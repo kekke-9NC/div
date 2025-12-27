@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual Environment
+venv/
+env/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Temporary files
+temp_clips/
+temp_video/
+rtsp/
+
+# Data files (large)
+*.pth
+*.npy
+*.npz
+
+# User settings
+app_settings.json
+custom_coordinates.json
+
+# Logs
+*.log
+
+# Backup folders
+app_itiji/
