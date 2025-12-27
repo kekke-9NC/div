@@ -42,7 +42,7 @@ TEMP_CLIP_DIR = "temp_clips"
 VIDEO_FOURCC = 'avc1'
 
 # --- Astrometry.net 関連 ---
-ASTROMETRY_API_KEY = "yqfnsfcshsipsfcw"
+ASTROMETRY_API_KEY = ""  # app_settings.json から読み込まれます
 FIELD_OF_VIEW_DEG = 105   # カメラのおおよその視野角（度） (floatでも可)
 SCALE_UNITS = 'degwidth'
 SCALE_LOWER = 95          # 視野角推定の下限（度） (floatでも可)

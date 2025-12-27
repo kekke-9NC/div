@@ -34,6 +34,12 @@ class StatusPanel(ttk.Frame):
         self.log_text = ScrolledText(self.log_frame, wrap=tk.WORD, state='disabled', height=15,
                                      bg="#263347", fg="#EAEAEA", relief=tk.FLAT, highlightthickness=0)
         self.log_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # ログ保存ボタン
+        log_btn_frame = ttk.Frame(self.log_frame)
+        log_btn_frame.pack(fill=tk.X, padx=5, pady=(0, 5))
+        save_log_btn = ttk.Button(log_btn_frame, text="ログを保存", command=self._save_log)
+        save_log_btn.pack(side=tk.RIGHT)
 
         # Processing status tab
         self.status_frame = ttk.Frame(self.notebook)
@@ -67,6 +73,36 @@ class StatusPanel(ttk.Frame):
         legend_frame.pack(anchor='w', padx=pad, pady=(0, pad))
         ttk.Label(legend_frame, text="■ 処理中", foreground="red").pack(side=tk.LEFT, padx=(0,6))
         ttk.Label(legend_frame, text="□ 待ち / 空き", foreground="white").pack(side=tk.LEFT)
+
+    def _save_log(self):
+        """ログ内容をファイルに保存する"""
+        from tkinter import filedialog, messagebox
+        from datetime import datetime
+        
+        # ログテキストの内容を取得
+        log_content = self.log_text.get("1.0", tk.END).strip()
+        if not log_content:
+            messagebox.showinfo("情報", "保存するログがありません。")
+            return
+        
+        # デフォルトファイル名を生成
+        default_filename = f"log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+        
+        # 保存先を選択
+        file_path = filedialog.asksaveasfilename(
+            title="ログを保存",
+            defaultextension=".txt",
+            initialfile=default_filename,
+            filetypes=[("テキストファイル", "*.txt"), ("すべてのファイル", "*.*")]
+        )
+        
+        if file_path:
+            try:
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    f.write(log_content)
+                messagebox.showinfo("成功", f"ログを保存しました:\n{file_path}")
+            except Exception as e:
+                messagebox.showerror("エラー", f"ログの保存に失敗しました:\n{e}")
 
     def get_status_callback(self) -> Callable[[Dict[str, Any]], None]:
         """Return a thread-safe callback that the pipeline can call.

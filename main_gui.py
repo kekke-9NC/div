@@ -198,6 +198,8 @@ class App(TkinterDnD.Tk):
         self.rtsp_end_min_var = tk.StringVar(value="00")
         # Plate solve mode: "local" (WSL solve-field) or "api" (Astrometry.net)
         self.plate_solve_mode_var = tk.StringVar(value="local")
+        # Astrometry.net API key
+        self.astrometry_api_key_var = tk.StringVar(value="")
 
     def setup_ui(self):
         main_pane = PanedWindow(self, orient=tk.HORIZONTAL, sashrelief=tk.RAISED, bg="#2E3F5B")
@@ -211,11 +213,13 @@ class App(TkinterDnD.Tk):
         notebook = ttk.Notebook(left_frame)
         notebook.pack(fill=tk.BOTH, expand=True)
 
+        tab_usage = self.create_usage_tab(notebook)
         tab_source = self.create_source_tab(notebook)
         tab_periodic = self.create_periodic_scan_tab(notebook)
         tab_settings = self.create_settings_tab(notebook)
         tab_analysis = self.create_analysis_tab(notebook)
 
+        notebook.add(tab_usage, text="使い方")
         notebook.add(tab_source, text="ソース選択")
         notebook.add(tab_periodic, text="定期スキャン")
         notebook.add(tab_settings, text="各種設定")
@@ -223,6 +227,99 @@ class App(TkinterDnD.Tk):
         
         main_pane.add(left_frame, width=550)
         main_pane.add(right_frame)
+
+
+    def create_usage_tab(self, parent):
+        frame = ttk.Frame(parent)
+        frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        # スクロール可能なキャンバスとスクロールバーを作成（各種設定タブと同じ方式）
+        canvas = tk.Canvas(frame, highlightthickness=0, bg="#2E3F5B")
+        scrollbar = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=canvas.yview)
+        scrollable_frame = ttk.Frame(canvas)
+
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+
+        canvas_window = canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+
+        # キャンバスのリサイズ時に内部フレームの幅を合わせる
+        def on_canvas_configure(event):
+            canvas.itemconfig(canvas_window, width=event.width)
+        canvas.bind("<Configure>", on_canvas_configure)
+
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        # マウスホイールでスクロール
+        def on_mousewheel(event):
+            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+        canvas.bind_all("<MouseWheel>", on_mousewheel)
+        
+        # --- コンテンツの追加 ---
+        pad_x = 10
+        pad_y = 5
+        
+        # タイトル
+        title_lbl = ttk.Label(scrollable_frame, text="✨ 流星検出アプリの使い方", font=("Arial", 16, "bold"), foreground="#87CEEB")
+        title_lbl.pack(pady=(15, 10), padx=pad_x, anchor="w")
+        
+        intro_text = "このアプリは、動画ファイルやRTSPストリームから流星を自動検出し、\n解析・記録するためのツールです。以下の手順に従って操作してください。"
+        ttk.Label(scrollable_frame, text=intro_text, justify=tk.LEFT).pack(padx=pad_x, pady=(0, 15), anchor="w")
+
+        # Step 1: ソースの追加
+        lf_step1 = ttk.LabelFrame(scrollable_frame, text="Step 1: データの準備 📂")
+        lf_step1.pack(fill=tk.X, padx=pad_x, pady=pad_y)
+        
+        s1_text = """「ソース選択」タブで解析対象を指定します。
+
+1. 動画ファイルの場合:
+   - フォルダまたはファイルをリストにドラッグ＆ドロップするか、
+     [フォルダ追加] / [ファイル追加] ボタンを使用してください。
+
+2. RTSPストリーム（ライブカメラ）の場合:
+   - RTSP URLを入力し、[追加] ボタンを押してください。
+   - ※ 外部GPUがない場合、CPU負荷にご注意ください。"""
+        ttk.Label(lf_step1, text=s1_text, justify=tk.LEFT).pack(padx=10, pady=10, anchor="w")
+
+        # Step 2: 設定
+        lf_step2 = ttk.LabelFrame(scrollable_frame, text="Step 2: 検出設定 ⚙️")
+        lf_step2.pack(fill=tk.X, padx=pad_x, pady=pad_y)
+        
+        s2_text = """「各種設定」タブで検出の感度や保存オプションを設定します。
+デフォルト設定のままでも使用可能です。
+
+- API Key: プレートソルブを使用する場合はAstrometry.netのキーを設定してください。
+- 保存オプション: 検出時の保存データ（動画、画像、CSV等）を選択します。"""
+        ttk.Label(lf_step2, text=s2_text, justify=tk.LEFT).pack(padx=10, pady=10, anchor="w")
+
+        # Step 3: 実行
+        lf_step3 = ttk.LabelFrame(scrollable_frame, text="Step 3: 解析開始 ▶️")
+        lf_step3.pack(fill=tk.X, padx=pad_x, pady=pad_y)
+        
+        s3_text = """画面右下の [開始] ボタンをクリックすると解析が始まります。
+
+- 状況バー: 現在の処理キューの状態や進行状況が表示されます。
+- キャンセル: 途中で停止したい場合は [キャンセル] ボタンを押してください。"""
+        ttk.Label(lf_step3, text=s3_text, justify=tk.LEFT).pack(padx=10, pady=10, anchor="w")
+
+        # Step 4: 結果の確認
+        lf_step4 = ttk.LabelFrame(scrollable_frame, text="Step 4: 結果の確認 📊")
+        lf_step4.pack(fill=tk.X, padx=pad_x, pady=pad_y)
+        
+        s4_text = """検出された流星は以下の場所に保存されます。
+
+- 保存先: デフォルトでは `meteor_save_path` に保存されます。
+  （設定タブで変更可能）
+- ログ: 「処理状況」パネルの [ログ] タブで詳細を確認できます。
+  [ログを保存] ボタンでテキストファイルに出力も可能です。"""
+        ttk.Label(lf_step4, text=s4_text, justify=tk.LEFT).pack(padx=10, pady=10, anchor="w")
+
+        return frame
 
     def create_source_tab(self, parent):
         frame = ttk.Frame(parent)
@@ -248,8 +345,55 @@ class App(TkinterDnD.Tk):
         ttk.Button(btn_frame, text="選択項目を削除", command=self.remove_selected_folders).pack(side=tk.LEFT, padx=2)
         ttk.Button(btn_frame, text="すべて削除", command=self.remove_all_folders).pack(side=tk.LEFT, padx=2)
 
-        lf_rtsp = ttk.LabelFrame(frame, text="RTSPストリーム")
+        lf_rtsp = ttk.LabelFrame(frame)
         lf_rtsp.pack(fill=tk.X, expand=True, pady=5)
+        
+        # RTSPストリームのタイトル行にiボタンを追加
+        rtsp_title_frame = ttk.Frame(lf_rtsp)
+        rtsp_title_frame.pack(fill=tk.X, anchor=tk.W)
+        ttk.Label(rtsp_title_frame, text="RTSPストリーム", font=("", 9, "bold")).pack(side=tk.LEFT)
+        
+        rtsp_info_label = ttk.Label(rtsp_title_frame, text=" ⓘ ", font=("Arial", 9), foreground="#87CEEB", cursor="hand2")
+        rtsp_info_label.pack(side=tk.LEFT)
+        
+        rtsp_info_text = "外部GPUが無い場合はCPUの負荷が高くなり\n映像が乱れることがあります。"
+        rtsp_info_label._tooltip = None
+        rtsp_info_label._tooltip_hover = False
+        
+        def show_rtsp_tooltip(event):
+            if rtsp_info_label._tooltip is not None:
+                return
+            tooltip = tk.Toplevel(self)
+            tooltip.wm_overrideredirect(True)
+            tooltip.wm_geometry(f"+{event.x_root + 10}+{event.y_root + 10}")
+            tooltip.configure(bg="#2E3F5B")
+            frame_tt = ttk.Frame(tooltip, padding=8)
+            frame_tt.pack()
+            ttk.Label(frame_tt, text=rtsp_info_text, justify=tk.LEFT).pack()
+            
+            def on_tooltip_enter(e):
+                rtsp_info_label._tooltip_hover = True
+            def on_tooltip_leave(e):
+                rtsp_info_label._tooltip_hover = False
+                self.after(100, check_rtsp_tooltip)
+            
+            tooltip.bind("<Enter>", on_tooltip_enter)
+            tooltip.bind("<Leave>", on_tooltip_leave)
+            rtsp_info_label._tooltip = tooltip
+        
+        def check_rtsp_tooltip():
+            if rtsp_info_label._tooltip and not rtsp_info_label._tooltip_hover:
+                try:
+                    rtsp_info_label._tooltip.destroy()
+                except:
+                    pass
+                rtsp_info_label._tooltip = None
+        
+        def hide_rtsp_tooltip(event):
+            self.after(150, check_rtsp_tooltip)
+        
+        rtsp_info_label.bind("<Enter>", show_rtsp_tooltip)
+        rtsp_info_label.bind("<Leave>", hide_rtsp_tooltip)
         
         entry_frame = ttk.Frame(lf_rtsp)
         entry_frame.pack(fill=tk.X)
@@ -537,7 +681,35 @@ class App(TkinterDnD.Tk):
         frame = ttk.Frame(parent)
         frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-        lf_params = ttk.LabelFrame(frame, text="処理パラメータ")
+        # スクロール可能なキャンバスとスクロールバーを作成
+        canvas = tk.Canvas(frame, highlightthickness=0, bg="#2E3F5B")
+        scrollbar = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=canvas.yview)
+        scrollable_frame = ttk.Frame(canvas)
+
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+
+        canvas_window = canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+
+        # キャンバスのリサイズ時に内部フレームの幅を合わせる
+        def on_canvas_configure(event):
+            canvas.itemconfig(canvas_window, width=event.width)
+        canvas.bind("<Configure>", on_canvas_configure)
+
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        # マウスホイールでスクロール
+        def on_mousewheel(event):
+            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+        canvas.bind_all("<MouseWheel>", on_mousewheel)
+
+        # 以下の内容はscrollable_frameに配置
+        lf_params = ttk.LabelFrame(scrollable_frame, text="処理パラメータ")
         lf_params.pack(fill=tk.X, pady=5)
         p_frame1 = ttk.Frame(lf_params); p_frame1.pack(fill=tk.X, pady=2)
         ttk.Label(p_frame1, text="同時処理数:", width=20).pack(side=tk.LEFT)
@@ -554,7 +726,7 @@ class App(TkinterDnD.Tk):
         ttk.Radiobutton(p_frame4, text="雲が少ないとき（高感度）", variable=self.rtsp_preset_var, value="clear").pack(side=tk.LEFT, padx=5)
         ttk.Radiobutton(p_frame4, text="雲が多いとき（ノイズ対策）", variable=self.rtsp_preset_var, value="cloudy").pack(side=tk.LEFT, padx=5)
 
-        lf_save = ttk.LabelFrame(frame, text="保存アイテム")
+        lf_save = ttk.LabelFrame(scrollable_frame, text="保存アイテム")
         lf_save.pack(fill=tk.X, pady=5)
         save_map = {
             'video': "動画クリップ (cutout.mp4)", 
@@ -577,7 +749,7 @@ class App(TkinterDnD.Tk):
                 var.trace_add("write", lambda *args: self.toggle_summary_settings_button())
                 self.toggle_summary_settings_button()
 
-        lf_path = ttk.LabelFrame(frame, text="保存先")
+        lf_path = ttk.LabelFrame(scrollable_frame, text="保存先")
         lf_path.pack(fill=tk.X, pady=5)
         path_frame1 = ttk.Frame(lf_path); path_frame1.pack(fill=tk.X, pady=2)
         ttk.Label(path_frame1, text="流星:", width=10).pack(side=tk.LEFT)
@@ -588,7 +760,7 @@ class App(TkinterDnD.Tk):
         ttk.Entry(path_frame2, textvariable=self.not_meteor_save_path_var, state='readonly').pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Button(path_frame2, text="選択", command=lambda: self.select_save_path(self.not_meteor_save_path_var)).pack(side=tk.LEFT, padx=(5,0))
 
-        lf_astro = ttk.LabelFrame(frame, text="プレートソルブ & マスク")
+        lf_astro = ttk.LabelFrame(scrollable_frame, text="プレートソルブ & マスク")
         lf_astro.pack(fill=tk.X, pady=5)
         
         ps_frame = ttk.Frame(lf_astro); ps_frame.pack(fill=tk.X, pady=2)
@@ -607,6 +779,112 @@ class App(TkinterDnD.Tk):
         ttk.Label(ps_mode_frame, text="ソルバー:").pack(side=tk.LEFT, padx=(0,5))
         ttk.Radiobutton(ps_mode_frame, text="ローカル (WSL)", variable=self.plate_solve_mode_var, value="local").pack(side=tk.LEFT, padx=5)
         ttk.Radiobutton(ps_mode_frame, text="API (Astrometry.net)", variable=self.plate_solve_mode_var, value="api").pack(side=tk.LEFT, padx=5)
+
+        # Astrometry.net API key input
+        api_key_frame = ttk.Frame(lf_astro); api_key_frame.pack(fill=tk.X, pady=2)
+        ttk.Label(api_key_frame, text="API Key").pack(side=tk.LEFT)
+        
+        # ヘルプボタン（?マーク）とツールチップ
+        api_key_url = "https://nova.astrometry.net/"
+        api_key_help_text_before = """Astrometry.net APIキーの取得手順
+
+1. 公式サイトにアクセス
+   URL: """
+        api_key_help_text_after = """
+
+2. サインイン（ログイン）
+   画面右上にある [Sign in] をクリックし、
+   GoogleアカウントやGitHubアカウントなどを
+   使用してログインしてください。
+
+3. ダッシュボードへ移動
+   ログインすると、自動的に「Dashboard」ページに
+   リダイレクトされます。
+   （もし別のページにいる場合は、上部メニューの
+   [Dashboard] ➞ [My Profile] をクリック）
+
+4. APIキーの確認
+   ダッシュボードページ内の「API Key」という
+   項目を探してください。
+   Your API key is: XXXXXXXX
+   と表示されている英数字の文字列が、
+   あなたのAPIキーです。"""
+        
+        help_label = ttk.Label(api_key_frame, text=" ? ", font=("Arial", 10, "bold"), foreground="#87CEEB", cursor="question_arrow")
+        help_label.pack(side=tk.LEFT)
+        
+        ttk.Label(api_key_frame, text=":").pack(side=tk.LEFT, padx=(0,5))
+        
+        api_key_entry = ttk.Entry(api_key_frame, textvariable=self.astrometry_api_key_var, show="*", width=30)
+        api_key_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        # API Key変更時にconfigを更新
+        self.astrometry_api_key_var.trace_add("write", lambda *args: setattr(config, 'ASTROMETRY_API_KEY', self.astrometry_api_key_var.get()))
+        
+        # ツールチップの作成
+        help_label._tooltip = None
+        help_label._tooltip_hover = False
+        
+        def show_tooltip(event):
+            if help_label._tooltip is not None:
+                return  # 既に表示中の場合は何もしない
+            
+            tooltip = tk.Toplevel(self)
+            tooltip.wm_overrideredirect(True)
+            tooltip.wm_geometry(f"+{event.x_root + 10}+{event.y_root + 10}")
+            tooltip.configure(bg="#2E3F5B")
+            frame = ttk.Frame(tooltip, padding=10)
+            frame.pack()
+            
+            # Textウィジェットでクリック可能なURLを実装
+            text_widget = tk.Text(frame, wrap=tk.WORD, width=45, height=20, bg="#3A4D6B", fg="#EAEAEA", 
+                                  relief=tk.FLAT, highlightthickness=0, cursor="arrow", font=("Arial", 9))
+            text_widget.pack()
+            text_widget.insert(tk.END, api_key_help_text_before)
+            
+            # URLをハイパーリンクとして挿入
+            text_widget.tag_configure("hyperlink", foreground="#00BFFF", underline=True)
+            url_start = text_widget.index(tk.END)
+            text_widget.insert(tk.END, api_key_url, "hyperlink")
+            
+            def open_url(e):
+                import webbrowser
+                webbrowser.open(api_key_url)
+            
+            text_widget.tag_bind("hyperlink", "<Button-1>", open_url)
+            text_widget.tag_bind("hyperlink", "<Enter>", lambda e: text_widget.config(cursor="hand2"))
+            text_widget.tag_bind("hyperlink", "<Leave>", lambda e: text_widget.config(cursor="arrow"))
+            
+            text_widget.insert(tk.END, api_key_help_text_after)
+            text_widget.config(state=tk.DISABLED)
+            
+            # ツールチップにマウスが入った時・出た時のイベント
+            def on_tooltip_enter(e):
+                help_label._tooltip_hover = True
+            
+            def on_tooltip_leave(e):
+                help_label._tooltip_hover = False
+                # 少し遅延してからチェック（マウスが移動中の場合に対応）
+                self.after(100, check_and_hide_tooltip)
+            
+            tooltip.bind("<Enter>", on_tooltip_enter)
+            tooltip.bind("<Leave>", on_tooltip_leave)
+            
+            help_label._tooltip = tooltip
+        
+        def check_and_hide_tooltip():
+            if help_label._tooltip and not help_label._tooltip_hover:
+                try:
+                    help_label._tooltip.destroy()
+                except:
+                    pass
+                help_label._tooltip = None
+            
+        def hide_tooltip(event):
+            # 少し遅延してからツールチップを閉じる（ツールチップにカーソルが移動する時間を確保）
+            self.after(150, check_and_hide_tooltip)
+        
+        help_label.bind("<Enter>", show_tooltip)
+        help_label.bind("<Leave>", hide_tooltip)
 
         ttk.Label(lf_astro, textvariable=self.plate_solve_status_var, foreground="#87CEEB").pack(pady=2)
         ttk.Checkbutton(lf_astro, text="プレートソルブ結果を利用する", variable=self.use_plate_solve_var).pack(anchor=tk.W)
@@ -1768,6 +2046,8 @@ class App(TkinterDnD.Tk):
             # Plate solve mode
             'plate_solve_mode': self.plate_solve_mode_var.get(),
             'rtsp_end_hour': self.rtsp_end_hour_var.get(), 'rtsp_end_minute': self.rtsp_end_min_var.get(),
+            # Astrometry.net API key
+            'astrometry_api_key': self.astrometry_api_key_var.get(),
         }
         if self.global_wcs_info:
             serializable_wcs = self.global_wcs_info.copy()
@@ -1862,6 +2142,12 @@ class App(TkinterDnD.Tk):
             
             # RTSPプリセット設定を復元
             self.rtsp_preset_var.set(settings.get('rtsp_preset', 'cloudy'))
+
+            # Astrometry.net APIキーを復元
+            api_key = settings.get('astrometry_api_key', '')
+            self.astrometry_api_key_var.set(api_key)
+            if api_key:
+                config.ASTROMETRY_API_KEY = api_key
 
             if os.path.exists(self.masks_file):
                 loaded_masks = np.load(self.masks_file)
