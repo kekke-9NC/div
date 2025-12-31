@@ -20,7 +20,6 @@ from typing import List, Dict, Any, Optional
 import status_panel
 import ui_state
 
-# status callback populated when the UI status panel is created
 STATUS_CALLBACK = None
 import network_copy
 import download_pipeline
@@ -190,6 +189,8 @@ class App(TkinterDnD.Tk):
         self.auto_updater.set_log_callback(self.append_log)
         # RTSP detection preset
         self.rtsp_preset_var = tk.StringVar(value="cloudy")  # "clear" or "cloudy"
+        # RTSP FPS setting
+        self.rtsp_fps_var = tk.StringVar(value=str(config.RTSP_FPS))
         # RTSP time limit for recording (similar to periodic scan)
         self.rtsp_time_limit_var = tk.BooleanVar(value=False)
         self.rtsp_start_hour_var = tk.StringVar(value="17")
@@ -332,13 +333,38 @@ class App(TkinterDnD.Tk):
         drop_label.drop_target_register(DND_FILES)
         drop_label.dnd_bind('<<Drop>>', self.drop)
 
-        list_frame = ttk.Frame(lf_folder)
-        list_frame.pack(fill=tk.BOTH, expand=True, pady=5)
-        self.listbox_folders = tk.Listbox(list_frame, selectmode=tk.EXTENDED, height=6, bg="#3A4D6B", fg="#EAEAEA", relief=tk.FLAT, highlightthickness=0)
-        self.listbox_folders.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.listbox_folders.yview)
+        # Custom scrollable list with modern FPS badges
+        list_container = ttk.Frame(lf_folder)
+        list_container.pack(fill=tk.BOTH, expand=True, pady=5)
+        
+        self.folder_list_canvas = tk.Canvas(list_container, bg="#3A4D6B", highlightthickness=0, height=120)
+        self.folder_list_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        scrollbar = ttk.Scrollbar(list_container, orient=tk.VERTICAL, command=self.folder_list_canvas.yview)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self.listbox_folders.config(yscrollcommand=scrollbar.set)
+        self.folder_list_canvas.configure(yscrollcommand=scrollbar.set)
+        
+        self.folder_list_frame = tk.Frame(self.folder_list_canvas, bg="#3A4D6B")
+        self.folder_list_window = self.folder_list_canvas.create_window((0, 0), window=self.folder_list_frame, anchor="nw")
+        
+        # Configure canvas scrolling
+        def on_frame_configure(event):
+            self.folder_list_canvas.configure(scrollregion=self.folder_list_canvas.bbox("all"))
+        self.folder_list_frame.bind("<Configure>", on_frame_configure)
+        
+        def on_canvas_configure(event):
+            self.folder_list_canvas.itemconfig(self.folder_list_window, width=event.width)
+        self.folder_list_canvas.bind("<Configure>", on_canvas_configure)
+        
+        # Mouse wheel scrolling
+        def on_mousewheel(event):
+            self.folder_list_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+        self.folder_list_canvas.bind("<MouseWheel>", on_mousewheel)
+        self.folder_list_frame.bind("<MouseWheel>", on_mousewheel)
+        
+        # Store item frames for selection
+        self.folder_item_frames = []
+        self.folder_selected_indices = set()
 
         btn_frame = ttk.Frame(lf_folder)
         btn_frame.pack(fill=tk.X, pady=(5,0))
@@ -399,15 +425,43 @@ class App(TkinterDnD.Tk):
         entry_frame.pack(fill=tk.X)
         ttk.Label(entry_frame, text="URL:").pack(side=tk.LEFT, padx=(0,5))
         ttk.Entry(entry_frame, textvariable=self.rtsp_url_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        
+        # FPS設定
+        ttk.Label(entry_frame, text="FPS:").pack(side=tk.LEFT, padx=(10, 5))
+        fps_spin = ttk.Spinbox(entry_frame, from_=1, to=120, increment=1, width=5, textvariable=self.rtsp_fps_var)
+        fps_spin.pack(side=tk.LEFT, padx=(0, 5))
+        
         ttk.Button(entry_frame, text="追加", command=self.add_rtsp_url).pack(side=tk.LEFT, padx=(5,0))
         
-        rtsp_list_frame = ttk.Frame(lf_rtsp)
-        rtsp_list_frame.pack(fill=tk.BOTH, expand=True, pady=5)
-        self.listbox_rtsp = tk.Listbox(rtsp_list_frame, selectmode=tk.EXTENDED, height=3, bg="#3A4D6B", fg="#EAEAEA", relief=tk.FLAT, highlightthickness=0)
-        self.listbox_rtsp.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        rtsp_scrollbar = ttk.Scrollbar(rtsp_list_frame, orient=tk.VERTICAL, command=self.listbox_rtsp.yview)
+        # Custom RTSP list with modern styling
+        rtsp_list_container = ttk.Frame(lf_rtsp)
+        rtsp_list_container.pack(fill=tk.BOTH, expand=True, pady=5)
+        
+        self.rtsp_list_canvas = tk.Canvas(rtsp_list_container, bg="#3A4D6B", highlightthickness=0, height=60)
+        self.rtsp_list_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        rtsp_scrollbar = ttk.Scrollbar(rtsp_list_container, orient=tk.VERTICAL, command=self.rtsp_list_canvas.yview)
         rtsp_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self.listbox_rtsp.config(yscrollcommand=rtsp_scrollbar.set)
+        self.rtsp_list_canvas.configure(yscrollcommand=rtsp_scrollbar.set)
+        
+        self.rtsp_list_frame = tk.Frame(self.rtsp_list_canvas, bg="#3A4D6B")
+        self.rtsp_list_window = self.rtsp_list_canvas.create_window((0, 0), window=self.rtsp_list_frame, anchor="nw")
+        
+        def on_rtsp_frame_configure(event):
+            self.rtsp_list_canvas.configure(scrollregion=self.rtsp_list_canvas.bbox("all"))
+        self.rtsp_list_frame.bind("<Configure>", on_rtsp_frame_configure)
+        
+        def on_rtsp_canvas_configure(event):
+            self.rtsp_list_canvas.itemconfig(self.rtsp_list_window, width=event.width)
+        self.rtsp_list_canvas.bind("<Configure>", on_rtsp_canvas_configure)
+        
+        def on_rtsp_mousewheel(event):
+            self.rtsp_list_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+        self.rtsp_list_canvas.bind("<MouseWheel>", on_rtsp_mousewheel)
+        self.rtsp_list_frame.bind("<MouseWheel>", on_rtsp_mousewheel)
+        
+        self.rtsp_item_frames = []
+        self.rtsp_selected_indices = set()
         
         rtsp_btn_frame = ttk.Frame(lf_rtsp)
         rtsp_btn_frame.pack(fill=tk.X, pady=(5,0))
@@ -461,13 +515,35 @@ class App(TkinterDnD.Tk):
         drop_label.drop_target_register(DND_FILES)
         drop_label.dnd_bind('<<Drop>>', self.drop_analysis)
 
-        list_frame = ttk.Frame(lf)
-        list_frame.pack(fill=tk.BOTH, expand=True, pady=5)
-        self.listbox_analysis = tk.Listbox(list_frame, selectmode=tk.EXTENDED, height=6, bg="#3A4D6B", fg="#EAEAEA", relief=tk.FLAT, highlightthickness=0)
-        self.listbox_analysis.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.listbox_analysis.yview)
+        # Custom analysis list with modern styling
+        analysis_list_container = ttk.Frame(lf)
+        analysis_list_container.pack(fill=tk.BOTH, expand=True, pady=5)
+        
+        self.analysis_list_canvas = tk.Canvas(analysis_list_container, bg="#3A4D6B", highlightthickness=0, height=100)
+        self.analysis_list_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        scrollbar = ttk.Scrollbar(analysis_list_container, orient=tk.VERTICAL, command=self.analysis_list_canvas.yview)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self.listbox_analysis.config(yscrollcommand=scrollbar.set)
+        self.analysis_list_canvas.configure(yscrollcommand=scrollbar.set)
+        
+        self.analysis_list_frame = tk.Frame(self.analysis_list_canvas, bg="#3A4D6B")
+        self.analysis_list_window = self.analysis_list_canvas.create_window((0, 0), window=self.analysis_list_frame, anchor="nw")
+        
+        def on_analysis_frame_configure(event):
+            self.analysis_list_canvas.configure(scrollregion=self.analysis_list_canvas.bbox("all"))
+        self.analysis_list_frame.bind("<Configure>", on_analysis_frame_configure)
+        
+        def on_analysis_canvas_configure(event):
+            self.analysis_list_canvas.itemconfig(self.analysis_list_window, width=event.width)
+        self.analysis_list_canvas.bind("<Configure>", on_analysis_canvas_configure)
+        
+        def on_analysis_mousewheel(event):
+            self.analysis_list_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+        self.analysis_list_canvas.bind("<MouseWheel>", on_analysis_mousewheel)
+        self.analysis_list_frame.bind("<MouseWheel>", on_analysis_mousewheel)
+        
+        self.analysis_item_frames = []
+        self.analysis_selected_indices = set()
 
         btn_frame = ttk.Frame(lf)
         btn_frame.pack(fill=tk.X, pady=(5,0))
@@ -509,25 +585,97 @@ class App(TkinterDnD.Tk):
             if os.path.isfile(p) and Path(p).suffix.lower() in ['.txt']:
                 if p not in self.analysis_files:
                     self.analysis_files.append(p)
-                    self.listbox_analysis.insert(tk.END, p)
+                    self._add_analysis_item(p)
                     added = True
 
         if not added:
             messagebox.showwarning("情報", "有効な .txt ファイルがドロップされませんでしたか、既に追加済みです。")
+    
+    def _add_analysis_item(self, filepath):
+        """Add a styled item to the analysis list with modern badge."""
+        index = len(self.analysis_item_frames)
+        
+        item_frame = tk.Frame(self.analysis_list_frame, bg="#3A4D6B", cursor="hand2")
+        item_frame.pack(fill=tk.X, padx=2, pady=1)
+        
+        # TXT badge with orange color
+        badge_canvas = tk.Canvas(item_frame, width=50, height=22, bg="#3A4D6B", highlightthickness=0)
+        badge_canvas.pack(side=tk.LEFT, padx=(4, 6), pady=2)
+        
+        self._draw_rounded_rect(badge_canvas, 2, 2, 48, 20, 8, fill="#E67E22", outline="")
+        badge_canvas.create_text(25, 11, text="TXT", fill="white", font=("Segoe UI", 8, "bold"))
+        
+        # Path label
+        path_label = tk.Label(item_frame, text=filepath, bg="#3A4D6B", fg="#EAEAEA", 
+                              anchor="w", font=("Segoe UI", 9))
+        path_label.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
+        
+        # Selection handling
+        def on_click(event, idx=index):
+            self._toggle_analysis_selection(idx)
+        
+        item_frame.bind("<Button-1>", on_click)
+        badge_canvas.bind("<Button-1>", on_click)
+        path_label.bind("<Button-1>", on_click)
+        
+        # Mouse wheel
+        def on_mousewheel(event):
+            self.analysis_list_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+        item_frame.bind("<MouseWheel>", on_mousewheel)
+        badge_canvas.bind("<MouseWheel>", on_mousewheel)
+        path_label.bind("<MouseWheel>", on_mousewheel)
+        
+        self.analysis_item_frames.append({
+            'frame': item_frame,
+            'badge': badge_canvas,
+            'label': path_label,
+            'selected': False
+        })
+    
+    def _toggle_analysis_selection(self, index):
+        """Toggle selection state of analysis item."""
+        if index < 0 or index >= len(self.analysis_item_frames):
+            return
+        
+        item = self.analysis_item_frames[index]
+        if item['selected']:
+            item['frame'].config(bg="#3A4D6B")
+            item['label'].config(bg="#3A4D6B")
+            item['badge'].config(bg="#3A4D6B")
+            item['selected'] = False
+            self.analysis_selected_indices.discard(index)
+        else:
+            item['frame'].config(bg="#5A7D9B")
+            item['label'].config(bg="#5A7D9B")
+            item['badge'].config(bg="#5A7D9B")
+            item['selected'] = True
+            self.analysis_selected_indices.add(index)
 
     def remove_selected_analysis(self):
-        selected = self.listbox_analysis.curselection()
-        if not selected: return
-        for idx in reversed(selected):
+        if not self.analysis_selected_indices:
+            return
+        for idx in sorted(self.analysis_selected_indices, reverse=True):
             if 0 <= idx < len(self.analysis_files):
                 del self.analysis_files[idx]
-                self.listbox_analysis.delete(idx)
+                item = self.analysis_item_frames.pop(idx)
+                item['frame'].destroy()
+        self.analysis_selected_indices.clear()
+        # Re-index
+        for i, item in enumerate(self.analysis_item_frames):
+            def make_click_handler(idx):
+                return lambda e: self._toggle_analysis_selection(idx)
+            item['frame'].bind("<Button-1>", make_click_handler(i))
+            item['badge'].bind("<Button-1>", make_click_handler(i))
+            item['label'].bind("<Button-1>", make_click_handler(i))
 
     def remove_all_analysis(self):
         if not self.analysis_files: return
         if messagebox.askyesno("確認", "リストからすべての解析ファイルを削除しますか？"):
             self.analysis_files.clear()
-            self.listbox_analysis.delete(0, tk.END)
+            for item in self.analysis_item_frames:
+                item['frame'].destroy()
+            self.analysis_item_frames.clear()
+            self.analysis_selected_indices.clear()
 
     def start_analysis(self):
         if not self.analysis_files:
@@ -635,7 +783,56 @@ class App(TkinterDnD.Tk):
         lf = ttk.LabelFrame(frame, text="定期スキャン設定")
         lf.pack(fill=tk.X, expand=True, pady=5)
 
-        ttk.Checkbutton(lf, text="定期スキャンを有効にする", variable=self.periodic_scan_var, command=self.update_start_button_state).pack(anchor=tk.W)
+        # Header frame for Checkbutton + Help
+        header_frame = ttk.Frame(lf)
+        header_frame.pack(fill=tk.X, anchor=tk.W)
+        
+        ttk.Checkbutton(header_frame, text="定期スキャンを有効にする", variable=self.periodic_scan_var, command=self.update_start_button_state).pack(side=tk.LEFT)
+        
+        help_label = ttk.Label(header_frame, text=" ? ", font=("Arial", 10, "bold"), foreground="#87CEEB", cursor="hand2")
+        help_label.pack(side=tk.LEFT, padx=5)
+        
+        help_text = """指定した監視フォルダを一定間隔でスキャンし、
+新しいファイルを自動的に解析する機能です。
+
+atomcam2で利用する場合は、GitHubで公開されている
+「atomcam_tools」を利用してください。
+その際、ネットワークフォルダー設定でatomcam2の
+データ保存先フォルダを指定する必要があります。"""
+
+        help_label._tooltip = None
+        help_label._tooltip_hover = False
+        
+        def show_periodic_tooltip(event):
+            if help_label._tooltip is not None: return
+            tooltip = tk.Toplevel(self)
+            tooltip.wm_overrideredirect(True)
+            tooltip.wm_geometry(f"+{event.x_root+10}+{event.y_root+10}")
+            tooltip.configure(bg="#2E3F5B")
+            f = ttk.Frame(tooltip, padding=8)
+            f.pack()
+            ttk.Label(f, text=help_text, justify=tk.LEFT, foreground="#EAEAEA", background="#2E3F5B").pack()
+            
+            def on_enter(e): help_label._tooltip_hover = True
+            def on_leave(e): 
+                help_label._tooltip_hover = False
+                self.after(100, check_periodic_tooltip)
+                
+            tooltip.bind("<Enter>", on_enter)
+            tooltip.bind("<Leave>", on_leave)
+            help_label._tooltip = tooltip
+
+        def check_periodic_tooltip():
+            if help_label._tooltip and not help_label._tooltip_hover:
+                try: help_label._tooltip.destroy()
+                except: pass
+                help_label._tooltip = None
+
+        def hide_periodic_tooltip(event):
+            self.after(150, check_periodic_tooltip)
+
+        help_label.bind("<Enter>", show_periodic_tooltip)
+        help_label.bind("<Leave>", hide_periodic_tooltip)
         
         dir_frame = ttk.Frame(lf)
         dir_frame.pack(fill=tk.X, pady=5)
@@ -763,6 +960,82 @@ class App(TkinterDnD.Tk):
         lf_astro = ttk.LabelFrame(scrollable_frame, text="プレートソルブ & マスク")
         lf_astro.pack(fill=tk.X, pady=5)
         
+        # プレートソルブ説明用ヘルプアイコン
+        ps_help_frame = ttk.Frame(lf_astro); ps_help_frame.pack(fill=tk.X, pady=2)
+        ps_help_label = ttk.Label(ps_help_frame, text="ⓘ", font=("Arial", 11), foreground="#87CEEB", cursor="question_arrow")
+        ps_help_label.pack(side=tk.LEFT, padx=(0,5))
+        ttk.Label(ps_help_frame, text="機能の説明を表示", foreground="gray").pack(side=tk.LEFT)
+        
+        ps_help_text = """【プレートソルブとは】
+動画のフレームを解析し、星の位置から撮影方向（赤経・赤緯）を
+特定する機能です。これにより、検出した流星の軌跡に
+星座やエリア名、座標情報をアノテーション（注釈付け）できます。
+
+【使い方】
+1. 「動画から実行」で動画ファイルを選択
+2. 「実行」ボタンでプレートソルブを開始
+3. 成功すると、以降の流星検出時に座標情報が付与されます
+
+【マスク機能】
+特定のエリア（建物、木など）を検出対象から除外できます。
+
+⚠️ 注意事項
+広角レンズ使用時は画像の歪みの影響で、
+画像端付近のアノテーションが正確でない場合があります。"""
+        
+        ps_help_label._tooltip = None
+        ps_help_label._tooltip_hover = False
+        
+        def show_ps_tooltip(event):
+            if ps_help_label._tooltip is not None:
+                return
+            
+            tooltip = tk.Toplevel(self)
+            tooltip.wm_overrideredirect(True)
+            tooltip.wm_geometry(f"+{event.x_root + 15}+{event.y_root + 10}")
+            tooltip.configure(bg="#333D4D")
+            
+            content_frame = tk.Frame(tooltip, bg="#333D4D", padx=10, pady=8)
+            content_frame.pack()
+            
+            text_label = tk.Label(content_frame, text=ps_help_text, justify=tk.LEFT, bg="#333D4D", fg="#FFFFFF", font=("Yu Gothic UI", 10))
+            text_label.pack()
+            
+            tooltip._hover = False
+            
+            def on_tooltip_enter(e):
+                tooltip._hover = True
+            def on_tooltip_leave(e):
+                tooltip._hover = False
+                tooltip.after(100, check_tooltip)
+            
+            def check_tooltip():
+                if not ps_help_label._tooltip_hover and not tooltip._hover:
+                    tooltip.destroy()
+                    ps_help_label._tooltip = None
+            
+            tooltip.bind("<Enter>", on_tooltip_enter)
+            tooltip.bind("<Leave>", on_tooltip_leave)
+            
+            ps_help_label._tooltip = tooltip
+        
+        def hide_ps_tooltip(event):
+            ps_help_label._tooltip_hover = False
+            if ps_help_label._tooltip:
+                ps_help_label._tooltip.after(150, lambda: check_ps_close())
+        
+        def check_ps_close():
+            if ps_help_label._tooltip and not ps_help_label._tooltip_hover and not getattr(ps_help_label._tooltip, '_hover', False):
+                ps_help_label._tooltip.destroy()
+                ps_help_label._tooltip = None
+        
+        def on_ps_enter(event):
+            ps_help_label._tooltip_hover = True
+            show_ps_tooltip(event)
+        
+        ps_help_label.bind("<Enter>", on_ps_enter)
+        ps_help_label.bind("<Leave>", hide_ps_tooltip)
+
         ps_frame = ttk.Frame(lf_astro); ps_frame.pack(fill=tk.X, pady=2)
         ttk.Label(ps_frame, text="動画から実行:").pack(side=tk.LEFT, padx=(0,5))
         ttk.Entry(ps_frame, textvariable=self.plate_solve_video_path_var, state='readonly').pack(side=tk.LEFT, fill=tk.X, expand=True)
@@ -981,65 +1254,273 @@ class App(TkinterDnD.Tk):
 
     def drop(self, event):
         paths = self.splitlist(event.data)
-        folders_to_add = set()
-        for path in paths:
-            target_folder = None
-            if os.path.isdir(path):
-                target_folder = path
-            elif os.path.isfile(path) and Path(path).suffix.lower() in config.PERIODIC_VIDEO_EXTENSIONS:
-                target_folder = str(Path(path).parent)
-
-            if target_folder and target_folder not in self.folder_paths:
-                folders_to_add.add(target_folder)
         
-        if folders_to_add:
-            for folder in sorted(list(folders_to_add)):
-                self.folder_paths.append(folder)
-                self.listbox_folders.insert(tk.END, folder)
+        items_to_add = [] # (fps_str, path_str, internal_path)
+        
+        def get_fps_str(video_path):
+            """Get FPS string for a video file."""
+            fps_str = "??"
+            try:
+                cap = cv2.VideoCapture(video_path)
+                if cap.isOpened():
+                    fps = cap.get(cv2.CAP_PROP_FPS)
+                    fps_str = f"{fps:.2f}"
+                    cap.release()
+                else:
+                    fps_str = "Error"
+            except Exception:
+                fps_str = "Error"
+            return fps_str
+        
+        for path in paths:
+            if os.path.isdir(path):
+                # Scan folder for video files
+                video_files = sorted([
+                    str(p) for p in Path(path).rglob('*') 
+                    if p.suffix.lower() in config.PERIODIC_VIDEO_EXTENSIONS
+                ])
+                
+                if not video_files:
+                    continue
+                
+                # Get FPS for all videos in this folder
+                fps_values = []
+                for video_path in video_files:
+                    fps_values.append(get_fps_str(video_path))
+                
+                # Check if all FPS values are the same
+                unique_fps = set(fps_values)
+                if len(unique_fps) == 1 and path not in self.folder_paths:
+                    # All same FPS - group as folder
+                    fps_str = fps_values[0]
+                    path_str = f"{path} ({len(video_files)} files)"
+                    items_to_add.append((fps_str, path_str, path))
+                else:
+                    # Mixed FPS - add individual files
+                    for video_path, fps_str in zip(video_files, fps_values):
+                        if video_path not in self.folder_paths:
+                            items_to_add.append((fps_str, video_path, video_path))
+                            
+            elif os.path.isfile(path) and Path(path).suffix.lower() in config.PERIODIC_VIDEO_EXTENSIONS:
+                if path not in self.folder_paths:
+                    fps_str = get_fps_str(path)
+                    items_to_add.append((fps_str, path, path))
+
+        if items_to_add:
+            for fps_str, path_str, internal_path in items_to_add:
+                if internal_path not in self.folder_paths:
+                    self.folder_paths.append(internal_path)
+                    self._add_folder_item(fps_str, path_str)
             self.update_start_button_state()
         else:
             messagebox.showwarning("情報", "有効なフォルダまたは動画ファイルがドロップされませんでした。")
+    
+    def _add_folder_item(self, fps_str, path_str):
+        """Add a styled item to the folder list with modern FPS badge."""
+        index = len(self.folder_item_frames)
+        
+        item_frame = tk.Frame(self.folder_list_frame, bg="#3A4D6B", cursor="hand2")
+        item_frame.pack(fill=tk.X, padx=2, pady=1)
+        
+        # FPS badge with rounded appearance using Canvas
+        badge_canvas = tk.Canvas(item_frame, width=70, height=22, bg="#3A4D6B", highlightthickness=0)
+        badge_canvas.pack(side=tk.LEFT, padx=(4, 6), pady=2)
+        
+        # Draw rounded rectangle for badge
+        self._draw_rounded_rect(badge_canvas, 2, 2, 68, 20, 8, fill="#4A90D9", outline="")
+        badge_canvas.create_text(35, 11, text=f"{fps_str} fps", fill="white", font=("Segoe UI", 8, "bold"))
+        
+        # Path label
+        path_label = tk.Label(item_frame, text=path_str, bg="#3A4D6B", fg="#EAEAEA", 
+                              anchor="w", font=("Segoe UI", 9))
+        path_label.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
+        
+        # Selection handling
+        def on_click(event, idx=index):
+            self._toggle_folder_selection(idx)
+        
+        item_frame.bind("<Button-1>", on_click)
+        badge_canvas.bind("<Button-1>", on_click)
+        path_label.bind("<Button-1>", on_click)
+        
+        # Mouse wheel propagation
+        def on_mousewheel(event):
+            self.folder_list_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+        item_frame.bind("<MouseWheel>", on_mousewheel)
+        badge_canvas.bind("<MouseWheel>", on_mousewheel)
+        path_label.bind("<MouseWheel>", on_mousewheel)
+        
+        self.folder_item_frames.append({
+            'frame': item_frame,
+            'badge': badge_canvas,
+            'label': path_label,
+            'selected': False
+        })
+    
+    def _draw_rounded_rect(self, canvas, x1, y1, x2, y2, radius, **kwargs):
+        """Draw a rounded rectangle on canvas."""
+        points = [
+            x1 + radius, y1,
+            x2 - radius, y1,
+            x2, y1,
+            x2, y1 + radius,
+            x2, y2 - radius,
+            x2, y2,
+            x2 - radius, y2,
+            x1 + radius, y2,
+            x1, y2,
+            x1, y2 - radius,
+            x1, y1 + radius,
+            x1, y1,
+            x1 + radius, y1,
+        ]
+        return canvas.create_polygon(points, smooth=True, **kwargs)
+    
+    def _toggle_folder_selection(self, index):
+        """Toggle selection state of folder item."""
+        if index < 0 or index >= len(self.folder_item_frames):
+            return
+        
+        item = self.folder_item_frames[index]
+        if item['selected']:
+            # Deselect
+            item['frame'].config(bg="#3A4D6B")
+            item['label'].config(bg="#3A4D6B")
+            item['badge'].config(bg="#3A4D6B")
+            item['selected'] = False
+            self.folder_selected_indices.discard(index)
+        else:
+            # Select
+            item['frame'].config(bg="#5A7D9B")
+            item['label'].config(bg="#5A7D9B")
+            item['badge'].config(bg="#5A7D9B")
+            item['selected'] = True
+            self.folder_selected_indices.add(index)
 
     def remove_selected_folders(self):
-        selected_indices = self.listbox_folders.curselection()
-        if not selected_indices: return
-        for index in reversed(selected_indices):
+        if not self.folder_selected_indices:
+            return
+        for index in sorted(self.folder_selected_indices, reverse=True):
             if 0 <= index < len(self.folder_paths):
                 del self.folder_paths[index]
-                self.listbox_folders.delete(index)
+                item = self.folder_item_frames.pop(index)
+                item['frame'].destroy()
+        self.folder_selected_indices.clear()
+        # Re-index remaining items
+        for i, item in enumerate(self.folder_item_frames):
+            def make_click_handler(idx):
+                return lambda e: self._toggle_folder_selection(idx)
+            item['frame'].bind("<Button-1>", make_click_handler(i))
+            item['badge'].bind("<Button-1>", make_click_handler(i))
+            item['label'].bind("<Button-1>", make_click_handler(i))
         self.update_start_button_state()
 
     def remove_all_folders(self):
         if not self.folder_paths: return
         if messagebox.askyesno("確認", "リストからすべてのフォルダを削除しますか？"):
             self.folder_paths.clear()
-            self.listbox_folders.delete(0, tk.END)
+            for item in self.folder_item_frames:
+                item['frame'].destroy()
+            self.folder_item_frames.clear()
+            self.folder_selected_indices.clear()
             self.update_start_button_state()
 
     def add_rtsp_url(self):
         url = self.rtsp_url_var.get().strip()
         if url and url not in self.rtsp_urls:
             self.rtsp_urls.append(url)
-            self.listbox_rtsp.insert(tk.END, url)
+            self._add_rtsp_item(url)
             self.rtsp_url_var.set("")
             self.update_start_button_state()
         elif not url:
             messagebox.showwarning("入力エラー", "RTSP URLを入力してください。")
+    
+    def _add_rtsp_item(self, url):
+        """Add a styled item to the RTSP list with modern badge."""
+        index = len(self.rtsp_item_frames)
+        
+        item_frame = tk.Frame(self.rtsp_list_frame, bg="#3A4D6B", cursor="hand2")
+        item_frame.pack(fill=tk.X, padx=2, pady=1)
+        
+        # RTSP badge with green color
+        badge_canvas = tk.Canvas(item_frame, width=55, height=22, bg="#3A4D6B", highlightthickness=0)
+        badge_canvas.pack(side=tk.LEFT, padx=(4, 6), pady=2)
+        
+        self._draw_rounded_rect(badge_canvas, 2, 2, 53, 20, 8, fill="#2ECC71", outline="")
+        badge_canvas.create_text(27, 11, text="RTSP", fill="white", font=("Segoe UI", 8, "bold"))
+        
+        # URL label
+        url_label = tk.Label(item_frame, text=url, bg="#3A4D6B", fg="#EAEAEA", 
+                             anchor="w", font=("Segoe UI", 9))
+        url_label.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
+        
+        # Selection handling
+        def on_click(event, idx=index):
+            self._toggle_rtsp_selection(idx)
+        
+        item_frame.bind("<Button-1>", on_click)
+        badge_canvas.bind("<Button-1>", on_click)
+        url_label.bind("<Button-1>", on_click)
+        
+        # Mouse wheel
+        def on_mousewheel(event):
+            self.rtsp_list_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+        item_frame.bind("<MouseWheel>", on_mousewheel)
+        badge_canvas.bind("<MouseWheel>", on_mousewheel)
+        url_label.bind("<MouseWheel>", on_mousewheel)
+        
+        self.rtsp_item_frames.append({
+            'frame': item_frame,
+            'badge': badge_canvas,
+            'label': url_label,
+            'selected': False
+        })
+    
+    def _toggle_rtsp_selection(self, index):
+        """Toggle selection state of RTSP item."""
+        if index < 0 or index >= len(self.rtsp_item_frames):
+            return
+        
+        item = self.rtsp_item_frames[index]
+        if item['selected']:
+            item['frame'].config(bg="#3A4D6B")
+            item['label'].config(bg="#3A4D6B")
+            item['badge'].config(bg="#3A4D6B")
+            item['selected'] = False
+            self.rtsp_selected_indices.discard(index)
+        else:
+            item['frame'].config(bg="#5A7D9B")
+            item['label'].config(bg="#5A7D9B")
+            item['badge'].config(bg="#5A7D9B")
+            item['selected'] = True
+            self.rtsp_selected_indices.add(index)
 
     def remove_selected_rtsp(self):
-        selected_indices = self.listbox_rtsp.curselection()
-        if not selected_indices: return
-        for index in reversed(selected_indices):
+        if not self.rtsp_selected_indices:
+            return
+        for index in sorted(self.rtsp_selected_indices, reverse=True):
             if 0 <= index < len(self.rtsp_urls):
                 del self.rtsp_urls[index]
-                self.listbox_rtsp.delete(index)
+                item = self.rtsp_item_frames.pop(index)
+                item['frame'].destroy()
+        self.rtsp_selected_indices.clear()
+        # Re-index
+        for i, item in enumerate(self.rtsp_item_frames):
+            def make_click_handler(idx):
+                return lambda e: self._toggle_rtsp_selection(idx)
+            item['frame'].bind("<Button-1>", make_click_handler(i))
+            item['badge'].bind("<Button-1>", make_click_handler(i))
+            item['label'].bind("<Button-1>", make_click_handler(i))
         self.update_start_button_state()
 
     def remove_all_rtsp(self):
         if not self.rtsp_urls: return
         if messagebox.askyesno("確認", "すべてのRTSP URLを削除しますか？"):
             self.rtsp_urls.clear()
-            self.listbox_rtsp.delete(0, tk.END)
+            for item in self.rtsp_item_frames:
+                item['frame'].destroy()
+            self.rtsp_item_frames.clear()
+            self.rtsp_selected_indices.clear()
             self.update_start_button_state()
 
     def select_periodic_dir(self):
@@ -1435,7 +1916,14 @@ class App(TkinterDnD.Tk):
             config.RTSP_HOUGH_THRESHOLD = preset['hough_threshold']
             config.RTSP_CANNY_THRESH1 = preset['canny_thresh1']
             config.RTSP_CANNY_THRESH2 = preset['canny_thresh2']
-            self.append_log(f"RTSP検出プリセット: {preset['name']}")
+            
+            # FPS設定を反映
+            try:
+                config.RTSP_FPS = int(self.rtsp_fps_var.get())
+            except ValueError:
+                messagebox.showwarning("設定警告", f"FPS値が無効です。デフォルト値({config.RTSP_FPS})を使用します。")
+            
+            self.append_log(f"RTSP検出プリセット: {preset['name']}, FPS: {config.RTSP_FPS}")
             os.makedirs(params['meteor_save_path'], exist_ok=True)
             os.makedirs(params['not_meteor_save_path'], exist_ok=True)
             # set temp_video dir path on the App instance so GUI can shorten logs
@@ -1491,7 +1979,7 @@ class App(TkinterDnD.Tk):
             rtsp_eh = int(self.rtsp_end_hour_var.get())
             rtsp_em = int(self.rtsp_end_min_var.get())
             
-            log_msg = f"RTSP処理開始 (URL: {url})"
+            log_msg = f"RTSP処理開始 (URL: {url}, 並列処理数: {params['max_workers']})"
             if rtsp_time_limit:
                 log_msg += f", 録画時間制限: {rtsp_sh:02d}:{rtsp_sm:02d} - {rtsp_eh:02d}:{rtsp_em:02d}"
             self.append_log(log_msg)
@@ -1502,17 +1990,22 @@ class App(TkinterDnD.Tk):
                 params['meteor_save_path'], params['not_meteor_save_path'], self.cancel_flag,
                 params['save_options'], params['interval_sec'], params['duration_sec'],
                 config.MIN_LINE_LENGTH, params['summary_config'],
-                rtsp_time_limit, rtsp_sh, rtsp_sm, rtsp_eh, rtsp_em
+                rtsp_time_limit, rtsp_sh, rtsp_sm, rtsp_eh, rtsp_em,
+                params['max_workers']
             )
             self.rtsp_thread = threading.Thread(target=file_utils.rtsp_save_and_process_thread_target, args=rtsp_args, daemon=True)
             self.rtsp_thread.start()
 
         elif self.folder_paths:
             sources_to_process = []
-            self.append_log(f"{len(self.folder_paths)}個のフォルダを処理します...")
-            for folder in self.folder_paths:
-                found = sorted([p for p in Path(folder).rglob('*') if p.suffix.lower() in config.PERIODIC_VIDEO_EXTENSIONS])
-                sources_to_process.extend([{'path': str(p), 'is_rtsp': False} for p in found])
+            self.append_log(f"{len(self.folder_paths)}個の項目を処理します...")
+            for path_item in self.folder_paths:
+                p = Path(path_item)
+                if p.is_dir():
+                    found = sorted([p for p in p.rglob('*') if p.suffix.lower() in config.PERIODIC_VIDEO_EXTENSIONS])
+                    sources_to_process.extend([{'path': str(fp), 'is_rtsp': False} for fp in found])
+                elif p.is_file() and p.suffix.lower() in config.PERIODIC_VIDEO_EXTENSIONS:
+                    sources_to_process.append({'path': str(p), 'is_rtsp': False})
             
             if not sources_to_process:
                 messagebox.showwarning("情報", "選択されたフォルダに動画ファイルが見つかりませんでした。")
@@ -2040,6 +2533,7 @@ class App(TkinterDnD.Tk):
             'summary_video_config': self.summary_video_config,
             'auto_time_updater_enabled': self.auto_time_updater_enabled_var.get(),
             'rtsp_preset': self.rtsp_preset_var.get(),
+            'rtsp_fps': self.rtsp_fps_var.get(),
             # RTSP time limit settings
             'rtsp_time_limit_enabled': self.rtsp_time_limit_var.get(),
             'rtsp_start_hour': self.rtsp_start_hour_var.get(), 'rtsp_start_minute': self.rtsp_start_min_var.get(),
@@ -2088,9 +2582,22 @@ class App(TkinterDnD.Tk):
             self.toggle_rtsp_time_limit_frame()
 
             self.folder_paths = settings.get('folder_paths', [])
-            self.listbox_folders.delete(0, tk.END); [self.listbox_folders.insert(tk.END, p) for p in self.folder_paths]
+            # Clear existing items and add restored paths
+            for item in self.folder_item_frames:
+                item['frame'].destroy()
+            self.folder_item_frames.clear()
+            self.folder_selected_indices.clear()
+            for p in self.folder_paths:
+                # For restored paths, show path only (no FPS calculation to avoid delay)
+                self._add_folder_item("--", p)
             self.rtsp_urls = settings.get('rtsp_urls', [])
-            self.listbox_rtsp.delete(0, tk.END); [self.listbox_rtsp.insert(tk.END, u) for u in self.rtsp_urls]
+            # Clear and restore RTSP items
+            for item in self.rtsp_item_frames:
+                item['frame'].destroy()
+            self.rtsp_item_frames.clear()
+            self.rtsp_selected_indices.clear()
+            for url in self.rtsp_urls:
+                self._add_rtsp_item(url)
 
             saved_opts = settings.get('save_options', {})
             for key, var in self.save_options_vars.items(): var.set(saved_opts.get(key, True))
@@ -2142,6 +2649,8 @@ class App(TkinterDnD.Tk):
             
             # RTSPプリセット設定を復元
             self.rtsp_preset_var.set(settings.get('rtsp_preset', 'cloudy'))
+            self.rtsp_fps_var.set(settings.get('rtsp_fps', str(config.RTSP_FPS)))
+            config.RTSP_FPS = int(float(self.rtsp_fps_var.get())) # Apply immediately update config
 
             # Astrometry.net APIキーを復元
             api_key = settings.get('astrometry_api_key', '')
