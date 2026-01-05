@@ -42,6 +42,7 @@ import meteor_angle_analysis
 import lighten_blend_video
 import lighten_blend_image
 import timelapse_creator
+import video_processor
 from tkinter import simpledialog
 
 class App(TkinterDnD.Tk):
@@ -201,6 +202,12 @@ class App(TkinterDnD.Tk):
         self.plate_solve_mode_var = tk.StringVar(value="local")
         # Astrometry.net API key
         self.astrometry_api_key_var = tk.StringVar(value="")
+        # Video concatenation
+        self.video_concat_files = []
+        self.video_concat_bitrate_var = tk.StringVar(value="8000k")
+        self.video_concat_codec_var = tk.StringVar(value="h264")
+        self.video_concat_fps_var = tk.StringVar(value="Auto")
+        self.video_concat_safe_mode_var = tk.BooleanVar(value=True) # デフォルトOn
 
     def setup_ui(self):
         main_pane = PanedWindow(self, orient=tk.HORIZONTAL, sashrelief=tk.RAISED, bg="#2E3F5B")
@@ -574,6 +581,80 @@ class App(TkinterDnD.Tk):
         ttk.Button(row3, text="比較明合成画像を作成", command=self.create_lighten_blend_image_callback).pack(side=tk.LEFT, padx=(0,5))
         ttk.Button(row3, text="比較明合成動画を作成", command=self.create_lighten_blend_video_callback).pack(side=tk.LEFT, padx=(0,5))
         ttk.Button(row3, text="タイムラプス作成", command=self.create_timelapse_callback).pack(side=tk.LEFT, padx=(0,5))
+        
+
+        # ===== 動画連結セクション =====
+        lf_concat = ttk.LabelFrame(frame, text="動画連結")
+        lf_concat.pack(fill=tk.BOTH, expand=True, pady=5)
+
+        # ドラッグ＆ドロップエリア
+        concat_drop_label = ttk.Label(lf_concat, text="ここに動画ファイルをドラッグ＆ドロップ", relief=tk.SOLID, padding=15, anchor=tk.CENTER, borderwidth=1)
+        concat_drop_label.pack(fill=tk.X, pady=5)
+        concat_drop_label.drop_target_register(DND_FILES)
+        concat_drop_label.dnd_bind('<<Drop>>', self.drop_video_concat)
+
+        # 動画リスト
+        concat_list_container = ttk.Frame(lf_concat)
+        concat_list_container.pack(fill=tk.BOTH, expand=True, pady=5)
+        
+        self.video_concat_list_canvas = tk.Canvas(concat_list_container, bg="#3A4D6B", highlightthickness=0, height=80)
+        self.video_concat_list_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        concat_scrollbar = ttk.Scrollbar(concat_list_container, orient=tk.VERTICAL, command=self.video_concat_list_canvas.yview)
+        concat_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.video_concat_list_canvas.configure(yscrollcommand=concat_scrollbar.set)
+        
+        self.video_concat_list_frame = tk.Frame(self.video_concat_list_canvas, bg="#3A4D6B")
+        self.video_concat_list_window = self.video_concat_list_canvas.create_window((0, 0), window=self.video_concat_list_frame, anchor="nw")
+        
+        def on_concat_frame_configure(event):
+            self.video_concat_list_canvas.configure(scrollregion=self.video_concat_list_canvas.bbox("all"))
+        self.video_concat_list_frame.bind("<Configure>", on_concat_frame_configure)
+        
+        def on_concat_canvas_configure(event):
+            self.video_concat_list_canvas.itemconfig(self.video_concat_list_window, width=event.width)
+        self.video_concat_list_canvas.bind("<Configure>", on_concat_canvas_configure)
+        
+        def on_concat_mousewheel(event):
+            self.video_concat_list_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+        self.video_concat_list_canvas.bind("<MouseWheel>", on_concat_mousewheel)
+        self.video_concat_list_frame.bind("<MouseWheel>", on_concat_mousewheel)
+        
+        self.video_concat_item_frames = []
+        self.video_concat_selected_indices = set()
+
+        # ボタン行
+        concat_btn_frame = ttk.Frame(lf_concat)
+        concat_btn_frame.pack(fill=tk.X, pady=(5,0))
+        ttk.Button(concat_btn_frame, text="ファイル追加", command=self.add_video_concat_files).pack(side=tk.LEFT, padx=2)
+        ttk.Button(concat_btn_frame, text="選択削除", command=self.remove_selected_video_concat).pack(side=tk.LEFT, padx=2)
+        ttk.Button(concat_btn_frame, text="すべて削除", command=self.remove_all_video_concat).pack(side=tk.LEFT, padx=2)
+
+        # 設定行
+        concat_settings_frame = ttk.Frame(lf_concat)
+        concat_settings_frame.pack(fill=tk.X, pady=5)
+        
+        ttk.Label(concat_settings_frame, text="ビットレート:").pack(side=tk.LEFT, padx=(0,5))
+        bitrate_combo = ttk.Combobox(concat_settings_frame, textvariable=self.video_concat_bitrate_var, 
+                                      values=["1000k","2000k","4000k", "8000k", "12000k", "16000k", "20000k"], width=8, state="readonly")
+        bitrate_combo.pack(side=tk.LEFT, padx=(0,15))
+        
+        ttk.Label(concat_settings_frame, text="コーデック:").pack(side=tk.LEFT, padx=(0,5))
+        ttk.Radiobutton(concat_settings_frame, text="H.264", variable=self.video_concat_codec_var, value="h264").pack(side=tk.LEFT, padx=(0,5))
+        ttk.Radiobutton(concat_settings_frame, text="H.265", variable=self.video_concat_codec_var, value="h265").pack(side=tk.LEFT, padx=(0,5))
+
+        ttk.Label(concat_settings_frame, text="FPS:").pack(side=tk.LEFT, padx=(10,5))
+        fps_combo = ttk.Combobox(concat_settings_frame, textvariable=self.video_concat_fps_var,
+                                 values=["Auto", "15", "24", "25", "30", "60"], width=6)
+        fps_combo.pack(side=tk.LEFT, padx=(0,5))
+
+        # 2行目の設定 (Safe Mode)
+        concat_settings_row2 = ttk.Frame(lf_concat)
+        concat_settings_row2.pack(fill=tk.X, pady=(0, 5))
+        ttk.Checkbutton(concat_settings_row2, text="セーフモード（タイムスタンプ補正）", variable=self.video_concat_safe_mode_var).pack(side=tk.LEFT, padx=5)
+
+        # 連結開始ボタン
+        ttk.Button(lf_concat, text="連結開始", command=self.start_video_concat).pack(pady=5)
 
         return frame
 
@@ -676,6 +757,245 @@ class App(TkinterDnD.Tk):
                 item['frame'].destroy()
             self.analysis_item_frames.clear()
             self.analysis_selected_indices.clear()
+
+    # ===== 動画連結機能 =====
+    
+    def drop_video_concat(self, event):
+        """動画ファイルのドラッグ＆ドロップ処理"""
+        paths = self.splitlist(event.data)
+        added = False
+        for p in paths:
+            p = p.strip('{}')
+            if os.path.isdir(p):
+                # フォルダの場合は中の動画ファイルを追加
+                for root, dirs, files in os.walk(p):
+                    for f in sorted(files):
+                        filepath = os.path.join(root, f)
+                        if video_processor.is_video_file(filepath):
+                            if filepath not in self.video_concat_files:
+                                self.video_concat_files.append(filepath)
+                                self._add_video_concat_item(filepath)
+                                added = True
+            elif os.path.isfile(p) and video_processor.is_video_file(p):
+                if p not in self.video_concat_files:
+                    self.video_concat_files.append(p)
+                    self._add_video_concat_item(p)
+                    added = True
+        
+        if not added:
+            messagebox.showwarning("情報", "有効な動画ファイルが見つからないか、既に追加済みです。")
+
+    def add_video_concat_files(self):
+        """ダイアログから動画ファイルを追加"""
+        filetypes = [
+            ("動画ファイル", "*.mp4 *.avi *.mov *.mkv *.wmv *.flv *.webm *.m4v *.ts *.mts *.m2ts"),
+            ("すべてのファイル", "*.*")
+        ]
+        files = filedialog.askopenfilenames(
+            title="動画ファイルを選択",
+            filetypes=filetypes
+        )
+        for f in files:
+            if f not in self.video_concat_files:
+                self.video_concat_files.append(f)
+                self._add_video_concat_item(f)
+
+    def _add_video_concat_item(self, filepath):
+        """動画連結リストにアイテムを追加"""
+        index = len(self.video_concat_item_frames)
+        
+        item_frame = tk.Frame(self.video_concat_list_frame, bg="#3A4D6B", cursor="hand2")
+        item_frame.pack(fill=tk.X, padx=2, pady=1)
+        
+        # 番号バッジ
+        badge_canvas = tk.Canvas(item_frame, width=30, height=22, bg="#3A4D6B", highlightthickness=0)
+        badge_canvas.pack(side=tk.LEFT, padx=(4, 6), pady=2)
+        
+        self._draw_rounded_rect(badge_canvas, 2, 2, 28, 20, 8, fill="#3498DB", outline="")
+        badge_canvas.create_text(15, 11, text=str(index + 1), fill="white", font=("Segoe UI", 8, "bold"))
+        
+        # ファイル名ラベル
+        filename = os.path.basename(filepath)
+        path_label = tk.Label(item_frame, text=filename, bg="#3A4D6B", fg="#EAEAEA", 
+                              anchor="w", font=("Segoe UI", 9))
+        path_label.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
+        
+        # 選択処理
+        def on_click(event, idx=index):
+            self._toggle_video_concat_selection(idx)
+        
+        item_frame.bind("<Button-1>", on_click)
+        badge_canvas.bind("<Button-1>", on_click)
+        path_label.bind("<Button-1>", on_click)
+        
+        # マウスホイール
+        def on_mousewheel(event):
+            self.video_concat_list_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+        item_frame.bind("<MouseWheel>", on_mousewheel)
+        badge_canvas.bind("<MouseWheel>", on_mousewheel)
+        path_label.bind("<MouseWheel>", on_mousewheel)
+        
+        self.video_concat_item_frames.append({
+            'frame': item_frame,
+            'badge': badge_canvas,
+            'label': path_label,
+            'selected': False
+        })
+        
+        self.append_log(f"動画連結リストにアイテムを追加しました: {filepath}")
+        
+        # 最初のファイルの場合、自動的にFPSを検出して設定する（Auto選択時用）
+        if len(self.video_concat_files) == 1 and self.video_concat_fps_var.get() == "Auto":
+            try:
+                def detect_fps():
+                    fps = video_processor.get_video_fps(filepath)
+                    if fps > 0:
+                        # 整数に近い場合は整数にする (29.97などはそのまま)
+                        if abs(fps - round(fps)) < 0.01:
+                            fps_val = str(int(round(fps)))
+                        else:
+                            fps_val = f"{fps:.2f}"
+                        self.after(0, lambda: self.append_log(f"自動検出したFPSを設定しました: {fps_val}"))
+                        # 必要ならここで変数を更新しても良いが、"Auto"のまま処理側で取得するのが安全
+                
+                threading.Thread(target=detect_fps, daemon=True).start()
+            except:
+                pass
+
+    def _toggle_video_concat_selection(self, index):
+        """動画連結リストの選択状態をトグル"""
+        if index < 0 or index >= len(self.video_concat_item_frames):
+            return
+        
+        item = self.video_concat_item_frames[index]
+        if item['selected']:
+            item['frame'].config(bg="#3A4D6B")
+            item['label'].config(bg="#3A4D6B")
+            item['badge'].config(bg="#3A4D6B")
+            item['selected'] = False
+            self.video_concat_selected_indices.discard(index)
+        else:
+            item['frame'].config(bg="#5A7D9B")
+            item['label'].config(bg="#5A7D9B")
+            item['badge'].config(bg="#5A7D9B")
+            item['selected'] = True
+            self.video_concat_selected_indices.add(index)
+
+    def remove_selected_video_concat(self):
+        """選択された動画を連結リストから削除"""
+        if not self.video_concat_selected_indices:
+            return
+        for idx in sorted(self.video_concat_selected_indices, reverse=True):
+            if 0 <= idx < len(self.video_concat_files):
+                del self.video_concat_files[idx]
+                item = self.video_concat_item_frames.pop(idx)
+                item['frame'].destroy()
+        self.video_concat_selected_indices.clear()
+        self._reindex_video_concat_list()
+
+    def remove_all_video_concat(self):
+        """すべての動画を連結リストから削除"""
+        if not self.video_concat_files:
+            return
+        if messagebox.askyesno("確認", "連結リストからすべての動画を削除しますか？"):
+            self.video_concat_files.clear()
+            for item in self.video_concat_item_frames:
+                item['frame'].destroy()
+            self.video_concat_item_frames.clear()
+            self.video_concat_selected_indices.clear()
+
+    def _reindex_video_concat_list(self):
+        """動画連結リストの番号を振り直し"""
+        for i, item in enumerate(self.video_concat_item_frames):
+            # バッジの番号を更新
+            item['badge'].delete("all")
+            self._draw_rounded_rect(item['badge'], 2, 2, 28, 20, 8, fill="#3498DB", outline="")
+            item['badge'].create_text(15, 11, text=str(i + 1), fill="white", font=("Segoe UI", 8, "bold"))
+            
+            # クリックハンドラを再バインド
+            def make_click_handler(idx):
+                return lambda e: self._toggle_video_concat_selection(idx)
+            item['frame'].bind("<Button-1>", make_click_handler(i))
+            item['badge'].bind("<Button-1>", make_click_handler(i))
+            item['label'].bind("<Button-1>", make_click_handler(i))
+
+    def start_video_concat(self):
+        """動画連結処理を開始"""
+        if len(self.video_concat_files) < 2:
+            messagebox.showwarning("情報", "連結するには2つ以上の動画ファイルを追加してください。")
+            return
+        
+        # 出力ファイルを選択
+        output_path = filedialog.asksaveasfilename(
+            title="出力ファイルを保存",
+            defaultextension=".mp4",
+            filetypes=[("MP4ファイル", "*.mp4"), ("すべてのファイル", "*.*")]
+        )
+        
+        if not output_path:
+            return
+        
+        # バックグラウンドで処理を開始
+        bitrate = self.video_concat_bitrate_var.get()
+        codec = self.video_concat_codec_var.get()
+        fps_str = self.video_concat_fps_var.get()
+        safe_mode = self.video_concat_safe_mode_var.get()
+        files = list(self.video_concat_files)
+        
+        # FPSの数値を解析
+        fps_val = None
+        if fps_str != "Auto":
+            try:
+                fps_val = float(fps_str)
+            except ValueError:
+                pass
+        else:
+            # Autoの場合は最初のファイルから取得を試みる
+            try:
+                fps_val = video_processor.get_video_fps(files[0])
+            except:
+                pass
+        
+        self.append_log(f"動画連結を開始: {len(files)}ファイル")
+        self.append_log(f"設定: ビットレート={bitrate}, コーデック={codec}, FPS={fps_str}")
+        
+        thread = threading.Thread(
+            target=self._video_concat_worker,
+            args=(files, output_path, bitrate, codec, fps_val, safe_mode),
+            daemon=True
+        )
+        thread.start()
+
+    def _video_concat_worker(self, files, output_path, bitrate, codec, fps, safe_mode):
+        """動画連結のバックグラウンド処理"""
+        def progress_callback(progress, message):
+            self.after(0, lambda: self.append_log(message))
+        
+        def cancel_check():
+            return self.cancel_flag.is_set()
+        
+        try:
+            success, message = video_processor.concatenate_videos(
+                input_files=files,
+                output_path=output_path,
+                bitrate=bitrate,
+                codec=codec,
+                fps=fps,
+                safe_mode=safe_mode,
+                progress_callback=progress_callback,
+                cancel_check=cancel_check
+            )
+            
+            if success:
+                self.after(0, lambda: messagebox.showinfo("完了", message))
+                self.after(0, lambda: self.append_log(f"連結完了: {output_path}"))
+            else:
+                self.after(0, lambda: messagebox.showerror("エラー", message))
+                self.after(0, lambda: self.append_log(f"連結エラー: {message}"))
+        except Exception as e:
+            error_msg = f"予期せぬエラー: {e}"
+            self.after(0, lambda: messagebox.showerror("エラー", error_msg))
+            self.after(0, lambda: self.append_log(error_msg))
 
     def start_analysis(self):
         if not self.analysis_files:
@@ -2850,14 +3170,14 @@ atomcam2で利用する場合は、GitHubで公開されている
         threading.Thread(target=run_task, daemon=True).start()
 
     def create_lighten_blend_image_callback(self):
-        """Callback for the 'Create Lighten Blend Image' button."""
+        """比較明合成画像作成ボタンのコールバック"""
         # デフォルトで流星の保存先フォルダを開く
         initial_dir = self.meteor_save_path_var.get()
         if not initial_dir or not os.path.exists(initial_dir):
             initial_dir = os.path.expanduser("~")
         
         # ファイル選択ダイアログで複数の画像/動画ファイルを選択
-        file_paths = filedialog.askopenfilenames(
+        file_paths_tuple = filedialog.askopenfilenames(
             title="比較明合成する画像・動画ファイルを選択（複数可）",
             initialdir=initial_dir,
             filetypes=[
@@ -2868,15 +3188,23 @@ atomcam2で利用する場合は、GitHubで公開されている
             ]
         )
         
-        if not file_paths:
+        if not file_paths_tuple:
             return
+            
+        file_paths = set(file_paths_tuple)
         
-        if len(file_paths) < 2:
-            messagebox.showwarning("警告", "比較明合成を行うには2つ以上のファイルを選択してください。")
+        if len(file_paths) < 1:
+            messagebox.showwarning("警告", "有効なファイルが見つかりません。")
             return
-        
-        # デフォルトの保存パスを取得（流星保存先フォルダを使用）
-        default_output = lighten_blend_image.get_default_output_path(initial_dir)
+
+        # 初期ディレクトリ設定
+        default_output = "composite.png"
+        if len(file_paths) == 1:
+            first_path = list(file_paths)[0]
+            if os.path.isdir(first_path):
+                default_output = os.path.join(os.path.dirname(first_path), f"{os.path.basename(first_path)}_composite.png")
+            else:
+                 default_output = os.path.join(os.path.dirname(first_path), f"{os.path.splitext(os.path.basename(first_path))[0]}_composite.png")
         
         # ユーザーに保存先を確認
         output_path = filedialog.asksaveasfilename(
@@ -2889,23 +3217,161 @@ atomcam2で利用する場合は、GitHubで公開されている
         
         if not output_path:
             return
+
+        # オプションダイアログを表示
+        dialog = ProcessingOptionDialog(self)
+        if dialog.result is None:  # キャンセル
+            return
+            
+        mode = dialog.result  # 0:通常, 1:明るいエリアマスク, 2:流星のみ
+        is_ai_mode = (mode != 0)
+        is_meteor_mode = (mode == 2)
+
+        # 通常モードの場合
+        if not is_ai_mode:
+            def run_normal_task():
+                self.append_log(f"比較明合成画像の作成を開始します... ({len(file_paths)}個の要素)")
+                success = lighten_blend_image.create_lighten_blend_image(
+                    list(file_paths),
+                    output_path,
+                    progress_callback=self.append_log
+                )
+                self._handle_synthesis_result(success, output_path)
+            
+            threading.Thread(target=run_normal_task, daemon=True).start()
+            return
+
+        # AI解析モードの場合
+        import detection_preview
+        import bright_area_detector
+        import cv2
+
+        # 検出関数の選択
+        detector_func = bright_area_detector.detect_meteors_with_boxes if is_meteor_mode else bright_area_detector.detect_bright_areas_with_boxes
         
-        self.append_log(f"比較明合成画像の作成を開始します... ({len(file_paths)}個のファイル)")
+        # 合成開始コールバック (プレビューウィンドウから呼ばれる)
+        def start_synthesis_with_results(results):
+            def run_ai_task():
+                self.append_log("AI解析結果に基づく合成処理を開始します...")
+                
+                # ファイルリストを展開して順序を確定させる必要がある
+                # create_lighten_blend_image内部ロジックと同じ順序でファイルを取得するため
+                # ここでは簡易的に、create_lighten_blend_imageの内部処理に任せつつ
+                # マスク生成関数内でインデックス管理を行う
+                
+                # ファイルリストを再構築（内部で展開されるのと同じロジックが必要だが、
+                # create_lighten_blend_imageにファイルリスト展開機能があるため、
+                # ここでは「マスク生成側でファイル名をキーにする」戦略をとる）
+                # しかし、create_lighten_blend_imageはフォルダを渡すと内部で展開する。
+                # 整合性を取るため、ここで全ファイルを展開するのが安全。
+                
+                all_files = []
+                image_ext, video_ext = lighten_blend_image.get_supported_extensions()
+                for path in file_paths:
+                    if os.path.isdir(path):
+                        all_files.extend(lighten_blend_image.collect_files_from_folder(path))
+                    elif os.path.isfile(path):
+                        all_files.append(path)
+                
+                all_files.sort()  # 名前順で処理されると仮定
+                
+                # インデックス管理用
+                file_index = [0]
+                
+                def mask_generator(img):
+                    if file_index[0] >= len(all_files):
+                        return None
+                    
+                    current_path = all_files[file_index[0]]
+                    filename = os.path.basename(current_path)
+                    file_index[0] += 1
+                    
+                    if filename in results:
+                        boxes = results[filename]['boxes']
+                        h, w = img.shape[:2]
+                        if is_meteor_mode:
+                            return bright_area_detector.create_inclusion_mask_from_boxes((h, w), boxes)
+                        else:
+                            return bright_area_detector.create_mask_from_boxes((h, w), boxes)
+                    return None
+
+                # 展開済みのファイルリストを渡す
+                success = lighten_blend_image.create_lighten_blend_image(
+                    all_files,
+                    output_path,
+                    progress_callback=self.append_log,
+                    mask_generator=mask_generator,
+                    inclusion_mode=is_meteor_mode
+                )
+                self._handle_synthesis_result(success, output_path)
+
+            threading.Thread(target=run_ai_task, daemon=True).start()
+
+        # プレビューウィンドウ作成
+        preview_window = detection_preview.DetectionPreviewWindow(self, start_synthesis_with_results)
         
-        def run_task():
-            success = lighten_blend_image.create_lighten_blend_image(
-                list(file_paths),
-                output_path,
-                progress_callback=self.append_log
-            )
-            if success:
-                messagebox.showinfo("完了", f"比較明合成画像の作成が完了しました。\n保存先: {output_path}")
-                self.append_log(f"比較明合成画像の作成が完了しました: {output_path}")
-            else:
-                messagebox.showerror("エラー", "比較明合成画像の作成に失敗しました。ログを確認してください。")
-                self.append_log("比較明合成画像の作成に失敗しました。")
-        
-        threading.Thread(target=run_task, daemon=True).start()
+        # 解析タスク実行
+        def run_analysis_task():
+            self.append_log("AIによる画像解析を開始します...")
+            
+            # ファイルリスト展開
+            all_files = []
+            for path in file_paths:
+                if os.path.isdir(path):
+                    all_files.extend(lighten_blend_image.collect_files_from_folder(path))
+                elif os.path.isfile(path):
+                    all_files.append(path)
+            all_files.sort()
+            
+            total = len(all_files)
+            
+            # プレビューウィンドウに総数を通知して計測開始
+            if preview_window.winfo_exists():
+                self.after(0, lambda: preview_window.start_analysis(total))
+            
+            for i, path in enumerate(all_files):
+                if not preview_window.winfo_exists():
+                    self.append_log("解析が中断されました。")
+                    return
+                
+                filename = os.path.basename(path)
+                # 進捗ログは多すぎると重いので適度に間引くか、重要なものだけ
+                self.append_log(f"解析中 ({i+1}/{total}): {filename}")
+                
+                img = cv2.imread(path)
+                if img is None: continue
+                
+                # 再検出用ラッパー
+                def reanalyze_wrapper(image):
+                    res = detector_func(image) # ログなし
+                    return res if res else (None, [])
+                
+                # 検出実行
+                res = detector_func(img)
+                boxes = res[1] if res else []
+                
+                # GUIスレッドでプレビューに追加
+                if preview_window.winfo_exists():
+                    self.after(0, lambda fn=filename, fp=path, b=boxes, cb=reanalyze_wrapper: 
+                              preview_window.add_item(fn, fp, b, cb))
+            
+            self.append_log("全画像の解析が完了しました。検出結果を確認・修正してください。")
+            
+            if preview_window.winfo_exists():
+                 # 完了処理（未検出を先頭になど）
+                 self.after(0, preview_window.finalize_analysis)
+                 messagebox.showinfo("解析完了", "全画像の解析が完了しました。\n未検出の画像が上部に表示されています。\nプレビュー画面で結果を確認し、「修正を確定して合成を開始」ボタンを押してください。")
+
+        threading.Thread(target=run_analysis_task, daemon=True).start()
+
+    def _handle_synthesis_result(self, success, output_path):
+        if success:
+            messagebox.showinfo("完了", f"比較明合成画像の作成が完了しました。\n保存先: {output_path}")
+            self.append_log(f"比較明合成画像の作成が完了しました: {output_path}")
+        else:
+            messagebox.showerror("エラー", "比較明合成画像の作成に失敗しました。ログを確認してください。")
+            self.append_log("比較明合成画像の作成に失敗しました。")
+
 
     def create_timelapse_callback(self):
         """タイムラプス作成ボタンのコールバック。ドラッグ＆ドロップウィンドウを表示する。"""
@@ -3206,6 +3672,86 @@ class TimelapseDragDropWindow(Toplevel):
                 self.log_callback("タイムラプス動画の作成に失敗しました。")
         
         threading.Thread(target=run_task, daemon=True).start()
+
+
+
+class ProcessingOptionDialog(tk.Toplevel):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.title("処理オプション")
+        self.result = None
+        self.geometry("400x320")
+        self.resizable(False, False)
+        
+        # メインフレームを作成して全体に配置（テーマの背景色を適用するため）
+        self.main_frame = ttk.Frame(self, padding="20 20 20 10")
+        self.main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # ヘッダー
+        ttk.Label(self.main_frame, text="比較明合成オプション", font=("", 14, "bold")).pack(anchor=tk.W, pady=(0, 15))
+        
+        # モード選択エリア
+        mode_frame = ttk.LabelFrame(self.main_frame, text="モード選択", padding=10)
+        mode_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        self.mode_var = tk.IntVar(value=0)
+        
+        ttk.Radiobutton(mode_frame, text="通常合成 (AIを使用しない)", variable=self.mode_var, value=0).pack(anchor=tk.W, pady=5)
+        self.rb_bright = ttk.Radiobutton(mode_frame, text="明るいエリアをマスク (AI検出)", variable=self.mode_var, value=1)
+        self.rb_bright.pack(anchor=tk.W, pady=5)
+        self.rb_meteor = ttk.Radiobutton(mode_frame, text="流星のみ合成 (AI検出)", variable=self.mode_var, value=2)
+        self.rb_meteor.pack(anchor=tk.W, pady=5)
+        
+        # AIステータスエリア
+        status_frame = ttk.Frame(self.main_frame)
+        status_frame.pack(fill=tk.X, pady=(0, 20))
+        
+        ttk.Label(status_frame, text="AIエンジン (LM Studio):", font=("", 9)).pack(side=tk.LEFT)
+        self.status_label = ttk.Label(status_frame, text="接続確認中...", font=("", 9, "bold"), foreground="gray")
+        self.status_label.pack(side=tk.LEFT, padx=5)
+        
+        # ボタンエリア (下寄せ)
+        btn_frame = ttk.Frame(self.main_frame)
+        btn_frame.pack(fill=tk.X, side=tk.BOTTOM)
+        
+        ttk.Button(btn_frame, text="キャンセル", command=self.destroy).pack(side=tk.RIGHT, padx=5)
+        ttk.Button(btn_frame, text="次へ", command=self.on_ok).pack(side=tk.RIGHT, padx=5) # 決定ではなく次へ進むニュアンス
+        
+        # 親ウィンドウの中心に配置
+        self.transient(parent)
+        self.grab_set()
+        
+        self.update_idletasks()
+        try:
+            x = parent.winfo_x() + (parent.winfo_width() // 2) - (self.winfo_width() // 2)
+            y = parent.winfo_y() + (parent.winfo_height() // 2) - (self.winfo_height() // 2)
+            self.geometry(f"+{x}+{y}")
+        except:
+            pass
+            
+        # 接続チェック開始
+        self.after(100, self.check_connection)
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
+        self.wait_window(self)
+        
+    def check_connection(self):
+        try:
+            import bright_area_detector
+            if bright_area_detector.check_vlm_connection():
+                self.status_label.config(text="接続OK", foreground="#4CAF50") # 緑系
+            else:
+                self.status_label.config(text="未接続", foreground="#F44336") # 赤系
+                self.rb_bright.config(state=tk.DISABLED)
+                self.rb_meteor.config(state=tk.DISABLED)
+                self.mode_var.set(0)
+        except Exception as e:
+            self.status_label.config(text=f"エラー: {e}", foreground="#F44336")
+            self.rb_bright.config(state=tk.DISABLED)
+            self.rb_meteor.config(state=tk.DISABLED)
+
+    def on_ok(self):
+        self.result = self.mode_var.get()
+        self.destroy()
 
 
 def worker_main_loop(

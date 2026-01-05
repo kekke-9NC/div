@@ -1,12 +1,38 @@
 # config.py (整数値確認版)
 
 import os
+import sys
+
+# --- Determine Base Paths for Portable/Frozen execution ---
+if getattr(sys, 'frozen', False):
+    # Running as compiled exe
+    BUNDLE_DIR = sys._MEIPASS
+    EXE_DIR = os.path.dirname(sys.executable)
+    # Bundle contains model at root
+    MODEL_PATH = os.path.join(BUNDLE_DIR, "model_epoch_46.pth")
+else:
+    # Running as script (Development)
+    SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+    # Assuming standard structure: my_app/div/config.py
+    # and my_app/model_epoch_46.pth
+    # So base dir for resources/output should be parent of div
+    PARENT_DIR = os.path.dirname(SCRIPT_DIR)
+    
+    # Decide where base ref is. Original code was hardcoded to C:\Users\kekke\Desktop\my_app
+    # calculated PARENT_DIR should match that.
+    EXE_DIR = PARENT_DIR 
+    
+    # Model path strategy for dev
+    if os.path.exists(os.path.join(SCRIPT_DIR, "model_epoch_46.pth")):
+        MODEL_PATH = os.path.join(SCRIPT_DIR, "model_epoch_46.pth")
+    else:
+        MODEL_PATH = os.path.join(PARENT_DIR, "model_epoch_46.pth")
 
 # --- 画像・モデル関連 ---
 IMG_HEIGHT = 224  # モデルの入力画像の高さ
 IMG_WIDTH = 224   #  モデルの入力画像の幅
 NUM_FRAMES = 16   #  モデルが期待するフレーム数（もし3Dモデル等で使用する場合）
-MODEL_PATH = r"C:\Users\kekke\Desktop\my_app\model_epoch_46.pth"# 学習済みモデルのパス
+# MODEL_PATH is now set above
 CUTOUT_SIZE = 256 # 切り出し画像のサイズ
 
 # --- 動画処理・検出関連 ---
@@ -36,9 +62,9 @@ BRIGHTNESS_CONSISTENCY_THRESHOLD = 20 # 飛行機判定用の輝度一貫性チ�
 VELOCITY_CONSISTENCY_THRESHOLD = 2    # 飛行機判定用の速度一貫性チェックの閾値（ピクセル/フレーム）
 
 # --- 保存パス関連 ---
-DEFAULT_METEOR_SAVE_PATH = r"C:\Users\kekke\Desktop\my_app\meteor"
-DEFAULT_NOT_METEOR_SAVE_PATH = r"C:\Users\kekke\Desktop\my_app\not_meteor"
-TEMP_CLIP_DIR = "temp_clips"
+DEFAULT_METEOR_SAVE_PATH = os.path.join(EXE_DIR, "meteor")
+DEFAULT_NOT_METEOR_SAVE_PATH = os.path.join(EXE_DIR, "not_meteor")
+TEMP_CLIP_DIR = os.path.join(EXE_DIR, "temp_clips")
 VIDEO_FOURCC = 'avc1'
 
 # --- Astrometry.net 関連 ---
@@ -63,7 +89,7 @@ VIZIER_STAR_MAG_LIMIT = 3 # Vizierから取得して画像に表示する星の�
 # --- 定期スキャン・RTSP関連 ---
 PERIODIC_VIDEO_EXTENSIONS = ('.mp4', '.avi', '.mov')
 DEFAULT_SCAN_INTERVAL = 60 # 定期スキャンのデフォルト間隔（秒）
-RTSP_SAVE_ROOT = r"C:\Users\kekke\Desktop\my_app\div\rtsp"
+RTSP_SAVE_ROOT = os.path.join(EXE_DIR, "rtsp")
 RTSP_FPS = 25 # RTSPストリームの前提FPS
 RTSP_SEGMENT_FRAMES = 1500 # 1セグメントあたりのフレーム数 (25fps * 60秒 = 1500フレーム)
 RTSP_SEGMENT_DURATION = 60 # RTSP動画の1セグメントあたりの秒数（参考値）

@@ -165,7 +165,10 @@ def extract_frames_from_video(
 def create_lighten_blend_image(
     file_paths: List[str],
     output_path: str,
-    progress_callback: Optional[Callable[[str], None]] = None
+    progress_callback: Optional[Callable[[str], None]] = None,
+    bright_area_mask: Optional[np.ndarray] = None,
+    mask_generator: Optional[Callable[[np.ndarray], Optional[np.ndarray]]] = None,
+    inclusion_mode: bool = False
 ) -> bool:
     """
     複数のファイルから比較明合成画像を作成する。
@@ -177,6 +180,9 @@ def create_lighten_blend_image(
         file_paths: ファイルパスのリスト（フォルダも可）
         output_path: 出力画像のパス
         progress_callback: 進捗報告用コールバック関数
+        bright_area_mask: 明るいエリアのマスク（0=マスク領域, 255=通常領域）
+        mask_generator: 各フレームごとにマスクを生成するコールバック関数
+        inclusion_mode: Trueの場合、マスク領域(255)のみ合成する（流星モード）
         
     Returns:
         bool: 成功したらTrue
@@ -237,6 +243,30 @@ def create_lighten_blend_image(
     composite = first_frame.astype(np.float32)
     processed = 1
     
+    # 最初のフレームにもマスクを適用
+    if mask_generator is not None:
+        first_mask = mask_generator(first_frame)
+        if first_mask is not None:
+            if first_mask.shape[0] != base_height or first_mask.shape[1] != base_width:
+                first_mask = cv2.resize(first_mask, (base_width, base_height), interpolation=cv2.INTER_NEAREST)
+            
+            if inclusion_mode:
+                # 包含モード（流星のみ合成）: マスク外（0の部分）を黒で初期化
+                mask_bool = first_mask == 0
+                composite[mask_bool] = 0
+            else:
+                # 除外モード（明るいエリアマスク）: マスク領域（0の部分）を黒で初期化
+                mask_bool = first_mask == 0
+                composite[mask_bool] = 0
+    
+    # マスクをリサイズ（必要な場合）
+    resized_mask = None
+    if bright_area_mask is not None:
+        if bright_area_mask.shape[0] != base_height or bright_area_mask.shape[1] != base_width:
+            resized_mask = cv2.resize(bright_area_mask, (base_width, base_height), interpolation=cv2.INTER_NEAREST)
+        else:
+            resized_mask = bright_area_mask
+    
     for idx, file_path in enumerate(all_files[1:], start=2):
         try:
             file_ext = Path(file_path).suffix.lower()
@@ -247,8 +277,29 @@ def create_lighten_blend_image(
                 if frame is not None:
                     if frame.shape[1] != base_width or frame.shape[0] != base_height:
                         frame = cv2.resize(frame, (base_width, base_height))
-                    np.maximum(composite, frame.astype(np.float32), out=composite)
+                    
+                    frame_float = frame.astype(np.float32)
+                    
+                    # 動的マスク生成（全画像処理）
+                    current_mask = resized_mask
+                    if mask_generator is not None:
+                        generated = mask_generator(frame)
+                        if generated is not None:
+                            if generated.shape[0] != base_height or generated.shape[1] != base_width:
+                                current_mask = cv2.resize(generated, (base_width, base_height), interpolation=cv2.INTER_NEAREST)
+                            else:
+                                current_mask = generated
+                    
+                    if current_mask is not None:
+                        # マスク領域（0の部分）は合成しない
+                        mask_bool = current_mask > 0
+                        composite = np.where(mask_bool[:, :, np.newaxis], 
+                                             np.maximum(composite, frame_float), 
+                                             composite)
+                    else:
+                        np.maximum(composite, frame_float, out=composite)
                     del frame
+                    del frame_float
                     processed += 1
                     
             else:
@@ -271,7 +322,28 @@ def create_lighten_blend_image(
                         if frame_idx % step == 0:
                             if frame.shape[1] != base_width or frame.shape[0] != base_height:
                                 frame = cv2.resize(frame, (base_width, base_height))
-                            np.maximum(composite, frame.astype(np.float32), out=composite)
+                            
+                            frame_float = frame.astype(np.float32)
+                            
+                            # 動的マスク生成（全画像処理）
+                            current_mask = resized_mask
+                            if mask_generator is not None:
+                                generated = mask_generator(frame)
+                                if generated is not None:
+                                    if generated.shape[0] != base_height or generated.shape[1] != base_width:
+                                        current_mask = cv2.resize(generated, (base_width, base_height), interpolation=cv2.INTER_NEAREST)
+                                    else:
+                                        current_mask = generated
+
+                            if current_mask is not None:
+                                # マスク領域（0の部分）は合成しない
+                                mask_bool = current_mask > 0
+                                composite = np.where(mask_bool[:, :, np.newaxis], 
+                                                     np.maximum(composite, frame_float), 
+                                                     composite)
+                            else:
+                                np.maximum(composite, frame_float, out=composite)
+                            del frame_float
                             video_frames_processed += 1
                         
                         del frame

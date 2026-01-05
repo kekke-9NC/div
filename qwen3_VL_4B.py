@@ -19,7 +19,7 @@ except ImportError:
 
 # Configuration
 LM_STUDIO_URL = "http://localhost:1234/v1"
-MODEL_ID = "qwen3-vl-4b-instruct" # Or whatever the loaded model is in LM Studio
+MODEL_ID = "qwen/qwen3-vl-4b" # Or whatever the loaded model is in LM Studio
 
 class QwenVLApp:
     def __init__(self, root):
@@ -69,6 +69,9 @@ class QwenVLApp:
 
         self.auto_btn = ttk.Button(control_frame, text="Auto Detect", command=self.run_auto_detect, state=tk.DISABLED)
         self.auto_btn.pack(side=tk.LEFT, padx=5)
+
+        self.quick_btn = ttk.Button(control_frame, text="Quick Detect", command=self.run_quick_detect, state=tk.DISABLED)
+        self.quick_btn.pack(side=tk.LEFT, padx=5)
 
         # Main Content Area (PanedWindow for Canvas + Legend)
         self.main_paned = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
@@ -126,6 +129,7 @@ class QwenVLApp:
             self.load_image()
             self.run_btn.config(state=tk.NORMAL)
             self.auto_btn.config(state=tk.NORMAL)
+            self.quick_btn.config(state=tk.NORMAL)
             # Clear previous detections
             self.detected_shapes = []
             self.visible_categories = {}
@@ -164,14 +168,115 @@ class QwenVLApp:
         self.status_var.set("Starting Auto Detection...")
         threading.Thread(target=self._auto_detect_worker, daemon=True).start()
 
+    def run_quick_detect(self):
+        """Single-prompt detection that identifies and labels all objects at once."""
+        if not self.image_path:
+            return
+        self._disable_controls()
+        # Clear previous detections
+        self.detected_shapes = []
+        self.visible_categories = {}
+        self.category_colors = {}
+        self.root.after(0, self._rebuild_legend)
+        self.status_var.set("Starting Quick Detection (single prompt)...")
+        threading.Thread(target=self._quick_detect_worker, daemon=True).start()
+
+    def _quick_detect_worker(self):
+        """Worker for single-prompt object detection with labels."""
+        try:
+            data_uri = self._image_to_base64_data_uri(self.image_path)
+            
+            system_prompt = """You are an advanced object detector. Detect ALL objects in the image and return their bounding boxes with labels.
+
+For each object, return in this format:
+label: (xmin,ymin),(xmax,ymax)
+
+IMPORTANT: For any person detected, include estimated age and gender in the label.
+Format for people: "person (age, gender)": (xmin,ymin),(xmax,ymax)
+Example: "person (XXs, male or female)": (100,200),(300,500)
+
+Multiple objects should be separated by semicolons (;).
+Coordinates should be 0-1000 (normalized).
+
+Example output:
+person (XXs, male or female): (100,200),(300,500); person (XXs, male or female): (350,180),(480,520); car: (400,300),(600,450); tree: (700,100),(850,400)
+
+Be thorough and detect as many distinct objects as possible. Include people, animals, vehicles, buildings, furniture, plants, and any other visible objects."""
+
+            user_prompt = "Detect and label ALL visible objects in this image. For each person, estimate their age and gender. Return each object with its label and bounding box coordinates."
+            
+            self.root.after(0, lambda: self.status_var.set("Quick Detect: Analyzing image..."))
+            
+            content = self._call_vlm(system_prompt, user_prompt, data_uri)
+            print(f"Quick Detect Raw Output: {content}")
+            
+            # Parse the labeled response
+            shapes = self._parse_labeled_boxes(content)
+            
+            for label, shape in shapes:
+                self.detected_shapes.append((label, shape))
+            
+            self.root.after(0, self._update_display)
+            self.root.after(0, lambda: self.status_var.set(f"Quick Detect Complete. Found {len(self.detected_shapes)} objects."))
+
+        except Exception as e:
+            self.root.after(0, lambda: messagebox.showerror("Quick Detect Error", f"Error: {e}"))
+            self.root.after(0, lambda: self.status_var.set("Quick detection failed."))
+        finally:
+            self.root.after(0, self._enable_controls)
+
+    def _parse_labeled_boxes(self, text):
+        """Parse labeled bounding boxes from VLM response."""
+        results = []
+        
+        # Split by semicolon for multiple objects
+        if ';' in text:
+            parts = text.split(';')
+        else:
+            parts = [text]
+        
+        for part in parts:
+            part = part.strip()
+            if not part:
+                continue
+            
+            # Try to extract label and coordinates
+            # Format: "label: (x1,y1),(x2,y2)" or "person (age, gender): (x1,y1),(x2,y2)"
+            # Find the last colon before coordinates pattern
+            coord_match = re.search(r':\s*\((\d+),\s*(\d+)\)', part)
+            if coord_match:
+                # Split at the colon that precedes the coordinates
+                colon_pos = coord_match.start()
+                label = part[:colon_pos].strip()
+                coords_text = part[colon_pos+1:]
+            else:
+                label = "object"
+                coords_text = part
+            
+            # Parse coordinates
+            point_pattern = r"\((-?\d+),\s*(-?\d+)\)"
+            points = re.findall(point_pattern, coords_text)
+            parsed_points = []
+            for p in points:
+                x, y = map(int, p)
+                if 0 <= x <= 1000 and 0 <= y <= 1000:
+                    parsed_points.append((x, y))
+            
+            if 2 <= len(parsed_points) <= 20:
+                results.append((label, parsed_points))
+        
+        return results
+
     def _disable_controls(self):
         self.run_btn.config(state=tk.DISABLED)
         self.auto_btn.config(state=tk.DISABLED)
+        self.quick_btn.config(state=tk.DISABLED)
         self.select_btn.config(state=tk.DISABLED)
 
     def _enable_controls(self):
         self.run_btn.config(state=tk.NORMAL)
         self.auto_btn.config(state=tk.NORMAL)
+        self.quick_btn.config(state=tk.NORMAL)
         self.select_btn.config(state=tk.NORMAL)
 
     def _call_vlm(self, system_prompt, user_prompt, data_uri):
@@ -185,7 +290,7 @@ class QwenVLApp:
         response = self.client.chat.completions.create(
             model=MODEL_ID,
             messages=messages,
-            temperature=0.7,
+            temperature=0.1,
             top_p=0.9,
             max_tokens=512
         )

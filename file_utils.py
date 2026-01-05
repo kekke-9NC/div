@@ -708,7 +708,8 @@ def process_new_rtsp_files(
     not_meteor_save_path: str = config.DEFAULT_NOT_METEOR_SAVE_PATH, cancel_flag: Optional[threading.Event] = None,
     save_options: Optional[Dict[str, bool]] = None, interval: float = config.DEFAULT_INTERVAL,
     duration: float = config.DEFAULT_DURATION, min_length: int = config.MIN_LINE_LENGTH,
-    summary_video_config: Optional[List[Dict[str, Any]]] = None
+    summary_video_config: Optional[List[Dict[str, Any]]] = None,
+    max_workers: int = 1
 ):
     new_files_to_process = []
     video_extensions = config.PERIODIC_VIDEO_EXTENSIONS
@@ -743,18 +744,46 @@ def process_new_rtsp_files(
         new_files_to_process.sort(key=os.path.getmtime)
 
         if new_files_to_process:
-            message = f"[RTSP解析] {len(new_files_to_process)} 個の新規保存動画ファイルを検出。"
+            message = f"[RTSP解析] {len(new_files_to_process)} 個の新規保存動画ファイルを検出。(並列処理数: {max_workers})"
             print(message)
             if progress_callback: progress_callback((message, None))
-            for file_path in new_files_to_process:
-                if cancel_flag is not None and cancel_flag.is_set(): break
-                processed_successfully = process_video_file_periodic(
-                     file_path, progress_callback, mask, global_wcs_info, plate_solve_mask,
-                     meteor_save_path, not_meteor_save_path, cancel_flag, save_options,
-                     interval, duration, min_length, summary_video_config
-                )
-                if processed_successfully:
-                    processed_files_set.add(file_path)
+            
+            if max_workers > 1:
+                # 並列処理モード
+                from concurrent.futures import ThreadPoolExecutor, as_completed
+                
+                def process_one_file(fp):
+                    if cancel_flag is not None and cancel_flag.is_set():
+                        return fp, False
+                    result = process_video_file_periodic(
+                        fp, progress_callback, mask, global_wcs_info, plate_solve_mask,
+                        meteor_save_path, not_meteor_save_path, cancel_flag, save_options,
+                        interval, duration, min_length, summary_video_config
+                    )
+                    return fp, result
+                
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    futures = {executor.submit(process_one_file, fp): fp for fp in new_files_to_process}
+                    for future in as_completed(futures):
+                        if cancel_flag is not None and cancel_flag.is_set():
+                            break
+                        try:
+                            file_path, success = future.result()
+                            if success:
+                                processed_files_set.add(file_path)
+                        except Exception as e:
+                            print(f"[RTSP解析] 並列処理中に例外: {e}")
+            else:
+                # 逐次処理モード（従来どおり）
+                for file_path in new_files_to_process:
+                    if cancel_flag is not None and cancel_flag.is_set(): break
+                    processed_successfully = process_video_file_periodic(
+                         file_path, progress_callback, mask, global_wcs_info, plate_solve_mask,
+                         meteor_save_path, not_meteor_save_path, cancel_flag, save_options,
+                         interval, duration, min_length, summary_video_config
+                    )
+                    if processed_successfully:
+                        processed_files_set.add(file_path)
         else:
              print("[RTSP解析] 解析対象の新規ファイルは見つかりませんでした。")
     except Exception as e:
@@ -773,7 +802,8 @@ def rtsp_save_and_process_thread_target(
     duration: float = config.DEFAULT_DURATION, min_length: int = config.MIN_LINE_LENGTH,
     summary_video_config: Optional[List[Dict[str, Any]]] = None,
     time_limit_enabled: bool = False, start_hour: int = 17, start_minute: int = 0,
-    end_hour: int = 7, end_minute: int = 0
+    end_hour: int = 7, end_minute: int = 0,
+    max_workers: int = 1
 ):
     global rtsp_processed_files
     video_extensions = config.PERIODIC_VIDEO_EXTENSIONS
@@ -814,7 +844,7 @@ def rtsp_save_and_process_thread_target(
         process_new_rtsp_files(
             save_root, rtsp_processed_files, progress_callback, mask, global_wcs_info, plate_solve_mask,
             meteor_save_path, not_meteor_save_path, cancel_flag, save_options,
-            interval, duration, min_length, summary_video_config
+            interval, duration, min_length, summary_video_config, max_workers
         )
         wait_message = f"[RTSP統合] 解析スキャン完了。次のスキャンまで {scan_interval} 秒待機。"
         print(wait_message)
