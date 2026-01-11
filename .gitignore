@@ -34,3 +34,15 @@ custom_coordinates.json
 
 # Backup folders
 app_itiji/
+
+# Unused/experimental Python files (not part of main app)
+qwen3_VL_4B.py
+yugami.py
+yugami_hosei.py
+app_state.py
+temp_cleanup.py
+file_utils_temp.py
+
+# Diff/patch files
+*.patch
+diff.txt
