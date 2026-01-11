@@ -1,4 +1,5 @@
 import os
+import hashlib
 import sys
 import time
 import threading
@@ -92,6 +93,23 @@ class App(TkinterDnD.Tk):
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
         self.after(100, self.update_progress)
 
+    def check_admin_password(self):
+        """Prompt for admin password and return True if correct."""
+        # パスワード確認
+        password = simpledialog.askstring("管理者認証", "この操作を実行するには管理者パスワードを入力してください:", show='*')
+        if not password:
+            return False
+            
+        # SHA-256でハッシュ化して比較 (パスワード: 141421)
+        pw_hash = hashlib.sha256(password.encode()).hexdigest()
+        admin_hash = "cfb24c91a9b83d9967f5b6a177037f5803abf3c8a84771a62c4fa48ab076434f0"
+        
+        if pw_hash != admin_hash:
+            messagebox.showerror("アクセス拒否", "パスワードが正しくありません。")
+            return False
+            
+        return True
+
     def setup_icon(self):
         try:
             if getattr(sys, 'frozen', False):
@@ -125,9 +143,17 @@ class App(TkinterDnD.Tk):
         style.configure("TButton", background="#4A6A9B", foreground="white", borderwidth=0)
         style.map("TButton", background=[('active', '#5C7DB8')])
         
+        # Admin protected button style (Gray)
+        style.configure("Gray.TButton", background="#666666", foreground="white", borderwidth=0)
+        style.map("Gray.TButton", background=[('active', '#888888')])
+        
         style.configure("TNotebook", background=BG_COLOR, borderwidth=0)
         style.configure("TNotebook.Tab", background=BG_COLOR, foreground=FG_COLOR, padding=[10, 5], font=('Segoe UI', 10))
         style.map("TNotebook.Tab", background=[("selected", SELECT_BG)], foreground=[("selected", "white")])
+        
+        # Spacer tab style: blend into background, no visible border
+        style.configure("Spacer.TNotebook.Tab", background=BG_COLOR, foreground=BG_COLOR, borderwidth=0, padding=[10, 5])
+        style.map("Spacer.TNotebook.Tab", background=[("disabled", BG_COLOR)], foreground=[("disabled", BG_COLOR)])
         
         style.configure("TLabelframe", background=FRAME_BG, bordercolor=SELECT_BG, padding=10)
         style.configure("TLabelframe.Label", font=('Segoe UI', 11, 'bold'), background=FRAME_BG, foreground=FG_COLOR)
@@ -139,6 +165,10 @@ class App(TkinterDnD.Tk):
         style.map("Vertical.TScrollbar", background=[('active', SELECT_BG)])
 
         style.configure("Horizontal.TProgressbar", background=SELECT_BG)
+
+        # Radiobutton style
+        style.configure("TRadiobutton", background=BG_COLOR, foreground=FG_COLOR, font=('Segoe UI', 10))
+        style.map("TRadiobutton", background=[('active', BG_COLOR), ('disabled', BG_COLOR)], foreground=[('disabled', '#AAAAAA')])
 
     def setup_variables(self):
         self.rtsp_url_var = tk.StringVar()
@@ -183,14 +213,11 @@ class App(TkinterDnD.Tk):
         # Coordinate manager for custom points
         self.coord_manager = coord_mgr.CoordinateManager()
         self.coord_manager.set_change_callback(self.on_coordinates_changed)
-        # Auto time updater
         self.auto_time_updater_enabled_var = tk.BooleanVar(value=False)
         self.auto_updater = auto_time_updater.AutoTimeUpdater()
         self.auto_updater.set_update_callback(self._on_auto_time_update)
         self.auto_updater.set_log_callback(self.append_log)
-        # RTSP detection preset
         self.rtsp_preset_var = tk.StringVar(value="cloudy")  # "clear" or "cloudy"
-        # RTSP FPS setting
         self.rtsp_fps_var = tk.StringVar(value=str(config.RTSP_FPS))
         # RTSP time limit for recording (similar to periodic scan)
         self.rtsp_time_limit_var = tk.BooleanVar(value=False)
@@ -198,16 +225,37 @@ class App(TkinterDnD.Tk):
         self.rtsp_start_min_var = tk.StringVar(value="00")
         self.rtsp_end_hour_var = tk.StringVar(value="07")
         self.rtsp_end_min_var = tk.StringVar(value="00")
-        # Plate solve mode: "local" (WSL solve-field) or "api" (Astrometry.net)
         self.plate_solve_mode_var = tk.StringVar(value="local")
-        # Astrometry.net API key
         self.astrometry_api_key_var = tk.StringVar(value="")
-        # Video concatenation
         self.video_concat_files = []
         self.video_concat_bitrate_var = tk.StringVar(value="8000k")
         self.video_concat_codec_var = tk.StringVar(value="h264")
         self.video_concat_fps_var = tk.StringVar(value="Auto")
         self.video_concat_safe_mode_var = tk.BooleanVar(value=True) # デフォルトOn
+
+        # Advanced settings variables (config.py values)
+        # 検出関連
+        self.cfg_min_line_length_var = tk.StringVar(value=str(config.MIN_LINE_LENGTH))
+        self.cfg_border_size_var = tk.StringVar(value=str(config.BORDER_SIZE))
+        self.cfg_duplicate_thresh_var = tk.StringVar(value=str(config.DUPLICATE_DETECTION_THRESHOLD))
+        self.cfg_meteor_prob_var = tk.StringVar(value=str(config.METEOR_PROBABILITY_THRESHOLD))
+        
+        # 詳細検出関連
+        self.cfg_finer_window_sec_var = tk.StringVar(value=str(config.FINER_DETECT_WINDOW_SECONDS))
+        self.cfg_finer_comp_step_var = tk.StringVar(value=str(config.FINER_COMPOSITE_STEP))
+        self.cfg_finer_min_length_var = tk.StringVar(value=str(config.FINER_DETECT_MIN_LENGTH))
+        self.cfg_finer_padding_sec_var = tk.StringVar(value=str(config.FINER_DETECT_PADDING_SECONDS))
+        self.cfg_finer_cutout_size_var = tk.StringVar(value=str(config.FINER_CUTOUT_SIZE))
+        
+        # 飛行機判定関連
+        self.cfg_airplane_dur_thresh_var = tk.StringVar(value=str(config.AIRPLANE_DURATION_THRESHOLD))
+        self.cfg_airplane_frame_thresh_var = tk.StringVar(value=str(config.AIRPLANE_FRAME_THRESHOLD))
+        self.cfg_tracking_dist_thresh_var = tk.StringVar(value=str(config.TRACKING_DISTANCE_THRESHOLD))
+        
+        # 動画クリップ関連
+        self.cfg_max_clip_dur_var = tk.StringVar(value=str(config.MAX_CLIP_DURATION))
+        self.cfg_clip_dur_sec_var = tk.StringVar(value=str(config.CLIP_DURATION_SECONDS))
+        self.cfg_cutout_size_var = tk.StringVar(value=str(config.CUTOUT_SIZE))
 
     def setup_ui(self):
         main_pane = PanedWindow(self, orient=tk.HORIZONTAL, sashrelief=tk.RAISED, bg="#2E3F5B")
@@ -226,12 +274,14 @@ class App(TkinterDnD.Tk):
         tab_periodic = self.create_periodic_scan_tab(notebook)
         tab_settings = self.create_settings_tab(notebook)
         tab_analysis = self.create_analysis_tab(notebook)
+        tab_advanced_settings = self.create_advanced_settings_tab(notebook)
 
         notebook.add(tab_usage, text="使い方")
         notebook.add(tab_source, text="ソース選択")
         notebook.add(tab_periodic, text="定期スキャン")
-        notebook.add(tab_settings, text="各種設定")
+        notebook.add(tab_settings, text="保存設定")
         notebook.add(tab_analysis, text="解析")
+        notebook.add(tab_advanced_settings, text="⚙️")
         
         main_pane.add(left_frame, width=550)
         main_pane.add(right_frame)
@@ -239,9 +289,9 @@ class App(TkinterDnD.Tk):
 
     def create_usage_tab(self, parent):
         frame = ttk.Frame(parent)
-        frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        # Notebook manages geometry, so NO pack() here.
+        # frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-        # スクロール可能なキャンバスとスクロールバーを作成（各種設定タブと同じ方式）
         canvas = tk.Canvas(frame, highlightthickness=0, bg="#2E3F5B")
         scrollbar = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=canvas.yview)
         scrollable_frame = ttk.Frame(canvas)
@@ -253,7 +303,6 @@ class App(TkinterDnD.Tk):
 
         canvas_window = canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
 
-        # キャンバスのリサイズ時に内部フレームの幅を合わせる
         def on_canvas_configure(event):
             canvas.itemconfig(canvas_window, width=event.width)
         canvas.bind("<Configure>", on_canvas_configure)
@@ -263,16 +312,24 @@ class App(TkinterDnD.Tk):
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        # マウスホイールでスクロール
+        # マウスホイールでスクロール (カーソルが上にある時のみ有効化)
         def on_mousewheel(event):
             canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-        canvas.bind_all("<MouseWheel>", on_mousewheel)
+
+        def _bind_mousewheel(event):
+            canvas.bind_all("<MouseWheel>", on_mousewheel)
         
-        # --- コンテンツの追加 ---
+        def _unbind_mousewheel(event):
+            canvas.unbind_all("<MouseWheel>")
+
+        # Canvasに入った時だけスクロールを割り当て、出たら解除
+        # これにより他のタブやウィジェットへの干渉を防ぐ
+        canvas.bind("<Enter>", _bind_mousewheel)
+        canvas.bind("<Leave>", _unbind_mousewheel)
+        
         pad_x = 10
         pad_y = 5
         
-        # タイトル
         title_lbl = ttk.Label(scrollable_frame, text="✨ 流星検出アプリの使い方", font=("Arial", 16, "bold"), foreground="#87CEEB")
         title_lbl.pack(pady=(15, 10), padx=pad_x, anchor="w")
         
@@ -354,7 +411,6 @@ class App(TkinterDnD.Tk):
         self.folder_list_frame = tk.Frame(self.folder_list_canvas, bg="#3A4D6B")
         self.folder_list_window = self.folder_list_canvas.create_window((0, 0), window=self.folder_list_frame, anchor="nw")
         
-        # Configure canvas scrolling
         def on_frame_configure(event):
             self.folder_list_canvas.configure(scrollregion=self.folder_list_canvas.bbox("all"))
         self.folder_list_frame.bind("<Configure>", on_frame_configure)
@@ -363,7 +419,6 @@ class App(TkinterDnD.Tk):
             self.folder_list_canvas.itemconfig(self.folder_list_window, width=event.width)
         self.folder_list_canvas.bind("<Configure>", on_canvas_configure)
         
-        # Mouse wheel scrolling
         def on_mousewheel(event):
             self.folder_list_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
         self.folder_list_canvas.bind("<MouseWheel>", on_mousewheel)
@@ -433,7 +488,6 @@ class App(TkinterDnD.Tk):
         ttk.Label(entry_frame, text="URL:").pack(side=tk.LEFT, padx=(0,5))
         ttk.Entry(entry_frame, textvariable=self.rtsp_url_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
         
-        # FPS設定
         ttk.Label(entry_frame, text="FPS:").pack(side=tk.LEFT, padx=(10, 5))
         fps_spin = ttk.Spinbox(entry_frame, from_=1, to=120, increment=1, width=5, textvariable=self.rtsp_fps_var)
         fps_spin.pack(side=tk.LEFT, padx=(0, 5))
@@ -477,7 +531,6 @@ class App(TkinterDnD.Tk):
         ttk.Button(rtsp_btn_frame, text="RTSPからプレートソルブ", command=self.start_rtsp_plate_solve).pack(side=tk.LEFT, padx=(10, 2))
         ttk.Button(rtsp_btn_frame, text="RTSPからマスク作成", command=self.create_rtsp_mask).pack(side=tk.LEFT, padx=2)
         
-        # RTSP録画時間制限
         rtsp_time_frame = ttk.Frame(lf_rtsp)
         rtsp_time_frame.pack(fill=tk.X, pady=(8,0))
         
@@ -557,25 +610,21 @@ class App(TkinterDnD.Tk):
         ttk.Button(btn_frame, text="選択項目を削除", command=self.remove_selected_analysis).pack(side=tk.LEFT, padx=2)
         ttk.Button(btn_frame, text="すべて削除", command=self.remove_all_analysis).pack(side=tk.LEFT, padx=2)
 
-        # start analysis button
         action_frame = ttk.Frame(frame)
         action_frame.pack(fill=tk.X, pady=8)
         
-        # Row 1
         row1 = ttk.Frame(action_frame)
         row1.pack(fill=tk.X, pady=2)
-        ttk.Button(row1, text="解析開始", command=self.start_analysis).pack(side=tk.LEFT, padx=(0,5))
-        ttk.Button(row1, text="座標点を追加", command=self.add_custom_point).pack(side=tk.LEFT, padx=(0,5))
-        ttk.Button(row1, text="座標点を管理", command=self.manage_coordinates).pack(side=tk.LEFT, padx=(0,5))
+        ttk.Button(row1, text="解析開始", command=self.start_analysis, style="Gray.TButton").pack(side=tk.LEFT, padx=(0,5))
+        ttk.Button(row1, text="座標点を追加", command=self.add_custom_point, style="Gray.TButton").pack(side=tk.LEFT, padx=(0,5))
+        ttk.Button(row1, text="座標点を管理", command=self.manage_coordinates, style="Gray.TButton").pack(side=tk.LEFT, padx=(0,5))
 
-        # Row 2
         row2 = ttk.Frame(action_frame)
         row2.pack(fill=tk.X, pady=2)
-        ttk.Button(row2, text="長時間輝線マップを作成", command=self.create_long_exposure_map_callback).pack(side=tk.LEFT, padx=(0,5))
-        ttk.Button(row2, text="ゆがみ補正", command=self.apply_distortion_correction_callback).pack(side=tk.LEFT, padx=(0,5))
-        ttk.Button(row2, text="角度分布分析", command=self.analyze_angles_callback).pack(side=tk.LEFT, padx=(0,5))
+        ttk.Button(row2, text="長時間輝線マップを作成", command=self.create_long_exposure_map_callback, style="Gray.TButton").pack(side=tk.LEFT, padx=(0,5))
+        ttk.Button(row2, text="ゆがみ補正", command=self.apply_distortion_correction_callback, style="Gray.TButton").pack(side=tk.LEFT, padx=(0,5))
+        ttk.Button(row2, text="角度分布分析", command=self.analyze_angles_callback, style="Gray.TButton").pack(side=tk.LEFT, padx=(0,5))
 
-        # Row 3
         row3 = ttk.Frame(action_frame)
         row3.pack(fill=tk.X, pady=2)
         ttk.Button(row3, text="比較明合成画像を作成", command=self.create_lighten_blend_image_callback).pack(side=tk.LEFT, padx=(0,5))
@@ -583,17 +632,14 @@ class App(TkinterDnD.Tk):
         ttk.Button(row3, text="タイムラプス作成", command=self.create_timelapse_callback).pack(side=tk.LEFT, padx=(0,5))
         
 
-        # ===== 動画連結セクション =====
         lf_concat = ttk.LabelFrame(frame, text="動画連結")
         lf_concat.pack(fill=tk.BOTH, expand=True, pady=5)
 
-        # ドラッグ＆ドロップエリア
         concat_drop_label = ttk.Label(lf_concat, text="ここに動画ファイルをドラッグ＆ドロップ", relief=tk.SOLID, padding=15, anchor=tk.CENTER, borderwidth=1)
         concat_drop_label.pack(fill=tk.X, pady=5)
         concat_drop_label.drop_target_register(DND_FILES)
         concat_drop_label.dnd_bind('<<Drop>>', self.drop_video_concat)
 
-        # 動画リスト
         concat_list_container = ttk.Frame(lf_concat)
         concat_list_container.pack(fill=tk.BOTH, expand=True, pady=5)
         
@@ -623,14 +669,12 @@ class App(TkinterDnD.Tk):
         self.video_concat_item_frames = []
         self.video_concat_selected_indices = set()
 
-        # ボタン行
         concat_btn_frame = ttk.Frame(lf_concat)
         concat_btn_frame.pack(fill=tk.X, pady=(5,0))
         ttk.Button(concat_btn_frame, text="ファイル追加", command=self.add_video_concat_files).pack(side=tk.LEFT, padx=2)
         ttk.Button(concat_btn_frame, text="選択削除", command=self.remove_selected_video_concat).pack(side=tk.LEFT, padx=2)
         ttk.Button(concat_btn_frame, text="すべて削除", command=self.remove_all_video_concat).pack(side=tk.LEFT, padx=2)
 
-        # 設定行
         concat_settings_frame = ttk.Frame(lf_concat)
         concat_settings_frame.pack(fill=tk.X, pady=5)
         
@@ -648,12 +692,10 @@ class App(TkinterDnD.Tk):
                                  values=["Auto", "15", "24", "25", "30", "60"], width=6)
         fps_combo.pack(side=tk.LEFT, padx=(0,5))
 
-        # 2行目の設定 (Safe Mode)
         concat_settings_row2 = ttk.Frame(lf_concat)
         concat_settings_row2.pack(fill=tk.X, pady=(0, 5))
         ttk.Checkbutton(concat_settings_row2, text="セーフモード（タイムスタンプ補正）", variable=self.video_concat_safe_mode_var).pack(side=tk.LEFT, padx=5)
 
-        # 連結開始ボタン
         ttk.Button(lf_concat, text="連結開始", command=self.start_video_concat).pack(pady=5)
 
         return frame
@@ -679,19 +721,16 @@ class App(TkinterDnD.Tk):
         item_frame = tk.Frame(self.analysis_list_frame, bg="#3A4D6B", cursor="hand2")
         item_frame.pack(fill=tk.X, padx=2, pady=1)
         
-        # TXT badge with orange color
         badge_canvas = tk.Canvas(item_frame, width=50, height=22, bg="#3A4D6B", highlightthickness=0)
         badge_canvas.pack(side=tk.LEFT, padx=(4, 6), pady=2)
         
         self._draw_rounded_rect(badge_canvas, 2, 2, 48, 20, 8, fill="#E67E22", outline="")
         badge_canvas.create_text(25, 11, text="TXT", fill="white", font=("Segoe UI", 8, "bold"))
         
-        # Path label
         path_label = tk.Label(item_frame, text=filepath, bg="#3A4D6B", fg="#EAEAEA", 
-                              anchor="w", font=("Segoe UI", 9))
+                               anchor="w", font=("Segoe UI", 9))
         path_label.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
         
-        # Selection handling
         def on_click(event, idx=index):
             self._toggle_analysis_selection(idx)
         
@@ -699,7 +738,6 @@ class App(TkinterDnD.Tk):
         badge_canvas.bind("<Button-1>", on_click)
         path_label.bind("<Button-1>", on_click)
         
-        # Mouse wheel
         def on_mousewheel(event):
             self.analysis_list_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
         item_frame.bind("<MouseWheel>", on_mousewheel)
@@ -741,7 +779,7 @@ class App(TkinterDnD.Tk):
                 item = self.analysis_item_frames.pop(idx)
                 item['frame'].destroy()
         self.analysis_selected_indices.clear()
-        # Re-index
+        
         for i, item in enumerate(self.analysis_item_frames):
             def make_click_handler(idx):
                 return lambda e: self._toggle_analysis_selection(idx)
@@ -807,20 +845,17 @@ class App(TkinterDnD.Tk):
         item_frame = tk.Frame(self.video_concat_list_frame, bg="#3A4D6B", cursor="hand2")
         item_frame.pack(fill=tk.X, padx=2, pady=1)
         
-        # 番号バッジ
         badge_canvas = tk.Canvas(item_frame, width=30, height=22, bg="#3A4D6B", highlightthickness=0)
         badge_canvas.pack(side=tk.LEFT, padx=(4, 6), pady=2)
         
         self._draw_rounded_rect(badge_canvas, 2, 2, 28, 20, 8, fill="#3498DB", outline="")
         badge_canvas.create_text(15, 11, text=str(index + 1), fill="white", font=("Segoe UI", 8, "bold"))
         
-        # ファイル名ラベル
         filename = os.path.basename(filepath)
         path_label = tk.Label(item_frame, text=filename, bg="#3A4D6B", fg="#EAEAEA", 
-                              anchor="w", font=("Segoe UI", 9))
+                               anchor="w", font=("Segoe UI", 9))
         path_label.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
         
-        # 選択処理
         def on_click(event, idx=index):
             self._toggle_video_concat_selection(idx)
         
@@ -828,7 +863,6 @@ class App(TkinterDnD.Tk):
         badge_canvas.bind("<Button-1>", on_click)
         path_label.bind("<Button-1>", on_click)
         
-        # マウスホイール
         def on_mousewheel(event):
             self.video_concat_list_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
         item_frame.bind("<MouseWheel>", on_mousewheel)
@@ -907,12 +941,10 @@ class App(TkinterDnD.Tk):
     def _reindex_video_concat_list(self):
         """動画連結リストの番号を振り直し"""
         for i, item in enumerate(self.video_concat_item_frames):
-            # バッジの番号を更新
             item['badge'].delete("all")
             self._draw_rounded_rect(item['badge'], 2, 2, 28, 20, 8, fill="#3498DB", outline="")
             item['badge'].create_text(15, 11, text=str(i + 1), fill="white", font=("Segoe UI", 8, "bold"))
             
-            # クリックハンドラを再バインド
             def make_click_handler(idx):
                 return lambda e: self._toggle_video_concat_selection(idx)
             item['frame'].bind("<Button-1>", make_click_handler(i))
@@ -935,14 +967,12 @@ class App(TkinterDnD.Tk):
         if not output_path:
             return
         
-        # バックグラウンドで処理を開始
         bitrate = self.video_concat_bitrate_var.get()
         codec = self.video_concat_codec_var.get()
         fps_str = self.video_concat_fps_var.get()
         safe_mode = self.video_concat_safe_mode_var.get()
         files = list(self.video_concat_files)
         
-        # FPSの数値を解析
         fps_val = None
         if fps_str != "Auto":
             try:
@@ -950,7 +980,6 @@ class App(TkinterDnD.Tk):
             except ValueError:
                 pass
         else:
-            # Autoの場合は最初のファイルから取得を試みる
             try:
                 fps_val = video_processor.get_video_fps(files[0])
             except:
@@ -998,6 +1027,9 @@ class App(TkinterDnD.Tk):
             self.after(0, lambda: self.append_log(error_msg))
 
     def start_analysis(self):
+        if not self.check_admin_password():
+            return
+            
         if not self.analysis_files:
             messagebox.showwarning("情報", "解析するファイルを追加してください。")
             return
@@ -1047,6 +1079,9 @@ class App(TkinterDnD.Tk):
 
     def add_custom_point(self):
         """Show dialog to add a custom coordinate point."""
+        if not self.check_admin_password():
+            return
+
         def on_add(name: str, ra: float, dec: float):
             self.coord_manager.add_point(name, ra, dec)
         
@@ -1055,6 +1090,9 @@ class App(TkinterDnD.Tk):
     
     def manage_coordinates(self):
         """Show dialog to manage coordinate points."""
+        if not self.check_admin_password():
+            return
+
         dialog = coord_mgr.CoordinateListDialog(self, self.coord_manager)
         dialog.show()
     
@@ -1196,7 +1234,8 @@ atomcam2で利用する場合は、GitHubで公開されている
 
     def create_settings_tab(self, parent):
         frame = ttk.Frame(parent)
-        frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        # Notebook manages geometry, so NO pack() here.
+        # frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
         # スクロール可能なキャンバスとスクロールバーを作成
         canvas = tk.Canvas(frame, highlightthickness=0, bg="#2E3F5B")
@@ -1221,9 +1260,20 @@ atomcam2で利用する場合は、GitHubで公開されている
         canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         # マウスホイールでスクロール
+        # マウスホイールでスクロール (カーソルが上にある時のみ有効化)
         def on_mousewheel(event):
             canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-        canvas.bind_all("<MouseWheel>", on_mousewheel)
+
+        def _bind_mousewheel(event):
+            canvas.bind_all("<MouseWheel>", on_mousewheel)
+        
+        def _unbind_mousewheel(event):
+            canvas.unbind_all("<MouseWheel>")
+
+        # Canvasに入った時だけスクロールを割り当て、出たら解除
+        # これにより他のタブやウィジェットへの干渉を防ぐ
+        canvas.bind("<Enter>", _bind_mousewheel)
+        canvas.bind("<Leave>", _unbind_mousewheel)
 
         # 以下の内容はscrollable_frameに配置
         lf_params = ttk.LabelFrame(scrollable_frame, text="処理パラメータ")
@@ -1370,7 +1420,7 @@ atomcam2で利用する場合は、GitHubで公開されている
         # Plate solve mode selection (local vs API)
         ps_mode_frame = ttk.Frame(lf_astro); ps_mode_frame.pack(fill=tk.X, pady=2)
         ttk.Label(ps_mode_frame, text="ソルバー:").pack(side=tk.LEFT, padx=(0,5))
-        ttk.Radiobutton(ps_mode_frame, text="ローカル (WSL)", variable=self.plate_solve_mode_var, value="local").pack(side=tk.LEFT, padx=5)
+        ttk.Radiobutton(ps_mode_frame, text="ローカル (coming soon)", variable=self.plate_solve_mode_var, value="local", state="disabled").pack(side=tk.LEFT, padx=5)
         ttk.Radiobutton(ps_mode_frame, text="API (Astrometry.net)", variable=self.plate_solve_mode_var, value="api").pack(side=tk.LEFT, padx=5)
 
         # Astrometry.net API key input
@@ -1498,6 +1548,96 @@ atomcam2で利用する場合は、GitHubで公開されている
         ttk.Checkbutton(lf_astro, text="検出マスクを適用する", variable=self.apply_mask_var).pack(anchor=tk.W)
         
         return frame
+
+    def create_advanced_settings_tab(self, parent):
+        frame = ttk.Frame(parent)
+        frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        canvas = tk.Canvas(frame, highlightthickness=0, bg="#2E3F5B")
+        scrollbar = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=canvas.yview)
+        scrollable_frame = ttk.Frame(canvas)
+
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+
+        canvas_window = canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+
+        def on_canvas_configure(event):
+            canvas.itemconfig(canvas_window, width=event.width)
+        canvas.bind("<Configure>", on_canvas_configure)
+
+        canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        def on_mousewheel(event):
+            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+        canvas.bind_all("<MouseWheel>", on_mousewheel)
+
+        # 検出パラメータ
+        lf_detect = ttk.LabelFrame(scrollable_frame, text="検出パラメータ")
+        lf_detect.pack(fill=tk.X, pady=5)
+        
+        def add_param(parent, text, var, from_, to, increment=1):
+            f = ttk.Frame(parent)
+            f.pack(fill=tk.X, pady=2)
+            ttk.Label(f, text=text, width=35).pack(side=tk.LEFT)
+            ttk.Spinbox(f, from_=from_, to=to, increment=increment, width=8, textvariable=var).pack(side=tk.LEFT)
+
+        add_param(lf_detect, "最小線長 (MIN_LINE_LENGTH):", self.cfg_min_line_length_var, 1, 100)
+        add_param(lf_detect, "枠外無視サイズ (BORDER_SIZE):", self.cfg_border_size_var, 0, 100)
+        add_param(lf_detect, "重複検出閾値 (DUPLICATE_THRESH):", self.cfg_duplicate_thresh_var, 10, 500, 10)
+        add_param(lf_detect, "流星判定確率 (METEOR_PROB_THRESH):", self.cfg_meteor_prob_var, 0.1, 1.0, 0.05)
+
+        # 詳細検出パラメータ
+        lf_finer = ttk.LabelFrame(scrollable_frame, text="詳細検出パラメータ")
+        lf_finer.pack(fill=tk.X, pady=5)
+        add_param(lf_finer, "詳細検出ウィンドウ秒数:", self.cfg_finer_window_sec_var, 1.0, 10.0, 0.5)
+        add_param(lf_finer, "比較明合成ステップ数:", self.cfg_finer_comp_step_var, 1, 20)
+        add_param(lf_finer, "最小線長 (詳細検出):", self.cfg_finer_min_length_var, 5, 50)
+        add_param(lf_finer, "パディング秒数:", self.cfg_finer_padding_sec_var, 0.1, 2.0, 0.1)
+        add_param(lf_finer, "カットアウトサイズ (詳細検出):", self.cfg_finer_cutout_size_var, 128, 1024, 64)
+
+        # 飛行機判定パラメータ
+        lf_airplane = ttk.LabelFrame(scrollable_frame, text="飛行機判定パラメータ")
+        lf_airplane.pack(fill=tk.X, pady=5)
+        add_param(lf_airplane, "継続時間閾値 (秒):", self.cfg_airplane_dur_thresh_var, 1, 60)
+        add_param(lf_airplane, "判定フレーム数上限 (10枚中):", self.cfg_airplane_frame_thresh_var, 1, 10)
+        add_param(lf_airplane, "トラッキング最大距離:", self.cfg_tracking_dist_thresh_var, 50, 500, 10)
+
+        # 動画クリップパラメータ
+        lf_clip = ttk.LabelFrame(scrollable_frame, text="動画クリップパラメータ")
+        lf_clip.pack(fill=tk.X, pady=5)
+        add_param(lf_clip, "最大クリップ秒数:", self.cfg_max_clip_dur_var, 1, 30)
+        add_param(lf_clip, "クリップ秒数目安:", self.cfg_clip_dur_sec_var, 1.0, 30.0, 0.5)
+        add_param(lf_clip, "切り出しサイズ (CUTOUT_SIZE):", self.cfg_cutout_size_var, 128, 1023, 64)
+
+        btn_frame = ttk.Frame(scrollable_frame)
+        btn_frame.pack(fill=tk.X, pady=10)
+        ttk.Button(btn_frame, text="デフォルトに戻す", command=self.reset_advanced_settings).pack(side=tk.LEFT, padx=5)
+
+        return frame
+
+    def reset_advanced_settings(self):
+        if messagebox.askyesno("確認", "詳細設定を初期値に戻しますか？"):
+            self.cfg_min_line_length_var.set("25")
+            self.cfg_border_size_var.set("30")
+            self.cfg_duplicate_thresh_var.set("100")
+            self.cfg_meteor_prob_var.set("0.5")
+            self.cfg_finer_window_sec_var.set("4.0")
+            self.cfg_finer_comp_step_var.set("3")
+            self.cfg_finer_min_length_var.set("15")
+            self.cfg_finer_padding_sec_var.set("0.5")
+            self.cfg_finer_cutout_size_var.set("384")
+            self.cfg_airplane_dur_thresh_var.set("7")
+            self.cfg_airplane_frame_thresh_var.set("7")
+            self.cfg_tracking_dist_thresh_var.set("200")
+            self.cfg_max_clip_dur_var.set("2")
+            self.cfg_clip_dur_sec_var.set("3.0")
+            self.cfg_cutout_size_var.set("256")
+            self.append_log("詳細設定をデフォルト値にリセットしました。")
 
     def create_info_panel(self, parent):
         # Create a combined Log / Processing Status panel from the status_panel module.
@@ -1642,11 +1782,9 @@ atomcam2で利用する場合は、GitHubで公開されている
         item_frame = tk.Frame(self.folder_list_frame, bg="#3A4D6B", cursor="hand2")
         item_frame.pack(fill=tk.X, padx=2, pady=1)
         
-        # FPS badge with rounded appearance using Canvas
         badge_canvas = tk.Canvas(item_frame, width=70, height=22, bg="#3A4D6B", highlightthickness=0)
         badge_canvas.pack(side=tk.LEFT, padx=(4, 6), pady=2)
         
-        # Draw rounded rectangle for badge
         self._draw_rounded_rect(badge_canvas, 2, 2, 68, 20, 8, fill="#4A90D9", outline="")
         badge_canvas.create_text(35, 11, text=f"{fps_str} fps", fill="white", font=("Segoe UI", 8, "bold"))
         
@@ -1655,7 +1793,6 @@ atomcam2で利用する場合は、GitHubで公開されている
                               anchor="w", font=("Segoe UI", 9))
         path_label.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
         
-        # Selection handling
         def on_click(event, idx=index):
             self._toggle_folder_selection(idx)
         
@@ -1663,7 +1800,6 @@ atomcam2で利用する場合は、GitHubで公開されている
         badge_canvas.bind("<Button-1>", on_click)
         path_label.bind("<Button-1>", on_click)
         
-        # Mouse wheel propagation
         def on_mousewheel(event):
             self.folder_list_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
         item_frame.bind("<MouseWheel>", on_mousewheel)
@@ -1726,7 +1862,6 @@ atomcam2で利用する場合は、GitHubで公開されている
                 item = self.folder_item_frames.pop(index)
                 item['frame'].destroy()
         self.folder_selected_indices.clear()
-        # Re-index remaining items
         for i, item in enumerate(self.folder_item_frames):
             def make_click_handler(idx):
                 return lambda e: self._toggle_folder_selection(idx)
@@ -1762,19 +1897,16 @@ atomcam2で利用する場合は、GitHubで公開されている
         item_frame = tk.Frame(self.rtsp_list_frame, bg="#3A4D6B", cursor="hand2")
         item_frame.pack(fill=tk.X, padx=2, pady=1)
         
-        # RTSP badge with green color
         badge_canvas = tk.Canvas(item_frame, width=55, height=22, bg="#3A4D6B", highlightthickness=0)
         badge_canvas.pack(side=tk.LEFT, padx=(4, 6), pady=2)
         
         self._draw_rounded_rect(badge_canvas, 2, 2, 53, 20, 8, fill="#2ECC71", outline="")
         badge_canvas.create_text(27, 11, text="RTSP", fill="white", font=("Segoe UI", 8, "bold"))
         
-        # URL label
         url_label = tk.Label(item_frame, text=url, bg="#3A4D6B", fg="#EAEAEA", 
                              anchor="w", font=("Segoe UI", 9))
         url_label.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
         
-        # Selection handling
         def on_click(event, idx=index):
             self._toggle_rtsp_selection(idx)
         
@@ -1782,7 +1914,6 @@ atomcam2で利用する場合は、GitHubで公開されている
         badge_canvas.bind("<Button-1>", on_click)
         url_label.bind("<Button-1>", on_click)
         
-        # Mouse wheel
         def on_mousewheel(event):
             self.rtsp_list_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
         item_frame.bind("<MouseWheel>", on_mousewheel)
@@ -1824,7 +1955,6 @@ atomcam2で利用する場合は、GitHubで公開されている
                 item = self.rtsp_item_frames.pop(index)
                 item['frame'].destroy()
         self.rtsp_selected_indices.clear()
-        # Re-index
         for i, item in enumerate(self.rtsp_item_frames):
             def make_click_handler(idx):
                 return lambda e: self._toggle_rtsp_selection(idx)
@@ -1909,16 +2039,13 @@ atomcam2で利用する場合は、GitHubで公開されている
             print(f"fetch_current_location: unexpected error: {e}")
             lat, lon = 35.0, 135.0
 
-        # update GUI vars on main thread
         try:
             self.after(0, lambda: self.current_lat_var.set(f"{lat:.6f}"))
             self.after(0, lambda: self.current_lon_var.set(f"{lon:.6f}"))
         except Exception:
             pass
 
-        # print result as requested
         print(f"Current location: lat={lat}, lon={lon}")
-        # also log into GUI log for convenience
         try:
             self.after(0, lambda: self.append_log(f"取得した位置情報: 緯度={lat}, 経度={lon}"))
         except Exception:
@@ -1951,7 +2078,6 @@ atomcam2で利用する場合は、GitHubで公開されている
             end_dt = period.get('end')
             if start_dt:
                 sh, sm = start_dt.hour, start_dt.minute
-                # update GUI spinboxes on main thread
                 self.after(0, lambda: self.start_hour_var.set(f"{sh:02d}"))
                 self.after(0, lambda: self.start_min_var.set(f"{sm:02d}"))
                 print(f"Auto-set start time to {sh:02d}:{sm:02d} (midpoint sunset/astro_dusk)")
@@ -2049,9 +2175,9 @@ atomcam2で利用する場合は、GitHubで公開されている
     def start_rtsp_plate_solve(self):
         """RTSPストリームからプレートソルブを実行する"""
         # 選択されているRTSP URLを取得、選択がなければ最初のURLを使用
-        selected = self.listbox_rtsp.curselection()
-        if selected:
-            rtsp_url = self.rtsp_urls[selected[0]]
+        if self.rtsp_selected_indices:
+            selected_index = min(self.rtsp_selected_indices)
+            rtsp_url = self.rtsp_urls[selected_index]
         elif self.rtsp_urls:
             rtsp_url = self.rtsp_urls[0]
         else:
@@ -2065,7 +2191,6 @@ atomcam2で利用する場合は、GitHubで公開されている
         self.progress_queue.put((f"RTSPプレートソルブを実行中: {rtsp_url}", None))
         try:
             cap = utils.create_rtsp_capture(rtsp_url)
-            # RTSPストリームのタイムアウト設定
             cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 10000)
             cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 10000)
             
@@ -2099,7 +2224,6 @@ atomcam2で利用する場合は、GitHubで公開されている
             self.plate_solve_status_var.set("プレートソルブ: 合成画像作成中...")
             self.progress_queue.put((f"RTSPから{len(frames)}フレームを取得しました。合成画像を作成中...", None))
             
-            # 比較明合成画像を作成
             composite_image = np.max(np.array(frames), axis=0).astype(np.uint8)
             temp_composite_path = os.path.join(config.TEMP_CLIP_DIR, f"rtsp_composite_{time.time_ns()}.jpg")
             os.makedirs(config.TEMP_CLIP_DIR, exist_ok=True)
@@ -2204,6 +2328,8 @@ atomcam2で利用する場合は、GitHubで公開されている
             self.destroy()
 
     def start_processing(self):
+        # 詳細設定をconfigに適用
+        self.apply_advanced_settings_to_config()
         if (self.worker_thread and self.worker_thread.is_alive()) or \
            (self.rtsp_thread and self.rtsp_thread.is_alive()) or \
            (self.periodic_scan_thread and self.periodic_scan_thread.is_alive()):
@@ -2227,7 +2353,6 @@ atomcam2で利用する場合は、GitHubで公開されている
                 'summary_config': [item.copy() for item in self.summary_video_config]
             }
             
-            # RTSP検出プリセットを適用
             if self.rtsp_preset_var.get() == "clear":
                 preset = config.RTSP_PRESET_CLEAR_SKY
             else:
@@ -2237,7 +2362,6 @@ atomcam2で利用する場合は、GitHubで公開されている
             config.RTSP_CANNY_THRESH1 = preset['canny_thresh1']
             config.RTSP_CANNY_THRESH2 = preset['canny_thresh2']
             
-            # FPS設定を反映
             try:
                 config.RTSP_FPS = int(self.rtsp_fps_var.get())
             except ValueError:
@@ -2368,7 +2492,6 @@ atomcam2で利用する場合は、GitHubで公開されている
             pass
         self.status_label.config(text="キャンセル中...")
 
-        # stop ETA/timers
         self.start_time_gui = None
 
         # allow Start to be pressed again immediately after cancel requested
@@ -2605,7 +2728,6 @@ atomcam2で利用する場合は、GitHubで公開されている
                 self.apply_mask_var.set(True)
                 self.preview_mask(self.mask_image, self.mask_preview_label, "検出マスク")
             win.destroy()
-
         btn_frame = ttk.Frame(win); btn_frame.pack(pady=10)
         ttk.Button(btn_frame, text="OK", command=on_ok).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="キャンセル", command=win.destroy).pack(side=tk.LEFT, padx=5)
@@ -2613,16 +2735,15 @@ atomcam2で利用する場合は、GitHubで公開されている
     def create_rtsp_mask(self):
         """RTSPストリームから検出マスクを作成する"""
         # 選択されているRTSP URLを取得、選択がなければ最初のURLを使用
-        selected = self.listbox_rtsp.curselection()
-        if selected:
-            rtsp_url = self.rtsp_urls[selected[0]]
+        if self.rtsp_selected_indices:
+            selected_index = min(self.rtsp_selected_indices)
+            rtsp_url = self.rtsp_urls[selected_index]
         elif self.rtsp_urls:
             rtsp_url = self.rtsp_urls[0]
         else:
             messagebox.showwarning("警告", "RTSPストリームを追加してください。")
             return
         
-        # 接続中ダイアログを表示
         progress_win = Toplevel(self)
         progress_win.title("接続中")
         progress_win.geometry("300x100")
@@ -2640,13 +2761,11 @@ atomcam2で利用する場合は、GitHubで公開されている
         cancel_btn = ttk.Button(progress_win, text="キャンセル", command=on_cancel)
         cancel_btn.pack(pady=5)
         
-        # Center the dialog
         progress_win.update_idletasks()
         x = self.winfo_x() + (self.winfo_width() - progress_win.winfo_width()) // 2
         y = self.winfo_y() + (self.winfo_height() - progress_win.winfo_height()) // 2
         progress_win.geometry(f"+{x}+{y}")
         
-        # バックグラウンドでフレームを取得
         result_holder = {'frame': None, 'error': None}
         
         def fetch_frame():
@@ -2862,6 +2981,24 @@ atomcam2で利用する場合は、GitHubで公開されている
             'rtsp_end_hour': self.rtsp_end_hour_var.get(), 'rtsp_end_minute': self.rtsp_end_min_var.get(),
             # Astrometry.net API key
             'astrometry_api_key': self.astrometry_api_key_var.get(),
+            # Advanced settings
+            'advanced_settings': {
+                'min_line_length': self.cfg_min_line_length_var.get(),
+                'border_size': self.cfg_border_size_var.get(),
+                'duplicate_thresh': self.cfg_duplicate_thresh_var.get(),
+                'meteor_prob': self.cfg_meteor_prob_var.get(),
+                'finer_window_sec': self.cfg_finer_window_sec_var.get(),
+                'finer_comp_step': self.cfg_finer_comp_step_var.get(),
+                'finer_min_length': self.cfg_finer_min_length_var.get(),
+                'finer_padding_sec': self.cfg_finer_padding_sec_var.get(),
+                'finer_cutout_size': self.cfg_finer_cutout_size_var.get(),
+                'airplane_dur_thresh': self.cfg_airplane_dur_thresh_var.get(),
+                'airplane_frame_thresh': self.cfg_airplane_frame_thresh_var.get(),
+                'tracking_dist_thresh': self.cfg_tracking_dist_thresh_var.get(),
+                'max_clip_dur': self.cfg_max_clip_dur_var.get(),
+                'clip_dur_sec': self.cfg_clip_dur_sec_var.get(),
+                'cutout_size': self.cfg_cutout_size_var.get(),
+            }
         }
         if self.global_wcs_info:
             serializable_wcs = self.global_wcs_info.copy()
@@ -2986,13 +3123,59 @@ atomcam2で利用する場合は、GitHubで公開されている
             self.preview_mask(self.mask_image, self.mask_preview_label, "検出マスク")
             self.preview_mask(self.plate_solve_mask_image, self.ps_mask_preview_label, "PSマスク")
 
+            # Advanced settings restore
+            adv = settings.get('advanced_settings', {})
+            if adv:
+                self.cfg_min_line_length_var.set(adv.get('min_line_length', str(config.MIN_LINE_LENGTH)))
+                self.cfg_border_size_var.set(adv.get('border_size', str(config.BORDER_SIZE)))
+                self.cfg_duplicate_thresh_var.set(adv.get('duplicate_thresh', str(config.DUPLICATE_DETECTION_THRESHOLD)))
+                self.cfg_meteor_prob_var.set(adv.get('meteor_prob', str(config.METEOR_PROBABILITY_THRESHOLD)))
+                self.cfg_finer_window_sec_var.set(adv.get('finer_window_sec', str(config.FINER_DETECT_WINDOW_SECONDS)))
+                self.cfg_finer_comp_step_var.set(adv.get('finer_comp_step', str(config.FINER_COMPOSITE_STEP)))
+                self.cfg_finer_min_length_var.set(adv.get('finer_min_length', str(config.FINER_DETECT_MIN_LENGTH)))
+                self.cfg_finer_padding_sec_var.set(adv.get('finer_padding_sec', str(config.FINER_DETECT_PADDING_SECONDS)))
+                self.cfg_finer_cutout_size_var.set(adv.get('finer_cutout_size', str(config.FINER_CUTOUT_SIZE)))
+                self.cfg_airplane_dur_thresh_var.set(adv.get('airplane_dur_thresh', str(config.AIRPLANE_DURATION_THRESHOLD)))
+                self.cfg_airplane_frame_thresh_var.set(adv.get('airplane_frame_thresh', str(config.AIRPLANE_FRAME_THRESHOLD)))
+                self.cfg_tracking_dist_thresh_var.set(adv.get('tracking_dist_thresh', str(config.TRACKING_DISTANCE_THRESHOLD)))
+                self.cfg_max_clip_dur_var.set(adv.get('max_clip_dur', str(config.MAX_CLIP_DURATION)))
+                self.cfg_clip_dur_sec_var.set(adv.get('clip_dur_sec', str(config.CLIP_DURATION_SECONDS)))
+                self.cfg_cutout_size_var.set(adv.get('cutout_size', str(config.CUTOUT_SIZE)))
+                
+                # Apply to config module
+                self.apply_advanced_settings_to_config()
+
             self.append_log("前回の設定を復元しました。")
             self.update_start_button_state()
         except Exception as e:
             messagebox.showerror("エラー", f"設定の読み込み中にエラーが発生しました: {e}")
 
+    def apply_advanced_settings_to_config(self):
+        """GUIの変数をconfigモジュールに適用する"""
+        try:
+            config.MIN_LINE_LENGTH = int(float(self.cfg_min_line_length_var.get()))
+            config.BORDER_SIZE = int(float(self.cfg_border_size_var.get()))
+            config.DUPLICATE_DETECTION_THRESHOLD = int(float(self.cfg_duplicate_thresh_var.get()))
+            config.METEOR_PROBABILITY_THRESHOLD = float(self.cfg_meteor_prob_var.get())
+            config.FINER_DETECT_WINDOW_SECONDS = float(self.cfg_finer_window_sec_var.get())
+            config.FINER_COMPOSITE_STEP = int(float(self.cfg_finer_comp_step_var.get()))
+            config.FINER_DETECT_MIN_LENGTH = int(float(self.cfg_finer_min_length_var.get()))
+            config.FINER_DETECT_PADDING_SECONDS = float(self.cfg_finer_padding_sec_var.get())
+            config.FINER_CUTOUT_SIZE = int(float(self.cfg_finer_cutout_size_var.get()))
+            config.AIRPLANE_DURATION_THRESHOLD = int(float(self.cfg_airplane_dur_thresh_var.get()))
+            config.AIRPLANE_FRAME_THRESHOLD = int(float(self.cfg_airplane_frame_thresh_var.get()))
+            config.TRACKING_DISTANCE_THRESHOLD = int(float(self.cfg_tracking_dist_thresh_var.get()))
+            config.MAX_CLIP_DURATION = float(self.cfg_max_clip_dur_var.get())
+            config.CLIP_DURATION_SECONDS = float(self.cfg_clip_dur_sec_var.get())
+            config.CUTOUT_SIZE = int(float(self.cfg_cutout_size_var.get()))
+        except Exception as e:
+            self.append_log(f"詳細設定の適用中にエラーが発生しました: {e}")
+
     def create_long_exposure_map_callback(self):
         """Callback for the 'Create Long Exposure Map' button."""
+        if not self.check_admin_password():
+            return
+
         if not self.folder_paths:
             messagebox.showwarning("情報", "ソース選択タブでフォルダまたは動画ファイルを追加してください。")
             return
@@ -3024,6 +3207,9 @@ atomcam2で利用する場合は、GitHubで公開されている
 
     def apply_distortion_correction_callback(self):
         """Callback for the 'Distortion Correction' button."""
+        if not self.check_admin_password():
+            return
+
         if not self.folder_paths:
             messagebox.showwarning("情報", "ソース選択タブでフォルダまたは動画ファイルを追加してください。")
             return
@@ -3065,6 +3251,9 @@ atomcam2で利用する場合は、GitHubで公開されている
 
     def analyze_angles_callback(self):
         """Callback for the 'Angle Distribution Analysis' button."""
+        if not self.check_admin_password():
+            return
+
         if not self.analysis_files:
             messagebox.showwarning("情報", "解析するファイルを追加してください。")
             return
@@ -3115,12 +3304,10 @@ atomcam2で利用する場合は、GitHubで公開されている
 
     def create_lighten_blend_video_callback(self):
         """Callback for the 'Create Lighten Blend Video' button."""
-        # デフォルトで流星の保存先フォルダを開く
         initial_dir = self.meteor_save_path_var.get()
         if not initial_dir or not os.path.exists(initial_dir):
             initial_dir = os.path.expanduser("~")
         
-        # ファイル選択ダイアログで複数の動画ファイルを選択
         video_files = filedialog.askopenfilenames(
             title="比較明合成する動画ファイルを選択（複数可）",
             initialdir=initial_dir,
@@ -3137,10 +3324,8 @@ atomcam2で利用する場合は、GitHubで公開されている
             messagebox.showwarning("警告", "比較明合成を行うには2つ以上の動画ファイルを選択してください。")
             return
         
-        # デフォルトの保存パスを取得
         default_output = lighten_blend_video.get_default_output_path()
         
-        # ユーザーに保存先を確認
         output_path = filedialog.asksaveasfilename(
             title="比較明合成動画の保存先",
             initialdir=os.path.dirname(default_output),
@@ -3154,24 +3339,202 @@ atomcam2で利用する場合は、GitHubで公開されている
         
         self.append_log(f"比較明合成動画の作成を開始します... ({len(video_files)}個の動画)")
         
-        def run_task():
-            success = lighten_blend_video.create_lighten_blend_video(
-                list(video_files),
-                output_path,
-                progress_callback=self.append_log
-            )
-            if success:
-                messagebox.showinfo("完了", f"比較明合成動画の作成が完了しました。\n保存先: {output_path}")
-                self.append_log(f"比較明合成動画の作成が完了しました: {output_path}")
-            else:
-                messagebox.showerror("エラー", "比較明合成動画の作成に失敗しました。ログを確認してください。")
-                self.append_log("比較明合成動画の作成に失敗しました。")
+        dialog = ProcessingOptionDialog(self)
+        if dialog.result is None:  # キャンセル
+            return
+            
+        mode = dialog.result  # 0:通常, 1:明るいエリアマスク, 2:流星のみ
+        # 動画編集では明るいエリアマスク(mode 1)は今のところ用途が薄いので、
+        # 0(通常)以外はすべて流星検出モードとして扱う、あるいはmode=2のみ対応とする。
+        if mode == 0:
+            # 通常モード
+            def run_task():
+                success = lighten_blend_video.create_lighten_blend_video(
+                    list(video_files),
+                    output_path,
+                    progress_callback=self.append_log
+                )
+                if success:
+                    messagebox.showinfo("完了", f"比較明合成動画の作成が完了しました。\\n保存先: {output_path}")
+                    self.append_log(f"比較明合成動画の作成が完了しました: {output_path}")
+                else:
+                    messagebox.showerror("エラー", "比較明合成動画の作成に失敗しました。ログを確認してください。")
+                    self.append_log("比較明合成動画の作成に失敗しました。")
+            
+            threading.Thread(target=run_task, daemon=True).start()
+        else:
+            # AI流星検出モード
+            self._create_lighten_blend_video_with_meteor_detection(video_files, output_path)
+
+    def _create_lighten_blend_video_with_meteor_detection(self, video_files, output_path):
+        """AI流星検出を使用して比較明合成動画を作成（各動画ごとに検出）"""
+        import detection_preview
+        import bright_area_detector
+        import gc
         
-        threading.Thread(target=run_task, daemon=True).start()
+        self.append_log("各動画から比較明合成画像を作成し、流星を検出します...")
+        
+        # 動画ごとの一時ファイルパスを保存（画像はメモリに保持しない）
+        video_composites = {}  # {video_path: {'temp_path': str, 'filename': str, 'shape': (h, w)}}
+        
+        def run_prep_task():
+            # Step 1: 各動画から個別に比較明合成画像を作成
+            for i, vp in enumerate(video_files):
+                self.append_log(f"動画 {i+1}/{len(video_files)} から合成画像を作成中: {os.path.basename(vp)}")
+                
+                composite_image = lighten_blend_video.create_composite_from_videos(
+                    [vp],  # 1つの動画のみ
+                    progress_callback=None,  # 個別のログは抑制
+                    sample_interval=1  # 全フレームを使用（流星を見逃さないため）
+                )
+                
+                if composite_image is not None:
+                    # 一時ファイルとして保存
+                    temp_path = os.path.join(config.TEMP_CLIP_DIR, f"temp_composite_{i}_{os.path.basename(vp)}.png")
+                    h, w = composite_image.shape[:2]
+                    cv2.imwrite(temp_path, composite_image)
+                    
+                    video_composites[vp] = {
+                        'temp_path': temp_path,
+                        'filename': os.path.basename(temp_path),
+                        'shape': (h, w)  # サイズ情報のみ保持
+                    }
+                    
+                    # メモリ解放
+                    del composite_image
+                    gc.collect()
+                else:
+                    self.append_log(f"警告: 動画から合成画像を作成できませんでした: {os.path.basename(vp)}")
+            
+            if not video_composites:
+                messagebox.showerror("エラー", "有効な合成画像を作成できませんでした。")
+                return
+            
+            self.append_log(f"{len(video_composites)}個の合成画像を作成しました。")
+            
+            # メインスレッドでプレビューウィンドウを開く
+            def open_preview():
+                # 合成開始コールバック
+                def start_video_synthesis_with_results(results):
+                    # 動画ごとの個別マスクを作成（和集合ではなく、各動画に対応するマスクのみ適用）
+                    per_video_masks = {}
+                    base_shape = None
+                    has_detections = False
+                    
+                    for vp, data in video_composites.items():
+                        filename = data['filename']
+                        if filename in results:
+                            boxes = results[filename]['boxes']
+                            if boxes:
+                                has_detections = True
+                                h, w = data['shape']
+                                if base_shape is None:
+                                    base_shape = (h, w)
+                                
+                                mask = bright_area_detector.create_inclusion_mask_from_boxes(
+                                    (h, w), boxes, margin=40
+                                )
+                                
+                                # サイズが異なる場合はリサイズ
+                                if base_shape != (h, w):
+                                    mask = cv2.resize(mask, (base_shape[1], base_shape[0]))
+                                
+                                # 動画パスをキーとして個別マスクを保存
+                                per_video_masks[vp] = mask
+                    
+                    if not has_detections:
+                        if not messagebox.askyesno("確認", "流星が検出されていないか、選択されていません。\\nマスクなしで（通常の比較明合成として）作成しますか？"):
+                            # 一時ファイルのクリーンアップ
+                            for data in video_composites.values():
+                                try:
+                                    if os.path.exists(data['temp_path']):
+                                        os.remove(data['temp_path'])
+                                except:
+                                    pass
+                            return
+                    
+                    # 動画ごとのマスクを適用して動画作成
+                    def run_video_task():
+                        self.append_log("動画ごとのマスクを適用して動画を作成中...")
+                        success = lighten_blend_video.create_lighten_blend_video(
+                            list(video_files),
+                            output_path,
+                            progress_callback=self.append_log,
+                            per_video_masks=per_video_masks if per_video_masks else None
+                        )
+                        if success:
+                            messagebox.showinfo("完了", f"比較明合成動画の作成が完了しました。\\n保存先: {output_path}")
+                            self.append_log(f"比較明合成動画の作成が完了しました: {output_path}")
+                        else:
+                            messagebox.showerror("エラー", "比較明合成動画の作成に失敗しました。ログを確認してください。")
+                            self.append_log("比較明合成動画の作成に失敗しました。")
+                        
+                        # 一時ファイルのクリーンアップ
+                        for data in video_composites.values():
+                            try:
+                                if os.path.exists(data['temp_path']):
+                                    os.remove(data['temp_path'])
+                            except:
+                                pass
+                    
+                    threading.Thread(target=run_video_task, daemon=True).start()
+                
+                # プレビューウィンドウ作成
+                preview_window = detection_preview.DetectionPreviewWindow(
+                    self, start_video_synthesis_with_results
+                )
+                
+                # 各動画の合成画像に対して検出実行
+                def run_detection():
+                    total = len(video_composites)
+                    self.append_log(f"AIによる流星検出を開始します... ({total}個の画像)")
+                    
+                    if preview_window.winfo_exists():
+                        self.after(0, lambda: preview_window.start_analysis(total))
+                    
+                    for i, (vp, data) in enumerate(video_composites.items()):
+                        if not preview_window.winfo_exists():
+                            self.append_log("検出が中断されました。")
+                            return
+                        
+                        self.append_log(f"検出中 ({i+1}/{total}): {os.path.basename(vp)}")
+                        
+                        # 一時ファイルから画像を読み込み（メモリ節約）
+                        composite_img = cv2.imread(data['temp_path'])
+                        if composite_img is None:
+                            continue
+                        
+                        res = bright_area_detector.detect_meteors_with_boxes(
+                            composite_img,
+                            progress_callback=None  # 個別ログ抑制
+                        )
+                        boxes = res[1] if res else []
+                        
+                        # 検出後すぐにメモリ解放
+                        del composite_img
+                        gc.collect()
+                        
+                        def reanalyze_wrapper(image):
+                            return bright_area_detector.detect_meteors_with_boxes(image)
+                        
+                        if preview_window.winfo_exists():
+                            filename = data['filename']
+                            temp_path = data['temp_path']
+                            self.after(0, lambda fn=filename, fp=temp_path, b=boxes, cb=reanalyze_wrapper:
+                                preview_window.add_item(fn, fp, b, cb))
+                    
+                    if preview_window.winfo_exists():
+                        self.after(0, preview_window.finalize_analysis)
+                    self.append_log("全画像の検出が完了しました。結果を確認してください。")
+                
+                threading.Thread(target=run_detection, daemon=True).start()
+            
+            self.after(0, open_preview)
+        
+        threading.Thread(target=run_prep_task, daemon=True).start()
 
     def create_lighten_blend_image_callback(self):
         """比較明合成画像作成ボタンのコールバック"""
-        # デフォルトで流星の保存先フォルダを開く
         initial_dir = self.meteor_save_path_var.get()
         if not initial_dir or not os.path.exists(initial_dir):
             initial_dir = os.path.expanduser("~")
@@ -3218,7 +3581,6 @@ atomcam2で利用する場合は、GitHubで公開されている
         if not output_path:
             return
 
-        # オプションダイアログを表示
         dialog = ProcessingOptionDialog(self)
         if dialog.result is None:  # キャンセル
             return
@@ -3227,7 +3589,6 @@ atomcam2で利用する場合は、GitHubで公開されている
         is_ai_mode = (mode != 0)
         is_meteor_mode = (mode == 2)
 
-        # 通常モードの場合
         if not is_ai_mode:
             def run_normal_task():
                 self.append_log(f"比較明合成画像の作成を開始します... ({len(file_paths)}個の要素)")
@@ -3246,7 +3607,6 @@ atomcam2で利用する場合は、GitHubで公開されている
         import bright_area_detector
         import cv2
 
-        # 検出関数の選択
         detector_func = bright_area_detector.detect_meteors_with_boxes if is_meteor_mode else bright_area_detector.detect_bright_areas_with_boxes
         
         # 合成開始コールバック (プレビューウィンドウから呼ばれる)
@@ -3295,7 +3655,6 @@ atomcam2で利用する場合は、GitHubで公開されている
                             return bright_area_detector.create_mask_from_boxes((h, w), boxes)
                     return None
 
-                # 展開済みのファイルリストを渡す
                 success = lighten_blend_image.create_lighten_blend_image(
                     all_files,
                     output_path,
@@ -3307,14 +3666,11 @@ atomcam2で利用する場合は、GitHubで公開されている
 
             threading.Thread(target=run_ai_task, daemon=True).start()
 
-        # プレビューウィンドウ作成
         preview_window = detection_preview.DetectionPreviewWindow(self, start_synthesis_with_results)
         
-        # 解析タスク実行
         def run_analysis_task():
             self.append_log("AIによる画像解析を開始します...")
             
-            # ファイルリスト展開
             all_files = []
             for path in file_paths:
                 if os.path.isdir(path):
@@ -3325,7 +3681,6 @@ atomcam2で利用する場合は、GitHubで公開されている
             
             total = len(all_files)
             
-            # プレビューウィンドウに総数を通知して計測開始
             if preview_window.winfo_exists():
                 self.after(0, lambda: preview_window.start_analysis(total))
             
@@ -3350,7 +3705,6 @@ atomcam2で利用する場合は、GitHubで公開されている
                 res = detector_func(img)
                 boxes = res[1] if res else []
                 
-                # GUIスレッドでプレビューに追加
                 if preview_window.winfo_exists():
                     self.after(0, lambda fn=filename, fp=path, b=boxes, cb=reanalyze_wrapper: 
                               preview_window.add_item(fn, fp, b, cb))
@@ -3394,16 +3748,13 @@ class TimelapseDragDropWindow(Toplevel):
         
         self.setup_ui()
         
-        # ウィンドウをモーダルに設定
         self.transient(parent)
         self.grab_set()
     
     def setup_ui(self):
-        # メインフレーム
         main_frame = ttk.Frame(self, padding=15)
         main_frame.pack(fill=tk.BOTH, expand=True)
         
-        # ドロップエリア
         drop_frame = ttk.LabelFrame(main_frame, text="ファイル / フォルダ", padding=10)
         drop_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
         
@@ -3418,11 +3769,9 @@ class TimelapseDragDropWindow(Toplevel):
         )
         self.drop_label.pack(fill=tk.BOTH, expand=True, pady=5)
         
-        # ドラッグ＆ドロップを登録
         self.drop_label.drop_target_register(DND_FILES)
         self.drop_label.dnd_bind('<<Drop>>', self.on_drop)
         
-        # ドロップしたファイルのリスト表示
         list_frame = ttk.Frame(drop_frame)
         list_frame.pack(fill=tk.BOTH, expand=True, pady=5)
         
@@ -3440,10 +3789,8 @@ class TimelapseDragDropWindow(Toplevel):
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.listbox.config(yscrollcommand=scrollbar.set)
         
-        # クリアボタン
         ttk.Button(drop_frame, text="リストをクリア", command=self.clear_list).pack(anchor=tk.E, pady=(5, 0))
         
-        # 動画長さ選択
         duration_frame = ttk.LabelFrame(main_frame, text="動画の長さ", padding=10)
         duration_frame.pack(fill=tk.X, pady=(0, 10))
         
@@ -3456,7 +3803,6 @@ class TimelapseDragDropWindow(Toplevel):
         ttk.Radiobutton(duration_options, text="30秒", variable=self.duration_var, value=30).pack(side=tk.LEFT, padx=15)
         ttk.Radiobutton(duration_options, text="60秒", variable=self.duration_var, value=60).pack(side=tk.LEFT, padx=15)
         
-        # マスクフレーム
         mask_frame = ttk.LabelFrame(main_frame, text="マスク設定", padding=10)
         mask_frame.pack(fill=tk.X, pady=(0, 10))
         
@@ -3472,7 +3818,6 @@ class TimelapseDragDropWindow(Toplevel):
         self.mask_status_label = ttk.Label(mask_controls, text="マスクなし")
         self.mask_status_label.pack(side=tk.LEFT, padx=10)
         
-        # 開始ボタン
         btn_frame = ttk.Frame(main_frame)
         btn_frame.pack(fill=tk.X)
         
@@ -3555,7 +3900,6 @@ class TimelapseDragDropWindow(Toplevel):
             messagebox.showerror("エラー", "フレームを取得できませんでした。")
             return
         
-        # マスク作成ウィンドウを開く
         mask_win = Toplevel(self)
         mask_win.title("タイムラプス用マスク作成")
         mask_win.geometry("1000x700")
@@ -3687,10 +4031,8 @@ class ProcessingOptionDialog(tk.Toplevel):
         self.main_frame = ttk.Frame(self, padding="20 20 20 10")
         self.main_frame.pack(fill=tk.BOTH, expand=True)
         
-        # ヘッダー
         ttk.Label(self.main_frame, text="比較明合成オプション", font=("", 14, "bold")).pack(anchor=tk.W, pady=(0, 15))
         
-        # モード選択エリア
         mode_frame = ttk.LabelFrame(self.main_frame, text="モード選択", padding=10)
         mode_frame.pack(fill=tk.X, pady=(0, 15))
         
@@ -3702,7 +4044,6 @@ class ProcessingOptionDialog(tk.Toplevel):
         self.rb_meteor = ttk.Radiobutton(mode_frame, text="流星のみ合成 (AI検出)", variable=self.mode_var, value=2)
         self.rb_meteor.pack(anchor=tk.W, pady=5)
         
-        # AIステータスエリア
         status_frame = ttk.Frame(self.main_frame)
         status_frame.pack(fill=tk.X, pady=(0, 20))
         
@@ -3710,14 +4051,13 @@ class ProcessingOptionDialog(tk.Toplevel):
         self.status_label = ttk.Label(status_frame, text="接続確認中...", font=("", 9, "bold"), foreground="gray")
         self.status_label.pack(side=tk.LEFT, padx=5)
         
-        # ボタンエリア (下寄せ)
         btn_frame = ttk.Frame(self.main_frame)
         btn_frame.pack(fill=tk.X, side=tk.BOTTOM)
         
         ttk.Button(btn_frame, text="キャンセル", command=self.destroy).pack(side=tk.RIGHT, padx=5)
-        ttk.Button(btn_frame, text="次へ", command=self.on_ok).pack(side=tk.RIGHT, padx=5) # 決定ではなく次へ進むニュアンス
+        self.next_btn = ttk.Button(btn_frame, text="次へ", command=self.on_ok, state=tk.DISABLED)
+        self.next_btn.pack(side=tk.RIGHT, padx=5) # 決定ではなく次へ進むニュアンス
         
-        # 親ウィンドウの中心に配置
         self.transient(parent)
         self.grab_set()
         
@@ -3729,25 +4069,36 @@ class ProcessingOptionDialog(tk.Toplevel):
         except:
             pass
             
-        # 接続チェック開始
         self.after(100, self.check_connection)
         self.protocol("WM_DELETE_WINDOW", self.destroy)
         self.wait_window(self)
         
     def check_connection(self):
+        # UIをブロックしないように別スレッドで実行
+        threading.Thread(target=self._check_connection_thread, daemon=True).start()
+
+    def _check_connection_thread(self):
         try:
             import bright_area_detector
-            if bright_area_detector.check_vlm_connection():
-                self.status_label.config(text="接続OK", foreground="#4CAF50") # 緑系
-            else:
-                self.status_label.config(text="未接続", foreground="#F44336") # 赤系
-                self.rb_bright.config(state=tk.DISABLED)
-                self.rb_meteor.config(state=tk.DISABLED)
-                self.mode_var.set(0)
+            connected = bright_area_detector.check_vlm_connection()
+            self.after(0, lambda: self._update_connection_status(connected))
         except Exception as e:
-            self.status_label.config(text=f"エラー: {e}", foreground="#F44336")
+            self.after(0, lambda: self._update_connection_status(False, str(e)))
+
+    def _update_connection_status(self, connected, error_msg=None):
+        if connected:
+            self.status_label.config(text="接続OK", foreground="#4CAF50") # 緑系
+        else:
+            msg = "未接続"
+            if error_msg:
+                msg = f"エラー: {error_msg}"
+            self.status_label.config(text=msg, foreground="#F44336") # 赤系
             self.rb_bright.config(state=tk.DISABLED)
             self.rb_meteor.config(state=tk.DISABLED)
+            self.mode_var.set(0)
+        
+        # チェック完了後はボタンを有効化
+        self.next_btn.config(state=tk.NORMAL)
 
     def on_ok(self):
         self.result = self.mode_var.get()
