@@ -36,7 +36,7 @@ custom_coordinates.json
 app_itiji/
 
 # Unused/experimental Python files (not part of main app)
-qwen3_VL_4B.py
+# qwen3_VL_4B.py
 yugami.py
 yugami_hosei.py
 app_state.py
@@ -46,3 +46,6 @@ file_utils_temp.py
 # Diff/patch files
 *.patch
 diff.txt
+
+# Build artifacts
+dist/

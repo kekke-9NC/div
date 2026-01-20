@@ -44,7 +44,6 @@ def get_default_output_path(base_folder: str = None) -> str:
         if not os.path.exists(output_dir):
             output_dir = os.path.join(os.path.expanduser("~"), "Desktop")
     
-    # 日時でファイル名を生成
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"lighten_blend_{timestamp}.png"
     
@@ -210,7 +209,6 @@ def create_lighten_blend_image(
     if progress_callback:
         progress_callback(f"合計 {len(all_files)} 個のファイルを処理します...")
     
-    # 最初のファイルから解像度を取得
     first_file = all_files[0]
     first_ext = Path(first_file).suffix.lower()
     
@@ -239,7 +237,6 @@ def create_lighten_blend_image(
     # 1GBで処理できるフレーム数を計算
     max_video_frames_in_memory = max(1, (MAX_MEMORY_BYTES // 2) // single_frame_memory)
     
-    # 合成を開始
     composite = first_frame.astype(np.float32)
     processed = 1
     
@@ -359,12 +356,10 @@ def create_lighten_blend_image(
                     if progress_callback and video_frames_processed > 0:
                         progress_callback(f"動画処理: {os.path.basename(file_path)} ({video_frames_processed}フレーム使用)")
             
-            # 進捗報告
             if progress_callback and idx % 10 == 0:
                 progress = idx / len(all_files) * 100
                 progress_callback(f"処理中: {idx}/{len(all_files)} ({progress:.1f}%)")
             
-            # 定期的なガベージコレクション
             if idx % 50 == 0:
                 gc.collect()
                 
@@ -373,7 +368,6 @@ def create_lighten_blend_image(
                 progress_callback(f"警告: ファイル処理エラー: {os.path.basename(file_path)} - {e}")
             continue
     
-    # 最終的な合成画像を保存
     composite_uint8 = np.clip(composite, 0, 255).astype(np.uint8)
     del composite
     gc.collect()

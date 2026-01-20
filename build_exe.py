@@ -32,7 +32,7 @@ if not os.path.exists(model_source_path):
 
 # Data files to include: (source, dest_in_bundle)
 datas = [
-    (settings_file, "."),
+    # (settings_file, "."), # Don't bundle settings, copy it manually later
     (masks_file, "."),
     (model_source_path, ".") if os.path.exists(model_source_path) else None,
     (icon_path, ".") if os.path.exists(icon_path) else None,
@@ -112,3 +112,15 @@ if os.path.exists(icon_path):
 print("Running PyInstaller with arguments:", args)
 
 PyInstaller.__main__.run(args)
+
+# Post-build: Copy settings file to dist folder
+dist_dir = os.path.join("dist", app_name)
+if os.path.exists(dist_dir):
+    print(f"Copying {settings_file} to {dist_dir}...")
+    try:
+        shutil.copy2(settings_file, os.path.join(dist_dir, settings_file))
+        print("Settings file copied successfully.")
+    except Exception as e:
+        print(f"Error copying settings file: {e}")
+else:
+    print(f"Warning: Dist directory {dist_dir} not found. Settings file not copied.")

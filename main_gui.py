@@ -76,7 +76,12 @@ class App(TkinterDnD.Tk):
             {'name': "Cutout Video", 'enabled': True},
             {'name': "Full Size Video", 'enabled': False}
         ]
-        self.settings_file = "app_settings.json"
+        if getattr(sys, 'frozen', False):
+            # exeと同じディレクトリに設定ファイルを置く
+            base_path = os.path.dirname(sys.executable)
+            self.settings_file = os.path.join(base_path, "app_settings.json")
+        else:
+            self.settings_file = "app_settings.json"
         self.masks_file = "app_masks.npz"
 
         self.worker_thread = None
@@ -102,7 +107,7 @@ class App(TkinterDnD.Tk):
             
         # SHA-256でハッシュ化して比較 (パスワード: 141421)
         pw_hash = hashlib.sha256(password.encode()).hexdigest()
-        admin_hash = "cfb24c91a9b83d9967f5b6a177037f5803abf3c8a84771a62c4fa48ab076434f0"
+        admin_hash = "cfb24c91a9b83d9967f5b6a177037f5803abf3c8a8471a62c4fa48ab076434f0"
         
         if pw_hash != admin_hash:
             messagebox.showerror("アクセス拒否", "パスワードが正しくありません。")
@@ -271,14 +276,14 @@ class App(TkinterDnD.Tk):
 
         tab_usage = self.create_usage_tab(notebook)
         tab_source = self.create_source_tab(notebook)
-        tab_periodic = self.create_periodic_scan_tab(notebook)
+
         tab_settings = self.create_settings_tab(notebook)
         tab_analysis = self.create_analysis_tab(notebook)
         tab_advanced_settings = self.create_advanced_settings_tab(notebook)
 
         notebook.add(tab_usage, text="使い方")
         notebook.add(tab_source, text="ソース選択")
-        notebook.add(tab_periodic, text="定期スキャン")
+
         notebook.add(tab_settings, text="保存設定")
         notebook.add(tab_analysis, text="解析")
         notebook.add(tab_advanced_settings, text="⚙️")
@@ -388,8 +393,47 @@ class App(TkinterDnD.Tk):
 
     def create_source_tab(self, parent):
         frame = ttk.Frame(parent)
-        frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-        lf_folder = ttk.LabelFrame(frame, text="フォルダ / 動画ファイル")
+        # Notebook manages geometry, so NO pack() here.
+        
+        # スクロール可能なキャンバスとスクロールバーを作成
+        canvas = tk.Canvas(frame, highlightthickness=0, bg="#2E3F5B")
+        scrollbar = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=canvas.yview)
+        scrollable_frame = ttk.Frame(canvas)
+
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+
+        canvas_window = canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+
+        # キャンバスのリサイズ時に内部フレームの幅を合わせる
+        def on_canvas_configure(event):
+            canvas.itemconfig(canvas_window, width=event.width)
+        canvas.bind("<Configure>", on_canvas_configure)
+
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        # マウスホイールでスクロール
+        def on_mousewheel(event):
+            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+
+        def _bind_mousewheel(event):
+            canvas.bind_all("<MouseWheel>", on_mousewheel)
+        
+        def _unbind_mousewheel(event):
+            canvas.unbind_all("<MouseWheel>")
+
+        canvas.bind("<Enter>", _bind_mousewheel)
+        canvas.bind("<Leave>", _unbind_mousewheel)
+        
+        # ===== ここから内部ウィジェット =====
+        # Note: pack()の親は scrollable_frame にする
+        
+        lf_folder = ttk.LabelFrame(scrollable_frame, text="フォルダ / 動画ファイル")
         lf_folder.pack(fill=tk.X, expand=True, pady=5)
         
         drop_label = ttk.Label(lf_folder, text="ここにフォルダや動画ファイルをドラッグ＆ドロップ", relief=tk.SOLID, padding=20, anchor=tk.CENTER, borderwidth=1)
@@ -401,12 +445,13 @@ class App(TkinterDnD.Tk):
         list_container = ttk.Frame(lf_folder)
         list_container.pack(fill=tk.BOTH, expand=True, pady=5)
         
+        # 内側のリスト用のキャンバス（スクロールイベントの競合に注意）
         self.folder_list_canvas = tk.Canvas(list_container, bg="#3A4D6B", highlightthickness=0, height=120)
         self.folder_list_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         
-        scrollbar = ttk.Scrollbar(list_container, orient=tk.VERTICAL, command=self.folder_list_canvas.yview)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self.folder_list_canvas.configure(yscrollcommand=scrollbar.set)
+        inner_scrollbar = ttk.Scrollbar(list_container, orient=tk.VERTICAL, command=self.folder_list_canvas.yview)
+        inner_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.folder_list_canvas.configure(yscrollcommand=inner_scrollbar.set)
         
         self.folder_list_frame = tk.Frame(self.folder_list_canvas, bg="#3A4D6B")
         self.folder_list_window = self.folder_list_canvas.create_window((0, 0), window=self.folder_list_frame, anchor="nw")
@@ -415,14 +460,21 @@ class App(TkinterDnD.Tk):
             self.folder_list_canvas.configure(scrollregion=self.folder_list_canvas.bbox("all"))
         self.folder_list_frame.bind("<Configure>", on_frame_configure)
         
-        def on_canvas_configure(event):
+        def on_inner_canvas_configure(event):
             self.folder_list_canvas.itemconfig(self.folder_list_window, width=event.width)
-        self.folder_list_canvas.bind("<Configure>", on_canvas_configure)
+        self.folder_list_canvas.bind("<Configure>", on_inner_canvas_configure)
         
-        def on_mousewheel(event):
+        # 内側のスクロール: 親のスクロールと競合しないようにカーソルが上にある時だけbindしたいが、
+        # bind_allを使っている親と衝突する可能性がある。
+        # シンプルに、内側エリアではbindを上書きするアプローチをとる。
+        
+        def on_inner_mousewheel(event):
             self.folder_list_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-        self.folder_list_canvas.bind("<MouseWheel>", on_mousewheel)
-        self.folder_list_frame.bind("<MouseWheel>", on_mousewheel)
+            # イベント伝播を止めたいが、Tkinter bindでは return "break" する必要がある
+            return "break"
+
+        self.folder_list_canvas.bind("<MouseWheel>", on_inner_mousewheel)
+        self.folder_list_frame.bind("<MouseWheel>", on_inner_mousewheel)
         
         # Store item frames for selection
         self.folder_item_frames = []
@@ -433,7 +485,7 @@ class App(TkinterDnD.Tk):
         ttk.Button(btn_frame, text="選択項目を削除", command=self.remove_selected_folders).pack(side=tk.LEFT, padx=2)
         ttk.Button(btn_frame, text="すべて削除", command=self.remove_all_folders).pack(side=tk.LEFT, padx=2)
 
-        lf_rtsp = ttk.LabelFrame(frame)
+        lf_rtsp = ttk.LabelFrame(scrollable_frame)
         lf_rtsp.pack(fill=tk.X, expand=True, pady=5)
         
         # RTSPストリームのタイトル行にiボタンを追加
@@ -516,10 +568,12 @@ class App(TkinterDnD.Tk):
             self.rtsp_list_canvas.itemconfig(self.rtsp_list_window, width=event.width)
         self.rtsp_list_canvas.bind("<Configure>", on_rtsp_canvas_configure)
         
-        def on_rtsp_mousewheel(event):
+        def on_rtsp_inner_mousewheel(event):
             self.rtsp_list_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-        self.rtsp_list_canvas.bind("<MouseWheel>", on_rtsp_mousewheel)
-        self.rtsp_list_frame.bind("<MouseWheel>", on_rtsp_mousewheel)
+            return "break"
+            
+        self.rtsp_list_canvas.bind("<MouseWheel>", on_rtsp_inner_mousewheel)
+        self.rtsp_list_frame.bind("<MouseWheel>", on_rtsp_inner_mousewheel)
         
         self.rtsp_item_frames = []
         self.rtsp_selected_indices = set()
@@ -560,6 +614,100 @@ class App(TkinterDnD.Tk):
         
         self.toggle_rtsp_time_limit_frame()
         
+        # ===== 定期スキャン (移設) =====
+        lf_periodic = ttk.LabelFrame(scrollable_frame, text="定期スキャン (監視フォルダ)")
+        lf_periodic.pack(fill=tk.X, expand=True, pady=5)
+
+        # Header frame for Checkbutton + Help
+        header_frame = ttk.Frame(lf_periodic)
+        header_frame.pack(fill=tk.X, anchor=tk.W)
+        
+        ttk.Checkbutton(header_frame, text="定期スキャンを有効にする", variable=self.periodic_scan_var, command=self.update_start_button_state).pack(side=tk.LEFT)
+        
+        help_label = ttk.Label(header_frame, text=" ? ", font=("Arial", 10, "bold"), foreground="#87CEEB", cursor="hand2")
+        help_label.pack(side=tk.LEFT, padx=5)
+        
+        help_text = """指定した監視フォルダを一定間隔でスキャンし、
+新しいファイルを自動的に解析する機能です。
+
+atomcam2で利用する場合は、GitHubで公開されている
+「atomcam_tools」を利用してください。
+その際、ネットワークフォルダー設定でatomcam2の
+データ保存先フォルダを指定する必要があります。"""
+
+        help_label._tooltip = None
+        help_label._tooltip_hover = False
+        
+        def show_periodic_tooltip(event):
+            if help_label._tooltip is not None: return
+            tooltip = tk.Toplevel(self)
+            tooltip.wm_overrideredirect(True)
+            tooltip.wm_geometry(f"+{event.x_root+10}+{event.y_root+10}")
+            tooltip.configure(bg="#2E3F5B")
+            f = ttk.Frame(tooltip, padding=8)
+            f.pack()
+            ttk.Label(f, text=help_text, justify=tk.LEFT, foreground="#EAEAEA", background="#2E3F5B").pack()
+            
+            def on_enter(e): help_label._tooltip_hover = True
+            def on_leave(e): 
+                help_label._tooltip_hover = False
+                self.after(100, check_periodic_tooltip)
+                
+            tooltip.bind("<Enter>", on_enter)
+            tooltip.bind("<Leave>", on_leave)
+            help_label._tooltip = tooltip
+
+        def check_periodic_tooltip():
+            if help_label._tooltip and not help_label._tooltip_hover:
+                try: help_label._tooltip.destroy()
+                except: pass
+                help_label._tooltip = None
+
+        def hide_periodic_tooltip(event):
+            self.after(150, check_periodic_tooltip)
+
+        help_label.bind("<Enter>", show_periodic_tooltip)
+        help_label.bind("<Leave>", hide_periodic_tooltip)
+        
+        dir_frame = ttk.Frame(lf_periodic)
+        dir_frame.pack(fill=tk.X, pady=5)
+        ttk.Label(dir_frame, text="監視フォルダ:").pack(side=tk.LEFT, padx=(0,5))
+        ttk.Entry(dir_frame, textvariable=self.periodic_dir_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(dir_frame, text="選択", command=self.select_periodic_dir).pack(side=tk.LEFT, padx=(5,0))
+        
+        interval_frame = ttk.Frame(lf_periodic)
+        interval_frame.pack(fill=tk.X, pady=5)
+        ttk.Label(interval_frame, text="スキャン間隔 (秒):").pack(side=tk.LEFT)
+        ttk.Entry(interval_frame, textvariable=self.periodic_interval_var, width=5).pack(side=tk.LEFT)
+
+        lf_time = ttk.LabelFrame(scrollable_frame, text="時間制限 (定期スキャン用)")
+        lf_time.pack(fill=tk.X, expand=True, pady=5)
+        
+        row_frame = ttk.Frame(lf_time)
+        row_frame.pack(fill=tk.X)
+        self.chk_time_limit = ttk.Checkbutton(row_frame, text="時間制限を有効にする", variable=self.periodic_time_limit_var, command=self.toggle_time_limit_frame)
+        self.chk_time_limit.pack(side=tk.LEFT, anchor=tk.W)
+        ttk.Button(row_frame, text="自動で設定", command=self.fetch_current_location).pack(side=tk.LEFT, padx=(8,0))
+        ttk.Checkbutton(row_frame, text="自動更新を有効にする", variable=self.auto_time_updater_enabled_var, command=self.toggle_auto_time_updater).pack(side=tk.LEFT, padx=(8,0))
+        
+        self.time_limit_frame = ttk.Frame(lf_time)
+        
+        start_frame = ttk.Frame(self.time_limit_frame)
+        start_frame.pack(fill=tk.X, pady=2)
+        ttk.Label(start_frame, text="開始時刻:", width=10).pack(side=tk.LEFT)
+        ttk.Spinbox(start_frame, from_=0, to=23, width=3, textvariable=self.start_hour_var, format="%02.0f").pack(side=tk.LEFT)
+        ttk.Label(start_frame, text=":").pack(side=tk.LEFT)
+        ttk.Spinbox(start_frame, from_=0, to=59, width=3, textvariable=self.start_min_var, format="%02.0f").pack(side=tk.LEFT)
+        
+        end_frame = ttk.Frame(self.time_limit_frame)
+        end_frame.pack(fill=tk.X, pady=2)
+        ttk.Label(end_frame, text="終了時刻:", width=10).pack(side=tk.LEFT)
+        ttk.Spinbox(end_frame, from_=0, to=23, width=3, textvariable=self.end_hour_var, format="%02.0f").pack(side=tk.LEFT)
+        ttk.Label(end_frame, text=":").pack(side=tk.LEFT)
+        ttk.Spinbox(end_frame, from_=0, to=59, width=3, textvariable=self.end_min_var, format="%02.0f").pack(side=tk.LEFT)
+
+        self.toggle_time_limit_frame()
+
         return frame
 
     def create_analysis_tab(self, parent):
@@ -1135,102 +1283,7 @@ class App(TkinterDnD.Tk):
             except Exception as e:
                 print(f"Failed to draw custom point {name}: {e}")
 
-    def create_periodic_scan_tab(self, parent):
-        frame = ttk.Frame(parent)
-        frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-        lf = ttk.LabelFrame(frame, text="定期スキャン設定")
-        lf.pack(fill=tk.X, expand=True, pady=5)
 
-        # Header frame for Checkbutton + Help
-        header_frame = ttk.Frame(lf)
-        header_frame.pack(fill=tk.X, anchor=tk.W)
-        
-        ttk.Checkbutton(header_frame, text="定期スキャンを有効にする", variable=self.periodic_scan_var, command=self.update_start_button_state).pack(side=tk.LEFT)
-        
-        help_label = ttk.Label(header_frame, text=" ? ", font=("Arial", 10, "bold"), foreground="#87CEEB", cursor="hand2")
-        help_label.pack(side=tk.LEFT, padx=5)
-        
-        help_text = """指定した監視フォルダを一定間隔でスキャンし、
-新しいファイルを自動的に解析する機能です。
-
-atomcam2で利用する場合は、GitHubで公開されている
-「atomcam_tools」を利用してください。
-その際、ネットワークフォルダー設定でatomcam2の
-データ保存先フォルダを指定する必要があります。"""
-
-        help_label._tooltip = None
-        help_label._tooltip_hover = False
-        
-        def show_periodic_tooltip(event):
-            if help_label._tooltip is not None: return
-            tooltip = tk.Toplevel(self)
-            tooltip.wm_overrideredirect(True)
-            tooltip.wm_geometry(f"+{event.x_root+10}+{event.y_root+10}")
-            tooltip.configure(bg="#2E3F5B")
-            f = ttk.Frame(tooltip, padding=8)
-            f.pack()
-            ttk.Label(f, text=help_text, justify=tk.LEFT, foreground="#EAEAEA", background="#2E3F5B").pack()
-            
-            def on_enter(e): help_label._tooltip_hover = True
-            def on_leave(e): 
-                help_label._tooltip_hover = False
-                self.after(100, check_periodic_tooltip)
-                
-            tooltip.bind("<Enter>", on_enter)
-            tooltip.bind("<Leave>", on_leave)
-            help_label._tooltip = tooltip
-
-        def check_periodic_tooltip():
-            if help_label._tooltip and not help_label._tooltip_hover:
-                try: help_label._tooltip.destroy()
-                except: pass
-                help_label._tooltip = None
-
-        def hide_periodic_tooltip(event):
-            self.after(150, check_periodic_tooltip)
-
-        help_label.bind("<Enter>", show_periodic_tooltip)
-        help_label.bind("<Leave>", hide_periodic_tooltip)
-        
-        dir_frame = ttk.Frame(lf)
-        dir_frame.pack(fill=tk.X, pady=5)
-        ttk.Label(dir_frame, text="監視フォルダ:").pack(side=tk.LEFT, padx=(0,5))
-        ttk.Entry(dir_frame, textvariable=self.periodic_dir_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Button(dir_frame, text="選択", command=self.select_periodic_dir).pack(side=tk.LEFT, padx=(5,0))
-        
-        interval_frame = ttk.Frame(lf)
-        interval_frame.pack(fill=tk.X, pady=5)
-        ttk.Label(interval_frame, text="スキャン間隔 (秒):").pack(side=tk.LEFT)
-        ttk.Entry(interval_frame, textvariable=self.periodic_interval_var, width=5).pack(side=tk.LEFT)
-
-        lf_time = ttk.LabelFrame(frame, text="時間制限")
-        lf_time.pack(fill=tk.X, expand=True, pady=5)
-        
-        row_frame = ttk.Frame(lf_time)
-        row_frame.pack(fill=tk.X)
-        self.chk_time_limit = ttk.Checkbutton(row_frame, text="時間制限を有効にする", variable=self.periodic_time_limit_var, command=self.toggle_time_limit_frame)
-        self.chk_time_limit.pack(side=tk.LEFT, anchor=tk.W)
-        ttk.Button(row_frame, text="自動で設定", command=self.fetch_current_location).pack(side=tk.LEFT, padx=(8,0))
-        ttk.Checkbutton(row_frame, text="自動更新を有効にする", variable=self.auto_time_updater_enabled_var, command=self.toggle_auto_time_updater).pack(side=tk.LEFT, padx=(8,0))
-        
-        self.time_limit_frame = ttk.Frame(lf_time)
-        
-        start_frame = ttk.Frame(self.time_limit_frame)
-        start_frame.pack(fill=tk.X, pady=2)
-        ttk.Label(start_frame, text="開始時刻:", width=10).pack(side=tk.LEFT)
-        ttk.Spinbox(start_frame, from_=0, to=23, width=3, textvariable=self.start_hour_var, format="%02.0f").pack(side=tk.LEFT)
-        ttk.Label(start_frame, text=":").pack(side=tk.LEFT)
-        ttk.Spinbox(start_frame, from_=0, to=59, width=3, textvariable=self.start_min_var, format="%02.0f").pack(side=tk.LEFT)
-        
-        end_frame = ttk.Frame(self.time_limit_frame)
-        end_frame.pack(fill=tk.X, pady=2)
-        ttk.Label(end_frame, text="終了時刻:", width=10).pack(side=tk.LEFT)
-        ttk.Spinbox(end_frame, from_=0, to=23, width=3, textvariable=self.end_hour_var, format="%02.0f").pack(side=tk.LEFT)
-        ttk.Label(end_frame, text=":").pack(side=tk.LEFT)
-        ttk.Spinbox(end_frame, from_=0, to=59, width=3, textvariable=self.end_min_var, format="%02.0f").pack(side=tk.LEFT)
-
-        self.toggle_time_limit_frame()
-        return frame
 
     def create_settings_tab(self, parent):
         frame = ttk.Frame(parent)

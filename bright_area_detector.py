@@ -87,6 +87,11 @@ def _parse_boxes(text: str) -> List[Tuple[int, int, int, int]]:
         
     Returns:
         ボックスのリスト [(x1,y1,x2,y2), ...]（0-1000正規化座標）
+    
+    対応形式:
+        - (x1,y1,x2,y2) - 4つの数値
+        - (x1,y1),(x2,y2) - 2つの座標ペア
+        - (x1,y1),(x2,y2);(x1,y1),(x2,y2) - セミコロン区切りで複数
     """
     boxes = []
     
@@ -94,19 +99,36 @@ def _parse_boxes(text: str) -> List[Tuple[int, int, int, int]]:
     if not text or "NONE" in text.upper():
         return boxes
     
-    # パターン: (x1,y1,x2,y2) または (x1, y1, x2, y2)
-    # 4つの数値を含む括弧を検出
-    pattern = r"\((\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\)"
-    matches = re.findall(pattern, text)
+    # パターン1: (x1,y1,x2,y2) - 4つの数値を含む括弧
+    pattern_4nums = r"\((\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\)"
+    matches_4nums = re.findall(pattern_4nums, text)
     
-    for match in matches:
+    for match in matches_4nums:
         try:
             x1, y1, x2, y2 = map(int, match)
-            # 座標は0-1000の範囲内であること
             if all(0 <= v <= 1000 for v in [x1, y1, x2, y2]):
                 boxes.append((x1, y1, x2, y2))
         except ValueError:
             continue
+    
+    # 4つの数値形式で見つかった場合はそれを返す
+    if boxes:
+        return boxes
+    
+    # パターン2: (x1,y1),(x2,y2) または (x1,y1),(x2,y2);... - セミコロン区切りの座標ペア
+    # まずセミコロンで分割して各セグメントを処理
+    segments = text.split(';')
+    pattern_pair = r"\((\d+)\s*,\s*(\d+)\)\s*,\s*\((\d+)\s*,\s*(\d+)\)"
+    
+    for segment in segments:
+        match = re.search(pattern_pair, segment.strip())
+        if match:
+            try:
+                x1, y1, x2, y2 = map(int, match.groups())
+                if all(0 <= v <= 1000 for v in [x1, y1, x2, y2]):
+                    boxes.append((x1, y1, x2, y2))
+            except ValueError:
+                continue
     
     return boxes
 
