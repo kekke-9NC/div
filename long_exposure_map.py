@@ -21,13 +21,12 @@ def create_long_exposure_map(sources, output_path, progress_callback=None):
     for source in sources:
         path = Path(source)
         if path.is_dir():
-            # Case insensitive search for extensions
             found = [p for p in path.rglob('*') if p.suffix.lower() in config.PERIODIC_VIDEO_EXTENSIONS]
             video_paths.extend(found)
         elif path.is_file() and path.suffix.lower() in config.PERIODIC_VIDEO_EXTENSIONS:
             video_paths.append(path)
     
-    # Remove duplicates just in case
+
     video_paths = sorted(list(set(video_paths)))
     
     if not video_paths:
@@ -56,7 +55,6 @@ def create_long_exposure_map(sources, output_path, progress_callback=None):
             if composite_image is None:
                 composite_image = frame.astype(np.uint8)
             else:
-                # Resize if dimensions don't match (optional, but good for robustness)
                 if frame.shape != composite_image.shape:
                     frame = cv2.resize(frame, (composite_image.shape[1], composite_image.shape[0]))
                 

@@ -233,11 +233,30 @@ def save_rtsp_video_segments_ffmpeg(
         print("[RTSP保存] FFmpegが見つかりません。OpenCV方式にフォールバック")
         return save_rtsp_video_segments(rtsp_url, save_root, segment_duration, cancel_flag)
     
-    # h264_cuvidサポート確認
+    # h264_cuvidサポート確認 + CUDAデバイス利用可否の確認
+    use_cuvid = False
     try:
         result = subprocess.run([ffmpeg_path, '-decoders'], capture_output=True, text=True, timeout=5)
-        use_cuvid = 'h264_cuvid' in result.stdout
-    except Exception:
+        if 'h264_cuvid' in result.stdout:
+            # FFmpegがh264_cuvidをサポートしている場合、実際にCUDAデバイスが利用可能かテスト
+            # 短いテストコマンドを実行してCUDAが使えるか確認
+            test_result = subprocess.run(
+                [ffmpeg_path, '-hide_banner', '-hwaccel', 'cuda', '-f', 'lavfi', '-i', 'nullsrc=s=64x64:d=0.1', '-f', 'null', '-'],
+                capture_output=True, text=True, timeout=10
+            )
+            if test_result.returncode == 0:
+                use_cuvid = True
+            else:
+                # CUDAエラーをチェック
+                if 'CUDA_ERROR_NO_DEVICE' in test_result.stderr or 'no CUDA-capable device' in test_result.stderr:
+                    print("[RTSP保存] CUDAデバイスが見つかりません。ソフトウェアデコードを使用します。")
+                elif 'cuda' in test_result.stderr.lower() and 'error' in test_result.stderr.lower():
+                    print(f"[RTSP保存] CUDAが利用できません。ソフトウェアデコードを使用します。")
+                else:
+                    # その他のエラーでもソフトウェアデコードにフォールバック
+                    print(f"[RTSP保存] ハードウェアアクセラレーションのテストに失敗。ソフトウェアデコードを使用します。")
+    except Exception as e:
+        print(f"[RTSP保存] デコーダー確認中にエラー: {e}。ソフトウェアデコードを使用します。")
         use_cuvid = False
     
     if use_cuvid:

@@ -31,9 +31,7 @@ def get_current_location(timeout: int = 5) -> Tuple[float, float]:
             lon = float(data.get("lon", DEFAULT_LON))
             return lat, lon
         else:
-            # API returned an error message or unexpected structure
             return DEFAULT_LAT, DEFAULT_LON
     except Exception as e:
-        # Any failure -> fallback default
         print(f"location_utils: failed to get location: {e}")
         return DEFAULT_LAT, DEFAULT_LON

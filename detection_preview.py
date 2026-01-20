@@ -12,6 +12,8 @@ from typing import List, Tuple, Optional, Callable, Dict
 import threading
 import time
 import math
+import cv2
+import numpy as np
 
 class DetectionPreviewWindow(tk.Toplevel):
     
@@ -421,60 +423,54 @@ class DetectionPreviewWindow(tk.Toplevel):
         canvas.offset_y = pos_y
 
     def _handle_reanalyze(self, filename, callback):
-        """再検出実行（表示順序を維持）"""
-        # 現在の順序インデックスを保存
-        # current_index = self.item_order.index(filename) if filename in self.item_order else -1
-        
+        """再検出実行（表示順序を維持）- バックグラウンドスレッドで処理"""
         data = self.results[filename]
         image_path = data['image_path']
         
-        # ローディング表示的な...
-        # ここでは簡易的にUIブロックなどはせず実行
+        # 画像読み込み
         img = cv2.imread(image_path)
         if img is None:
             return
-            
-        # UIフリーズ回避のためスレッド実行推奨だが、
-        # コールバック内でどう処理されているかに依存。
-        # ここではシンプルに実行(GUIをブロックする可能性あり)
-        try:
-            # カーソルを待機状態に
-            self.config(cursor="watch")
-            self.update()
-            
-            # コールバック実行 (bright_area_detectorの関数を呼ぶ想定)
-            # detect_xxx_with_boxes は (mask, boxes) を返す
-            mask, boxes = callback(img)
-            
-            # データ更新
-            self.results[filename]['boxes'] = boxes
-            
-            # 再描画 (add_itemを呼ぶと末尾に追加される可能性があるため、
-            # add_itemを使わずに directly update or fix order after add_item)
-            # 現在のadd_item実装は、既存があればframeをdestroyしてpackし直すので
-            # 必ず末尾に移動してしまう。
-            # なので、add_itemで更新した後、_rebuild_uiで元の順序に戻すのが確実。
-            
-            # まずは更新（これで末尾に行く）
-            # self.add_item(filename, image_path, boxes, callback)
-            
-            # もっと効率的にやるなら、frameをdestroyせずに中身だけ更新すべきだが
-            # _create_item_uiを使っている関係上作り直している。
-            # なので _rebuild_ui を呼ぶのが一番安全策。
-            # ただし全再構築は重いかもしれない。
-            
-            # 個別に更新する場合:
-            self.results[filename].update({'boxes': boxes})
-            
-            # UIのみ更新 (_create_item_uiはdestroyしてpackするので順序が変わる)
-            # なので、このアイテムの位置を維持したまま更新するには、
-            # packの順番を変えない工夫が必要だが、Tkinterのpackは順序制御が難しい。
-            # 全再構築が無難。
-            
-            self._rebuild_ui(self.item_order)
-            
-        finally:
-            self.config(cursor="")
+        
+        # カーソルを待機状態に
+        self.config(cursor="watch")
+        self.update()
+        
+        def run_detection():
+            """バックグラウンドで検出処理を実行"""
+            try:
+                # コールバック実行 (bright_area_detectorの関数を呼ぶ想定)
+                result = callback(img)
+                if result is None:
+                    boxes = []
+                else:
+                    mask, boxes = result
+                
+                # メインスレッドでUI更新
+                def update_ui():
+                    if not self.winfo_exists():
+                        return
+                    try:
+                        # データ更新
+                        self.results[filename]['boxes'] = boxes
+                        
+                        # UI再構築（順序を維持）
+                        self._rebuild_ui(self.item_order)
+                    finally:
+                        self.config(cursor="")
+                
+                self.after(0, update_ui)
+                
+            except Exception as e:
+                # エラー時もカーソルを戻す
+                def reset_cursor():
+                    if self.winfo_exists():
+                        self.config(cursor="")
+                self.after(0, reset_cursor)
+                print(f"再検出エラー: {e}")
+        
+        # バックグラウンドスレッドで実行
+        threading.Thread(target=run_detection, daemon=True).start()
 
     def _clear_boxes(self, filename, canvas, label_widget):
         self.results[filename]['boxes'] = []

@@ -58,16 +58,74 @@ def calculate_frame_memory(width: int, height: int, num_videos: int) -> int:
     Returns:
         int: 必要なメモリ（バイト）
     """
-    # 1フレーム = width * height * 3 (BGR) bytes
+
     frame_size = width * height * 3
-    # 各動画のフレーム + 合成用バッファ + 出力バッファ
     return frame_size * (num_videos + 2)
+
+
+def create_composite_from_videos(
+    video_paths: List[str],
+    progress_callback: Optional[Callable[[str], None]] = None,
+    sample_interval: int = 30
+) -> Optional[np.ndarray]:
+    """
+    複数の動画ファイルから比較明合成画像を作成する。
+    AI流星検出の前処理用。
+    
+    Args:
+        video_paths: 動画ファイルのパスリスト
+        progress_callback: 進捗コールバック
+        sample_interval: フレームサンプリング間隔
+        
+    Returns:
+        合成画像 (BGR) or None
+    """
+    if not video_paths:
+        return None
+        
+    composite_image = None
+    
+    for i, vp in enumerate(video_paths):
+        if progress_callback:
+            progress_callback(f"動画をスキャン中 ({i+1}/{len(video_paths)}): {os.path.basename(vp)}")
+            
+        cap = cv2.VideoCapture(vp)
+        if not cap.isOpened():
+            continue
+            
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if frame_count <= 0:
+            cap.release()
+            continue
+            
+        count = 0
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+                
+            if count % sample_interval == 0:
+                if composite_image is None:
+                    composite_image = frame.copy()
+                else:
+                    # サイズが異なる場合はリサイズ（今回は簡易的に最初の動画に合わせる）
+                    if frame.shape != composite_image.shape:
+                        frame = cv2.resize(frame, (composite_image.shape[1], composite_image.shape[0]))
+                    composite_image = np.maximum(composite_image, frame)
+            
+            count += 1
+            
+        cap.release()
+        
+    return composite_image
 
 
 def create_lighten_blend_video(
     video_paths: List[str],
     output_path: str,
-    progress_callback: Optional[Callable[[str], None]] = None
+    progress_callback: Optional[Callable[[str], None]] = None,
+    inclusion_mask: Optional[np.ndarray] = None,
+    per_video_masks: Optional[dict] = None
 ) -> bool:
     """
     複数の動画ファイルから比較明合成動画を作成する（メモリ効率版）。
@@ -84,6 +142,8 @@ def create_lighten_blend_video(
         video_paths: 動画ファイルパスのリスト
         output_path: 出力動画のパス
         progress_callback: 進捗報告用コールバック関数
+        inclusion_mask: 包含マスク（255=保持、0=黒塗り）。全動画に共通で適用。
+        per_video_masks: 動画ごとのマスク辞書 {video_path: mask}。各動画に個別のマスクを適用。
         
     Returns:
         bool: 成功したらTrue
@@ -96,6 +156,7 @@ def create_lighten_blend_video(
     if progress_callback:
         progress_callback(f"動画情報を取得中... ({len(video_paths)}個のファイル)")
     
+
     # 各動画の情報を取得
     video_infos = []
     for vp in video_paths:
@@ -122,32 +183,123 @@ def create_lighten_blend_video(
     if base_fps <= 0 or base_fps > 120:
         base_fps = 30.0
     
-    # メモリ計算: 1フレームあたりのメモリ使用量
-    frame_memory = calculate_frame_memory(base_width, base_height, len(video_infos))
-    
-    # 1GBで同時に処理できる動画数を計算
+    # メモリ計算: 厳密に計算
+    # 1フレーム = width * height * 3 bytes (BGR)
     frame_size = base_width * base_height * 3
-    max_concurrent_videos = max(1, (MAX_MEMORY_BYTES - frame_size * 2) // frame_size)
+    
+    # 安全なメモリ上限: 500MB（1GBの半分で余裕を持つ）
+    SAFE_MEMORY_LIMIT = 500 * 1024 * 1024  # 500MB
+    
+    # 同時に処理できる動画数 = (メモリ上限 - 出力バッファ) / フレームサイズ
+    # 出力バッファとして2フレーム分を確保
+    available_memory = SAFE_MEMORY_LIMIT - (frame_size * 2)
+    max_concurrent_videos = max(1, available_memory // frame_size)
+    
+    # 安全のため上限を10に制限（VideoCapture自体もメモリを消費するため）
+    max_concurrent_videos = min(max_concurrent_videos, 10)
     
     if progress_callback:
-        memory_per_frame_mb = frame_memory / (1024 * 1024)
+        memory_per_video_mb = frame_size / (1024 * 1024)
+        total_memory_mb = memory_per_video_mb * min(len(video_infos), max_concurrent_videos)
         progress_callback(f"出力設定: {base_width}x{base_height}, {base_fps:.2f}fps, {max_frames}フレーム")
-        progress_callback(f"メモリ使用量: 約{memory_per_frame_mb:.1f}MB/フレーム (制限: 1GB)")
+        progress_callback(f"メモリ使用量: 約{total_memory_mb:.1f}MB (上限: 500MB, 同時処理: {min(len(video_infos), max_concurrent_videos)}動画)")
+    
+    # 動画数が1の場合は単純コピー（マスク適用のみ）
+    if len(video_infos) == 1:
+        single_mask = inclusion_mask
+        if per_video_masks and video_infos[0]['path'] in per_video_masks:
+            single_mask = per_video_masks[video_infos[0]['path']]
+        return _create_single_video_with_mask(
+            video_infos[0], output_path, base_width, base_height, base_fps,
+            progress_callback, single_mask
+        )
     
     # 動画数がメモリ制限を超える場合はバッチ処理
     if len(video_infos) > max_concurrent_videos:
         if progress_callback:
-            progress_callback(f"動画数({len(video_infos)})が多いためバッチ処理を使用します...")
+            progress_callback(f"動画数({len(video_infos)})が多いため段階的バッチ処理を使用します（最大{max_concurrent_videos}動画/バッチ）...")
         return _create_lighten_blend_video_batched(
             video_infos, output_path, base_width, base_height, base_fps, 
-            max_frames, max_concurrent_videos, progress_callback
+            max_frames, max_concurrent_videos, progress_callback, inclusion_mask, per_video_masks
         )
     
     # 通常処理（メモリに収まる場合）
     return _create_lighten_blend_video_streaming(
         video_infos, output_path, base_width, base_height, base_fps,
-        max_frames, progress_callback
+        max_frames, progress_callback, inclusion_mask, per_video_masks
     )
+
+
+def _create_single_video_with_mask(
+    video_info: dict,
+    output_path: str,
+    base_width: int,
+    base_height: int,
+    base_fps: float,
+    progress_callback: Optional[Callable[[str], None]] = None,
+    inclusion_mask: Optional[np.ndarray] = None
+) -> bool:
+    """単一動画にマスクを適用して出力"""
+    cap = cv2.VideoCapture(video_info['path'])
+    if not cap.isOpened():
+        return False
+    
+    command = [
+        'ffmpeg', '-y', '-f', 'rawvideo', '-vcodec', 'rawvideo',
+        '-s', f'{base_width}x{base_height}', '-pix_fmt', 'bgr24',
+        '-r', str(base_fps), '-i', '-', '-an', '-c:v', 'libx264',
+        '-preset', 'medium', '-crf', '18', '-pix_fmt', 'yuv420p',
+        output_path
+    ]
+    
+    try:
+        proc = subprocess.Popen(
+            command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
+        )
+    except Exception as e:
+        cap.release()
+        if progress_callback:
+            progress_callback(f"エラー: ffmpegの起動に失敗: {e}")
+        return False
+    
+    frame_count = video_info['frame_count']
+    
+    # マスクの前処理
+    mask_3ch = None
+    if inclusion_mask is not None:
+        if inclusion_mask.shape[:2] != (base_height, base_width):
+            resized_mask = cv2.resize(inclusion_mask, (base_width, base_height))
+        else:
+            resized_mask = inclusion_mask
+        if len(resized_mask.shape) == 2:
+            mask_3ch = cv2.merge([resized_mask, resized_mask, resized_mask])
+        else:
+            mask_3ch = resized_mask
+    
+    try:
+        for frame_idx in range(frame_count):
+            ret, frame = cap.read()
+            if not ret:
+                break
+            
+            if frame.shape[1] != base_width or frame.shape[0] != base_height:
+                frame = cv2.resize(frame, (base_width, base_height))
+            
+            if mask_3ch is not None:
+                frame = cv2.bitwise_and(frame, mask_3ch)
+            
+            proc.stdin.write(frame.tobytes())
+            
+            if progress_callback and frame_idx % 30 == 0:
+                progress = (frame_idx + 1) / frame_count * 100
+                progress_callback(f"処理中: {frame_idx + 1}/{frame_count} フレーム ({progress:.1f}%)")
+    finally:
+        cap.release()
+        if proc.stdin:
+            proc.stdin.close()
+        proc.wait()
+    
+    return proc.returncode == 0
 
 
 def _create_lighten_blend_video_streaming(
@@ -157,11 +309,16 @@ def _create_lighten_blend_video_streaming(
     base_height: int,
     base_fps: float,
     max_frames: int,
-    progress_callback: Optional[Callable[[str], None]] = None
+    progress_callback: Optional[Callable[[str], None]] = None,
+    inclusion_mask: Optional[np.ndarray] = None,
+    per_video_masks: Optional[dict] = None
 ) -> bool:
     """
     ストリーミング方式で比較明合成動画を作成（メモリ効率版）。
     フレームを1つずつ読み込み、即座に合成して出力する。
+    
+    per_video_masksが指定されている場合、各動画のフレームに個別のマスクを適用してから
+    比較明合成を行う。これにより、各動画はその動画で検出された領域のみを合成に寄与する。
     """
     # 全ての動画のVideoCaptureを開く
     caps = []
@@ -174,7 +331,8 @@ def _create_lighten_blend_video_streaming(
                 'cap': cap,
                 'frame_count': info['frame_count'],
                 'width': info['width'],
-                'height': info['height']
+                'height': info['height'],
+                'path': info['path']  # パスを保持（per_video_masks用）
             })
     
     if not caps:
@@ -212,6 +370,34 @@ def _create_lighten_blend_video_streaming(
         return False
     
     try:
+        # 共通マスクの前処理（ループ外で一度だけ実行）
+        common_mask_3ch = None
+        if inclusion_mask is not None:
+            # マスクサイズが異なる場合はリサイズ
+            if inclusion_mask.shape[:2] != (base_height, base_width):
+                resized_mask = cv2.resize(inclusion_mask, (base_width, base_height))
+            else:
+                resized_mask = inclusion_mask
+            
+            # マスクが2次元(H,W)の場合、3チャンネル(H,W,3)に拡張
+            if len(resized_mask.shape) == 2:
+                common_mask_3ch = cv2.merge([resized_mask, resized_mask, resized_mask])
+            else:
+                common_mask_3ch = resized_mask
+        
+        # 動画ごとのマスクを前処理（パフォーマンスのため）
+        per_video_masks_3ch = {}
+        if per_video_masks:
+            for cap_info in caps:
+                video_path = cap_info['path']
+                if video_path in per_video_masks:
+                    mask = per_video_masks[video_path]
+                    if mask.shape[:2] != (base_height, base_width):
+                        mask = cv2.resize(mask, (base_width, base_height))
+                    if len(mask.shape) == 2:
+                        mask = cv2.merge([mask, mask, mask])
+                    per_video_masks_3ch[video_path] = mask
+        
         for frame_idx in range(max_frames):
             # 合成用のベースフレーム（最初のフレームで初期化）
             composite_frame = None
@@ -226,6 +412,11 @@ def _create_lighten_blend_video_streaming(
                         if frame.shape[1] != base_width or frame.shape[0] != base_height:
                             frame = cv2.resize(frame, (base_width, base_height))
                         
+                        # 動画ごとのマスクを適用（指定がある場合）
+                        video_path = cap_info['path']
+                        if video_path in per_video_masks_3ch:
+                            frame = np.where(per_video_masks_3ch[video_path] > 0, frame, 0).astype(np.uint8)
+                        
                         if composite_frame is None:
                             composite_frame = frame
                         else:
@@ -239,6 +430,9 @@ def _create_lighten_blend_video_streaming(
             if composite_frame is None:
                 # フレームがない場合は黒フレーム
                 composite_frame = np.zeros((base_height, base_width, 3), dtype=np.uint8)
+            elif common_mask_3ch is not None:
+                # 共通マスク適用: マスクが0の場所は黒にする
+                composite_frame = np.where(common_mask_3ch > 0, composite_frame, 0).astype(np.uint8)
             
             # FFMPEGに書き込み
             if proc.stdin:
@@ -299,7 +493,9 @@ def _create_lighten_blend_video_batched(
     base_fps: float,
     max_frames: int,
     batch_size: int,
-    progress_callback: Optional[Callable[[str], None]] = None
+    progress_callback: Optional[Callable[[str], None]] = None,
+    inclusion_mask: Optional[np.ndarray] = None,
+    per_video_masks: Optional[dict] = None
 ) -> bool:
     """
     バッチ処理方式で比較明合成動画を作成。
@@ -307,7 +503,7 @@ def _create_lighten_blend_video_batched(
     
     処理手順:
     1. 動画をバッチに分割
-    2. 各バッチで中間ファイルを作成
+    2. 各バッチで中間ファイルを作成（per_video_masksも適用）
     3. 中間ファイルを最終合成
     """
     import tempfile
@@ -333,10 +529,10 @@ def _create_lighten_blend_video_batched(
             intermediate_path = os.path.join(temp_dir, f"batch_{batch_idx}.mp4")
             intermediate_files.append(intermediate_path)
             
-            # バッチを処理
+            # バッチを処理（マスクも適用）
             success = _create_lighten_blend_video_streaming(
                 batch_infos, intermediate_path, base_width, base_height, base_fps,
-                max_frames, None  # 中間処理では進捗を抑制
+                max_frames, None, inclusion_mask, per_video_masks  # per_video_masksも渡す
             )
             
             if not success:
@@ -360,8 +556,8 @@ def _create_lighten_blend_video_batched(
             final_infos = [info for info in final_infos if info is not None]
             
             success = _create_lighten_blend_video_streaming(
-                final_infos, output_path, base_width, base_height, base_fps,
-                max_frames, progress_callback
+                final_infos, output_path, base_width, base_height, base_fps, 
+                max_frames, progress_callback, inclusion_mask
             )
             
             if not success:
