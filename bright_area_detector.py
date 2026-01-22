@@ -36,19 +36,21 @@ def _get_client():
     return _client
 
 
-def check_vlm_connection() -> bool:
+def check_vlm_connection() -> tuple:
     """
     LM Studio (VLM) への接続を確認する
     
     Returns:
-        bool: 接続成功なら True
+        tuple: (接続成功なら True, モデル名または空文字列)
     """
     try:
         client = _get_client()
-        client.models.list()
-        return True
+        models = client.models.list()
+        if models.data:
+            return (True, models.data[0].id)
+        return (True, "")
     except Exception:
-        return False
+        return (False, "")
 
 
 def image_to_base64_data_uri(image: np.ndarray, downscale: bool = False) -> str:
@@ -194,7 +196,8 @@ def detect_bright_areas(
             progress_callback(msg)
     
     # 接続確認
-    if not check_vlm_connection():
+    connected, _ = check_vlm_connection()
+    if not connected:
         log("エラー: LM Studio への接続に失敗しました。localhost:1234 で起動していることを確認してください。")
         return None
     
@@ -278,7 +281,8 @@ def detect_bright_areas_with_boxes(
             progress_callback(msg)
     
     # 接続確認
-    if not check_vlm_connection():
+    connected, _ = check_vlm_connection()
+    if not connected:
         log("エラー: LM Studio への接続に失敗しました。localhost:1234 で起動していることを確認してください。")
         return None
     
@@ -436,7 +440,8 @@ def detect_meteors_with_boxes(
             progress_callback(msg)
     
     # 接続確認
-    if not check_vlm_connection():
+    connected, _ = check_vlm_connection()
+    if not connected:
         log("エラー: LM Studio への接続に失敗しました。localhost:1234 で起動していることを確認してください。")
         return None
     
