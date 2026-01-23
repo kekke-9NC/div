@@ -9,75 +9,231 @@ Qwen3-VL を使用して画像内の明るいエリア（月、街灯など）�
     mask = bright_area_detector.detect_bright_areas(image, progress_callback)
 """
 
+import os
 import numpy as np
 import cv2
-import base64
 import re
+import gc
+import time
+import threading
 from typing import Optional, Tuple, Callable, List
-from io import BytesIO
+from PIL import Image
 
-# LM Studio 設定
-LM_STUDIO_URL = "http://localhost:1234/v1"
-MODEL_ID = "qwen/qwen3-vl-4b"
+import torch
+from transformers import Qwen3VLForConditionalGeneration, AutoProcessor, BitsAndBytesConfig
+from qwen_vl_utils import process_vision_info
 
-# openai クライアントの遅延インポート
-_client = None
+# モデル設定
+MODEL_ID = "Qwen/Qwen3-VL-4B-Instruct"
+LOCAL_MODEL_DIR = "./quantized_model"
+MODEL_OFFLOAD_TIMEOUT = 300  # 5分 = 300秒
+
+# グローバルモデルインスタンス（遅延ロード）
+_model = None
+_processor = None
+_model_loading = False
+_last_used_time = None
+_offload_timer = None
+_offload_lock = threading.Lock()
 
 
-def _get_client():
-    """OpenAI クライアントを取得（遅延初期化）"""
-    global _client
-    if _client is None:
+def _offload_model():
+    """モデルをオフロードしてGPUメモリを解放"""
+    global _model, _processor, _last_used_time, _offload_timer
+    
+    with _offload_lock:
+        if _model is None:
+            return
+        
+        print("モデルを5分間未使用のためオフロードしています...")
+        
         try:
-            from openai import OpenAI
-            _client = OpenAI(base_url=LM_STUDIO_URL, api_key="lm-studio")
-        except ImportError:
-            raise ImportError("openai-python がインストールされていません。pip install openai を実行してください。")
-    return _client
+            del _model
+            del _processor
+            _model = None
+            _processor = None
+            _last_used_time = None
+            _offload_timer = None
+            
+            torch.cuda.empty_cache()
+            gc.collect()
+            
+            print("モデルのオフロード完了（GPUメモリを解放しました）")
+        except Exception as e:
+            print(f"モデルオフロード中にエラー: {e}")
+
+
+def _reset_offload_timer():
+    """オフロードタイマーをリセット"""
+    global _last_used_time, _offload_timer
+    
+    with _offload_lock:
+        _last_used_time = time.time()
+        
+        # 既存のタイマーをキャンセル
+        if _offload_timer is not None:
+            _offload_timer.cancel()
+        
+        # 新しいタイマーを設定
+        _offload_timer = threading.Timer(MODEL_OFFLOAD_TIMEOUT, _offload_model)
+        _offload_timer.daemon = True
+        _offload_timer.start()
+
+
+def _get_model():
+    """モデルとプロセッサを取得（遅延初期化）"""
+    global _model, _processor, _model_loading
+    
+    with _offload_lock:
+        if _model is not None and _processor is not None:
+            return _model, _processor
+    
+    if _model_loading:
+        raise RuntimeError("モデルは現在ロード中です。しばらくお待ちください。")
+    
+    _model_loading = True
+    try:
+        bnb_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.bfloat16
+        )
+        
+        # ローカルキャッシュから読み込み試行
+        if os.path.exists(LOCAL_MODEL_DIR):
+            try:
+                print(f"ローカルモデルを読み込み中: {LOCAL_MODEL_DIR}")
+                _model = Qwen3VLForConditionalGeneration.from_pretrained(
+                    LOCAL_MODEL_DIR,
+                    device_map="auto",
+                    trust_remote_code=True,
+                    low_cpu_mem_usage=True
+                )
+                _processor = AutoProcessor.from_pretrained(
+                    LOCAL_MODEL_DIR, trust_remote_code=True, fix_mistral_regex=True
+                )
+                print("ローカルモデルの読み込み完了")
+                _reset_offload_timer()
+                return _model, _processor
+            except Exception as e:
+                print(f"ローカルモデル読み込み失敗: {e}")
+        
+        # リモートからダウンロード
+        print(f"モデルをダウンロード中: {MODEL_ID}")
+        _model = Qwen3VLForConditionalGeneration.from_pretrained(
+            MODEL_ID,
+            quantization_config=bnb_config,
+            device_map="auto",
+            low_cpu_mem_usage=True,
+            trust_remote_code=True
+        )
+        _processor = AutoProcessor.from_pretrained(
+            MODEL_ID, trust_remote_code=True
+        )
+        
+        # ローカルに保存
+        try:
+            print(f"モデルをローカルに保存中: {LOCAL_MODEL_DIR}")
+            _model.save_pretrained(LOCAL_MODEL_DIR)
+            _processor.save_pretrained(LOCAL_MODEL_DIR)
+            print("モデル保存完了")
+        except Exception as e:
+            print(f"モデル保存失敗: {e}")
+        
+        _reset_offload_timer()
+        return _model, _processor
+    finally:
+        _model_loading = False
+
 
 
 def check_vlm_connection() -> tuple:
     """
-    LM Studio (VLM) への接続を確認する
+    モデルの利用可否を確認する
     
     Returns:
-        tuple: (接続成功なら True, モデル名または空文字列)
+        tuple: (利用可能なら True, モデル名または空文字列)
     """
+    global _model, _processor
     try:
-        client = _get_client()
-        models = client.models.list()
-        if models.data:
-            return (True, models.data[0].id)
-        return (True, "")
-    except Exception:
-        return (False, "")
+        if _model is not None and _processor is not None:
+            _reset_offload_timer()
+            return (True, MODEL_ID)
+        # まだロードされていない場合は試行
+        _get_model()
+        return (True, MODEL_ID)
+    except Exception as e:
+        return (False, str(e))
 
 
-def image_to_base64_data_uri(image: np.ndarray, downscale: bool = False) -> str:
-    """
-    OpenCV画像をBase64 data URIに変換
-    
-    Args:
-        image: BGR形式のOpenCV画像
-        downscale: Trueの場合、画像サイズを1/2にリサイズ（高速化のため）
-        
-    Returns:
-        str: data:image/jpeg;base64,... 形式の文字列
-    """
-    # BGRからRGBに変換
+
+def _cv2_to_pil(image: np.ndarray) -> Image.Image:
+    """OpenCV画像をPIL Imageに変換（リサイズ含む）"""
     rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    pil_image = Image.fromarray(rgb_image)
     
-    if downscale:
-        # 画像サイズを1/2にリサイズ
-        height, width = rgb_image.shape[:2]
-        new_width = width // 2
-        new_height = height // 2
-        rgb_image = cv2.resize(rgb_image, (new_width, new_height), interpolation=cv2.INTER_AREA)
+    # 1080p にリサイズ（メモリ節約）
+    if pil_image.height != 1080:
+        aspect_ratio = pil_image.width / pil_image.height
+        new_height = 1080
+        new_width = int(new_height * aspect_ratio)
+        pil_image = pil_image.resize((new_width, new_height))
     
-    # JPEGエンコード
-    _, buffer = cv2.imencode('.jpg', rgb_image, [cv2.IMWRITE_JPEG_QUALITY, 85])
-    base64_data = base64.b64encode(buffer).decode('utf-8')
-    return f"data:image/jpeg;base64,{base64_data}"
+    return pil_image
+
+
+def _call_vlm(system_prompt: str, user_prompt: str, image: np.ndarray) -> str:
+    """VLMを呼び出してテキスト応答を取得"""
+    model, processor = _get_model()
+    
+    pil_image = _cv2_to_pil(image)
+    
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": [
+            {"type": "image", "image": pil_image},
+            {"type": "text", "text": user_prompt}
+        ]}
+    ]
+    
+    text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    image_inputs, video_inputs = process_vision_info(messages)
+    
+    inputs = processor(
+        text=[text],
+        images=image_inputs,
+        videos=video_inputs,
+        padding=True,
+        return_tensors="pt",
+    ).to("cuda")
+    
+    with torch.no_grad():
+        generated_ids = model.generate(
+            **inputs,
+            max_new_tokens=512,
+            temperature=0.7,
+            top_p=0.8,
+            top_k=20,
+            do_sample=True,
+        )
+    
+    generated_ids_trimmed = [
+        out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
+    ]
+    output_text = processor.batch_decode(
+        generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
+    )[0]
+    
+    # メモリ解放
+    del inputs, generated_ids, image_inputs, video_inputs
+    torch.cuda.empty_cache()
+    gc.collect()
+    
+    # オフロードタイマーをリセット（使用後に5分カウントダウン再開）
+    _reset_offload_timer()
+    
+    return output_text
 
 
 def _parse_boxes(text: str) -> List[Tuple[int, int, int, int]]:
@@ -196,19 +352,14 @@ def detect_bright_areas(
             progress_callback(msg)
     
     # 接続確認
-    connected, _ = check_vlm_connection()
+    connected, err = check_vlm_connection()
     if not connected:
-        log("エラー: LM Studio への接続に失敗しました。localhost:1234 で起動していることを確認してください。")
+        log(f"エラー: モデルの読み込みに失敗しました: {err}")
         return None
     
-    log("VLM接続OK。明るいエリアの検出を実行中...")
+    log("モデル準備OK。明るいエリアの検出を実行中...")
     
     try:
-        client = _get_client()
-        
-        # 画像をBase64に変換（ソース解像度を使用）
-        data_uri = image_to_base64_data_uri(image, downscale=False)
-        
         # プロンプト設定
         system_prompt = "Identify STATIC bright light sources (moon, streetlights). Ignore meteors/satellites."
         
@@ -220,24 +371,7 @@ def detect_bright_areas(
         )
         
         # VLM呼び出し
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": [
-                {"type": "text", "text": user_prompt},
-                {"type": "image_url", "image_url": {"url": data_uri}}
-            ]}
-        ]
-        
-        # Qwen3-VL 公式推奨パラメータ (Instruct model)
-        response = client.chat.completions.create(
-            model=MODEL_ID,
-            messages=messages,
-            temperature=0.7,
-            top_p=0.8,
-            max_tokens=512
-        )
-        
-        result_text = response.choices[0].message.content
+        result_text = _call_vlm(system_prompt, user_prompt, image)
         log(f"VLM応答: {result_text[:100]}..." if len(result_text) > 100 else f"VLM応答: {result_text}")
         
         # ボックスをパース
@@ -281,19 +415,14 @@ def detect_bright_areas_with_boxes(
             progress_callback(msg)
     
     # 接続確認
-    connected, _ = check_vlm_connection()
+    connected, err = check_vlm_connection()
     if not connected:
-        log("エラー: LM Studio への接続に失敗しました。localhost:1234 で起動していることを確認してください。")
+        log(f"エラー: モデルの読み込みに失敗しました: {err}")
         return None
     
-    log("VLM接続OK。明るいエリアの検出を実行中...")
+    log("モデル準備OK。明るいエリアの検出を実行中...")
     
     try:
-        client = _get_client()
-        
-        # 画像をBase64に変換（ソース解像度を使用）
-        data_uri = image_to_base64_data_uri(image, downscale=False)
-        
         # プロンプト設定
         system_prompt = "Identify STATIC bright light sources (moon, planets, streetlights). Ignore meteors/satellites."
         
@@ -305,24 +434,7 @@ def detect_bright_areas_with_boxes(
         )
         
         # VLM呼び出し
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": [
-                {"type": "text", "text": user_prompt},
-                {"type": "image_url", "image_url": {"url": data_uri}}
-            ]}
-        ]
-        
-        # Qwen3-VL 公式推奨パラメータ (Instruct model)
-        response = client.chat.completions.create(
-            model=MODEL_ID,
-            messages=messages,
-            temperature=0.7,
-            top_p=0.8,
-            max_tokens=512
-        )
-        
-        result_text = response.choices[0].message.content
+        result_text = _call_vlm(system_prompt, user_prompt, image)
         log(f"VLM応答: {result_text[:100]}..." if len(result_text) > 100 else f"VLM応答: {result_text}")
         
         # ボックスをパース
@@ -440,19 +552,14 @@ def detect_meteors_with_boxes(
             progress_callback(msg)
     
     # 接続確認
-    connected, _ = check_vlm_connection()
+    connected, err = check_vlm_connection()
     if not connected:
-        log("エラー: LM Studio への接続に失敗しました。localhost:1234 で起動していることを確認してください。")
+        log(f"エラー: モデルの読み込みに失敗しました: {err}")
         return None
     
-    log("VLM接続OK。流星の検出を実行中...")
+    log("モデル準備OK。流星の検出を実行中...")
     
     try:
-        client = _get_client()
-        
-        # 画像をBase64に変換（ソース解像度を使用）
-        data_uri = image_to_base64_data_uri(image, downscale=False)
-        
         # プロンプト設定（流星検出用）
         system_prompt = "Identify meteors, shooting stars, and linear light trails. Ignore static lights like moon/streetlights."
         
@@ -464,24 +571,7 @@ def detect_meteors_with_boxes(
         )
         
         # VLM呼び出し
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": [
-                {"type": "text", "text": user_prompt},
-                {"type": "image_url", "image_url": {"url": data_uri}}
-            ]}
-        ]
-        
-        # Qwen3-VL 公式推奨パラメータ (Instruct model)
-        response = client.chat.completions.create(
-            model=MODEL_ID,
-            messages=messages,
-            temperature=0.7,
-            top_p=0.8,
-            max_tokens=512
-        )
-        
-        result_text = response.choices[0].message.content
+        result_text = _call_vlm(system_prompt, user_prompt, image)
         log(f"VLM応答: {result_text[:100]}..." if len(result_text) > 100 else f"VLM応答: {result_text}")
         
         # ボックスをパース
