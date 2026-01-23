@@ -15,22 +15,7 @@ from transformers import Qwen3VLForConditionalGeneration, AutoProcessor, BitsAnd
 from qwen_vl_utils import process_vision_info
 
 # Configuration
-MODEL_ID = "Qwen/Qwen2-VL-7B-Instruct" # Based on qwen3_VL_4B.py which says "qwen/qwen3-vl-4b" but llm_test/app.py uses "Qwen/Qwen3-VL-4B-Instruct". Wait, qwen3 is actually Qwen2.5 or similar? 
-# The user's qwen3_VL_4B.py has "qwen/qwen3-vl-4b", but llm_test/app.py has "Qwen/Qwen3-VL-4B-Instruct".
-# The import in llm_test/app.py is `from transformers import Qwen3VLForConditionalGeneration`.
-# Wait, let me check the import in llm_test/app.py again.
-# Step 6 view_file shows: `from transformers import Qwen3VLForConditionalGeneration`
-# But I see `Qwen2VLForConditionalGeneration` in my thought.
-# Let me re-read llm_test/app.py carefully.
-
-# Step 6:
-# 5: from transformers import Qwen3VLForConditionalGeneration, AutoProcessor, BitsAndBytesConfig
-# 11: model_id = "Qwen/Qwen3-VL-4B-Instruct"
-
-# So I must use Qwen3VLForConditionalGeneration.
-# However, standard transformers might not have Qwen3VL yet?
-# Users code `llm_test/app.py` imports it. So it must exist in their environment.
-# I will use exactly what is in `llm_test/app.py`.
+MODEL_ID = "Qwen/Qwen3-VL-4B-Instruct"
 
 class QwenVLApp:
     def __init__(self, root):
@@ -45,7 +30,6 @@ class QwenVLApp:
         self.tk_image = None  # PhotoImage for display
         self.is_loading = False
         
-        # Detection state
         self.detected_shapes = []  # List of (label, points)
         self.visible_categories = {}  # category -> BooleanVar
         self.category_colors = {}  # category -> color
@@ -57,11 +41,9 @@ class QwenVLApp:
         threading.Thread(target=self.initialize_model, daemon=True).start()
 
     def setup_ui(self):
-        # Configure Grid
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(1, weight=1)
 
-        # Control Panel
         control_frame = ttk.Frame(self.root, padding=10)
         control_frame.grid(row=0, column=0, sticky="ew")
 
@@ -82,22 +64,18 @@ class QwenVLApp:
         self.quick_btn = ttk.Button(control_frame, text="Quick Detect", command=self.run_quick_detect, state=tk.DISABLED)
         self.quick_btn.pack(side=tk.LEFT, padx=5)
 
-        # Main Content Area (PanedWindow for Canvas + Legend)
         self.main_paned = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
         self.main_paned.grid(row=1, column=0, sticky="nsew", padx=10, pady=10)
 
-        # Image Display Area (Left)
         self.canvas_frame = ttk.Frame(self.main_paned)
         self.main_paned.add(self.canvas_frame, weight=4)
 
         self.canvas = tk.Canvas(self.canvas_frame, bg="#333333")
         self.canvas.pack(fill=tk.BOTH, expand=True)
 
-        # Legend Panel (Right)
         self.legend_frame = ttk.LabelFrame(self.main_paned, text="Legend", padding=10)
         self.main_paned.add(self.legend_frame, weight=1)
 
-        # Scrollable legend content
         self.legend_canvas = tk.Canvas(self.legend_frame, width=180)
         self.legend_scrollbar = ttk.Scrollbar(self.legend_frame, orient="vertical", command=self.legend_canvas.yview)
         self.legend_inner = ttk.Frame(self.legend_canvas)
@@ -109,7 +87,6 @@ class QwenVLApp:
         self.legend_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.legend_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
-        # Status Bar
         self.status_var = tk.StringVar(value="Initializing...")
         self.status_bar = ttk.Label(self.root, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W)
         self.status_bar.grid(row=2, column=0, sticky="ew")
@@ -118,8 +95,7 @@ class QwenVLApp:
         try:
             self.root.after(0, lambda: self.status_var.set("Loading model... (This may take a while)"))
             
-            # Model configuration
-            model_id = "Qwen/Qwen3-VL-4B-Instruct"
+
             bnb_config = BitsAndBytesConfig(
                 load_in_4bit=True,
                 bnb_4bit_use_double_quant=True,
@@ -148,15 +124,15 @@ class QwenVLApp:
             
             # If not loaded, download and load
             if not loaded:
-                print(f"Downloading/Loading model {model_id}...")
+                print(f"Downloading/Loading model {MODEL_ID}...")
                 self.model = Qwen3VLForConditionalGeneration.from_pretrained(
-                    model_id,
+                    MODEL_ID,
                     quantization_config=bnb_config,
                     device_map="cuda",
                     low_cpu_mem_usage=True,
                     trust_remote_code=True
                 )
-                self.processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True, fix_mistral_regex=True)
+                self.processor = AutoProcessor.from_pretrained(MODEL_ID, trust_remote_code=True, fix_mistral_regex=True)
                 
                 # Try to save locally
                 try:
