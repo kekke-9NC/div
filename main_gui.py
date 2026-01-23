@@ -46,6 +46,7 @@ import lighten_blend_image
 import timelapse_creator
 import video_processor
 from tkinter import simpledialog
+import chat_gui
 
 class App(TkinterDnD.Tk):
     def __init__(self):
@@ -285,6 +286,7 @@ class App(TkinterDnD.Tk):
 
         tab_settings = self.create_settings_tab(notebook)
         tab_analysis = self.create_analysis_tab(notebook)
+        tab_chat = chat_gui.create_tab(notebook)
         tab_advanced_settings = self.create_advanced_settings_tab(notebook)
 
         notebook.add(tab_usage, text="使い方")
@@ -292,6 +294,7 @@ class App(TkinterDnD.Tk):
 
         notebook.add(tab_settings, text="保存設定")
         notebook.add(tab_analysis, text="解析")
+        notebook.add(tab_chat, text="Chat")
         notebook.add(tab_advanced_settings, text="⚙️")
         
         main_pane.add(left_frame, width=550)
