@@ -1,0 +1,14 @@
+numpy
+opencv-python
+pillow
+astropy
+tkinterdnd2
+openai
+torch
+torchvision
+matplotlib
+requests
+transformers
+qwen-vl-utils
+accelerate
+bitsandbytes

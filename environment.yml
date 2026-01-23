@@ -1,0 +1,25 @@
+name: meteor_detector
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  - numpy
+  - pillow
+  - astropy
+  - pytorch
+  - torchvision
+  - pytorch-cuda=11.8
+  - matplotlib
+  - requests
+  - pip:
+    - opencv-python
+    - tkinterdnd2
+    - openai
+    - transformers
+    - qwen-vl-utils
+    - accelerate
+    - bitsandbytes
