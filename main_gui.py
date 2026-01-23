@@ -4183,7 +4183,7 @@ class ProcessingOptionDialog(tk.Toplevel):
         super().__init__(parent)
         self.title("処理オプション")
         self.result = None
-        self.geometry("400x320")
+        self.geometry("500x320") 
         self.resizable(False, False)
         
         # メインフレームを作成して全体に配置（テーマの背景色を適用するため）
@@ -4203,25 +4203,19 @@ class ProcessingOptionDialog(tk.Toplevel):
         self.rb_meteor = ttk.Radiobutton(mode_frame, text="流星のみ合成 (AI検出)", variable=self.mode_var, value=2)
         self.rb_meteor.pack(anchor=tk.W, pady=5)
         
-        status_frame = ttk.Frame(self.main_frame)
-        status_frame.pack(fill=tk.X, pady=(0, 20))
-        
-        ttk.Label(status_frame, text="AIエンジン (LM Studio):", font=("", 9)).pack(side=tk.LEFT)
-        self.status_label = ttk.Label(status_frame, text="接続確認中...", font=("", 9, "bold"), foreground="gray")
-        self.status_label.pack(side=tk.LEFT, padx=5)
-        
-        # ヘルプツールチップ（?アイコン）
-        # ttk.Labelでは色が反映されない場合があるためtk.Labelを使用
-        help_label = tk.Label(status_frame, text="?", font=("", 9, "bold"), fg="#87CEEB", bg="#2E3F5B", cursor="hand2")
-        help_label.pack(side=tk.LEFT, padx=2)
-        self._setup_help_tooltip(help_label)
+        # VRAM warning
+        warning_frame = ttk.Frame(self.main_frame)
+        warning_frame.pack(fill=tk.X, pady=(5, 10))
+        # 黄色 (#FFD700) に変更
+        ttk.Label(warning_frame, text="※AI検出を選択時、VRAMが7GB未満の場合は", font=("", 9), foreground="#FFD700").pack(anchor=tk.W)
+        ttk.Label(warning_frame, text="  動作が非常に遅くなる可能性があります。", font=("", 9), foreground="#FFD700").pack(anchor=tk.W)
         
         btn_frame = ttk.Frame(self.main_frame)
         btn_frame.pack(fill=tk.X, side=tk.BOTTOM)
         
         ttk.Button(btn_frame, text="キャンセル", command=self.destroy).pack(side=tk.RIGHT, padx=5)
-        self.next_btn = ttk.Button(btn_frame, text="次へ", command=self.on_ok, state=tk.DISABLED)
-        self.next_btn.pack(side=tk.RIGHT, padx=5) # 決定ではなく次へ進むニュアンス
+        self.next_btn = ttk.Button(btn_frame, text="次へ", command=self.on_ok, state=tk.NORMAL) # 最初から有効化
+        self.next_btn.pack(side=tk.RIGHT, padx=5)
         
         self.transient(parent)
         self.grab_set()
@@ -4234,122 +4228,17 @@ class ProcessingOptionDialog(tk.Toplevel):
         except:
             pass
             
-        self.after(100, self.check_connection)
         self.protocol("WM_DELETE_WINDOW", self.destroy)
         self.wait_window(self)
-        
-    def check_connection(self):
-        # UIをブロックしないように別スレッドで実行
-        threading.Thread(target=self._check_connection_thread, daemon=True).start()
-
-    def _check_connection_thread(self):
-        try:
-            import bright_area_detector
-            connected, model_name = bright_area_detector.check_vlm_connection()
-            self.after(0, lambda: self._update_connection_status(connected, model_name=model_name))
-        except Exception as e:
-            self.after(0, lambda: self._update_connection_status(False, error_msg=str(e)))
-
-    def _update_connection_status(self, connected, model_name="", error_msg=None):
-        try:
-            if not self.winfo_exists():
-                return
-        except Exception:
-            return
-
-        if connected:
-            if model_name and "qwen3-vl" in model_name.lower():
-                self.status_label.config(text=f"利用可能: {model_name}", foreground="#4CAF50")
-            elif model_name:
-                self.status_label.config(text=f"接続OK: {model_name}", foreground="#FFA500")  # オレンジ（非推奨モデル）
-            else:
-                self.status_label.config(text="接続OK", foreground="#4CAF50")
-        else:
-            msg = "未接続"
-            if error_msg:
-                msg = f"エラー: {error_msg}"
-            self.status_label.config(text=msg, foreground="#F44336") # 赤系
-            self.rb_bright.config(state=tk.DISABLED)
-            self.rb_meteor.config(state=tk.DISABLED)
-            self.mode_var.set(0)
-        
-        # チェック完了後はボタンを有効化
-        self.next_btn.config(state=tk.NORMAL)
+    
+    # check_connection, _check_connection_thread, _update_connection_status removed
 
     def on_ok(self):
         self.result = self.mode_var.get()
         self.destroy()
     
     def _setup_help_tooltip(self, widget):
-        """ヘルプツールチップを作成（URLクリック可能）"""
-        import webbrowser
-        self._help_tooltip = None
-        self._hide_scheduled = None
-        
-        def show_tooltip(event=None):
-            if self._hide_scheduled:
-                self.after_cancel(self._hide_scheduled)
-                self._hide_scheduled = None
-            if self._help_tooltip:
-                return
-            x = widget.winfo_rootx() + 20
-            y = widget.winfo_rooty() + 20
-            self._help_tooltip = tk.Toplevel(self)
-            self._help_tooltip.wm_overrideredirect(True)
-            self._help_tooltip.wm_geometry(f"+{x}+{y}")
-            
-            frame = tk.Frame(self._help_tooltip, background="#2E3F5B", relief=tk.SOLID, borderwidth=1)
-            frame.pack()
-            
-            tk.Label(frame, text="【使用モデル】 qwen3-vl-4b", font=("", 9, "bold"), 
-                   background="#2E3F5B", foreground="#EAEAEA", anchor=tk.W).pack(fill=tk.X, padx=8, pady=(5,2))
-            
-            tk.Label(frame, text="\n【LM Studio インストール方法】", font=("", 9, "bold"), 
-                   background="#2E3F5B", foreground="#EAEAEA", anchor=tk.W).pack(fill=tk.X, padx=8, pady=0)
-            
-            url_frame = tk.Frame(frame, background="#2E3F5B")
-            url_frame.pack(fill=tk.X, padx=8, pady=2)
-            tk.Label(url_frame, text="1. ", font=("", 9), background="#2E3F5B", foreground="#EAEAEA").pack(side=tk.LEFT)
-            url_label = tk.Label(url_frame, text="https://lmstudio.ai/", font=("", 9, "underline"), 
-                               foreground="#87CEEB", background="#2E3F5B", cursor="hand2")
-            url_label.pack(side=tk.LEFT)
-            url_label.bind("<Button-1>", lambda e: webbrowser.open("https://lmstudio.ai/"))
-            tk.Label(url_frame, text=" からダウンロード", font=("", 9), background="#2E3F5B", foreground="#EAEAEA").pack(side=tk.LEFT)
-            
-            steps = [
-                "2. 検索バーで 'qwen3-vl-4b' を検索",
-                "3. モデルをダウンロード",
-                "4. 'Local Server' でサーバーを開始 (port 1234)"
-            ]
-            for step in steps:
-                tk.Label(frame, text=step, font=("", 9), background="#2E3F5B", foreground="#EAEAEA", 
-                       anchor=tk.W).pack(fill=tk.X, padx=8, pady=1)
-            
-            tk.Label(frame, text="", background="#2E3F5B").pack(pady=2)  # 下余白
-            
-            # ツールチップ内にマウスが入ったら消えないように
-            self._help_tooltip.bind("<Enter>", lambda e: cancel_hide())
-            self._help_tooltip.bind("<Leave>", schedule_hide)
-        
-        def cancel_hide():
-            if self._hide_scheduled:
-                self.after_cancel(self._hide_scheduled)
-                self._hide_scheduled = None
-        
-        def schedule_hide(event=None):
-            if self._hide_scheduled:
-                self.after_cancel(self._hide_scheduled)
-            self._hide_scheduled = self.after(200, hide_tooltip)
-        
-        def hide_tooltip():
-            if self._help_tooltip:
-                self._help_tooltip.destroy()
-                self._help_tooltip = None
-            self._hide_scheduled = None
-        
-        widget.bind("<Enter>", show_tooltip)
-        widget.bind("<Leave>", schedule_hide)
-
+        pass
 
 def worker_main_loop(
     progress_queue: queue.Queue, sources: List[Dict[str, Any]], max_workers: int, interval: float, duration: float,
