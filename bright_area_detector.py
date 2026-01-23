@@ -236,6 +236,90 @@ def _call_vlm(system_prompt: str, user_prompt: str, image: np.ndarray) -> str:
     return output_text
 
 
+def generate_response(
+    user_prompt: str,
+    system_prompt: str = "You are a helpful assistant.",
+    image: Optional[np.ndarray] = None
+) -> str:
+    """
+    汎用的なチャット応答を生成する
+    
+    Args:
+        user_prompt: ユーザーからのメッセージ
+        system_prompt: システムプロンプト
+        image: オプションの画像 (BGR)
+        
+    Returns:
+        応答テキスト
+    """
+    # 接続確認
+    connected, err = check_vlm_connection()
+    if not connected:
+        return f"エラー: モデルの読み込みに失敗しました: {err}"
+
+    model, processor = _get_model()
+    
+    content = []
+    
+    image_inputs = None
+    video_inputs = None
+    
+    if image is not None:
+        pil_image = _cv2_to_pil(image)
+        content.append({"type": "image", "image": pil_image})
+        
+    content.append({"type": "text", "text": user_prompt})
+    
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": content}
+    ]
+    
+    text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    
+    # 画像がある場合のみ process_vision_info を呼ぶ
+    if image is not None:
+        image_inputs, video_inputs = process_vision_info(messages)
+    
+    inputs_args = {"text": [text], "padding": True, "return_tensors": "pt"}
+    if image_inputs is not None:
+        inputs_args["images"] = image_inputs
+    if video_inputs is not None:
+        inputs_args["videos"] = video_inputs
+        
+    inputs = processor(**inputs_args).to("cuda")
+    
+    with torch.no_grad():
+        generated_ids = model.generate(
+            **inputs,
+            max_new_tokens=512,
+            temperature=0.7,
+            top_p=0.8,
+            top_k=20,
+            do_sample=True,
+        )
+    
+    generated_ids_trimmed = [
+        out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
+    ]
+    output_text = processor.batch_decode(
+        generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
+    )[0]
+    
+    # メモリ解放
+    del inputs, generated_ids
+    if image_inputs is not None:
+        del image_inputs
+    if video_inputs is not None:
+        del video_inputs
+    torch.cuda.empty_cache()
+    gc.collect()
+    
+    _reset_offload_timer()
+    
+    return output_text
+
+
 def _parse_boxes(text: str) -> List[Tuple[int, int, int, int]]:
     """
     VLMレスポンスからボックス座標をパース
