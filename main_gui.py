@@ -8,6 +8,7 @@ import json
 import cv2
 import numpy as np
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import ttk, filedialog, messagebox, Toplevel, Canvas, PanedWindow
 from tkinter.scrolledtext import ScrolledText
 from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -71,10 +72,10 @@ class App(TkinterDnD.Tk):
         self.global_wcs_info = None
         self.summary_video_config = [
             {'name': "Composite Image", 'enabled': True, 'duration': 1.0},
-            {'name': "Annotated Image", 'enabled': True, 'duration': 2.0},
-            {'name': "Zoom Sequence", 'enabled': True, 'duration': 2.0},
-            {'name': "Cutout Video", 'enabled': True},
-            {'name': "Full Size Video", 'enabled': False}
+            {'name': "Annotated Image", 'enabled': False, 'duration': 2.0},
+            {'name': "Full Size Video", 'enabled': True},
+            {'name': "Zoom Sequence", 'enabled': False, 'duration': 2.0},
+            {'name': "Cutout Video", 'enabled': True}
         ]
         if getattr(sys, 'frozen', False):
             # exeと同じディレクトリに設定ファイルを置く
@@ -174,6 +175,11 @@ class App(TkinterDnD.Tk):
         # Radiobutton style
         style.configure("TRadiobutton", background=BG_COLOR, foreground=FG_COLOR, font=('Segoe UI', 10))
         style.map("TRadiobutton", background=[('active', BG_COLOR), ('disabled', BG_COLOR)], foreground=[('disabled', '#AAAAAA')])
+
+        # Combobox style matching dark theme with Red text
+        style.configure("TCombobox", fieldbackground="#3A4D6B", background=BG_COLOR, foreground="#FF0000", arrowcolor=FG_COLOR, bordercolor=SELECT_BG)
+        style.map("TCombobox", fieldbackground=[('readonly', '#3A4D6B')], selectbackground=[('readonly', '#3A4D6B')], 
+                  foreground=[('readonly', '#FF0000')], selectforeground=[('readonly', '#FF0000')])
 
     def setup_variables(self):
         self.rtsp_url_var = tk.StringVar()
@@ -837,16 +843,77 @@ atomcam2で利用する場合は、GitHubで公開されている
 
         ttk.Label(concat_settings_frame, text="FPS:").pack(side=tk.LEFT, padx=(10,5))
         fps_combo = ttk.Combobox(concat_settings_frame, textvariable=self.video_concat_fps_var,
-                                 values=["Auto", "15", "24", "25", "30", "60"], width=6)
+                                 values=["Auto", "15", "24", "25", "30", "60"], width=6, state="readonly")
         fps_combo.pack(side=tk.LEFT, padx=(0,5))
 
         concat_settings_row2 = ttk.Frame(lf_concat)
         concat_settings_row2.pack(fill=tk.X, pady=(0, 5))
-        ttk.Checkbutton(concat_settings_row2, text="セーフモード（タイムスタンプ補正）", variable=self.video_concat_safe_mode_var).pack(side=tk.LEFT, padx=5)
+        ttk.Checkbutton(concat_settings_row2, text="セーフモード（タイムスタンプ補正）", variable=self.video_concat_safe_mode_var).pack(side=tk.LEFT, padx=(5,0))
+        help_label = tk.Label(concat_settings_row2, text="?", font=("", 9, "bold"), fg="#87CEEB", bg="#2E3F5B", cursor="hand2")
+        
+        help_label.pack(side=tk.LEFT, padx=(2, 5))
+        
+        help_text = ("動画連結時に、入力ファイルのタイムスタンプ情報が正しくない場合や、\n"
+                     "動画間で不整合がある場合に、このオプションを有効にしてください。\n"
+                     "全フレームを再エンコードして一時ファイルを作成するため、\n"
+                     "処理に時間がかかりますが、連結の安定性が向上します。")
+        self._setup_help_tooltip(help_label, help_text)
 
         ttk.Button(lf_concat, text="連結開始", command=self.start_video_concat).pack(pady=5)
 
         return frame
+
+    def _setup_help_tooltip(self, widget, text):
+        """ヘルプツールチップを作成（汎用版）"""
+        self._help_tooltip = None
+        self._hide_scheduled = None
+        
+        def show_tooltip(event=None):
+            if self._hide_scheduled:
+                self.after_cancel(self._hide_scheduled)
+                self._hide_scheduled = None
+            if self._help_tooltip:
+                return
+            x = widget.winfo_rootx() + 20
+            y = widget.winfo_rooty() + 20
+            self._help_tooltip = tk.Toplevel(self)
+            self._help_tooltip.wm_overrideredirect(True)
+            self._help_tooltip.wm_geometry(f"+{x}+{y}")
+            
+            # ダークテーマっぽい配色を使用
+            bg_color = "#2E3F5B"
+            fg_color = "#EAEAEA"
+            
+            frame = tk.Frame(self._help_tooltip, background=bg_color, relief=tk.SOLID, borderwidth=1)
+            frame.pack()
+            
+            # 複数行テキストに対応
+            for line in text.split('\n'):
+                tk.Label(frame, text=line, font=("", 9), 
+                       background=bg_color, foreground=fg_color, anchor=tk.W, justify=tk.LEFT).pack(fill=tk.X, padx=8, pady=1)
+            
+            # ツールチップ内にマウスが入ったら消えないように
+            self._help_tooltip.bind("<Enter>", lambda e: cancel_hide())
+            self._help_tooltip.bind("<Leave>", schedule_hide)
+        
+        def cancel_hide():
+            if self._hide_scheduled:
+                self.after_cancel(self._hide_scheduled)
+                self._hide_scheduled = None
+        
+        def schedule_hide(event=None):
+            if self._hide_scheduled:
+                self.after_cancel(self._hide_scheduled)
+            self._hide_scheduled = self.after(200, hide_tooltip)
+        
+        def hide_tooltip():
+            if self._help_tooltip:
+                self._help_tooltip.destroy()
+                self._help_tooltip = None
+            self._hide_scheduled = None
+        
+        widget.bind("<Enter>", show_tooltip)
+        widget.bind("<Leave>", schedule_hide)
 
     def drop_analysis(self, event):
         paths = self.splitlist(event.data)
@@ -1343,8 +1410,8 @@ atomcam2で利用する場合は、GitHubで公開されている
                 # RTSP検出プリセット選択
         p_frame4 = ttk.Frame(lf_params); p_frame4.pack(fill=tk.X, pady=2)
         ttk.Label(p_frame4, text="RTSP検出感度:", width=20).pack(side=tk.LEFT)
-        ttk.Radiobutton(p_frame4, text="雲が少ないとき（高感度）", variable=self.rtsp_preset_var, value="clear").pack(side=tk.LEFT, padx=5)
-        ttk.Radiobutton(p_frame4, text="雲が多いとき（ノイズ対策）", variable=self.rtsp_preset_var, value="cloudy").pack(side=tk.LEFT, padx=5)
+        ttk.Radiobutton(p_frame4, text="雲が少ないとき", variable=self.rtsp_preset_var, value="clear").pack(side=tk.LEFT, padx=5)
+        ttk.Radiobutton(p_frame4, text="雲が多いとき（推奨）", variable=self.rtsp_preset_var, value="cloudy").pack(side=tk.LEFT, padx=5)
 
         lf_save = ttk.LabelFrame(scrollable_frame, text="保存アイテム")
         lf_save.pack(fill=tk.X, pady=5)
@@ -1364,6 +1431,43 @@ atomcam2で利用する場合は、GitHubで公開されている
             chk = ttk.Checkbutton(f, text=text, variable=var)
             chk.pack(side=tk.LEFT, anchor=tk.W)
             if key == 'summary':
+                # ヘルプの?マーク
+                summary_help_label = tk.Label(f, text="?", font=("", 9, "bold"), fg="#87CEEB", bg="#2E3F5B", cursor="hand2")
+                summary_help_label.pack(side=tk.LEFT, padx=(2, 0))
+                summary_help_label._tooltip = None
+                
+                def show_summary_tooltip(event, label=summary_help_label):
+                    if label._tooltip is not None:
+                        return
+                    tooltip = tk.Toplevel(self)
+                    tooltip.wm_overrideredirect(True)
+                    tooltip.wm_geometry(f"+{event.x_root + 15}+{event.y_root + 10}")
+                    tooltip.configure(bg="#2E3F5B")
+                    content_frame = tk.Frame(tooltip, bg="#2E3F5B", padx=8, pady=5)
+                    content_frame.pack()
+                    tk.Label(content_frame, text="SNSなどの投稿に便利な編集済みの動画を作成します", 
+                             bg="#2E3F5B", fg="#EAEAEA", font=("Yu Gothic UI", 9)).pack()
+                    label._tooltip = tooltip
+                    
+                    def hide_after_delay():
+                        if label._tooltip:
+                            label._tooltip.destroy()
+                            label._tooltip = None
+                    
+                    tooltip.after(2000, hide_after_delay)
+                
+                def hide_summary_tooltip(event, label=summary_help_label):
+                    if label._tooltip:
+                        label._tooltip.after(200, lambda: close_tooltip(label))
+                
+                def close_tooltip(label):
+                    if label._tooltip:
+                        label._tooltip.destroy()
+                        label._tooltip = None
+                
+                summary_help_label.bind("<Enter>", show_summary_tooltip)
+                summary_help_label.bind("<Leave>", hide_summary_tooltip)
+                
                 self.btn_summary_settings = ttk.Button(f, text="詳細設定...", command=self.create_summary_settings_window)
                 self.btn_summary_settings.pack(side=tk.LEFT, padx=5)
                 var.trace_add("write", lambda *args: self.toggle_summary_settings_button())
@@ -2655,7 +2759,8 @@ atomcam2で利用する場合は、GitHubで公開されている
         
         ttk.Label(win, text="概要動画に含める項目と順序:").pack(pady=5, padx=10, anchor='w')
         list_frame = ttk.Frame(win); list_frame.pack(fill=tk.BOTH, expand=True, padx=10)
-        listbox = tk.Listbox(list_frame, selectmode=tk.SINGLE, exportselection=False)
+        listbox = tk.Listbox(list_frame, selectmode=tk.SINGLE, exportselection=False,
+                             bg="#3A4D6B", fg="#EAEAEA", selectbackground="#5A7AA9", highlightthickness=0)
         listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         check_vars = [tk.BooleanVar(value=item['enabled']) for item in temp_config]
