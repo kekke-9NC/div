@@ -278,24 +278,24 @@ class App(TkinterDnD.Tk):
         right_frame = ttk.Frame(main_pane, padding=10)
         self.create_info_panel(right_frame)
 
-        notebook = ttk.Notebook(left_frame)
-        notebook.pack(fill=tk.BOTH, expand=True)
+        self.notebook = ttk.Notebook(left_frame)
+        self.notebook.pack(fill=tk.BOTH, expand=True)
 
-        tab_usage = self.create_usage_tab(notebook)
-        tab_source = self.create_source_tab(notebook)
+        tab_usage = self.create_usage_tab(self.notebook)
+        self.tab_source = self.create_source_tab(self.notebook)
 
-        tab_settings = self.create_settings_tab(notebook)
-        tab_analysis = self.create_analysis_tab(notebook)
-        tab_chat = chat_gui.create_tab(notebook)
-        tab_advanced_settings = self.create_advanced_settings_tab(notebook)
+        self.tab_settings = self.create_settings_tab(self.notebook)
+        self.tab_analysis = self.create_analysis_tab(self.notebook)
+        tab_chat = chat_gui.create_tab(self.notebook, app=self)
+        tab_advanced_settings = self.create_advanced_settings_tab(self.notebook)
 
-        notebook.add(tab_usage, text="使い方")
-        notebook.add(tab_source, text="ソース選択")
+        self.notebook.add(tab_usage, text="使い方")
+        self.notebook.add(self.tab_source, text="ソース選択")
 
-        notebook.add(tab_settings, text="保存設定")
-        notebook.add(tab_analysis, text="解析")
-        notebook.add(tab_chat, text="Chat")
-        notebook.add(tab_advanced_settings, text="⚙️")
+        self.notebook.add(self.tab_settings, text="保存設定")
+        self.notebook.add(self.tab_analysis, text="解析")
+        self.notebook.add(tab_chat, text="Chat")
+        self.notebook.add(tab_advanced_settings, text="⚙️")
         
         main_pane.add(left_frame, width=550)
         main_pane.add(right_frame)
@@ -445,10 +445,12 @@ class App(TkinterDnD.Tk):
         lf_folder = ttk.LabelFrame(scrollable_frame, text="フォルダ / 動画ファイル")
         lf_folder.pack(fill=tk.X, expand=True, pady=5)
         
-        drop_label = ttk.Label(lf_folder, text="ここにフォルダや動画ファイルをドラッグ＆ドロップ", relief=tk.SOLID, padding=20, anchor=tk.CENTER, borderwidth=1)
-        drop_label.pack(fill=tk.X, pady=5)
-        drop_label.drop_target_register(DND_FILES)
-        drop_label.dnd_bind('<<Drop>>', self.drop)
+        self.source_drop_label = ttk.Label(lf_folder, text="ここにフォルダや動画ファイルをドラッグ＆ドロップ", relief=tk.SOLID, padding=20, anchor=tk.CENTER, borderwidth=1)
+        self.source_drop_label.pack(fill=tk.X, pady=5)
+        self.source_drop_label.drop_target_register(DND_FILES)
+        self.source_drop_label.dnd_bind('<<Drop>>', self.drop)
+        # Store original style for highlight feature
+        self.source_drop_label._original_bg = None
 
         # Custom scrollable list with modern FPS badges
         list_container = ttk.Frame(lf_folder)
@@ -547,7 +549,8 @@ class App(TkinterDnD.Tk):
         entry_frame = ttk.Frame(lf_rtsp)
         entry_frame.pack(fill=tk.X)
         ttk.Label(entry_frame, text="URL:").pack(side=tk.LEFT, padx=(0,5))
-        ttk.Entry(entry_frame, textvariable=self.rtsp_url_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.rtsp_url_entry = ttk.Entry(entry_frame, textvariable=self.rtsp_url_var)
+        self.rtsp_url_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
         
         ttk.Label(entry_frame, text="FPS:").pack(side=tk.LEFT, padx=(10, 5))
         fps_spin = ttk.Spinbox(entry_frame, from_=1, to=120, increment=1, width=5, textvariable=self.rtsp_fps_var)
@@ -592,7 +595,8 @@ class App(TkinterDnD.Tk):
         ttk.Button(rtsp_btn_frame, text="選択項目を削除", command=self.remove_selected_rtsp).pack(side=tk.LEFT, padx=2)
         ttk.Button(rtsp_btn_frame, text="すべて削除", command=self.remove_all_rtsp).pack(side=tk.LEFT, padx=2)
         ttk.Button(rtsp_btn_frame, text="RTSPからプレートソルブ", command=self.start_rtsp_plate_solve).pack(side=tk.LEFT, padx=(10, 2))
-        ttk.Button(rtsp_btn_frame, text="RTSPからマスク作成", command=self.create_rtsp_mask).pack(side=tk.LEFT, padx=2)
+        self.btn_rtsp_mask = ttk.Button(rtsp_btn_frame, text="RTSPからマスク作成", command=self.create_rtsp_mask)
+        self.btn_rtsp_mask.pack(side=tk.LEFT, padx=2)
         
         rtsp_time_frame = ttk.Frame(lf_rtsp)
         rtsp_time_frame.pack(fill=tk.X, pady=(8,0))
@@ -719,6 +723,127 @@ atomcam2で利用する場合は、GitHubで公開されている
 
         return frame
 
+    def navigate_to_source_drop_area(self):
+        """Navigate to Source Selection tab and highlight the drop area for a few seconds."""
+        # Switch to the Source Selection tab
+        self.notebook.select(self.tab_source)
+        
+        # Highlight the drop area
+        style = ttk.Style()
+        # Save original background if not saved yet
+        try:
+            orig_bg = style.lookup('TLabel', 'background')
+        except:
+            orig_bg = "#2E3F5B"
+        
+        # Create highlight style
+        style.configure("Highlight.TLabel", background="#FFD700", foreground="#000000")
+        self.source_drop_label.configure(style="Highlight.TLabel")
+        
+        # Flash effect: cycle through highlight colors
+        def flash_highlight(count=0):
+            if count >= 6:  # 3 seconds (6 * 500ms)
+                # Restore original style
+                self.source_drop_label.configure(style="TLabel")
+                return
+            
+            if count % 2 == 0:
+                style.configure("Highlight.TLabel", background="#FFD700", foreground="#000000")
+            else:
+                style.configure("Highlight.TLabel", background="#4A6A9B", foreground="#EAEAEA")
+            
+            self.after(500, lambda: flash_highlight(count + 1))
+        
+        flash_highlight()
+
+    def navigate_to_start_button(self):
+        """Highlight the start button for a few seconds."""
+        style = ttk.Style()
+        
+        # Create highlight style for button
+        style.configure("Highlight.TButton", background="#FFD700", foreground="#000000")
+        self.start_button.configure(style="Highlight.TButton")
+        
+        # Flash effect
+        def flash_highlight(count=0):
+            if count >= 6:  # 3 seconds
+                self.start_button.configure(style="TButton")
+                return
+            
+            if count % 2 == 0:
+                style.configure("Highlight.TButton", background="#FFD700", foreground="#000000")
+            else:
+                style.configure("Highlight.TButton", background="#4A6A9B", foreground="#FFFFFF")
+            
+            self.after(500, lambda: flash_highlight(count + 1))
+        
+        flash_highlight()
+
+    def navigate_to_rtsp_entry(self):
+        """Navigate to Source Selection tab and highlight the RTSP URL entry for a few seconds."""
+        # Switch to the Source Selection tab
+        self.notebook.select(self.tab_source)
+        
+        style = ttk.Style()
+        
+        # Create highlight style for entry
+        style.configure("Highlight.TEntry", fieldbackground="#FFD700", foreground="#000000")
+        self.rtsp_url_entry.configure(style="Highlight.TEntry")
+        
+        # Flash effect
+        def flash_highlight(count=0):
+            if count >= 6:  # 3 seconds
+                self.rtsp_url_entry.configure(style="TEntry")
+                return
+            
+            if count % 2 == 0:
+                style.configure("Highlight.TEntry", fieldbackground="#FFD700", foreground="#000000")
+            else:
+                style.configure("Highlight.TEntry", fieldbackground="#3A4D6B", foreground="#EAEAEA")
+            
+            self.after(500, lambda: flash_highlight(count + 1))
+        
+        flash_highlight()
+
+    def navigate_to_rtsp_mask_button(self):
+        """Navigate to Source tab and highlight RTSP mask button."""
+        self.notebook.select(self.tab_source)
+        self._flash_button(self.btn_rtsp_mask)
+
+    def navigate_to_detection_mask_button(self):
+        """Navigate to Settings tab and highlight Detection mask button."""
+        self.notebook.select(self.tab_settings)
+        self._flash_button(self.btn_detection_mask)
+
+    def navigate_to_ps_mask_button(self):
+        """Navigate to Settings tab and highlight Plate Solve mask button."""
+        self.notebook.select(self.tab_settings)
+        self._flash_button(self.btn_ps_mask)
+
+    def _flash_button(self, button):
+        """Helper to flash a button."""
+        style = ttk.Style()
+        style.configure("Highlight.TButton", background="#FFD700", foreground="#000000")
+        button.configure(style="Highlight.TButton")
+        
+        def flash(count=0):
+            if count >= 6:
+                button.configure(style="TButton")
+                return
+            if count % 2 == 0:
+                style.configure("Highlight.TButton", background="#FFD700", foreground="#000000")
+            else:
+                style.configure("Highlight.TButton", background="#4A6A9B", foreground="#FFFFFF")
+            self.after(500, lambda: flash(count + 1))
+        flash()
+
+    def navigate_to_analysis_actions(self):
+        """Navigate to Analysis tab and highlight the blend/timelapse buttons."""
+        self.notebook.select(self.tab_analysis)
+        self._flash_button(self.btn_blend_image)
+        self._flash_button(self.btn_blend_video)
+        self._flash_button(self.btn_timelapse)
+
     def create_analysis_tab(self, parent):
         """Create the '解析' tab where users can drop meteor info .txt files and run batch drawing."""
         frame = ttk.Frame(parent)
@@ -784,9 +909,12 @@ atomcam2で利用する場合は、GitHubで公開されている
 
         row3 = ttk.Frame(action_frame)
         row3.pack(fill=tk.X, pady=2)
-        ttk.Button(row3, text="比較明合成画像を作成", command=self.create_lighten_blend_image_callback).pack(side=tk.LEFT, padx=(0,5))
-        ttk.Button(row3, text="比較明合成動画を作成", command=self.create_lighten_blend_video_callback).pack(side=tk.LEFT, padx=(0,5))
-        ttk.Button(row3, text="タイムラプス作成", command=self.create_timelapse_callback).pack(side=tk.LEFT, padx=(0,5))
+        self.btn_blend_image = ttk.Button(row3, text="比較明合成画像を作成", command=self.create_lighten_blend_image_callback)
+        self.btn_blend_image.pack(side=tk.LEFT, padx=(0,5))
+        self.btn_blend_video = ttk.Button(row3, text="比較明合成動画を作成", command=self.create_lighten_blend_video_callback)
+        self.btn_blend_video.pack(side=tk.LEFT, padx=(0,5))
+        self.btn_timelapse = ttk.Button(row3, text="タイムラプス作成", command=self.create_timelapse_callback)
+        self.btn_timelapse.pack(side=tk.LEFT, padx=(0,5))
         
 
         lf_concat = ttk.LabelFrame(frame, text="動画連結")
@@ -1695,9 +1823,12 @@ atomcam2で利用する場合は、GitHubで公開されている
         ttk.Separator(lf_astro, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=10)
 
         mask_btn_frame = ttk.Frame(lf_astro); mask_btn_frame.pack(fill=tk.X, pady=2)
-        ttk.Button(mask_btn_frame, text="検出マスク作成", command=lambda: self.create_mask_window(is_plate_solve_mask=False)).pack(side=tk.LEFT)
-        ttk.Button(mask_btn_frame, text="💾", width=3, command=self.download_mask).pack(side=tk.LEFT, padx=2)
-        ttk.Button(mask_btn_frame, text="プレートソルブ用マスク作成", command=lambda: self.create_mask_window(is_plate_solve_mask=True)).pack(side=tk.LEFT, padx=5)
+        self.btn_detection_mask = ttk.Button(mask_btn_frame, text="検出マスク作成", command=lambda: self.create_mask_window(is_plate_solve_mask=False))
+        self.btn_detection_mask.pack(side=tk.LEFT)
+        self.btn_download_mask = ttk.Button(mask_btn_frame, text="💾", width=3, command=self.download_mask)
+        self.btn_download_mask.pack(side=tk.LEFT, padx=2)
+        self.btn_ps_mask = ttk.Button(mask_btn_frame, text="プレートソルブ用マスク作成", command=lambda: self.create_mask_window(is_plate_solve_mask=True))
+        self.btn_ps_mask.pack(side=tk.LEFT, padx=5)
         
         self.mask_preview_frame = ttk.Frame(lf_astro); self.mask_preview_frame.pack(pady=5)
         self.mask_preview_label = ttk.Label(self.mask_preview_frame, text="検出マスクなし")
