@@ -20,7 +20,7 @@ from typing import Optional, Tuple, Callable, List
 from PIL import Image
 
 import torch
-from transformers import Qwen3VLForConditionalGeneration, AutoProcessor, BitsAndBytesConfig
+from transformers import Qwen3VLForConditionalGeneration, AutoProcessor, BitsAndBytesConfig, TextIteratorStreamer
 from qwen_vl_utils import process_vision_info
 
 # モデル設定
@@ -80,7 +80,7 @@ def _reset_offload_timer():
         _offload_timer.start()
 
 
-def _get_model():
+def _get_model(status_callback: Optional[Callable[[str], None]] = None):
     """モデルとプロセッサを取得（遅延初期化）"""
     global _model, _processor, _model_loading
     
@@ -99,6 +99,9 @@ def _get_model():
             bnb_4bit_quant_type="nf4",
             bnb_4bit_compute_dtype=torch.bfloat16
         )
+        
+        if status_callback:
+            status_callback("モデルをロード中...")
         
         # ローカルキャッシュから読み込み試行
         if os.path.exists(LOCAL_MODEL_DIR):
@@ -120,6 +123,8 @@ def _get_model():
                 print(f"ローカルモデル読み込み失敗: {e}")
         
         # リモートからダウンロード
+        if status_callback:
+            status_callback(f"モデルをダウンロード中: {MODEL_ID}")
         print(f"モデルをダウンロード中: {MODEL_ID}")
         _model = Qwen3VLForConditionalGeneration.from_pretrained(
             MODEL_ID,
@@ -148,7 +153,7 @@ def _get_model():
 
 
 
-def check_vlm_connection() -> tuple:
+def check_vlm_connection(status_callback: Optional[Callable[[str], None]] = None) -> tuple:
     """
     モデルの利用可否を確認する
     
@@ -161,7 +166,7 @@ def check_vlm_connection() -> tuple:
             _reset_offload_timer()
             return (True, MODEL_ID)
         # まだロードされていない場合は試行
-        _get_model()
+        _get_model(status_callback)
         return (True, MODEL_ID)
     except Exception as e:
         return (False, str(e))
@@ -183,9 +188,15 @@ def _cv2_to_pil(image: np.ndarray) -> Image.Image:
     return pil_image
 
 
-def _call_vlm(system_prompt: str, user_prompt: str, image: np.ndarray) -> str:
+def _call_vlm(
+    system_prompt: str, 
+    user_prompt: str, 
+    image: np.ndarray, 
+    status_callback: Optional[Callable[[str], None]] = None,
+    stream_callback: Optional[Callable[[str], None]] = None
+) -> str:
     """VLMを呼び出してテキスト応答を取得"""
-    model, processor = _get_model()
+    model, processor = _get_model(status_callback)
     
     pil_image = _cv2_to_pil(image)
     
@@ -208,25 +219,51 @@ def _call_vlm(system_prompt: str, user_prompt: str, image: np.ndarray) -> str:
         return_tensors="pt",
     ).to("cuda")
     
-    with torch.no_grad():
-        generated_ids = model.generate(
+    if stream_callback:
+        # ストリーミング生成の場合
+        streamer = TextIteratorStreamer(processor, skip_prompt=True, skip_special_tokens=True)
+        generation_kwargs = dict(
             **inputs,
             max_new_tokens=512,
             temperature=0.7,
             top_p=0.8,
             top_k=20,
             do_sample=True,
+            streamer=streamer,
         )
-    
-    generated_ids_trimmed = [
-        out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
-    ]
-    output_text = processor.batch_decode(
-        generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
-    )[0]
+        
+        thread = threading.Thread(target=model.generate, kwargs=generation_kwargs)
+        thread.start()
+        
+        output_text = ""
+        for new_text in streamer:
+            output_text += new_text
+            stream_callback(new_text)
+            
+        thread.join()
+        
+    else:
+        # 従来の生成
+        with torch.no_grad():
+            generated_ids = model.generate(
+                **inputs,
+                max_new_tokens=512,
+                temperature=0.7,
+                top_p=0.8,
+                top_k=20,
+                do_sample=True,
+            )
+        
+        generated_ids_trimmed = [
+            out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
+        ]
+        output_text = processor.batch_decode(
+            generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
+        )[0]
+        del generated_ids
     
     # メモリ解放
-    del inputs, generated_ids, image_inputs, video_inputs
+    del inputs, image_inputs, video_inputs
     torch.cuda.empty_cache()
     gc.collect()
     
@@ -239,7 +276,10 @@ def _call_vlm(system_prompt: str, user_prompt: str, image: np.ndarray) -> str:
 def generate_response(
     user_prompt: str,
     system_prompt: str = "You are a helpful assistant.",
-    image: Optional[np.ndarray] = None
+    image: Optional[np.ndarray] = None,
+    history: Optional[List[dict]] = None,
+    status_callback: Optional[Callable[[str], None]] = None,
+    stream_callback: Optional[Callable[[str], None]] = None
 ) -> str:
     """
     汎用的なチャット応答を生成する
@@ -248,17 +288,22 @@ def generate_response(
         user_prompt: ユーザーからのメッセージ
         system_prompt: システムプロンプト
         image: オプションの画像 (BGR)
+        history: 会話履歴 [{'role': 'user'|'assistant', 'content': str}]
         
     Returns:
         応答テキスト
     """
     # 接続確認
-    connected, err = check_vlm_connection()
+    if status_callback: status_callback("接続確認中...")
+    connected, err = check_vlm_connection(status_callback)
     if not connected:
         return f"エラー: モデルの読み込みに失敗しました: {err}"
 
-    model, processor = _get_model()
+    model, processor = _get_model(status_callback)
     
+    if status_callback: status_callback("回答を生成中...")
+    
+    # 現在のユーザーターンのコンテンツ構築
     content = []
     
     image_inputs = None
@@ -270,10 +315,18 @@ def generate_response(
         
     content.append({"type": "text", "text": user_prompt})
     
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": content}
-    ]
+    # メッセージリストの構築
+    messages = [{"role": "system", "content": system_prompt}]
+    
+    # 履歴があれば追加
+    if history:
+        # 履歴の形式は {'role': '...', 'content': '...'} を想定
+        # QwenVLのチャットテンプレートに合わせて整形が必要ならここで行う
+        # テキストのみの履歴と仮定
+        for msg in history:
+            messages.append(msg)
+            
+    messages.append({"role": "user", "content": content})
     
     text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     
@@ -289,25 +342,71 @@ def generate_response(
         
     inputs = processor(**inputs_args).to("cuda")
     
-    with torch.no_grad():
-        generated_ids = model.generate(
+    # VLM呼び出し
+    if image is not None:
+        # 画像がある場合は process_vision_info を使うロジック（_call_vlm 相当）を実行
+        # TODO: generate_response は _call_vlm を再利用するようにリファクタリングが理想だが、
+        # 現状は独立しているため、ここでストリーミング対応を追加する。
+        # ただし、現状のコード構造では generate_response 内に重複ロジックがあるため
+        # _call_vlm を呼ぶ形にするのが最もきれい。
+        
+        # 既存の generate_response は実は _call_vlm とほぼ同じ処理をしているが、
+        # 完全に同じではない（引数の組み立てなど）。
+        # ここでは実装の重複を避けるため、_call_vlm を呼ぶように変更する。
+        pass
+
+    # _call_vlm に統一して delegating する
+    # 注意: generate_response 固有の「画像がない場合の処理」も _call_vlm はハンドルできる（image=None対応が必要）
+    # しかし _call_vlm は現状 pil_image = _cv2_to_pil(image) を無条件に行うため、修正が必要。
+    
+    # ここでは安全に、現状の generate_response 内にストリーミング分岐を追加する
+    
+    if stream_callback:
+        streamer = TextIteratorStreamer(processor, skip_prompt=True, skip_special_tokens=True)
+        inputs_args["streamer"] = streamer
+        
+        generation_kwargs = dict(
             **inputs,
             max_new_tokens=512,
             temperature=0.7,
             top_p=0.8,
             top_k=20,
             do_sample=True,
+            streamer=streamer,
         )
-    
-    generated_ids_trimmed = [
-        out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
-    ]
-    output_text = processor.batch_decode(
-        generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
-    )[0]
+        
+        thread = threading.Thread(target=model.generate, kwargs=generation_kwargs)
+        thread.start()
+        
+        output_text = ""
+        for new_text in streamer:
+            output_text += new_text
+            stream_callback(new_text)
+            
+        thread.join()
+        
+    else:
+
+        with torch.no_grad():
+            generated_ids = model.generate(
+                **inputs,
+                max_new_tokens=512,
+                temperature=0.7,
+                top_p=0.8,
+                top_k=20,
+                do_sample=True,
+            )
+        
+        generated_ids_trimmed = [
+            out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
+        ]
+        output_text = processor.batch_decode(
+            generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
+        )[0]
     
     # メモリ解放
-    del inputs, generated_ids
+    del inputs
+    if "generated_ids" in locals(): del generated_ids
     if image_inputs is not None:
         del image_inputs
     if video_inputs is not None:
