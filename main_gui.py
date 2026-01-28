@@ -858,6 +858,29 @@ atomcam2で利用する場合は、GitHubで公開されている
         self._flash_button(self.btn_blend_video)
         self._flash_button(self.btn_timelapse)
 
+    # Added to ensure output filenames begin with a date prefix (YYYYMMDD_)
+    # This helps with file ordering, clarity, and consistency for generated files.
+    # Change introduced to prepend today's date when a user selects an output file
+    # without a date prefix.
+    def _ensure_date_prefix(self, path: str) -> str:
+        """Ensure the filename starts with YYYYMMDD_. If not, prepend today's date.
+
+        Returns possibly-updated full path.
+        """
+        try:
+            if not path:
+                return path
+            dirpath = os.path.dirname(path)
+            basename = os.path.basename(path)
+            # If already starts with YYYYMMDD_ then leave as-is
+            if len(basename) >= 9 and basename[:9].isdigit() and basename[8] == '_':
+                return path
+            date_prefix = datetime.now().strftime("%Y%m%d_")
+            new_name = date_prefix + basename
+            return os.path.join(dirpath, new_name)
+        except Exception:
+            return path
+
     def create_analysis_tab(self, parent):
         """Create the '解析' tab where users can drop meteor info .txt files and run batch drawing."""
         frame = ttk.Frame(parent)
@@ -3642,6 +3665,8 @@ atomcam2で利用する場合は、GitHubで公開されている
         
         if not output_path:
             return
+        # Ensure filename starts with today's date (YYYYMMDD_)
+        output_path = self._ensure_date_prefix(output_path)
         
         self.append_log(f"比較明合成動画の作成を開始します... ({len(video_files)}個の動画)")
         
@@ -3886,6 +3911,8 @@ atomcam2で利用する場合は、GitHubで公開されている
         
         if not output_path:
             return
+        # Ensure filename starts with today's date (YYYYMMDD_)
+        output_path = self._ensure_date_prefix(output_path)
 
         dialog = ProcessingOptionDialog(self)
         if dialog.result is None:  # キャンセル
@@ -4313,6 +4340,11 @@ class TimelapseDragDropWindow(Toplevel):
         
         if not output_path:
             return
+        # Ensure filename starts with today's date (YYYYMMDD_)
+        try:
+            output_path = self.parent._ensure_date_prefix(output_path)
+        except Exception:
+            pass
         
         duration = self.duration_var.get()
         paths = list(self.dropped_paths)
