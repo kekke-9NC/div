@@ -15,6 +15,23 @@ from typing import List, Optional, Callable
 import config
 
 
+# Added helper to safely read images whose file paths contain Unicode characters
+# Some platforms (especially Windows) do not handle non-ASCII paths well with
+# cv2.imread directly. This function first tries reading raw bytes via
+# numpy.fromfile and then decodes with cv2.imdecode, falling back to
+# cv2.imread if that fails.
+def _imread_unicode(path: str):
+    """Read image with Unicode path support using np.fromfile + imdecode."""
+    try:
+        data = np.fromfile(path, dtype=np.uint8)
+        img = cv2.imdecode(data, cv2.IMREAD_COLOR)
+        if img is not None:
+            return img
+    except Exception:
+        pass
+    return cv2.imread(path)
+
+
 # メモリ制限: 1GB = 1024 * 1024 * 1024 bytes
 MAX_MEMORY_BYTES = 1 * 1024 * 1024 * 1024
 
@@ -44,8 +61,13 @@ def get_default_output_path(base_folder: str = None) -> str:
         if not os.path.exists(output_dir):
             output_dir = os.path.join(os.path.expanduser("~"), "Desktop")
     
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"lighten_blend_{timestamp}.png"
+    # Use date and time in the filename for clearer ordering and readability
+    # Previous implementation used a single timestamp string; this change splits
+    # into date and time parts so filenames sort more naturally (YYYYMMDD_HHMMSS).
+    now = datetime.now()
+    date = now.strftime("%Y%m%d")
+    time = now.strftime("%H%M%S")
+    filename = f"{date}_lighten_blend_{time}.png"
     
     return os.path.join(output_dir, filename)
 
@@ -213,7 +235,7 @@ def create_lighten_blend_image(
     first_ext = Path(first_file).suffix.lower()
     
     if first_ext in image_ext:
-        first_frame = cv2.imread(first_file)
+        first_frame = _imread_unicode(first_file)
     else:
         first_frame = get_frame_from_video(first_file)
     
@@ -270,7 +292,7 @@ def create_lighten_blend_image(
             
             if file_ext in image_ext:
                 # 画像の場合
-                frame = cv2.imread(file_path)
+                frame = _imread_unicode(file_path)
                 if frame is not None:
                     if frame.shape[1] != base_width or frame.shape[0] != base_height:
                         frame = cv2.resize(frame, (base_width, base_height))
