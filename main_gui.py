@@ -7,6 +7,20 @@ import queue
 import json
 import cv2
 import numpy as np
+
+def imread_with_japanese_path(path):
+    """日本語パスに対応した画像読み込み関数
+    
+    cv2.imreadは日本語などのマルチバイト文字を含むパスで
+    読み込みに失敗することがあるため、np.fromfileとcv2.imdecodeを使用
+    """
+    try:
+        img_array = np.fromfile(path, dtype=np.uint8)
+        img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+        return img
+    except Exception:
+        # フォールバック: 通常のimread
+        return cv2.imread(path)
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import ttk, filedialog, messagebox, Toplevel, Canvas, PanedWindow
@@ -3792,7 +3806,7 @@ atomcam2で利用する場合は、GitHubで公開されている
                         self.append_log(f"検出中 ({i+1}/{total}): {os.path.basename(vp)}")
                         
                         # 一時ファイルから画像を読み込み（メモリ節約）
-                        composite_img = cv2.imread(data['temp_path'])
+                        composite_img = imread_with_japanese_path(data['temp_path'])
                         if composite_img is None:
                             continue
                         
@@ -3880,6 +3894,7 @@ atomcam2で利用する場合は、GitHubで公開されている
         mode = dialog.result  # 0:通常, 1:明るいエリアマスク, 2:流星のみ
         is_ai_mode = (mode != 0)
         is_meteor_mode = (mode == 2)
+        print(f"DEBUG: ProcessingOptionDialog result: mode={mode}, is_ai_mode={is_ai_mode}, is_meteor_mode={is_meteor_mode}")
 
         if not is_ai_mode:
             def run_normal_task():
@@ -3895,11 +3910,13 @@ atomcam2で利用する場合は、GitHubで公開されている
             return
 
         # AI解析モードの場合
+        print("DEBUG: AI解析モードに入りました")
         import detection_preview
         import bright_area_detector
         import cv2
 
         detector_func = bright_area_detector.detect_meteors_with_boxes if is_meteor_mode else bright_area_detector.detect_bright_areas_with_boxes
+        print(f"DEBUG: detector_func = {detector_func.__name__}")
         
         # 合成開始コールバック (プレビューウィンドウから呼ばれる)
         def start_synthesis_with_results(results):
@@ -3961,53 +3978,68 @@ atomcam2で利用する場合は、GitHubで公開されている
         preview_window = detection_preview.DetectionPreviewWindow(self, start_synthesis_with_results)
         
         def run_analysis_task():
-            self.append_log("AIによる画像解析を開始します...")
-            
-            all_files = []
-            for path in file_paths:
-                if os.path.isdir(path):
-                    all_files.extend(lighten_blend_image.collect_files_from_folder(path))
-                elif os.path.isfile(path):
-                    all_files.append(path)
-            all_files.sort()
-            
-            total = len(all_files)
-            
-            if preview_window.winfo_exists():
-                self.after(0, lambda: preview_window.start_analysis(total))
-            
-            for i, path in enumerate(all_files):
-                if not preview_window.winfo_exists():
-                    self.append_log("解析が中断されました。")
-                    return
+            try:
+                print("DEBUG: run_analysis_task started")
+                self.append_log("AIによる画像解析を開始します...")
                 
-                filename = os.path.basename(path)
-                # 進捗ログは多すぎると重いので適度に間引くか、重要なものだけ
-                self.append_log(f"解析中 ({i+1}/{total}): {filename}")
+                all_files = []
+                for path in file_paths:
+                    if os.path.isdir(path):
+                        all_files.extend(lighten_blend_image.collect_files_from_folder(path))
+                    elif os.path.isfile(path):
+                        all_files.append(path)
+                all_files.sort()
                 
-                img = cv2.imread(path)
-                if img is None: continue
-                
-                # 再検出用ラッパー
-                def reanalyze_wrapper(image):
-                    res = detector_func(image) # ログなし
-                    return res if res else (None, [])
-                
-                # 検出実行
-                res = detector_func(img)
-                boxes = res[1] if res else []
+                total = len(all_files)
+                print(f"DEBUG: Processing {total} files")
                 
                 if preview_window.winfo_exists():
-                    self.after(0, lambda fn=filename, fp=path, b=boxes, cb=reanalyze_wrapper: 
-                              preview_window.add_item(fn, fp, b, cb))
-            
-            self.append_log("全画像の解析が完了しました。検出結果を確認・修正してください。")
-            
-            if preview_window.winfo_exists():
-                 # 完了処理（未検出を先頭になど）
-                 self.after(0, preview_window.finalize_analysis)
-                 messagebox.showinfo("解析完了", "全画像の解析が完了しました。\n未検出の画像が上部に表示されています。\nプレビュー画面で結果を確認し、「修正を確定して合成を開始」ボタンを押してください。")
+                    self.after(0, lambda: preview_window.start_analysis(total))
+                
+                for i, path in enumerate(all_files):
+                    if not preview_window.winfo_exists():
+                        self.append_log("解析が中断されました。")
+                        return
+                    
+                    filename = os.path.basename(path)
+                    # 進捗ログは多すぎると重いので適度に間引くか、重要なものだけ
+                    self.append_log(f"解析中 ({i+1}/{total}): {filename}")
+                    print(f"DEBUG: Analyzing file {i+1}/{total}: {filename}")
+                    
+                    img = imread_with_japanese_path(path)
+                    if img is None:
+                        print(f"DEBUG: Failed to read image: {path}")
+                        continue
+                    
+                    # 再検出用ラッパー
+                    def reanalyze_wrapper(image):
+                        res = detector_func(image) # ログなし
+                        return res if res else (None, [])
+                    
+                    # 検出実行
+                    print(f"DEBUG: Calling detector_func for {filename}")
+                    res = detector_func(img)
+                    boxes = res[1] if res else []
+                    print(f"DEBUG: Detection result for {filename}: {len(boxes)} boxes found")
+                    
+                    if preview_window.winfo_exists():
+                        self.after(0, lambda fn=filename, fp=path, b=boxes, cb=reanalyze_wrapper: 
+                                  preview_window.add_item(fn, fp, b, cb))
+                
+                self.append_log("全画像の解析が完了しました。検出結果を確認・修正してください。")
+                print("DEBUG: Analysis completed")
+                
+                if preview_window.winfo_exists():
+                     # 完了処理（未検出を先頭になど）
+                     self.after(0, preview_window.finalize_analysis)
+                     messagebox.showinfo("解析完了", "全画像の解析が完了しました。\n未検出の画像が上部に表示されています。\nプレビュー画面で結果を確認し、「修正を確定して合成を開始」ボタンを押してください。")
+            except Exception as e:
+                print(f"ERROR: run_analysis_task failed with exception: {e}")
+                import traceback
+                traceback.print_exc()
+                self.append_log(f"AI解析中にエラーが発生しました: {e}")
 
+        print("DEBUG: Starting run_analysis_task thread")
         threading.Thread(target=run_analysis_task, daemon=True).start()
 
     def _handle_synthesis_result(self, success, output_path):
