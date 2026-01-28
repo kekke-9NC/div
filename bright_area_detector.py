@@ -20,8 +20,13 @@ from typing import Optional, Tuple, Callable, List
 from PIL import Image
 
 import torch
-from transformers import Qwen3VLForConditionalGeneration, AutoProcessor, BitsAndBytesConfig, TextIteratorStreamer
-from qwen_vl_utils import process_vision_info
+
+# Lazy import placeholders
+Qwen3VLForConditionalGeneration = None
+AutoProcessor = None
+BitsAndBytesConfig = None
+TextIteratorStreamer = None
+process_vision_info = None
 
 # モデル設定
 MODEL_ID = "Qwen/Qwen3-VL-4B-Instruct"
@@ -93,6 +98,7 @@ def _get_model(status_callback: Optional[Callable[[str], None]] = None):
     
     _model_loading = True
     try:
+        from transformers import Qwen3VLForConditionalGeneration, AutoProcessor, BitsAndBytesConfig
         bnb_config = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_use_double_quant=True,
@@ -196,6 +202,8 @@ def _call_vlm(
     stream_callback: Optional[Callable[[str], None]] = None
 ) -> str:
     """VLMを呼び出してテキスト応答を取得"""
+    from transformers import TextIteratorStreamer
+    from qwen_vl_utils import process_vision_info
     model, processor = _get_model(status_callback)
     
     pil_image = _cv2_to_pil(image)
@@ -293,6 +301,9 @@ def generate_response(
     Returns:
         応答テキスト
     """
+    from transformers import TextIteratorStreamer
+    from qwen_vl_utils import process_vision_info
+    
     # 接続確認
     if status_callback: status_callback("接続確認中...")
     connected, err = check_vlm_connection(status_callback)
@@ -594,10 +605,12 @@ def detect_bright_areas_with_boxes(
         (マスク画像, ボックスリスト) or None（エラー時）
     """
     def log(msg: str):
+        print(f"[detect_bright_areas_with_boxes] {msg}")  # 常にコンソールに出力
         if progress_callback:
             progress_callback(msg)
     
     # 接続確認
+    log("モデル接続を確認中...")
     connected, err = check_vlm_connection()
     if not connected:
         log(f"エラー: モデルの読み込みに失敗しました: {err}")
@@ -731,10 +744,12 @@ def detect_meteors_with_boxes(
         マスクは検出領域=255、それ以外=0
     """
     def log(msg: str):
+        print(f"[detect_meteors_with_boxes] {msg}")  # 常にコンソールに出力
         if progress_callback:
             progress_callback(msg)
     
     # 接続確認
+    log("モデル接続を確認中...")
     connected, err = check_vlm_connection()
     if not connected:
         log(f"エラー: モデルの読み込みに失敗しました: {err}")
