@@ -15,6 +15,15 @@ import math
 import cv2
 import numpy as np
 
+def imread_with_japanese_path(path):
+    """日本語パスに対応した画像読み込み関数"""
+    try:
+        img_array = np.fromfile(path, dtype=np.uint8)
+        img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+        return img
+    except Exception:
+        return cv2.imread(path)
+
 class DetectionPreviewWindow(tk.Toplevel):
     
     # アイテムの表示高さ（概算px）
@@ -105,6 +114,9 @@ class DetectionPreviewWindow(tk.Toplevel):
 
     def _on_mousewheel(self, event):
         """マウスホイール処理"""
+        # ウィンドウが存在しない場合は処理しない
+        if not self.winfo_exists():
+            return
         if not self.item_order:
             return
             
@@ -177,9 +189,15 @@ class DetectionPreviewWindow(tk.Toplevel):
 
     def refresh_view(self):
         """現在のスクロール位置に基づいてアイテムを表示"""
+        # ウィンドウが存在しない場合は処理しない
+        if not self.winfo_exists():
+            return
         # 既存ウィジェットの破棄
-        for child in self.items_frame.winfo_children():
-            child.destroy()
+        try:
+            for child in self.items_frame.winfo_children():
+                child.destroy()
+        except Exception:
+            return
             
         # 画像参照のクリア（表示されなくなった分を解放）
         self.photo_images.clear()
@@ -270,7 +288,7 @@ class DetectionPreviewWindow(tk.Toplevel):
         リストにアイテムを追加（または更新）
         """
         # データ登録
-        full_image = cv2.imread(image_path)
+        full_image = imread_with_japanese_path(image_path)
         if full_image is None:
             return
             
@@ -349,7 +367,7 @@ class DetectionPreviewWindow(tk.Toplevel):
                   command=lambda: self._clear_boxes(filename, img_canvas, coord_label)).pack(side=tk.LEFT, padx=2)
         
         # 画像読み込みと描画
-        full_image = cv2.imread(image_path)
+        full_image = imread_with_japanese_path(image_path)
         if full_image is not None:
             self._draw_image_on_canvas(filename, img_canvas, full_image, boxes)
 
@@ -428,7 +446,7 @@ class DetectionPreviewWindow(tk.Toplevel):
         image_path = data['image_path']
         
         # 画像読み込み
-        img = cv2.imread(image_path)
+        img = imread_with_japanese_path(image_path)
         if img is None:
             return
         
@@ -475,7 +493,7 @@ class DetectionPreviewWindow(tk.Toplevel):
     def _clear_boxes(self, filename, canvas, label_widget):
         self.results[filename]['boxes'] = []
         image_path = self.results[filename]['image_path']
-        img = cv2.imread(image_path)
+        img = imread_with_japanese_path(image_path)
         if img is not None:
              self._draw_image_on_canvas(filename, canvas, img, [])
         label_widget.config(text="検出なし")
