@@ -19,7 +19,6 @@ def imread_with_japanese_path(path):
         img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
         return img
     except Exception:
-        # フォールバック: 通常のimread
         return cv2.imread(path)
 import tkinter as tk
 import tkinter.font as tkfont
@@ -858,10 +857,6 @@ atomcam2で利用する場合は、GitHubで公開されている
         self._flash_button(self.btn_blend_video)
         self._flash_button(self.btn_timelapse)
 
-    # Added to ensure output filenames begin with a date prefix (YYYYMMDD_)
-    # This helps with file ordering, clarity, and consistency for generated files.
-    # Change introduced to prepend today's date when a user selects an output file
-    # without a date prefix.
     def _ensure_date_prefix(self, path: str) -> str:
         """Ensure the filename starts with YYYYMMDD_. If not, prepend today's date.
 
