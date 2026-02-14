@@ -3021,7 +3021,7 @@ atomcam2で利用する場合は、GitHubで公開されている
         ttk.Button(btn_frame, text="キャンセル", command=win.destroy).pack(side=tk.LEFT, padx=5)
 
     def create_rtsp_mask(self):
-        """RTSPストリームから検出マスクを作成する"""
+        """RTSPストリームからマスクを作成する"""
         # 選択されているRTSP URLを取得、選択がなければ最初のURLを使用
         if self.rtsp_selected_indices:
             selected_index = min(self.rtsp_selected_indices)
@@ -3030,6 +3030,10 @@ atomcam2で利用する場合は、GitHubで公開されている
             rtsp_url = self.rtsp_urls[0]
         else:
             messagebox.showwarning("警告", "RTSPストリームを追加してください。")
+            return
+
+        is_plate_solve_mask = self._select_rtsp_mask_type()
+        if is_plate_solve_mask is None:
             return
         
         progress_win = Toplevel(self)
@@ -3089,16 +3093,68 @@ atomcam2で利用する場合は、GitHubで公開されている
                 if result_holder['error']:
                     messagebox.showerror("エラー", f"RTSPからのフレーム取得に失敗しました:\n{result_holder['error']}")
                 elif result_holder['frame'] is not None:
-                    self._open_rtsp_mask_window(result_holder['frame'])
+                    self._open_rtsp_mask_window(result_holder['frame'], is_plate_solve_mask)
         
         self.after(100, check_thread)
+
+    def _select_rtsp_mask_type(self) -> Optional[bool]:
+        """RTSPマスク作成時にマスクの用途を選択する"""
+        selection = {'is_plate_solve_mask': None}
+        style = ttk.Style(self)
+        bg_color = self.cget("background") or style.lookup("TFrame", "background") or "#2E3F5B"
+        sub_fg_color = "#AFC0DA"
+
+        dialog = Toplevel(self)
+        dialog.title("マスク種別の選択")
+        dialog.geometry("440x190")
+        dialog.transient(self)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+        dialog.configure(background=bg_color)
+        dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+
+        container = tk.Frame(dialog, bg=bg_color, padx=18, pady=14)
+        container.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(container, text="作成するマスクを選択してください。").pack(pady=(4, 8))
+        tk.Label(
+            container,
+            text="RTSPから取得したフレームでマスクを作成します。",
+            bg=bg_color,
+            fg=sub_fg_color,
+            font=("Segoe UI", 10)
+        ).pack(pady=(0, 14))
+
+        btn_frame = ttk.Frame(container)
+        btn_frame.pack(pady=4)
+
+        def choose_detection_mask():
+            selection['is_plate_solve_mask'] = False
+            dialog.destroy()
+
+        def choose_plate_solve_mask():
+            selection['is_plate_solve_mask'] = True
+            dialog.destroy()
+
+        ttk.Button(btn_frame, text="検出用マスク", command=choose_detection_mask).pack(side=tk.LEFT, padx=6)
+        ttk.Button(btn_frame, text="プレートソルブ用マスク", command=choose_plate_solve_mask).pack(side=tk.LEFT, padx=6)
+        ttk.Button(container, text="キャンセル", command=dialog.destroy).pack(pady=(12, 0))
+
+        dialog.update_idletasks()
+        x = self.winfo_x() + (self.winfo_width() - dialog.winfo_width()) // 2
+        y = self.winfo_y() + (self.winfo_height() - dialog.winfo_height()) // 2
+        dialog.geometry(f"+{x}+{y}")
+
+        self.wait_window(dialog)
+        return selection['is_plate_solve_mask']
     
-    def _open_rtsp_mask_window(self, frame):
+    def _open_rtsp_mask_window(self, frame, is_plate_solve_mask: bool):
         """RTSPから取得したフレームでマスク作成ウィンドウを開く"""
         
         # マスク作成ウィンドウを開く
         win = Toplevel(self)
-        win.title("RTSPからマスク作成")
+        mask_label = "プレートソルブ用マスク" if is_plate_solve_mask else "検出用マスク"
+        win.title(f"RTSPから{mask_label}作成")
         win.geometry("1000x700")
         win.grab_set()
 
@@ -3159,14 +3215,16 @@ atomcam2で利用する場合は、GitHubで公開されている
                     final_mask = np.full((orig_h, orig_w), 255, dtype=np.uint8)
                 
                 # メインアプリのマスクを更新
-                self.mask_image = final_mask
-                self.mask_path_var.set("作成済み (RTSP)")
-                self.apply_mask_var.set(True)
+                if is_plate_solve_mask:
+                    self.plate_solve_mask_image = final_mask
+                    self.preview_mask(self.plate_solve_mask_image, self.ps_mask_preview_label, "PSマスク")
+                else:
+                    self.mask_image = final_mask
+                    self.mask_path_var.set("作成済み (RTSP)")
+                    self.apply_mask_var.set(True)
+                    self.preview_mask(self.mask_image, self.mask_preview_label, "検出マスク")
                 
-                # プレビューを更新
-                self.preview_mask(self.mask_image, self.mask_preview_label, "検出マスク")
-                
-                print(f"RTSPマスク作成完了: shape={final_mask.shape}, max={final_mask.max()}, min={final_mask.min()}")
+                print(f"RTSP{mask_label}作成完了: shape={final_mask.shape}, max={final_mask.max()}, min={final_mask.min()}")
                 
                 # 一時データを削除
                 del self._rtsp_mask_data
