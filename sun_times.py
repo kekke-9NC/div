@@ -86,10 +86,10 @@ def _calc_time_utc(is_rise: bool, lat: float, lon: float, zenith: float, when: d
 
 
 def _utc_hours_to_local_datetime(utc_hours: float, when: date, tz_offset_hours: int) -> datetime:
-    hours = int(math.floor(utc_hours))
-    minutes = int(math.floor((utc_hours - hours) * 60.0))
-    seconds = int(round(((utc_hours - hours) * 60.0 - minutes) * 60.0))
-    dt_utc = datetime(when.year, when.month, when.day, hours, minutes, seconds)
+    # Round via total seconds to avoid invalid values such as second=60 caused
+    # by floating-point error around hh:mm:59.999...
+    total_seconds = int(round((utc_hours % 24.0) * 3600.0))
+    dt_utc = datetime(when.year, when.month, when.day) + timedelta(seconds=total_seconds)
     return dt_utc + timedelta(hours=tz_offset_hours)
 
 
