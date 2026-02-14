@@ -15,11 +15,6 @@ from typing import List, Optional, Callable
 import config
 
 
-# Added helper to safely read images whose file paths contain Unicode characters
-# Some platforms (especially Windows) do not handle non-ASCII paths well with
-# cv2.imread directly. This function first tries reading raw bytes via
-# numpy.fromfile and then decodes with cv2.imdecode, falling back to
-# cv2.imread if that fails.
 def _imread_unicode(path: str):
     """Read image with Unicode path support using np.fromfile + imdecode."""
     try:
@@ -61,9 +56,6 @@ def get_default_output_path(base_folder: str = None) -> str:
         if not os.path.exists(output_dir):
             output_dir = os.path.join(os.path.expanduser("~"), "Desktop")
     
-    # Use date and time in the filename for clearer ordering and readability
-    # Previous implementation used a single timestamp string; this change splits
-    # into date and time parts so filenames sort more naturally (YYYYMMDD_HHMMSS).
     now = datetime.now()
     date = now.strftime("%Y%m%d")
     time = now.strftime("%H%M%S")
