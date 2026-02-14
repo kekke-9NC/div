@@ -199,11 +199,10 @@ class FrameLoader:
         
         frame = None
         
-        # 画像ファイルの場合
         if Path(path).suffix.lower() in IMAGE_EXTENSIONS:
             frame = cv2.imread(path)
         else:
-            # 動画ファイルの場合 - 各スレッドで独自のVideoCaptureを使用
+            # 動画ファイル: 各スレッドで独自の VideoCapture を使用
             cap = cv2.VideoCapture(path)
             if cap.isOpened():
                 cap.set(cv2.CAP_PROP_POS_FRAMES, local_index)
@@ -212,7 +211,6 @@ class FrameLoader:
                     frame = None
                 cap.release()
         
-        # リサイズが必要な場合（target_sizeが有効な場合のみ）
         if frame is not None and target_size[0] > 0 and target_size[1] > 0:
             if frame.shape[1] != target_size[0] or frame.shape[0] != target_size[1]:
                 frame = cv2.resize(frame, target_size)
@@ -228,7 +226,6 @@ class FrameLoader:
 
 
 def load_frame_wrapper(args):
-    """ThreadPoolExecutor用のラッパー関数"""
     loader, idx, global_idx, target_size = args
     frame = loader.load_frame(global_idx, target_size)
     return (idx, frame)
