@@ -7,19 +7,6 @@ import queue
 import json
 import cv2
 import numpy as np
-
-def imread_with_japanese_path(path):
-    """日本語パスに対応した画像読み込み関数
-    
-    cv2.imreadは日本語などのマルチバイト文字を含むパスで
-    読み込みに失敗することがあるため、np.fromfileとcv2.imdecodeを使用
-    """
-    try:
-        img_array = np.fromfile(path, dtype=np.uint8)
-        img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
-        return img
-    except Exception:
-        return cv2.imread(path)
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import ttk, filedialog, messagebox, Toplevel, Canvas, PanedWindow
@@ -34,13 +21,10 @@ import concurrent.futures
 from typing import List, Dict, Any, Optional
 import status_panel
 import ui_state
-
-STATUS_CALLBACK = None
 import network_copy
 import download_pipeline
 import meteor_sky_viewer as msv
 import coordinate_manager as coord_mgr
-
 import config
 import file_utils
 import video_processing
@@ -60,6 +44,21 @@ import timelapse_creator
 import video_processor
 from tkinter import simpledialog
 import chat_gui
+
+STATUS_CALLBACK = None
+
+def imread_with_japanese_path(path):
+    """日本語パスに対応した画像読み込み関数
+
+    cv2.imreadは日本語などのマルチバイト文字を含むパスで
+    読み込みに失敗することがあるため、np.fromfileとcv2.imdecodeを使用
+    """
+    try:
+        img_array = np.fromfile(path, dtype=np.uint8)
+        img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+        return img
+    except Exception:
+        return cv2.imread(path)
 
 class App(TkinterDnD.Tk):
     def __init__(self):
@@ -256,7 +255,7 @@ class App(TkinterDnD.Tk):
         self.video_concat_bitrate_var = tk.StringVar(value="8000k")
         self.video_concat_codec_var = tk.StringVar(value="h264")
         self.video_concat_fps_var = tk.StringVar(value="Auto")
-        self.video_concat_safe_mode_var = tk.BooleanVar(value=True) # デフォルトOn
+        self.video_concat_safe_mode_var = tk.BooleanVar(value=True) 
 
         # Advanced settings variables (config.py values)
         # 検出関連
