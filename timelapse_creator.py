@@ -497,8 +497,6 @@ def get_default_output_path() -> str:
     if not os.path.exists(downloads_path):
         downloads_path = os.path.join(os.path.expanduser("~"), "Desktop")
     
-    # Use date and time in the filename so generated timelapses sort and read clearly
-    # Changed from single timestamp string to separated date/time (YYYYMMDD_HHMMSS)
     now = datetime.now()
     date = now.strftime("%Y%m%d")
     time = now.strftime("%H%M%S")
