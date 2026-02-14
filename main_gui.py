@@ -3659,6 +3659,9 @@ atomcam2で利用する場合は、GitHubで公開されている
         video_composites = {}  # {video_path: {'temp_path': str, 'filename': str, 'shape': (h, w)}}
         
         def run_prep_task():
+            if not self._ensure_ai_model_loaded(bright_area_detector):
+                return
+
             # Step 1: 各動画から個別に比較明合成画像を作成
             for i, vp in enumerate(video_files):
                 self.append_log(f"動画 {i+1}/{len(video_files)} から合成画像を作成中: {os.path.basename(vp)}")
@@ -3946,6 +3949,11 @@ atomcam2で利用する場合は、GitHubで公開されている
             try:
                 print("DEBUG: run_analysis_task started")
                 self.append_log("AIによる画像解析を開始します...")
+
+                if not self._ensure_ai_model_loaded(bright_area_detector):
+                    if preview_window.winfo_exists():
+                        self.after(0, preview_window.destroy)
+                    return
                 
                 all_files = []
                 for path in file_paths:
@@ -4011,6 +4019,19 @@ atomcam2で利用する場合は、GitHubで公開されている
         else:
             messagebox.showerror("エラー", "比較明合成画像の作成に失敗しました。ログを確認してください。")
             self.append_log("比較明合成画像の作成に失敗しました。")
+
+    def _ensure_ai_model_loaded(self, detector_module) -> bool:
+        """AI合成前に内部LLMのロード完了を保証する。"""
+        self.append_log("AIモデルのロードを確認中...")
+        connected, err = detector_module.check_vlm_connection()
+        if connected:
+            self.append_log("AIモデルのロードが完了しました。")
+            return True
+
+        error_message = f"AIモデルのロードに失敗しました: {err}"
+        self.append_log(error_message)
+        self.after(0, lambda msg=error_message: messagebox.showerror("エラー", msg))
+        return False
 
 
     def create_timelapse_callback(self):
