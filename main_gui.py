@@ -316,8 +316,6 @@ class App(TkinterDnD.Tk):
 
     def create_usage_tab(self, parent):
         frame = ttk.Frame(parent)
-        # Notebook manages geometry, so NO pack() here.
-        # frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
         canvas = tk.Canvas(frame, highlightthickness=0, bg="#2E3F5B")
         scrollbar = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=canvas.yview)
@@ -415,8 +413,6 @@ class App(TkinterDnD.Tk):
 
     def create_source_tab(self, parent):
         frame = ttk.Frame(parent)
-        # Notebook manages geometry, so NO pack() here.
-        
         # スクロール可能なキャンバスとスクロールバーを作成
         canvas = tk.Canvas(frame, highlightthickness=0, bg="#2E3F5B")
         scrollbar = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=canvas.yview)
@@ -462,10 +458,10 @@ class App(TkinterDnD.Tk):
         self.source_drop_label.pack(fill=tk.X, pady=5)
         self.source_drop_label.drop_target_register(DND_FILES)
         self.source_drop_label.dnd_bind('<<Drop>>', self.drop)
-        # Store original style for highlight feature
+
         self.source_drop_label._original_bg = None
 
-        # Custom scrollable list with modern FPS badges
+        # Folder list (styled)
         list_container = ttk.Frame(lf_folder)
         list_container.pack(fill=tk.BOTH, expand=True, pady=5)
         
@@ -488,9 +484,7 @@ class App(TkinterDnD.Tk):
             self.folder_list_canvas.itemconfig(self.folder_list_window, width=event.width)
         self.folder_list_canvas.bind("<Configure>", on_inner_canvas_configure)
         
-        # 内側のスクロール: 親のスクロールと競合しないようにカーソルが上にある時だけbindしたいが、
-        # bind_allを使っている親と衝突する可能性がある。
-        # シンプルに、内側エリアではbindを上書きするアプローチをとる。
+        # 内側スクロール: 親と競合しないようローカルでbindする
         
         def on_inner_mousewheel(event):
             self.folder_list_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
@@ -571,7 +565,7 @@ class App(TkinterDnD.Tk):
         
         ttk.Button(entry_frame, text="追加", command=self.add_rtsp_url).pack(side=tk.LEFT, padx=(5,0))
         
-        # Custom RTSP list with modern styling
+        # RTSP list (styled)
         rtsp_list_container = ttk.Frame(lf_rtsp)
         rtsp_list_container.pack(fill=tk.BOTH, expand=True, pady=5)
         
@@ -738,25 +732,14 @@ atomcam2で利用する場合は、GitHubで公開されている
 
     def navigate_to_source_drop_area(self):
         """Navigate to Source Selection tab and highlight the drop area for a few seconds."""
-        # Switch to the Source Selection tab
         self.notebook.select(self.tab_source)
-        
-        # Highlight the drop area
+
         style = ttk.Style()
-        # Save original background if not saved yet
-        try:
-            orig_bg = style.lookup('TLabel', 'background')
-        except:
-            orig_bg = "#2E3F5B"
-        
-        # Create highlight style
         style.configure("Highlight.TLabel", background="#FFD700", foreground="#000000")
         self.source_drop_label.configure(style="Highlight.TLabel")
-        
-        # Flash effect: cycle through highlight colors
+
         def flash_highlight(count=0):
             if count >= 6:  # 3 seconds (6 * 500ms)
-                # Restore original style
                 self.source_drop_label.configure(style="TLabel")
                 return
             
@@ -772,12 +755,9 @@ atomcam2で利用する場合は、GitHubで公開されている
     def navigate_to_start_button(self):
         """Highlight the start button for a few seconds."""
         style = ttk.Style()
-        
-        # Create highlight style for button
         style.configure("Highlight.TButton", background="#FFD700", foreground="#000000")
         self.start_button.configure(style="Highlight.TButton")
-        
-        # Flash effect
+
         def flash_highlight(count=0):
             if count >= 6:  # 3 seconds
                 self.start_button.configure(style="TButton")
@@ -794,16 +774,12 @@ atomcam2で利用する場合は、GitHubで公開されている
 
     def navigate_to_rtsp_entry(self):
         """Navigate to Source Selection tab and highlight the RTSP URL entry for a few seconds."""
-        # Switch to the Source Selection tab
         self.notebook.select(self.tab_source)
         
         style = ttk.Style()
-        
-        # Create highlight style for entry
         style.configure("Highlight.TEntry", fieldbackground="#FFD700", foreground="#000000")
         self.rtsp_url_entry.configure(style="Highlight.TEntry")
-        
-        # Flash effect
+
         def flash_highlight(count=0):
             if count >= 6:  # 3 seconds
                 self.rtsp_url_entry.configure(style="TEntry")
@@ -889,7 +865,7 @@ atomcam2で利用する場合は、GitHubで公開されている
         drop_label.drop_target_register(DND_FILES)
         drop_label.dnd_bind('<<Drop>>', self.drop_analysis)
 
-        # Custom analysis list with modern styling
+        # Analysis list (styled)
         analysis_list_container = ttk.Frame(lf)
         analysis_list_container.pack(fill=tk.BOTH, expand=True, pady=5)
         
@@ -1517,8 +1493,6 @@ atomcam2で利用する場合は、GitHubで公開されている
 
     def create_settings_tab(self, parent):
         frame = ttk.Frame(parent)
-        # Notebook manages geometry, so NO pack() here.
-        # frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
         # スクロール可能なキャンバスとスクロールバーを作成
         canvas = tk.Canvas(frame, highlightthickness=0, bg="#2E3F5B")
@@ -1542,8 +1516,7 @@ atomcam2で利用する場合は、GitHubで公開されている
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        # マウスホイールでスクロール
-        # マウスホイールでスクロール (カーソルが上にある時のみ有効化)
+        # マウスホイールでスクロール（キャンバス上にカーソルがある間のみ）
         def on_mousewheel(event):
             canvas.yview_scroll(int(-1*(event.delta/120)), "units")
 
@@ -1963,15 +1936,11 @@ atomcam2で利用する場合は、GitHubで公開されている
             self.append_log("詳細設定をデフォルト値にリセットしました。")
 
     def create_info_panel(self, parent):
-        # Create a combined Log / Processing Status panel from the status_panel module.
         panel = status_panel.StatusPanel(parent, progress_queue=self.progress_queue, app=self)
         panel.pack(fill=tk.BOTH, expand=True, pady=5)
 
-        # reuse the panel's log_text so existing append_log continues to work
         self.log_text = panel.log_text
 
-        # keep references for existing logic (progress bar, labels, buttons)
-        # create a compact status row under the panel (progressbar, ETA, buttons)
         status_row = ttk.Frame(parent)
         status_row.pack(fill=tk.X, pady=5)
         self.progress = ttk.Progressbar(status_row, orient=tk.HORIZONTAL, mode='determinate')
@@ -1993,7 +1962,7 @@ atomcam2で利用する場合は、GitHubで公開されている
         self.cancel_button = ttk.Button(btn_frame, text="キャンセル", command=self.cancel_processing, state=tk.DISABLED)
         self.cancel_button.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5,0))
 
-        # expose the panel's status callback to the module-level worker loop
+        # Share status callback with worker-side pipeline.
         try:
             global STATUS_CALLBACK
             STATUS_CALLBACK = panel.get_status_callback()
@@ -2797,11 +2766,7 @@ atomcam2で利用する場合は、GitHubで公開されている
             self.cancel_processing(restore_button_state=True)
 
     def cancel_processing(self, restore_button_state=False):
-        # Immediately set cancel flag so background workers can observe it without
-        # relying on a blocking confirmation dialog. This avoids situations where
-        # the GUI becomes unresponsive to cancel clicks (confirmation dialogs
-        # can cause subtle focus/state issues). We still log the request and
-        # disable the cancel button to prevent duplicate clicks.
+        # リクエストが来たら直ちにキャンセルフラグを立て、UIを更新する
         if not self.cancel_flag.is_set():
             self.append_log("キャンセル要求を受け付けました...")
         else:
@@ -3547,10 +3512,7 @@ atomcam2で利用する場合は、GitHubで公開されている
         if not output_path:
             return
 
-        # Define paths for distortion maps (assuming they are in the same directory as the script or specified fixed paths)
-        # User specified: C:\Users\kekke\Desktop\my_app\div\distortion_map_x.npy
-        # We can construct this relative to the current script location to be safer/more portable if needed,
-        # but user gave specific paths. Let's use the div folder path.
+        # Distortion maps are stored next to this module.
         module_dir = os.path.dirname(os.path.abspath(__file__))
         map_x_path = os.path.join(module_dir, "distortion_map_x.npy")
         map_y_path = os.path.join(module_dir, "distortion_map_y.npy")
@@ -3582,8 +3544,6 @@ atomcam2で利用する場合は、GitHubで公開されている
             messagebox.showwarning("情報", "解析するファイルを追加してください。")
             return
 
-        # Ask for Radiant Coordinates
-        # Using a simple dialog sequence for now. Could be improved with a custom dialog.
         ra_str = simpledialog.askstring("放射点入力", "放射点の赤経 (RA) を度数 (deg) で入力してください:\n(例: 45.0)")
         if ra_str is None: return
         try:
@@ -3660,7 +3620,6 @@ atomcam2で利用する場合は、GitHubで公開されている
         
         if not output_path:
             return
-        # Ensure filename starts with today's date (YYYYMMDD_)
         output_path = self._ensure_date_prefix(output_path)
         
         self.append_log(f"比較明合成動画の作成を開始します... ({len(video_files)}個の動画)")
@@ -3670,10 +3629,8 @@ atomcam2で利用する場合は、GitHubで公開されている
             return
             
         mode = dialog.result  # 0:通常, 1:明るいエリアマスク, 2:流星のみ
-        # 動画編集では明るいエリアマスク(mode 1)は今のところ用途が薄いので、
-        # 0(通常)以外はすべて流星検出モードとして扱う、あるいはmode=2のみ対応とする。
+        # mode=1(明るいエリア)は現状 mode=2(流星のみ)と同じ扱いにする。
         if mode == 0:
-            # 通常モード
             def run_task():
                 success = lighten_blend_video.create_lighten_blend_video(
                     list(video_files),
@@ -3689,7 +3646,6 @@ atomcam2で利用する場合は、GitHubで公開されている
             
             threading.Thread(target=run_task, daemon=True).start()
         else:
-            # AI流星検出モード
             self._create_lighten_blend_video_with_meteor_detection(video_files, output_path)
 
     def _create_lighten_blend_video_with_meteor_detection(self, video_files, output_path):
@@ -3906,7 +3862,6 @@ atomcam2で利用する場合は、GitHubで公開されている
         
         if not output_path:
             return
-        # Ensure filename starts with today's date (YYYYMMDD_)
         output_path = self._ensure_date_prefix(output_path)
 
         dialog = ProcessingOptionDialog(self)
@@ -3940,21 +3895,10 @@ atomcam2で利用する場合は、GitHubで公開されている
         detector_func = bright_area_detector.detect_meteors_with_boxes if is_meteor_mode else bright_area_detector.detect_bright_areas_with_boxes
         print(f"DEBUG: detector_func = {detector_func.__name__}")
         
-        # 合成開始コールバック (プレビューウィンドウから呼ばれる)
         def start_synthesis_with_results(results):
             def run_ai_task():
                 self.append_log("AI解析結果に基づく合成処理を開始します...")
-                
-                # ファイルリストを展開して順序を確定させる必要がある
-                # create_lighten_blend_image内部ロジックと同じ順序でファイルを取得するため
-                # ここでは簡易的に、create_lighten_blend_imageの内部処理に任せつつ
-                # マスク生成関数内でインデックス管理を行う
-                
-                # ファイルリストを再構築（内部で展開されるのと同じロジックが必要だが、
-                # create_lighten_blend_imageにファイルリスト展開機能があるため、
-                # ここでは「マスク生成側でファイル名をキーにする」戦略をとる）
-                # しかし、create_lighten_blend_imageはフォルダを渡すと内部で展開する。
-                # 整合性を取るため、ここで全ファイルを展開するのが安全。
+                # Mask generation must follow the same expanded file order as synthesis.
                 
                 all_files = []
                 image_ext, video_ext = lighten_blend_image.get_supported_extensions()
@@ -4024,7 +3968,6 @@ atomcam2で利用する場合は、GitHubで公開されている
                         return
                     
                     filename = os.path.basename(path)
-                    # 進捗ログは多すぎると重いので適度に間引くか、重要なものだけ
                     self.append_log(f"解析中 ({i+1}/{total}): {filename}")
                     print(f"DEBUG: Analyzing file {i+1}/{total}: {filename}")
                     
@@ -4033,12 +3976,10 @@ atomcam2で利用する場合は、GitHubで公開されている
                         print(f"DEBUG: Failed to read image: {path}")
                         continue
                     
-                    # 再検出用ラッパー
                     def reanalyze_wrapper(image):
-                        res = detector_func(image) # ログなし
+                        res = detector_func(image)
                         return res if res else (None, [])
                     
-                    # 検出実行
                     print(f"DEBUG: Calling detector_func for {filename}")
                     res = detector_func(img)
                     boxes = res[1] if res else []
@@ -4335,7 +4276,6 @@ class TimelapseDragDropWindow(Toplevel):
         
         if not output_path:
             return
-        # Ensure filename starts with today's date (YYYYMMDD_)
         try:
             output_path = self.parent._ensure_date_prefix(output_path)
         except Exception:
@@ -4424,8 +4364,6 @@ class ProcessingOptionDialog(tk.Toplevel):
         self.protocol("WM_DELETE_WINDOW", self.destroy)
         self.wait_window(self)
     
-    # check_connection, _check_connection_thread, _update_connection_status removed
-
     def on_ok(self):
         self.result = self.mode_var.get()
         self.destroy()
