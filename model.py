@@ -88,7 +88,7 @@ except Exception as e:
     sys.exit(1)
 
 
-DATASET_MEAN = [0.035, 0.035, 0.035]
+DATASET_MEAN = [0.033, 0.033, 0.033]
 DATASET_STD = [0.047, 0.047, 0.047]
 
 print(f"Using custom normalization: MEAN={DATASET_MEAN}, STD={DATASET_STD}")
