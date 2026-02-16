@@ -378,24 +378,38 @@ class App(TkinterDnD.Tk):
         self.notebook = ttk.Notebook(left_frame)
         self.notebook.pack(fill=tk.BOTH, expand=True)
 
-        tab_usage = self.create_usage_tab(self.notebook)
+        self.tab_usage = self.create_usage_tab(self.notebook)
         self.tab_source = self.create_source_tab(self.notebook)
 
         self.tab_settings = self.create_settings_tab(self.notebook)
         self.tab_analysis = self.create_analysis_tab(self.notebook)
-        tab_chat = chat_gui.create_tab(self.notebook, app=self)
-        tab_advanced_settings = self.create_advanced_settings_tab(self.notebook)
+        self.tab_chat = chat_gui.create_tab(self.notebook, app=self)
+        self.tab_advanced_settings = self.create_advanced_settings_tab(self.notebook)
 
-        self.notebook.add(tab_usage, text="使い方")
+        self.notebook.add(self.tab_usage, text="使い方")
         self.notebook.add(self.tab_source, text="ソース選択")
 
         self.notebook.add(self.tab_settings, text="保存設定")
         self.notebook.add(self.tab_analysis, text="解析")
-        self.notebook.add(tab_chat, text="Chat")
-        self.notebook.add(tab_advanced_settings, text="⚙️")
+        self.notebook.add(self.tab_chat, text="Chat")
+        self.notebook.add(self.tab_advanced_settings, text="⚙️")
         
-        main_pane.add(left_frame, width=550)
-        main_pane.add(right_frame)
+        # 右ログ領域を少し狭くし、左の設定領域を広く確保する
+        main_pane.add(left_frame, width=860, minsize=720)
+        main_pane.add(right_frame, width=360, minsize=300)
+
+        def _set_initial_sash():
+            try:
+                total = main_pane.winfo_width()
+                if total <= 0:
+                    return
+                desired_right = 360
+                sash_x = max(720, total - desired_right - 20)
+                main_pane.sash_place(0, sash_x, 0)
+            except Exception:
+                pass
+
+        self.after(120, _set_initial_sash)
 
 
     def create_usage_tab(self, parent):
@@ -421,135 +435,264 @@ class App(TkinterDnD.Tk):
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        # マウスホイールでスクロール (カーソルが上にある時のみ有効化)
         def on_mousewheel(event):
-            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
         def _bind_mousewheel(event):
             canvas.bind_all("<MouseWheel>", on_mousewheel)
-        
+
         def _unbind_mousewheel(event):
             canvas.unbind_all("<MouseWheel>")
 
-        # Canvasに入った時だけスクロールを割り当て、出たら解除
-        # これにより他のタブやウィジェットへの干渉を防ぐ
         canvas.bind("<Enter>", _bind_mousewheel)
         canvas.bind("<Leave>", _unbind_mousewheel)
-        
+
         pad_x = 10
-        pad_y = 5
-        
-        title_lbl = ttk.Label(scrollable_frame, text="✨ 流星検出アプリの使い方", font=("Arial", 16, "bold"), foreground="#87CEEB")
-        title_lbl.pack(pady=(15, 10), padx=pad_x, anchor="w")
-        
-        intro_text = "このアプリは、動画ファイルやRTSPストリームから流星を自動検出し、\n解析・記録するためのツールです。以下の手順に従って操作してください。"
-        ttk.Label(scrollable_frame, text=intro_text, justify=tk.LEFT).pack(padx=pad_x, pady=(0, 15), anchor="w")
+        pad_y = 6
+        wrap_w = 520
+        base_bg = "#2E3F5B"
+        phase_styles = {
+            "detect": {
+                "border": "#4F77A8",
+                "header_bg": "#2F4E74",
+                "header_fg": "#EAF4FF",
+                "body_bg": "#314765",
+                "text_fg": "#EAEAEA",
+            },
+            "post": {
+                "border": "#4E8C72",
+                "header_bg": "#2F5A4B",
+                "header_fg": "#ECFFF6",
+                "body_bg": "#355346",
+                "text_fg": "#EAEAEA",
+            },
+        }
 
-        def add_usage_shortcut_buttons(parent_frame, buttons):
-            row = ttk.Frame(parent_frame)
-            row.pack(fill=tk.X, padx=10, pady=(0, 10), anchor="w")
+        ttk.Label(
+            scrollable_frame,
+            text="✨ 流星検出アプリの使い方",
+            font=("Arial", 16, "bold"),
+            foreground="#87CEEB",
+        ).pack(pady=(15, 8), padx=pad_x, anchor="w")
 
-            for label, command, text_color in buttons:
-                btn = tk.Button(
-                    row,
-                    text=label,
-                    command=command,
-                    bg="#3A4D6B",
-                    fg=text_color,
-                    activebackground="#4A6A9B",
-                    activeforeground=text_color,
-                    font=("Segoe UI", 10, "bold"),
-                    relief="raised",
-                    bd=1,
-                    padx=8,
-                    pady=2,
-                    cursor="hand2",
-                )
-                btn.pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Label(
+            scrollable_frame,
+            text=(
+                "各Stepの説明文の中にあるボタンを押すと、該当タブや操作場所へ直接移動します。"
+            ),
+            justify=tk.LEFT,
+            wraplength=wrap_w,
+        ).pack(padx=pad_x, pady=(0, 14), anchor="w")
 
-                def on_enter(event, b=btn):
-                    b.configure(bg="#4A6A9B")
+        def make_inline_button(parent_frame, label, command, text_color="#FFD700", button_bg="#3A4D6B"):
+            btn = tk.Button(
+                parent_frame,
+                text=label,
+                command=command,
+                bg=button_bg,
+                fg=text_color,
+                activebackground="#4A6A9B",
+                activeforeground=text_color,
+                font=("Segoe UI", 10, "bold"),
+                relief="raised",
+                bd=1,
+                padx=6,
+                pady=1,
+                cursor="hand2",
+            )
+            btn.bind("<Enter>", lambda e, b=btn: b.configure(bg="#4A6A9B"))
+            btn.bind("<Leave>", lambda e, b=btn, bg=button_bg: b.configure(bg=bg))
+            return btn
 
-                def on_leave(event, b=btn):
-                    b.configure(bg="#3A4D6B")
+        default_font = tkfont.nametofont("TkDefaultFont")
+        button_font = tkfont.Font(family="Segoe UI", size=10, weight="bold")
 
-                btn.bind("<Enter>", on_enter)
-                btn.bind("<Leave>", on_leave)
+        def _fit_prefix(text, max_px):
+            if not text:
+                return ""
+            if default_font.measure(text) <= max_px:
+                return text
+            lo, hi = 1, len(text)
+            best = 1
+            while lo <= hi:
+                mid = (lo + hi) // 2
+                if default_font.measure(text[:mid]) <= max_px:
+                    best = mid
+                    lo = mid + 1
+                else:
+                    hi = mid - 1
+            return text[:best]
 
-        # Step 1: ソースの追加
-        lf_step1 = ttk.LabelFrame(scrollable_frame, text="Step 1: データの準備 📂")
-        lf_step1.pack(fill=tk.X, padx=pad_x, pady=pad_y)
-        
-        s1_text = """「ソース選択」タブで解析対象を指定します。
+        def add_inline_line(parent_frame, segments, section_bg, text_fg):
+            max_line_px = wrap_w - 24
 
-1. 動画ファイルの場合:
-   - フォルダまたはファイルをリストにドラッグ＆ドロップするか、
-     [フォルダ追加] / [ファイル追加] ボタンを使用してください。
+            def new_row():
+                r = tk.Frame(parent_frame, bg=section_bg)
+                r.pack(fill=tk.X, padx=10, pady=(0, 6), anchor="w")
+                return r
 
-2. RTSPストリーム（ライブカメラ）の場合:
-   - RTSP URLを入力し、[追加] ボタンを押してください。
-   - ※ 外部GPUがない場合、CPU負荷にご注意ください。"""
-        ttk.Label(lf_step1, text=s1_text, justify=tk.LEFT).pack(padx=10, pady=10, anchor="w")
-        add_usage_shortcut_buttons(
-            lf_step1,
+            row = new_row()
+            used_px = 0
+
+            for seg in segments:
+                if not seg:
+                    continue
+                kind = seg[0]
+
+                if kind == "button":
+                    label = seg[1]
+                    command = seg[2]
+                    color = seg[3] if len(seg) >= 4 else "#FFD700"
+                    btn = make_inline_button(row, label, command, color, button_bg="#3A4D6B")
+                    btn.update_idletasks()
+                    req_px = btn.winfo_reqwidth() + 10
+                    if used_px > 0 and used_px + req_px > max_line_px:
+                        btn.destroy()
+                        row = new_row()
+                        used_px = 0
+                        btn = make_inline_button(row, label, command, color, button_bg="#3A4D6B")
+                        btn.update_idletasks()
+                        req_px = btn.winfo_reqwidth() + 10
+                    btn.pack(side=tk.LEFT, padx=4)
+                    used_px += req_px
+                    continue
+
+                if kind == "text":
+                    text = seg[1]
+                    while text:
+                        remain_px = max_line_px - used_px
+                        if remain_px < 40 and used_px > 0:
+                            row = new_row()
+                            used_px = 0
+                            remain_px = max_line_px
+
+                        if default_font.measure(text) <= remain_px:
+                            tk.Label(row, text=text, bg=section_bg, fg=text_fg).pack(side=tk.LEFT)
+                            used_px += default_font.measure(text) + 6
+                            text = ""
+                        else:
+                            part = _fit_prefix(text, remain_px)
+                            if not part:
+                                row = new_row()
+                                used_px = 0
+                                continue
+                            tk.Label(row, text=part, bg=section_bg, fg=text_fg).pack(side=tk.LEFT)
+                            used_px += default_font.measure(part) + 6
+                            text = text[len(part):]
+                            if text:
+                                row = new_row()
+                                used_px = 0
+
+        def add_phase_separator(text):
+            sep = tk.Frame(scrollable_frame, bg=base_bg)
+            sep.pack(fill=tk.X, padx=pad_x, pady=(10, 8))
+            tk.Frame(sep, bg="#6FB792", height=2).pack(fill=tk.X, pady=(0, 4))
+            tk.Label(
+                sep,
+                text=text,
+                bg=base_bg,
+                fg="#9DE3BC",
+                font=("Segoe UI", 10, "bold"),
+            ).pack(anchor="center")
+            tk.Frame(sep, bg="#6FB792", height=2).pack(fill=tk.X, pady=(4, 0))
+
+        def add_section(title, lines, phase="detect"):
+            style = phase_styles["detect"] if phase not in phase_styles else phase_styles[phase]
+            section_outer = tk.Frame(
+                scrollable_frame,
+                bg=style["border"],
+                highlightthickness=1,
+                highlightbackground=style["border"],
+            )
+            section_outer.pack(fill=tk.X, padx=pad_x, pady=pad_y)
+
+            header = tk.Label(
+                section_outer,
+                text=title,
+                anchor="w",
+                bg=style["header_bg"],
+                fg=style["header_fg"],
+                font=("Segoe UI", 11, "bold"),
+                padx=8,
+                pady=5,
+            )
+            header.pack(fill=tk.X, padx=1, pady=(1, 0))
+
+            body = tk.Frame(section_outer, bg=style["body_bg"])
+            body.pack(fill=tk.X, padx=1, pady=(0, 1))
+            for line in lines:
+                add_inline_line(body, line, section_bg=style["body_bg"], text_fg=style["text_fg"])
+
+        add_section(
+            "Step 0: 最短で動かす手順 🚀",
             [
-                ("📂 ソース選択を開く", self.navigate_to_source_drop_area, "#FFD700"),
-                ("📹 RTSP入力欄を表示", self.navigate_to_rtsp_entry, "#87CEEB"),
+                [("text", "最初に "), ("button", "ソース選択へ", self.navigate_to_source_drop_area, "#FFD700"), ("text", " で入力データを追加します。")],
+                [("text", "次に "), ("button", "保存設定へ", self.navigate_to_settings_tab, "#FFD700"), ("text", " で保存先・保存項目を確認します。")],
+                [("text", "準備ができたら "), ("button", "開始ボタン", self.navigate_to_start_button, "#90EE90"), ("text", " を押して処理を開始します。")],
             ],
+            phase="detect",
         )
 
-        # Step 2: 設定
-        lf_step2 = ttk.LabelFrame(scrollable_frame, text="Step 2: 検出設定 ⚙️")
-        lf_step2.pack(fill=tk.X, padx=pad_x, pady=pad_y)
-        
-        s2_text = """「各種設定」タブで検出の感度や保存オプションを設定します。
-デフォルト設定のままでも使用可能です。
-
-- API Key: プレートソルブを使用する場合はAstrometry.netのキーを設定してください。
-- 保存オプション: 検出時の保存データ（動画、画像、CSV等）を選択します。"""
-        ttk.Label(lf_step2, text=s2_text, justify=tk.LEFT).pack(padx=10, pady=10, anchor="w")
-        add_usage_shortcut_buttons(
-            lf_step2,
+        add_section(
+            "Step 1: 入力ソースの準備（動画 / RTSP / 定期スキャン） 📂",
             [
-                ("⚙️ 保存設定タブを開く", self.navigate_to_settings_tab, "#FFD700"),
-                ("🎭 検出マスク作成を表示", self.navigate_to_detection_mask_button, "#FFD700"),
+                [("text", "動画を使う場合は "), ("button", "ドロップ領域へ", self.navigate_to_source_drop_area, "#FFD700"), ("text", " から追加します。")],
+                [("text", "RTSPを使う場合は "), ("button", "RTSP入力欄", self.navigate_to_rtsp_entry, "#87CEEB"), ("text", " にURLを入力し、"), ("button", "RTSP追加ボタン", self.navigate_to_rtsp_add_button, "#87CEEB"), ("text", " を押します。")],
+                [("text", "定期運用する場合は "), ("button", "定期スキャン設定", self.navigate_to_periodic_scan_section, "#FFD700"), ("text", " を有効化し、"), ("button", "監視フォルダ選択", self.navigate_to_periodic_dir_button, "#FFD700"), ("text", " を設定します。")],
             ],
+            phase="detect",
         )
 
-        # Step 3: 実行
-        lf_step3 = ttk.LabelFrame(scrollable_frame, text="Step 3: 解析開始 ▶️")
-        lf_step3.pack(fill=tk.X, padx=pad_x, pady=pad_y)
-        
-        s3_text = """画面右下の [開始] ボタンをクリックすると解析が始まります。
-
-- 状況バー: 現在の処理キューの状態や進行状況が表示されます。
-- キャンセル: 途中で停止したい場合は [キャンセル] ボタンを押してください。"""
-        ttk.Label(lf_step3, text=s3_text, justify=tk.LEFT).pack(padx=10, pady=10, anchor="w")
-        add_usage_shortcut_buttons(
-            lf_step3,
+        add_section(
+            "Step 2: 保存・検出・座標設定（マスク / プレートソルブ / APIキー） ⚙️",
             [
-                ("▶ 開始ボタンを表示", self.navigate_to_start_button, "#90EE90"),
+                [("text", "保存設定は "), ("button", "保存設定へ", self.navigate_to_settings_tab, "#FFD700"), ("text", " で行います。")],
+                [("text", "誤検出が多い場合は "), ("button", "検出マスク", self.navigate_to_detection_mask_button, "#FFD700"), ("text", " を作成して調整します。")],
+                [("text", "プレートソルブを使う場合は "), ("button", "PS動画の選択", self.navigate_to_plate_solve_select_video_button, "#87CEEB"), ("text", " の後に "), ("button", "プレートソルブ実行", self.navigate_to_plate_solve_run_button, "#87CEEB"), ("text", " を押します。")],
+                [("text", "API利用時は "), ("button", "API Key入力欄", self.navigate_to_api_key_entry, "#87CEEB"), ("text", " を設定します。")],
+                [("text", "準備ができたら "), ("button", "開始ボタン", self.navigate_to_start_button, "#90EE90"), ("text", " を押して処理を開始します。")],
             ],
+            phase="detect",
         )
 
-        # Step 4: 結果の確認
-        lf_step4 = ttk.LabelFrame(scrollable_frame, text="Step 4: 結果の確認 📊")
-        lf_step4.pack(fill=tk.X, padx=pad_x, pady=pad_y)
-        
-        s4_text = """検出された流星は以下の場所に保存されます。
+        add_phase_separator("ここから後処理ステップ（検出後に使う機能）")
 
-- 保存先: デフォルトでは `meteor_save_path` に保存されます。
-  （設定タブで変更可能）
-- ログ: 「処理状況」パネルの [ログ] タブで詳細を確認できます。
-  [ログを保存] ボタンでテキストファイルに出力も可能です。"""
-        ttk.Label(lf_step4, text=s4_text, justify=tk.LEFT).pack(padx=10, pady=10, anchor="w")
-        add_usage_shortcut_buttons(
-            lf_step4,
+        add_section(
+            "Step 3: 解析タブ（画像/動画生成） 🧪",
             [
-                ("📝 ログタブを開く", self.navigate_to_log_tab, "#FFD700"),
-                ("📊 解析機能を表示", self.navigate_to_analysis_actions, "#FFD700"),
+                [("text", "まず "), ("button", "解析タブへ", self.navigate_to_analysis_tab, "#90EE90"), ("text", " を開きます。")],
+                [("text", "静止画を作るときは "), ("button", "比較明合成画像", self.navigate_to_blend_image_button, "#FFD700"), ("text", " を使います。")],
+                [("text", "動画を作るときは "), ("button", "比較明合成動画", self.navigate_to_blend_video_button, "#FFD700"), ("text", " を使います。")],
+                [("text", "時間変化を確認したいときは "), ("button", "タイムラプス", self.navigate_to_timelapse_button, "#FFD700"), ("text", " を使います。")],
             ],
+            phase="post",
         )
+
+        add_section(
+            "Step 4: 動画連結（複数動画を一本化） 🔗",
+            [
+                [("text", "連結対象の動画は解析タブ内の動画連結エリアへドラッグ＆ドロップします（必要ならファイル追加も可）。")],
+                [("text", "設定後、"), ("button", "連結開始ボタン", self.navigate_to_video_concat_start_button, "#FFD700"), ("text", " で1本に連結します。")],
+            ],
+            phase="post",
+        )
+
+        add_section(
+            "Step 5: 困ったときの確認先 💬",
+            [
+                [("text", "処理状況の確認は "), ("button", "ログ確認", self.navigate_to_log_tab, "#FFD700"), ("text", " と "), ("button", "処理状況", self.navigate_to_processing_status_tab, "#FFD700"), ("text", " を使います。")],
+                [("text", "操作手順に迷った場合は "), ("button", "Chatへ", self.navigate_to_chat_tab, "#FFD700"), ("text", " で質問できます。")],
+            ],
+            phase="post",
+        )
+
+        ttk.Label(
+            scrollable_frame,
+            text="迷った場合は Step 0 から順に進めてください。",
+            justify=tk.LEFT,
+            wraplength=wrap_w,
+            foreground="#AAAAAA",
+        ).pack(padx=pad_x, pady=(8, 14), anchor="w")
 
         return frame
 
@@ -705,7 +848,8 @@ class App(TkinterDnD.Tk):
         fps_spin = ttk.Spinbox(entry_frame, from_=1, to=120, increment=1, width=5, textvariable=self.rtsp_fps_var)
         fps_spin.pack(side=tk.LEFT, padx=(0, 5))
         
-        ttk.Button(entry_frame, text="追加", command=self.add_rtsp_url).pack(side=tk.LEFT, padx=(5,0))
+        self.btn_add_rtsp = ttk.Button(entry_frame, text="追加", command=self.add_rtsp_url)
+        self.btn_add_rtsp.pack(side=tk.LEFT, padx=(5,0))
         
         # RTSP list (styled)
         rtsp_list_container = ttk.Frame(lf_rtsp)
@@ -743,7 +887,8 @@ class App(TkinterDnD.Tk):
         rtsp_btn_frame.pack(fill=tk.X, pady=(5,0))
         ttk.Button(rtsp_btn_frame, text="選択項目を削除", command=self.remove_selected_rtsp).pack(side=tk.LEFT, padx=2)
         ttk.Button(rtsp_btn_frame, text="すべて削除", command=self.remove_all_rtsp).pack(side=tk.LEFT, padx=2)
-        ttk.Button(rtsp_btn_frame, text="RTSPからプレートソルブ", command=self.start_rtsp_plate_solve).pack(side=tk.LEFT, padx=(10, 2))
+        self.btn_rtsp_plate_solve = ttk.Button(rtsp_btn_frame, text="RTSPからプレートソルブ", command=self.start_rtsp_plate_solve)
+        self.btn_rtsp_plate_solve.pack(side=tk.LEFT, padx=(10, 2))
         self.btn_rtsp_mask = ttk.Button(rtsp_btn_frame, text="RTSPからマスク作成", command=self.create_rtsp_mask)
         self.btn_rtsp_mask.pack(side=tk.LEFT, padx=2)
         
@@ -784,7 +929,8 @@ class App(TkinterDnD.Tk):
         header_frame = ttk.Frame(lf_periodic)
         header_frame.pack(fill=tk.X, anchor=tk.W)
         
-        ttk.Checkbutton(header_frame, text="定期スキャンを有効にする", variable=self.periodic_scan_var, command=self.update_start_button_state).pack(side=tk.LEFT)
+        self.chk_periodic_scan = ttk.Checkbutton(header_frame, text="定期スキャンを有効にする", variable=self.periodic_scan_var, command=self.update_start_button_state)
+        self.chk_periodic_scan.pack(side=tk.LEFT)
         
         help_label = ttk.Label(header_frame, text=" ? ", font=("Arial", 10, "bold"), foreground="#87CEEB", cursor="hand2")
         help_label.pack(side=tk.LEFT, padx=5)
@@ -835,7 +981,8 @@ atomcam2で利用する場合は、GitHubで公開されている
         dir_frame.pack(fill=tk.X, pady=5)
         ttk.Label(dir_frame, text="監視フォルダ:").pack(side=tk.LEFT, padx=(0,5))
         ttk.Entry(dir_frame, textvariable=self.periodic_dir_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Button(dir_frame, text="選択", command=self.select_periodic_dir).pack(side=tk.LEFT, padx=(5,0))
+        self.btn_select_periodic_dir = ttk.Button(dir_frame, text="選択", command=self.select_periodic_dir)
+        self.btn_select_periodic_dir.pack(side=tk.LEFT, padx=(5,0))
         
         interval_frame = ttk.Frame(lf_periodic)
         interval_frame.pack(fill=tk.X, pady=5)
@@ -849,7 +996,8 @@ atomcam2で利用する場合は、GitHubで公開されている
         row_frame.pack(fill=tk.X)
         self.chk_time_limit = ttk.Checkbutton(row_frame, text="時間制限を有効にする", variable=self.periodic_time_limit_var, command=self.toggle_time_limit_frame)
         self.chk_time_limit.pack(side=tk.LEFT, anchor=tk.W)
-        ttk.Button(row_frame, text="自動で設定", command=self.fetch_current_location).pack(side=tk.LEFT, padx=(8,0))
+        self.btn_periodic_auto_time = ttk.Button(row_frame, text="自動で設定", command=self.fetch_current_location)
+        self.btn_periodic_auto_time.pack(side=tk.LEFT, padx=(8,0))
         ttk.Checkbutton(row_frame, text="自動更新を有効にする", variable=self.auto_time_updater_enabled_var, command=self.toggle_auto_time_updater).pack(side=tk.LEFT, padx=(8,0))
         
         self.time_limit_frame = ttk.Frame(lf_time)
@@ -881,115 +1029,258 @@ atomcam2で利用する場合は、GitHubで公開されている
         self.source_drop_label.configure(style="Highlight.TLabel")
 
         def flash_highlight(count=0):
-            if count >= 6:  # 3 seconds (6 * 500ms)
+            if count >= 6:
                 self.source_drop_label.configure(style="TLabel")
                 return
-            
             if count % 2 == 0:
                 style.configure("Highlight.TLabel", background="#FFD700", foreground="#000000")
             else:
                 style.configure("Highlight.TLabel", background="#4A6A9B", foreground="#EAEAEA")
-            
-            self.after(500, lambda: flash_highlight(count + 1))
-        
+            self.after(400, lambda: flash_highlight(count + 1))
+
         flash_highlight()
 
     def navigate_to_start_button(self):
-        """Highlight the start button for a few seconds."""
-        style = ttk.Style()
-        style.configure("Highlight.TButton", background="#FFD700", foreground="#000000")
-        self.start_button.configure(style="Highlight.TButton")
-
-        def flash_highlight(count=0):
-            if count >= 6:  # 3 seconds
-                self.start_button.configure(style="TButton")
-                return
-            
-            if count % 2 == 0:
-                style.configure("Highlight.TButton", background="#FFD700", foreground="#000000")
-            else:
-                style.configure("Highlight.TButton", background="#4A6A9B", foreground="#FFFFFF")
-            
-            self.after(500, lambda: flash_highlight(count + 1))
-        
-        flash_highlight()
+        self._flash_button(self.start_button)
 
     def navigate_to_rtsp_entry(self):
-        """Navigate to Source Selection tab and highlight the RTSP URL entry for a few seconds."""
+        """Navigate to Source tab and highlight RTSP URL entry."""
         self.notebook.select(self.tab_source)
-        
-        style = ttk.Style()
-        style.configure("Highlight.TEntry", fieldbackground="#FFD700", foreground="#000000")
-        self.rtsp_url_entry.configure(style="Highlight.TEntry")
+        self._flash_entry(self.rtsp_url_entry)
+        try:
+            self.rtsp_url_entry.focus_set()
+        except Exception:
+            pass
 
-        def flash_highlight(count=0):
-            if count >= 6:  # 3 seconds
-                self.rtsp_url_entry.configure(style="TEntry")
-                return
-            
-            if count % 2 == 0:
-                style.configure("Highlight.TEntry", fieldbackground="#FFD700", foreground="#000000")
-            else:
-                style.configure("Highlight.TEntry", fieldbackground="#3A4D6B", foreground="#EAEAEA")
-            
-            self.after(500, lambda: flash_highlight(count + 1))
-        
-        flash_highlight()
+    def navigate_to_rtsp_add_button(self):
+        self.notebook.select(self.tab_source)
+        if hasattr(self, "btn_add_rtsp"):
+            self._flash_button(self.btn_add_rtsp)
+
+    def navigate_to_rtsp_plate_solve_button(self):
+        self.notebook.select(self.tab_source)
+        if hasattr(self, "btn_rtsp_plate_solve"):
+            self._flash_button(self.btn_rtsp_plate_solve)
 
     def navigate_to_rtsp_mask_button(self):
-        """Navigate to Source tab and highlight RTSP mask button."""
         self.notebook.select(self.tab_source)
-        self._flash_button(self.btn_rtsp_mask)
+        if hasattr(self, "btn_rtsp_mask"):
+            self._flash_button(self.btn_rtsp_mask)
+
+    def navigate_to_periodic_scan_section(self):
+        self.notebook.select(self.tab_source)
+        if hasattr(self, "btn_select_periodic_dir"):
+            self._flash_button(self.btn_select_periodic_dir)
+
+    def navigate_to_periodic_dir_button(self):
+        self.notebook.select(self.tab_source)
+        if hasattr(self, "btn_select_periodic_dir"):
+            self._flash_button(self.btn_select_periodic_dir)
+
+    def navigate_to_periodic_auto_time_button(self):
+        self.notebook.select(self.tab_source)
+        if hasattr(self, "btn_periodic_auto_time"):
+            self._flash_button(self.btn_periodic_auto_time)
 
     def navigate_to_settings_tab(self):
-        """Navigate to Settings tab and highlight key controls."""
         self.notebook.select(self.tab_settings)
         if hasattr(self, "btn_detection_mask"):
             self._flash_button(self.btn_detection_mask)
-        if hasattr(self, "btn_ps_mask"):
-            self._flash_button(self.btn_ps_mask)
+
+    def navigate_to_mask_download_button(self):
+        self.notebook.select(self.tab_settings)
+        if hasattr(self, "btn_download_mask"):
+            self._flash_button(self.btn_download_mask)
+
+    def navigate_to_plate_solve_select_video_button(self):
+        self.notebook.select(self.tab_settings)
+        if hasattr(self, "btn_select_plate_solve_video"):
+            self._flash_button(self.btn_select_plate_solve_video)
+
+    def navigate_to_plate_solve_run_button(self):
+        self.notebook.select(self.tab_settings)
+        if hasattr(self, "btn_run_plate_solve"):
+            self._flash_button(self.btn_run_plate_solve)
+
+    def navigate_to_api_key_entry(self):
+        self.notebook.select(self.tab_settings)
+        if hasattr(self, "api_key_entry"):
+            self._flash_entry(self.api_key_entry)
+            try:
+                self.api_key_entry.focus_set()
+            except Exception:
+                pass
+
+    def navigate_to_summary_settings_button(self):
+        self.notebook.select(self.tab_settings)
+        if hasattr(self, "btn_summary_settings"):
+            self._flash_button(self.btn_summary_settings)
+
+    def navigate_to_analysis_tab(self):
+        self.notebook.select(self.tab_analysis)
+
+    def navigate_to_analysis_start_button(self):
+        self.notebook.select(self.tab_analysis)
+        if hasattr(self, "btn_analysis_start"):
+            self._flash_button(self.btn_analysis_start)
+
+    def navigate_to_blend_image_button(self):
+        self.notebook.select(self.tab_analysis)
+        if hasattr(self, "btn_blend_image"):
+            self._flash_button(self.btn_blend_image)
+
+    def navigate_to_blend_video_button(self):
+        self.notebook.select(self.tab_analysis)
+        if hasattr(self, "btn_blend_video"):
+            self._flash_button(self.btn_blend_video)
+
+    def navigate_to_timelapse_button(self):
+        self.notebook.select(self.tab_analysis)
+        if hasattr(self, "btn_timelapse"):
+            self._flash_button(self.btn_timelapse)
+
+    def navigate_to_long_exposure_button(self):
+        self.notebook.select(self.tab_analysis)
+        if hasattr(self, "btn_long_exposure"):
+            self._flash_button(self.btn_long_exposure)
+
+    def navigate_to_distortion_button(self):
+        self.notebook.select(self.tab_analysis)
+        if hasattr(self, "btn_distortion"):
+            self._flash_button(self.btn_distortion)
+
+    def navigate_to_angle_analysis_button(self):
+        self.notebook.select(self.tab_analysis)
+        if hasattr(self, "btn_angle_analysis"):
+            self._flash_button(self.btn_angle_analysis)
+
+    def navigate_to_video_concat_start_button(self):
+        self.notebook.select(self.tab_analysis)
+        if hasattr(self, "btn_video_concat_start"):
+            self._flash_button(self.btn_video_concat_start)
+
+    def navigate_to_chat_tab(self):
+        self.notebook.select(self.tab_chat)
+
+    def navigate_to_advanced_tab(self):
+        self.notebook.select(self.tab_advanced_settings)
+        if hasattr(self, "btn_reset_advanced"):
+            self._flash_button(self.btn_reset_advanced)
 
     def navigate_to_log_tab(self):
-        """Focus the right panel's log tab."""
         if hasattr(self, "status_panel") and hasattr(self.status_panel, "notebook"):
             try:
                 self.status_panel.notebook.select(self.status_panel.log_frame)
             except Exception:
                 pass
 
+    def navigate_to_processing_status_tab(self):
+        if hasattr(self, "status_panel") and hasattr(self.status_panel, "notebook"):
+            try:
+                self.status_panel.notebook.select(self.status_panel.status_frame)
+            except Exception:
+                pass
+
     def navigate_to_detection_mask_button(self):
-        """Navigate to Settings tab and highlight Detection mask button."""
         self.notebook.select(self.tab_settings)
-        self._flash_button(self.btn_detection_mask)
+        if hasattr(self, "btn_detection_mask"):
+            self._scroll_settings_to_widget(self.btn_detection_mask, top_margin=20)
+            self.after(160, lambda: self._flash_button(self.btn_detection_mask))
 
     def navigate_to_ps_mask_button(self):
-        """Navigate to Settings tab and highlight Plate Solve mask button."""
         self.notebook.select(self.tab_settings)
-        self._flash_button(self.btn_ps_mask)
+        if hasattr(self, "btn_ps_mask"):
+            self._scroll_settings_to_widget(self.btn_ps_mask, top_margin=20)
+            self.after(160, lambda: self._flash_button(self.btn_ps_mask))
+
+    def _scroll_settings_to_widget(self, widget, top_margin=16):
+        """Scroll settings tab canvas so target widget becomes visible near top."""
+        def do_scroll():
+            try:
+                if widget is None or not widget.winfo_exists():
+                    return
+                if not hasattr(self, "settings_canvas") or not hasattr(self, "settings_scrollable_frame"):
+                    return
+                canvas = self.settings_canvas
+                scrollable_frame = self.settings_scrollable_frame
+                if not canvas.winfo_exists() or not scrollable_frame.winfo_exists():
+                    return
+
+                self.update_idletasks()
+                bbox = canvas.bbox("all")
+                if not bbox:
+                    return
+
+                total_h = max(1, bbox[3] - bbox[1])
+                view_h = max(1, canvas.winfo_height())
+                max_scroll = max(1, total_h - view_h)
+
+                # y position inside scrollable frame (independent from current scroll)
+                y_in_frame = widget.winfo_rooty() - scrollable_frame.winfo_rooty()
+                target_y = max(0, y_in_frame - top_margin)
+                frac = min(1.0, max(0.0, target_y / max_scroll))
+                canvas.yview_moveto(frac)
+            except Exception:
+                pass
+
+        # Run twice to stabilize position after tab switch/layout refresh.
+        self.after(20, do_scroll)
+        self.after(140, do_scroll)
+
+    def _flash_entry(self, entry):
+        if entry is None:
+            return
+        try:
+            if not entry.winfo_exists():
+                return
+            base_style = entry.cget("style") or "TEntry"
+            style = ttk.Style()
+            highlight_style = f"Highlight{entry.winfo_id()}.TEntry"
+            style.configure(highlight_style, fieldbackground="#FFD700", foreground="#000000")
+
+            def flash(count=0):
+                if not entry.winfo_exists():
+                    return
+                if count >= 6:
+                    entry.configure(style=base_style)
+                    return
+                entry.configure(style=highlight_style if count % 2 == 0 else base_style)
+                self.after(400, lambda: flash(count + 1))
+
+            flash()
+        except Exception:
+            pass
 
     def _flash_button(self, button):
-        """Helper to flash a button."""
-        style = ttk.Style()
-        style.configure("Highlight.TButton", background="#FFD700", foreground="#000000")
-        button.configure(style="Highlight.TButton")
-        
-        def flash(count=0):
-            if count >= 6:
-                button.configure(style="TButton")
+        if button is None:
+            return
+        try:
+            if not button.winfo_exists():
                 return
-            if count % 2 == 0:
-                style.configure("Highlight.TButton", background="#FFD700", foreground="#000000")
-            else:
-                style.configure("Highlight.TButton", background="#4A6A9B", foreground="#FFFFFF")
-            self.after(500, lambda: flash(count + 1))
-        flash()
+            base_style = button.cget("style") or "TButton"
+            style = ttk.Style()
+            highlight_style = f"Highlight{button.winfo_id()}.TButton"
+            style.configure(highlight_style, background="#FFD700", foreground="#000000")
+
+            def flash(count=0):
+                if not button.winfo_exists():
+                    return
+                if count >= 6:
+                    button.configure(style=base_style)
+                    return
+                button.configure(style=highlight_style if count % 2 == 0 else base_style)
+                self.after(400, lambda: flash(count + 1))
+
+            flash()
+        except Exception:
+            pass
 
     def navigate_to_analysis_actions(self):
         """Navigate to Analysis tab and highlight the blend/timelapse buttons."""
         self.notebook.select(self.tab_analysis)
-        self._flash_button(self.btn_blend_image)
-        self._flash_button(self.btn_blend_video)
-        self._flash_button(self.btn_timelapse)
+        self.navigate_to_blend_image_button()
+        self.navigate_to_blend_video_button()
+        self.navigate_to_timelapse_button()
 
     def _ensure_date_prefix(self, path: str) -> str:
         """Ensure the filename starts with YYYYMMDD_. If not, prepend today's date.
@@ -1063,15 +1354,19 @@ atomcam2で利用する場合は、GitHubで公開されている
         
         row1 = ttk.Frame(action_frame)
         row1.pack(fill=tk.X, pady=2)
-        ttk.Button(row1, text="解析開始", command=self.start_analysis, style="Gray.TButton").pack(side=tk.LEFT, padx=(0,5))
+        self.btn_analysis_start = ttk.Button(row1, text="解析開始", command=self.start_analysis, style="Gray.TButton")
+        self.btn_analysis_start.pack(side=tk.LEFT, padx=(0,5))
         ttk.Button(row1, text="座標点を追加", command=self.add_custom_point, style="Gray.TButton").pack(side=tk.LEFT, padx=(0,5))
         ttk.Button(row1, text="座標点を管理", command=self.manage_coordinates, style="Gray.TButton").pack(side=tk.LEFT, padx=(0,5))
 
         row2 = ttk.Frame(action_frame)
         row2.pack(fill=tk.X, pady=2)
-        ttk.Button(row2, text="長時間輝線マップを作成", command=self.create_long_exposure_map_callback, style="Gray.TButton").pack(side=tk.LEFT, padx=(0,5))
-        ttk.Button(row2, text="ゆがみ補正", command=self.apply_distortion_correction_callback, style="Gray.TButton").pack(side=tk.LEFT, padx=(0,5))
-        ttk.Button(row2, text="角度分布分析", command=self.analyze_angles_callback, style="Gray.TButton").pack(side=tk.LEFT, padx=(0,5))
+        self.btn_long_exposure = ttk.Button(row2, text="長時間輝線マップを作成", command=self.create_long_exposure_map_callback, style="Gray.TButton")
+        self.btn_long_exposure.pack(side=tk.LEFT, padx=(0,5))
+        self.btn_distortion = ttk.Button(row2, text="ゆがみ補正", command=self.apply_distortion_correction_callback, style="Gray.TButton")
+        self.btn_distortion.pack(side=tk.LEFT, padx=(0,5))
+        self.btn_angle_analysis = ttk.Button(row2, text="角度分布分析", command=self.analyze_angles_callback, style="Gray.TButton")
+        self.btn_angle_analysis.pack(side=tk.LEFT, padx=(0,5))
 
         row3 = ttk.Frame(action_frame)
         row3.pack(fill=tk.X, pady=2)
@@ -1156,7 +1451,8 @@ atomcam2で利用する場合は、GitHubで公開されている
                      "処理に時間がかかりますが、連結の安定性が向上します。")
         self._setup_help_tooltip(help_label, help_text)
 
-        ttk.Button(lf_concat, text="連結開始", command=self.start_video_concat).pack(pady=5)
+        self.btn_video_concat_start = ttk.Button(lf_concat, text="連結開始", command=self.start_video_concat)
+        self.btn_video_concat_start.pack(pady=5)
 
         return frame
 
@@ -1656,6 +1952,8 @@ atomcam2で利用する場合は、GitHubで公開されている
         canvas = tk.Canvas(frame, highlightthickness=0, bg="#2E3F5B")
         scrollbar = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=canvas.yview)
         scrollable_frame = ttk.Frame(canvas)
+        self.settings_canvas = canvas
+        self.settings_scrollable_frame = scrollable_frame
 
         scrollable_frame.bind(
             "<Configure>",
@@ -1860,8 +2158,10 @@ atomcam2で利用する場合は、GitHubで公開されている
         ps_frame = ttk.Frame(lf_astro); ps_frame.pack(fill=tk.X, pady=2)
         ttk.Label(ps_frame, text="動画から実行:").pack(side=tk.LEFT, padx=(0,5))
         ttk.Entry(ps_frame, textvariable=self.plate_solve_video_path_var, state='readonly').pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Button(ps_frame, text="選択", command=self.select_plate_solve_video).pack(side=tk.LEFT, padx=(5,0))
-        ttk.Button(ps_frame, text="実行", command=self.start_plate_solve).pack(side=tk.LEFT, padx=(5,0))
+        self.btn_select_plate_solve_video = ttk.Button(ps_frame, text="選択", command=self.select_plate_solve_video)
+        self.btn_select_plate_solve_video.pack(side=tk.LEFT, padx=(5,0))
+        self.btn_run_plate_solve = ttk.Button(ps_frame, text="実行", command=self.start_plate_solve)
+        self.btn_run_plate_solve.pack(side=tk.LEFT, padx=(5,0))
         
         ps_wcs_frame = ttk.Frame(lf_astro); ps_wcs_frame.pack(fill=tk.X, pady=2)
         ttk.Label(ps_wcs_frame, text="既存WCSファイル:").pack(side=tk.LEFT, padx=(0,5))
@@ -1909,8 +2209,8 @@ atomcam2で利用する場合は、GitHubで公開されている
         
         ttk.Label(api_key_frame, text=":").pack(side=tk.LEFT, padx=(0,5))
         
-        api_key_entry = ttk.Entry(api_key_frame, textvariable=self.astrometry_api_key_var, show="*", width=30)
-        api_key_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.api_key_entry = ttk.Entry(api_key_frame, textvariable=self.astrometry_api_key_var, show="*", width=30)
+        self.api_key_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
         # API Key変更時にconfigを更新
         self.astrometry_api_key_var.trace_add("write", lambda *args: setattr(config, 'ASTROMETRY_API_KEY', self.astrometry_api_key_var.get()))
         
@@ -2070,7 +2370,8 @@ atomcam2で利用する場合は、GitHubで公開されている
 
         btn_frame = ttk.Frame(scrollable_frame)
         btn_frame.pack(fill=tk.X, pady=10)
-        ttk.Button(btn_frame, text="デフォルトに戻す", command=self.reset_advanced_settings).pack(side=tk.LEFT, padx=5)
+        self.btn_reset_advanced = ttk.Button(btn_frame, text="デフォルトに戻す", command=self.reset_advanced_settings)
+        self.btn_reset_advanced.pack(side=tk.LEFT, padx=5)
 
         return frame
 
