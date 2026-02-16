@@ -19,8 +19,16 @@ else:
     # calculated PARENT_DIR should match that.
     EXE_DIR = PARENT_DIR 
 
-# Use the requested trained model file explicitly.
-MODEL_PATH = r"C:\Users\kekke\Desktop\my_app\div\model_epoch_47.pth"
+# Resolve model path relative to this file (portable/exe-friendly).
+_MODEL_CANDIDATES = [
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "model_epoch_47.pth"),
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "model_latest_1.pth"),
+]
+MODEL_PATH = _MODEL_CANDIDATES[0]
+for _candidate in _MODEL_CANDIDATES:
+    if os.path.exists(_candidate):
+        MODEL_PATH = _candidate
+        break
 
 # --- 画像・モデル関連 ---
 IMG_HEIGHT = 224  # モデルの入力画像の高さ
