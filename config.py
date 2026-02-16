@@ -8,25 +8,19 @@ if getattr(sys, 'frozen', False):
     # Running as compiled exe
     BUNDLE_DIR = sys._MEIPASS
     EXE_DIR = os.path.dirname(sys.executable)
-    # Bundle contains model at root
-    MODEL_PATH = os.path.join(BUNDLE_DIR, "model_epoch_46.pth")
 else:
     # Running as script (Development)
     SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
     # Assuming standard structure: my_app/div/config.py
-    # and my_app/model_epoch_46.pth
     # So base dir for resources/output should be parent of div
     PARENT_DIR = os.path.dirname(SCRIPT_DIR)
     
     # Decide where base ref is. Original code was hardcoded to C:\Users\kekke\Desktop\my_app
     # calculated PARENT_DIR should match that.
     EXE_DIR = PARENT_DIR 
-    
-    # Model path strategy for dev
-    if os.path.exists(os.path.join(SCRIPT_DIR, "model_epoch_46.pth")):
-        MODEL_PATH = os.path.join(SCRIPT_DIR, "model_epoch_46.pth")
-    else:
-        MODEL_PATH = os.path.join(PARENT_DIR, "model_epoch_46.pth")
+
+# Use the requested trained model file explicitly.
+MODEL_PATH = r"C:\Users\kekke\Desktop\my_app\div\model_epoch_47.pth"
 
 # --- 画像・モデル関連 ---
 IMG_HEIGHT = 224  # モデルの入力画像の高さ
