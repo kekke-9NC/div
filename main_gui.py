@@ -1,4 +1,4 @@
-import os
+﻿import os
 import hashlib
 import sys
 import time
@@ -10,6 +10,7 @@ import contextlib
 import shutil
 import re
 import subprocess
+import importlib.util
 import cv2
 import numpy as np
 import tkinter as tk
@@ -36,6 +37,7 @@ import video_processing
 import astrometry
 import image_processing
 import model
+import model_catalog
 import utils
 import location_utils
 import sun_times
@@ -330,6 +332,9 @@ class App(TkinterDnD.Tk):
         self.apply_mask_var = tk.BooleanVar(value=False)
         self.meteor_save_path_var = tk.StringVar(value=config.DEFAULT_METEOR_SAVE_PATH)
         self.not_meteor_save_path_var = tk.StringVar(value=config.DEFAULT_NOT_METEOR_SAVE_PATH)
+        self.selected_model_path_var = tk.StringVar(value=config.MODEL_PATH)
+        self.model_meta_info_var = tk.StringVar(value="")
+        self.custom_model_paths = []
         # store last-fetched coordinates (display only for now)
         self.current_lat_var = tk.StringVar(value="--")
         self.current_lon_var = tk.StringVar(value="--")
@@ -377,6 +382,8 @@ class App(TkinterDnD.Tk):
         self.cfg_finer_min_length_var = tk.StringVar(value=str(config.FINER_DETECT_MIN_LENGTH))
         self.cfg_finer_padding_sec_var = tk.StringVar(value=str(config.FINER_DETECT_PADDING_SECONDS))
         self.cfg_finer_cutout_size_var = tk.StringVar(value=str(config.FINER_CUTOUT_SIZE))
+        self.cfg_rtsp_scale_lower_var = tk.StringVar(value=str(config.RTSP_SCALE_LOWER))
+        self.cfg_rtsp_scale_upper_var = tk.StringVar(value=str(config.RTSP_SCALE_UPPER))
         
         # 飛行機判定関連
         self.cfg_airplane_dur_thresh_var = tk.StringVar(value=str(config.AIRPLANE_DURATION_THRESHOLD))
@@ -387,6 +394,8 @@ class App(TkinterDnD.Tk):
         self.cfg_max_clip_dur_var = tk.StringVar(value=str(config.MAX_CLIP_DURATION))
         self.cfg_clip_dur_sec_var = tk.StringVar(value=str(config.CLIP_DURATION_SECONDS))
         self.cfg_cutout_size_var = tk.StringVar(value=str(config.CUTOUT_SIZE))
+        self.cfg_rtsp_scale_lower_var.trace_add("write", lambda *_: self._sync_rtsp_scale_from_ui())
+        self.cfg_rtsp_scale_upper_var.trace_add("write", lambda *_: self._sync_rtsp_scale_from_ui())
 
     def setup_ui(self):
         main_pane = PanedWindow(self, orient=tk.HORIZONTAL, sashrelief=tk.RAISED, bg="#2E3F5B")
@@ -432,6 +441,16 @@ class App(TkinterDnD.Tk):
                 pass
 
         self.after(120, _set_initial_sash)
+
+    def _sync_rtsp_scale_from_ui(self):
+        try:
+            lower = float(self.cfg_rtsp_scale_lower_var.get())
+            upper = float(self.cfg_rtsp_scale_upper_var.get())
+            if lower > 0 and upper > lower:
+                config.RTSP_SCALE_LOWER = lower
+                config.RTSP_SCALE_UPPER = upper
+        except Exception:
+            pass
 
 
     def create_usage_tab(self, parent):
@@ -671,6 +690,7 @@ class App(TkinterDnD.Tk):
                 [("text", "保存設定は "), ("button", "保存設定へ", self.navigate_to_settings_tab, "#FFD700"), ("text", " で行います。")],
                 [("text", "誤検出が多い場合は "), ("button", "検出マスク", self.navigate_to_detection_mask_button, "#FFD700"), ("text", " を作成して調整します。")],
                 [("text", "プレートソルブを使う場合は "), ("button", "PS動画の選択", self.navigate_to_plate_solve_select_video_button, "#87CEEB"), ("text", " の後に "), ("button", "プレートソルブ実行", self.navigate_to_plate_solve_run_button, "#87CEEB"), ("text", " を押します。")],
+                [("text", "プレートソルブの視野角は "), ("button", "プレートソルブ時の視野角設定", self.navigate_to_plate_solve_fov_settings, "#87CEEB"), ("text", " で設定してください。設定した値が正しくない場合、プレートソルブがうまくいかない場合があります。")],
                 [("text", "API利用時は "), ("button", "API Key入力欄", self.navigate_to_api_key_entry, "#87CEEB"), ("text", " を設定します。")],
                 [("text", "準備ができたら "), ("button", "開始ボタン", self.navigate_to_start_button, "#90EE90"), ("text", " を押して処理を開始します。")],
             ],
@@ -704,6 +724,15 @@ class App(TkinterDnD.Tk):
             [
                 [("text", "処理状況の確認は "), ("button", "ログ確認", self.navigate_to_log_tab, "#FFD700"), ("text", " と "), ("button", "処理状況", self.navigate_to_processing_status_tab, "#FFD700"), ("text", " を使います。")],
                 [("text", "操作手順に迷った場合は "), ("button", "Chatへ", self.navigate_to_chat_tab, "#FFD700"), ("text", " で質問できます。")],
+            ],
+            phase="post",
+        )
+
+        add_section(
+            "Step 6: モデル学習と切替 🧠",
+            [
+                [("text", "推論に使うCNNは "), ("button", "流星分類モデル選択", self.navigate_to_model_selector, "#87CEEB"), ("text", " から切り替えます。")],
+                [("text", "独自モデルを作る場合は "), ("button", "機械学習モデル作成", self.navigate_to_model_training_button, "#FFD700"), ("text", " から学習画面を開きます。")],
             ],
             phase="post",
         )
@@ -1141,6 +1170,21 @@ atomcam2で利用する場合は、GitHubで公開されている
     def navigate_to_analysis_tab(self):
         self.notebook.select(self.tab_analysis)
 
+    def navigate_to_model_training_button(self):
+        self.notebook.select(self.tab_analysis)
+        if hasattr(self, "btn_model_training"):
+            self._flash_button(self.btn_model_training)
+
+    def navigate_to_model_selector(self):
+        self.notebook.select(self.tab_settings)
+        if hasattr(self, "btn_model_refresh"):
+            self._flash_button(self.btn_model_refresh)
+
+    def navigate_to_plate_solve_fov_settings(self):
+        self.notebook.select(self.tab_advanced_settings)
+        if hasattr(self, "btn_apply_plate_solve_fov"):
+            self._flash_button(self.btn_apply_plate_solve_fov)
+
     def navigate_to_analysis_start_button(self):
         self.notebook.select(self.tab_analysis)
         if hasattr(self, "btn_analysis_start"):
@@ -1398,7 +1442,11 @@ atomcam2で利用する場合は、GitHubで公開されている
         self.btn_blend_video.pack(side=tk.LEFT, padx=(0,5))
         self.btn_timelapse = ttk.Button(row3, text="タイムラプス作成", command=self.create_timelapse_callback)
         self.btn_timelapse.pack(side=tk.LEFT, padx=(0,5))
-        
+
+        row4 = ttk.Frame(action_frame)
+        row4.pack(fill=tk.X, pady=2)
+        self.btn_model_training = ttk.Button(row4, text="機械学習モデル作成", command=self.open_model_training_tool)
+        self.btn_model_training.pack(side=tk.LEFT, padx=(0, 5))
 
         lf_concat = ttk.LabelFrame(frame, text="動画連結")
         lf_concat.pack(fill=tk.BOTH, expand=True, pady=5)
@@ -1477,6 +1525,58 @@ atomcam2で利用する場合は、GitHubで公開されている
         self.btn_video_concat_start.pack(pady=5)
 
         return frame
+
+    def _ensure_training_tool_dependencies(self):
+        required = [
+            ("customtkinter", "customtkinter"),
+            ("sklearn", "scikit-learn"),
+        ]
+        missing = [(module_name, pkg_name) for module_name, pkg_name in required if importlib.util.find_spec(module_name) is None]
+        if not missing:
+            return True
+
+        missing_pkgs = [pkg_name for _, pkg_name in missing]
+        self.append_log(f"学習ツール依存が不足しています。自動インストールを開始: {', '.join(missing_pkgs)}")
+        cmd = [sys.executable, "-m", "pip", "install", *missing_pkgs]
+        try:
+            result = subprocess.run(
+                cmd,
+                cwd=os.path.dirname(os.path.abspath(__file__)),
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode != 0:
+                err = (result.stderr or result.stdout or "").strip()
+                tail = err[-800:] if err else "詳細ログなし"
+                messagebox.showerror(
+                    "依存関係エラー",
+                    f"学習ツール依存の自動インストールに失敗しました。\n"
+                    f"実行コマンド: {' '.join(cmd)}\n\n{tail}",
+                )
+                self.append_log("学習ツール依存の自動インストールに失敗しました。")
+                return False
+            self.append_log("学習ツール依存の自動インストールが完了しました。")
+            return True
+        except Exception as e:
+            messagebox.showerror("依存関係エラー", f"依存関係インストール中にエラーが発生しました: {e}")
+            self.append_log(f"依存関係インストールエラー: {e}")
+            return False
+
+    def open_model_training_tool(self):
+        trainer_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "train_labeled_backup0826.py")
+        if not os.path.exists(trainer_path):
+            messagebox.showerror("エラー", f"学習スクリプトが見つかりません: {trainer_path}")
+            return
+
+        if not self._ensure_training_tool_dependencies():
+            return
+
+        try:
+            subprocess.Popen([sys.executable, trainer_path], cwd=os.path.dirname(trainer_path))
+            self.append_log("機械学習モデル作成ツールを起動しました。")
+        except Exception as e:
+            messagebox.showerror("エラー", f"学習ツールの起動に失敗しました: {e}")
+            self.append_log(f"学習ツール起動エラー: {e}")
 
     def _setup_help_tooltip(self, widget, text):
         """ヘルプツールチップを作成（汎用版）"""
@@ -2081,6 +2181,29 @@ atomcam2で利用する場合は、GitHubで公開されている
         ttk.Entry(path_frame2, textvariable=self.not_meteor_save_path_var, state='readonly').pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Button(path_frame2, text="選択", command=lambda: self.select_save_path(self.not_meteor_save_path_var)).pack(side=tk.LEFT, padx=(5,0))
 
+        lf_model = ttk.LabelFrame(scrollable_frame, text="流星分類に使用するモデル")
+        lf_model.pack(fill=tk.X, pady=5)
+        model_row1 = ttk.Frame(lf_model)
+        model_row1.pack(fill=tk.X, pady=2)
+        ttk.Label(model_row1, text="モデル:", width=10).pack(side=tk.LEFT)
+        self.cmb_model_select = ttk.Combobox(
+            model_row1,
+            textvariable=self.selected_model_path_var,
+            state="readonly",
+        )
+        self.cmb_model_select.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.cmb_model_select.bind("<<ComboboxSelected>>", self.on_model_combobox_selected)
+        self.btn_model_refresh = ttk.Button(model_row1, text="更新", command=self.refresh_model_candidates)
+        self.btn_model_refresh.pack(side=tk.LEFT, padx=(5, 0))
+        self.btn_select_model_file = ttk.Button(model_row1, text="参照", command=self.select_model_file)
+        self.btn_select_model_file.pack(side=tk.LEFT, padx=(5, 0))
+
+        model_row2 = ttk.Frame(lf_model)
+        model_row2.pack(fill=tk.X, pady=(2, 4))
+        ttk.Button(model_row2, text="流星分類モデルとして適用", command=lambda: self.apply_selected_model(show_message=True)).pack(side=tk.LEFT)
+        ttk.Label(model_row2, textvariable=self.model_meta_info_var, foreground="#87CEEB").pack(side=tk.LEFT, padx=(10, 0))
+        self.refresh_model_candidates()
+
         lf_astro = ttk.LabelFrame(scrollable_frame, text="プレートソルブ & マスク")
         lf_astro.pack(fill=tk.X, pady=5)
         
@@ -2305,8 +2428,100 @@ atomcam2で利用する場合は、GitHubで公開されている
         self.ps_mask_preview_label.pack(side=tk.LEFT, padx=10)
 
         ttk.Checkbutton(lf_astro, text="検出マスクを適用する", variable=self.apply_mask_var).pack(anchor=tk.W)
-        
+
         return frame
+
+    def _model_search_dirs(self):
+        candidates = [
+            os.path.dirname(os.path.abspath(__file__)),
+            getattr(config, "EXE_DIR", ""),
+        ]
+        result = []
+        seen = set()
+        for d in candidates:
+            if not d:
+                continue
+            abs_d = os.path.abspath(d)
+            if abs_d in seen or not os.path.isdir(abs_d):
+                continue
+            seen.add(abs_d)
+            result.append(abs_d)
+        return result
+
+    def refresh_model_candidates(self):
+        current = self.selected_model_path_var.get().strip()
+        discovered = model_catalog.discover_model_paths(
+            self._model_search_dirs(),
+            self.custom_model_paths,
+            recursive=False,
+        )
+        if current and current not in discovered:
+            discovered.append(current)
+        self.available_model_paths = discovered
+        if hasattr(self, "cmb_model_select"):
+            self.cmb_model_select.configure(values=discovered)
+        if (not current) and discovered:
+            self.selected_model_path_var.set(discovered[0])
+        self.update_model_meta_info(self.selected_model_path_var.get())
+
+    def update_model_meta_info(self, model_path):
+        model_path = (model_path or "").strip()
+        if not model_path or not os.path.exists(model_path):
+            self.model_meta_info_var.set("mean/std: --")
+            return
+
+        meta = model_catalog.load_model_metadata(model_path)
+        mean = np.round(np.array(meta.get("mean", model_catalog.DEFAULT_MEAN), dtype=float), 3).tolist()
+        std = np.round(np.array(meta.get("std", model_catalog.DEFAULT_STD), dtype=float), 3).tolist()
+        resize = meta.get("input_resize")
+        resize_text = "no resize" if resize is None else f"{int(resize[0])}x{int(resize[1])}"
+        self.model_meta_info_var.set(f"mean={mean} std={std} resize={resize_text}")
+
+    def on_model_combobox_selected(self, _event=None):
+        self.apply_selected_model(show_message=False)
+
+    def select_model_file(self):
+        model_path = filedialog.askopenfilename(
+            title="モデルファイルを選択",
+            filetypes=(("PyTorch Model", "*.pth"), ("All files", "*.*")),
+        )
+        if not model_path:
+            return
+        model_path = os.path.abspath(model_path)
+        if model_path not in self.custom_model_paths:
+            self.custom_model_paths.append(model_path)
+        self.selected_model_path_var.set(model_path)
+        self.refresh_model_candidates()
+        self.apply_selected_model(show_message=True)
+
+    def apply_selected_model(self, show_message=False, silent=False):
+        model_path = self.selected_model_path_var.get().strip()
+        if not model_path:
+            if not silent:
+                messagebox.showwarning("警告", "モデルが選択されていません。")
+            return False
+
+        model_path = os.path.abspath(model_path)
+        if not os.path.exists(model_path):
+            if not silent:
+                messagebox.showerror("エラー", f"モデルファイルが見つかりません: {model_path}")
+            return False
+
+        metadata = model_catalog.load_model_metadata(model_path)
+        ok, msg = model.reload_model(model_path=model_path, metadata=metadata)
+        if not ok:
+            if not silent:
+                messagebox.showerror("エラー", f"モデル読み込みに失敗しました: {msg}")
+            self.append_log(f"モデル読み込み失敗: {msg}")
+            return False
+
+        config.MODEL_PATH = model_path
+        self.selected_model_path_var.set(model_path)
+        self.update_model_meta_info(model_path)
+        self.append_log(f"使用モデルを切り替えました: {os.path.basename(model_path)}")
+        if show_message:
+            messagebox.showinfo("モデル適用", f"モデルを適用しました:\n{model_path}")
+        return True
 
     def _create_basic_processing_params_section(self, parent):
         """Create basic processing controls moved from 保存設定 to 詳細設定 tab."""
@@ -2364,6 +2579,21 @@ atomcam2で利用する場合は、GitHubで公開されている
         # 基本の処理パラメータ（保存設定タブから移設）
         self._create_basic_processing_params_section(scrollable_frame)
 
+        lf_ps_fov = ttk.LabelFrame(scrollable_frame, text="プレートソルブ時の視野角設定")
+        lf_ps_fov.pack(fill=tk.X, pady=5)
+        ps_fov_row = ttk.Frame(lf_ps_fov)
+        ps_fov_row.pack(fill=tk.X, pady=2)
+        ttk.Label(ps_fov_row, text="Lower:").pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Spinbox(ps_fov_row, from_=10, to=180, increment=0.5, width=8, textvariable=self.cfg_rtsp_scale_lower_var).pack(side=tk.LEFT)
+        ttk.Label(ps_fov_row, text="Upper:").pack(side=tk.LEFT, padx=(10, 4))
+        ttk.Spinbox(ps_fov_row, from_=10, to=180, increment=0.5, width=8, textvariable=self.cfg_rtsp_scale_upper_var).pack(side=tk.LEFT)
+        self.btn_apply_plate_solve_fov = ttk.Button(
+            ps_fov_row,
+            text="視野角を反映",
+            command=self.apply_advanced_settings_to_config,
+        )
+        self.btn_apply_plate_solve_fov.pack(side=tk.LEFT, padx=(12, 0))
+
         # 検出パラメータ
         lf_detect = ttk.LabelFrame(scrollable_frame, text="検出パラメータ")
         lf_detect.pack(fill=tk.X, pady=5)
@@ -2389,11 +2619,7 @@ atomcam2で利用する場合は、GitHubで公開されている
         add_param(lf_finer, "カットアウトサイズ (詳細検出):", self.cfg_finer_cutout_size_var, 128, 1024, 64)
 
         # 飛行機判定パラメータ
-        lf_airplane = ttk.LabelFrame(scrollable_frame, text="飛行機判定パラメータ")
-        lf_airplane.pack(fill=tk.X, pady=5)
-        add_param(lf_airplane, "継続時間閾値 (秒):", self.cfg_airplane_dur_thresh_var, 1, 60)
-        add_param(lf_airplane, "判定フレーム数上限 (10枚中):", self.cfg_airplane_frame_thresh_var, 1, 10)
-        add_param(lf_airplane, "トラッキング最大距離:", self.cfg_tracking_dist_thresh_var, 50, 500, 10)
+        # 飛行機判定パラメータは設定セクションから非表示化（内部パラメータは維持）
 
         # 動画クリップパラメータ
         lf_clip = ttk.LabelFrame(scrollable_frame, text="動画クリップパラメータ")
@@ -2426,6 +2652,8 @@ atomcam2で利用する場合は、GitHubで公開されている
             self.cfg_max_clip_dur_var.set("2")
             self.cfg_clip_dur_sec_var.set("3.0")
             self.cfg_cutout_size_var.set("256")
+            self.cfg_rtsp_scale_lower_var.set("85")
+            self.cfg_rtsp_scale_upper_var.set("100")
             self.append_log("詳細設定をデフォルト値にリセットしました。")
 
     def create_info_panel(self, parent):
@@ -3423,10 +3651,12 @@ atomcam2で利用する場合は、GitHubで公開されている
                 messagebox.showerror("エラー", f"WCSファイルのロード/検証に失敗しました:\n{e}")
 
     def start_plate_solve(self):
+        self.apply_advanced_settings_to_config()
         threading.Thread(target=self.execute_plate_solve_thread, daemon=True).start()
 
     def start_rtsp_plate_solve(self):
         """RTSPストリームからプレートソルブを実行する"""
+        self.apply_advanced_settings_to_config()
         # 選択されているRTSP URLを取得、選択がなければ最初のURLを使用
         if self.rtsp_selected_indices:
             selected_index = min(self.rtsp_selected_indices)
@@ -3584,6 +3814,9 @@ atomcam2で利用する場合は、GitHubで公開されている
     def start_processing(self):
         # 詳細設定をconfigに適用
         self.apply_advanced_settings_to_config()
+        if not self.apply_selected_model(silent=True):
+            messagebox.showerror("設定エラー", "有効な学習モデルを選択してください。")
+            return
         if (self.worker_thread and self.worker_thread.is_alive()) or \
            (self.rtsp_thread and self.rtsp_thread.is_alive()) or \
            (self.periodic_scan_thread and self.periodic_scan_thread.is_alive()):
@@ -4277,6 +4510,8 @@ atomcam2で利用する場合は、GitHubで公開されている
             'mask_path_or_status': self.mask_path_var.get(), 'concurrency': self.concurrency_var.get(),
             'interval': self.interval_var.get(), 'duration': self.duration_var.get(),
             'meteor_save_path': self.meteor_save_path_var.get(), 'not_meteor_save_path': self.not_meteor_save_path_var.get(),
+            'selected_model_path': self.selected_model_path_var.get(),
+            'custom_model_paths': list(self.custom_model_paths),
             'has_mask_image': self.mask_image is not None, 'has_plate_solve_mask_image': self.plate_solve_mask_image is not None,
             'summary_video_config': self.summary_video_config,
             'auto_time_updater_enabled': self.auto_time_updater_enabled_var.get(),
@@ -4307,6 +4542,8 @@ atomcam2で利用する場合は、GitHubで公開されている
                 'max_clip_dur': self.cfg_max_clip_dur_var.get(),
                 'clip_dur_sec': self.cfg_clip_dur_sec_var.get(),
                 'cutout_size': self.cfg_cutout_size_var.get(),
+                'rtsp_scale_lower': self.cfg_rtsp_scale_lower_var.get(),
+                'rtsp_scale_upper': self.cfg_rtsp_scale_upper_var.get(),
             }
         }
         if self.global_wcs_info:
@@ -4388,6 +4625,9 @@ atomcam2で利用する場合は、GitHubで公開されている
             self.duration_var.set(settings.get('duration', str(config.DEFAULT_DURATION)))
             self.meteor_save_path_var.set(settings.get('meteor_save_path', config.DEFAULT_METEOR_SAVE_PATH))
             self.not_meteor_save_path_var.set(settings.get('not_meteor_save_path', config.DEFAULT_NOT_METEOR_SAVE_PATH))
+            self.custom_model_paths = [str(p) for p in settings.get('custom_model_paths', []) if isinstance(p, str)]
+            self.selected_model_path_var.set(settings.get('selected_model_path', config.MODEL_PATH))
+            self.refresh_model_candidates()
             # summary_video_config: 保存された順番を復元し、新項目を末尾に追加
             saved_summary_config = settings.get('summary_video_config', [])
             if saved_summary_config:
@@ -4452,9 +4692,13 @@ atomcam2で利用する場合は、GitHubで公開されている
                 self.cfg_max_clip_dur_var.set(adv.get('max_clip_dur', str(config.MAX_CLIP_DURATION)))
                 self.cfg_clip_dur_sec_var.set(adv.get('clip_dur_sec', str(config.CLIP_DURATION_SECONDS)))
                 self.cfg_cutout_size_var.set(adv.get('cutout_size', str(config.CUTOUT_SIZE)))
+                self.cfg_rtsp_scale_lower_var.set(adv.get('rtsp_scale_lower', str(config.RTSP_SCALE_LOWER)))
+                self.cfg_rtsp_scale_upper_var.set(adv.get('rtsp_scale_upper', str(config.RTSP_SCALE_UPPER)))
                 
                 # Apply to config module
                 self.apply_advanced_settings_to_config()
+
+            self.apply_selected_model(silent=True)
 
             self.append_log("前回の設定を復元しました。")
             self.update_start_button_state()
@@ -4479,6 +4723,8 @@ atomcam2で利用する場合は、GitHubで公開されている
             config.MAX_CLIP_DURATION = float(self.cfg_max_clip_dur_var.get())
             config.CLIP_DURATION_SECONDS = float(self.cfg_clip_dur_sec_var.get())
             config.CUTOUT_SIZE = int(float(self.cfg_cutout_size_var.get()))
+            config.RTSP_SCALE_LOWER = float(self.cfg_rtsp_scale_lower_var.get())
+            config.RTSP_SCALE_UPPER = float(self.cfg_rtsp_scale_upper_var.get())
         except Exception as e:
             self.append_log(f"詳細設定の適用中にエラーが発生しました: {e}")
 
