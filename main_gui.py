@@ -178,10 +178,11 @@ class App(TkinterDnD.Tk):
         if getattr(sys, 'frozen', False):
             # exeと同じディレクトリに設定ファイルを置く
             base_path = os.path.dirname(sys.executable)
-            self.settings_file = os.path.join(base_path, "app_settings.json")
         else:
-            self.settings_file = "app_settings.json"
-        self.masks_file = "app_masks.npz"
+            base_path = os.path.dirname(os.path.abspath(__file__))
+        self.settings_file = os.path.join(base_path, "app_settings.json")
+        self.masks_file = os.path.join(base_path, "app_masks.npz")
+        self._migrate_legacy_settings_files()
 
         self.worker_thread = None
         self.rtsp_thread = None
@@ -196,6 +197,26 @@ class App(TkinterDnD.Tk):
         self.load_settings()
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
         self.after(100, self.update_progress)
+
+    def _migrate_legacy_settings_files(self):
+        """Move legacy setting files from CWD to app directory if needed."""
+        try:
+            legacy_settings = os.path.abspath("app_settings.json")
+            legacy_masks = os.path.abspath("app_masks.npz")
+            target_settings = os.path.abspath(self.settings_file)
+            target_masks = os.path.abspath(self.masks_file)
+
+            if legacy_settings != target_settings and os.path.exists(legacy_settings) and not os.path.exists(target_settings):
+                os.makedirs(os.path.dirname(target_settings), exist_ok=True)
+                shutil.move(legacy_settings, target_settings)
+                print(f"設定ファイルを移動しました: {legacy_settings} -> {target_settings}")
+
+            if legacy_masks != target_masks and os.path.exists(legacy_masks) and not os.path.exists(target_masks):
+                os.makedirs(os.path.dirname(target_masks), exist_ok=True)
+                shutil.move(legacy_masks, target_masks)
+                print(f"マスクファイルを移動しました: {legacy_masks} -> {target_masks}")
+        except Exception as e:
+            print(f"設定ファイル移動の確認中にエラーが発生しました: {e}")
 
     def check_admin_password(self):
         """Prompt for admin password and return True if correct."""
@@ -1988,23 +2009,6 @@ atomcam2で利用する場合は、GitHubで公開されている
         canvas.bind("<Leave>", _unbind_mousewheel)
 
         # 以下の内容はscrollable_frameに配置
-        lf_params = ttk.LabelFrame(scrollable_frame, text="処理パラメータ")
-        lf_params.pack(fill=tk.X, pady=5)
-        p_frame1 = ttk.Frame(lf_params); p_frame1.pack(fill=tk.X, pady=2)
-        ttk.Label(p_frame1, text="同時処理数:", width=20).pack(side=tk.LEFT)
-        ttk.Spinbox(p_frame1, from_=1, to=os.cpu_count() or 1, width=5, textvariable=self.concurrency_var).pack(side=tk.LEFT)
-        p_frame2 = ttk.Frame(lf_params); p_frame2.pack(fill=tk.X, pady=2)
-        ttk.Label(p_frame2, text="差分作成間隔 (秒):", width=20).pack(side=tk.LEFT)
-        ttk.Spinbox(p_frame2, from_=1, to=60, width=5, textvariable=self.interval_var).pack(side=tk.LEFT)
-        p_frame3 = ttk.Frame(lf_params); p_frame3.pack(fill=tk.X, pady=2)
-        ttk.Label(p_frame3, text="差分作成期間 (秒):", width=20).pack(side=tk.LEFT)
-        ttk.Spinbox(p_frame3, from_=1, to=60, width=5, textvariable=self.duration_var).pack(side=tk.LEFT)
-                # RTSP検出プリセット選択
-        p_frame4 = ttk.Frame(lf_params); p_frame4.pack(fill=tk.X, pady=2)
-        ttk.Label(p_frame4, text="RTSP検出感度:", width=20).pack(side=tk.LEFT)
-        ttk.Radiobutton(p_frame4, text="雲が少ないとき", variable=self.rtsp_preset_var, value="clear").pack(side=tk.LEFT, padx=5)
-        ttk.Radiobutton(p_frame4, text="雲が多いとき（推奨）", variable=self.rtsp_preset_var, value="cloudy").pack(side=tk.LEFT, padx=5)
-
         lf_save = ttk.LabelFrame(scrollable_frame, text="保存アイテム")
         lf_save.pack(fill=tk.X, pady=5)
         save_map = {
@@ -2303,6 +2307,32 @@ atomcam2で利用する場合は、GitHubで公開されている
         
         return frame
 
+    def _create_basic_processing_params_section(self, parent):
+        """Create basic processing controls moved from 保存設定 to 詳細設定 tab."""
+        lf_params = ttk.LabelFrame(parent, text="処理パラメータ")
+        lf_params.pack(fill=tk.X, pady=5)
+
+        p_frame1 = ttk.Frame(lf_params)
+        p_frame1.pack(fill=tk.X, pady=2)
+        ttk.Label(p_frame1, text="同時処理数:", width=20).pack(side=tk.LEFT)
+        ttk.Spinbox(p_frame1, from_=1, to=os.cpu_count() or 1, width=5, textvariable=self.concurrency_var).pack(side=tk.LEFT)
+
+        p_frame2 = ttk.Frame(lf_params)
+        p_frame2.pack(fill=tk.X, pady=2)
+        ttk.Label(p_frame2, text="差分作成間隔 (秒):", width=20).pack(side=tk.LEFT)
+        ttk.Spinbox(p_frame2, from_=1, to=60, width=5, textvariable=self.interval_var).pack(side=tk.LEFT)
+
+        p_frame3 = ttk.Frame(lf_params)
+        p_frame3.pack(fill=tk.X, pady=2)
+        ttk.Label(p_frame3, text="差分作成期間 (秒):", width=20).pack(side=tk.LEFT)
+        ttk.Spinbox(p_frame3, from_=1, to=60, width=5, textvariable=self.duration_var).pack(side=tk.LEFT)
+
+        p_frame4 = ttk.Frame(lf_params)
+        p_frame4.pack(fill=tk.X, pady=2)
+        ttk.Label(p_frame4, text="RTSP検出感度:", width=20).pack(side=tk.LEFT)
+        ttk.Radiobutton(p_frame4, text="雲が少ないとき", variable=self.rtsp_preset_var, value="clear").pack(side=tk.LEFT, padx=5)
+        ttk.Radiobutton(p_frame4, text="雲が多いとき（推奨）", variable=self.rtsp_preset_var, value="cloudy").pack(side=tk.LEFT, padx=5)
+
     def create_advanced_settings_tab(self, parent):
         frame = ttk.Frame(parent)
         frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
@@ -2329,6 +2359,9 @@ atomcam2で利用する場合は、GitHubで公開されている
         def on_mousewheel(event):
             canvas.yview_scroll(int(-1*(event.delta/120)), "units")
         canvas.bind_all("<MouseWheel>", on_mousewheel)
+
+        # 基本の処理パラメータ（保存設定タブから移設）
+        self._create_basic_processing_params_section(scrollable_frame)
 
         # 検出パラメータ
         lf_detect = ttk.LabelFrame(scrollable_frame, text="検出パラメータ")
@@ -3886,6 +3919,8 @@ atomcam2で利用する場合は、GitHubで公開されている
 
     def load_settings(self):
         if not os.path.exists(self.settings_file): return
+        self.append_log(f"設定ファイル読み込み元: {self.settings_file}")
+        self.append_log(f"マスクファイル読み込み元: {self.masks_file}")
         if not messagebox.askyesno("設定の復元", "前回の設定を復元しますか？"): return
         
         try:
