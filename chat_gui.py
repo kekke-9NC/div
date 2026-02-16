@@ -427,13 +427,7 @@ RTSPストリーム（ライブカメラ）を使う場合、URLを入力して�
 
     def _get_response(self, user_msg):
         self._update_status("準備中...")
-        
-        # Collect streaming chunks to parse markers after completion
-        self.streaming_chunks = []
-        
-        # UI側でAIのメッセージ開始枠を作る
-        self.after(0, self._prepare_streaming_ui)
-        
+
         def stream_handler(chunk):
             self.streaming_chunks.append(chunk)
             # Filter out shortcut markers from displayed chunks
@@ -442,6 +436,18 @@ RTSPストリーム（ライブカメラ）を使う場合、URLを入力して�
                 self.after(0, self._append_stream_chunk, display_chunk)
             
         try:
+            if self.app and hasattr(self.app, "_ensure_ai_model_loaded"):
+                self._update_status("AIモデル確認中...")
+                if not self.app._ensure_ai_model_loaded(bright_area_detector):
+                    self.after(0, lambda: self.append_message("System", "AIモデルの準備がキャンセルまたは失敗しました。", "error"))
+                    return
+
+            # Collect streaming chunks to parse markers after completion
+            self.streaming_chunks = []
+
+            # UI側でAIのメッセージ開始枠を作る
+            self.after(0, self._prepare_streaming_ui)
+
             # ストリーミング実行（戻り値の全文は無視して、ストリームで表示済みのものを正とする）
             # 履歴の過去10件を取得
             history_context = self.conversation_history[-10:] if len(self.conversation_history) > 10 else self.conversation_history
@@ -481,9 +487,9 @@ RTSPストリーム（ライブカメラ）を使う場合、URLを入力して�
         except Exception as e:
             # エラー時は追記
             self.after(0, lambda: self.append_message("System", f"Error: {e}", "error"))
-        
-        # 完了処理
-        self.after(0, self._finalize_streaming_ui)
+        finally:
+            # 完了処理
+            self.after(0, self._finalize_streaming_ui)
 
 
 
