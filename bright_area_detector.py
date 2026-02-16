@@ -79,6 +79,23 @@ def has_quantized_model() -> bool:
     return _has_model_files(LOCAL_MODEL_DIR)
 
 
+def _load_processor_compat(
+    auto_processor_cls,
+    model_dir: str,
+    status_callback: Optional[Callable[[str], None]] = None,
+):
+    """AutoProcessorのAPI差分を吸収しつつ読み込む。"""
+    try:
+        return auto_processor_cls.from_pretrained(model_dir, trust_remote_code=True)
+    except TypeError as e:
+        msg = str(e)
+        # transformers/tokenizersの組み合わせによりキーワード衝突が起きる環境向けフォールバック
+        if "fix_mistral_regex" in msg or "trust_remote_code" in msg:
+            _log("AutoProcessor互換フォールバックを適用します。", status_callback)
+            return auto_processor_cls.from_pretrained(model_dir)
+        raise
+
+
 def _offload_model():
     """モデルをオフロードしてGPUメモリを解放"""
     global _model, _processor, _last_used_time, _offload_timer
@@ -131,8 +148,20 @@ def _get_model(status_callback: Optional[Callable[[str], None]] = None):
     
     _model_loading = True
     try:
+        if not torch.cuda.is_available():
+            raise RuntimeError("ローカルLLM機能はNVIDIA GPU (CUDA) 環境でのみ利用できます。")
+
         from transformers import Qwen3VLForConditionalGeneration, AutoProcessor, BitsAndBytesConfig
         from huggingface_hub import snapshot_download
+        try:
+            import transformers
+            import tokenizers
+            _log(
+                f"Transformers={transformers.__version__}, tokenizers={tokenizers.__version__}",
+                status_callback,
+            )
+        except Exception:
+            pass
         bnb_config = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_use_double_quant=True,
@@ -151,8 +180,8 @@ def _get_model(status_callback: Optional[Callable[[str], None]] = None):
                     trust_remote_code=True,
                     low_cpu_mem_usage=True
                 )
-                _processor = AutoProcessor.from_pretrained(
-                    LOCAL_MODEL_DIR, trust_remote_code=True, fix_mistral_regex=True
+                _processor = _load_processor_compat(
+                    AutoProcessor, LOCAL_MODEL_DIR, status_callback
                 )
                 _log("ローカル量子化モデルの読み込み完了", status_callback)
                 _reset_offload_timer()
@@ -185,8 +214,8 @@ def _get_model(status_callback: Optional[Callable[[str], None]] = None):
             low_cpu_mem_usage=True,
             trust_remote_code=True
         )
-        quantized_processor = AutoProcessor.from_pretrained(
-            FULL_MODEL_DIR, trust_remote_code=True
+        quantized_processor = _load_processor_compat(
+            AutoProcessor, FULL_MODEL_DIR, status_callback
         )
 
         tmp_quant_dir = f"{LOCAL_MODEL_DIR}_tmp"
@@ -219,8 +248,8 @@ def _get_model(status_callback: Optional[Callable[[str], None]] = None):
             trust_remote_code=True,
             low_cpu_mem_usage=True
         )
-        _processor = AutoProcessor.from_pretrained(
-            LOCAL_MODEL_DIR, trust_remote_code=True, fix_mistral_regex=True
+        _processor = _load_processor_compat(
+            AutoProcessor, LOCAL_MODEL_DIR, status_callback
         )
         _log("量子化モデルのロード完了", status_callback)
         _reset_offload_timer()
