@@ -5,6 +5,10 @@ import time
 import threading
 import queue
 import json
+import io
+import contextlib
+import shutil
+import re
 import cv2
 import numpy as np
 import tkinter as tk
@@ -46,6 +50,87 @@ from tkinter import simpledialog
 import chat_gui
 
 STATUS_CALLBACK = None
+
+class _StderrProgressStream(io.TextIOBase):
+    def __init__(self, log_callback, passthrough=None):
+        super().__init__()
+        self._log_callback = log_callback
+        self._passthrough = passthrough
+        self._buffer = ""
+        self._lock = threading.Lock()
+        self._last_line = ""
+        self._last_emit_time = 0.0
+
+    def _should_log(self, line: str) -> bool:
+        s = line.strip()
+        if not s:
+            return False
+        if "UserWarning" in s:
+            return True
+        if "hf_xet" in s or "Xet Storage is enabled" in s:
+            return True
+        if s.startswith("Fetching ") and " files" in s:
+            return True
+        if s.endswith(".safetensors") or ".safetensors:" in s:
+            return True
+        if ".bin:" in s or "model-" in s:
+            return True
+        if "%" in s:
+            return True
+        speed_tokens = ("B/s", "kB/s", "MB/s", "GB/s")
+        if any(t in s for t in speed_tokens):
+            return True
+        return False
+
+    def _emit(self, line: str, partial: bool = False):
+        line = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", line)
+        line = " ".join(line.strip().split())
+        if not self._should_log(line):
+            return
+
+        now = time.time()
+        force_emit = ("100%" in line) or ("UserWarning" in line) or ("hf_xet" in line)
+        min_interval = 0.3 if partial else 0.15
+        if not force_emit and (now - self._last_emit_time) < min_interval:
+            return
+        if line == self._last_line:
+            return
+
+        self._last_line = line
+        self._last_emit_time = now
+        self._log_callback(line)
+
+    def write(self, s):
+        if not s:
+            return 0
+        if self._passthrough is not None:
+            try:
+                self._passthrough.write(s)
+            except Exception:
+                pass
+
+        text = s.replace("\r", "\n")
+        with self._lock:
+            self._buffer += text
+            while "\n" in self._buffer:
+                line, self._buffer = self._buffer.split("\n", 1)
+                self._emit(line, partial=False)
+            # tqdm は改行なしで更新するため、末尾バッファも進捗行なら随時表示する
+            if self._buffer and self._should_log(self._buffer):
+                self._emit(self._buffer, partial=True)
+        return len(s)
+
+    def flush(self):
+        if self._passthrough is not None:
+            try:
+                self._passthrough.flush()
+            except Exception:
+                pass
+        with self._lock:
+            tail = self._buffer
+            self._buffer = ""
+        if tail:
+            self._emit(tail, partial=False)
 
 def imread_with_japanese_path(path):
     """日本語パスに対応した画像読み込み関数
@@ -360,6 +445,37 @@ class App(TkinterDnD.Tk):
         intro_text = "このアプリは、動画ファイルやRTSPストリームから流星を自動検出し、\n解析・記録するためのツールです。以下の手順に従って操作してください。"
         ttk.Label(scrollable_frame, text=intro_text, justify=tk.LEFT).pack(padx=pad_x, pady=(0, 15), anchor="w")
 
+        def add_usage_shortcut_buttons(parent_frame, buttons):
+            row = ttk.Frame(parent_frame)
+            row.pack(fill=tk.X, padx=10, pady=(0, 10), anchor="w")
+
+            for label, command, text_color in buttons:
+                btn = tk.Button(
+                    row,
+                    text=label,
+                    command=command,
+                    bg="#3A4D6B",
+                    fg=text_color,
+                    activebackground="#4A6A9B",
+                    activeforeground=text_color,
+                    font=("Segoe UI", 10, "bold"),
+                    relief="raised",
+                    bd=1,
+                    padx=8,
+                    pady=2,
+                    cursor="hand2",
+                )
+                btn.pack(side=tk.LEFT, padx=(0, 6))
+
+                def on_enter(event, b=btn):
+                    b.configure(bg="#4A6A9B")
+
+                def on_leave(event, b=btn):
+                    b.configure(bg="#3A4D6B")
+
+                btn.bind("<Enter>", on_enter)
+                btn.bind("<Leave>", on_leave)
+
         # Step 1: ソースの追加
         lf_step1 = ttk.LabelFrame(scrollable_frame, text="Step 1: データの準備 📂")
         lf_step1.pack(fill=tk.X, padx=pad_x, pady=pad_y)
@@ -374,6 +490,13 @@ class App(TkinterDnD.Tk):
    - RTSP URLを入力し、[追加] ボタンを押してください。
    - ※ 外部GPUがない場合、CPU負荷にご注意ください。"""
         ttk.Label(lf_step1, text=s1_text, justify=tk.LEFT).pack(padx=10, pady=10, anchor="w")
+        add_usage_shortcut_buttons(
+            lf_step1,
+            [
+                ("📂 ソース選択を開く", self.navigate_to_source_drop_area, "#FFD700"),
+                ("📹 RTSP入力欄を表示", self.navigate_to_rtsp_entry, "#87CEEB"),
+            ],
+        )
 
         # Step 2: 設定
         lf_step2 = ttk.LabelFrame(scrollable_frame, text="Step 2: 検出設定 ⚙️")
@@ -385,6 +508,13 @@ class App(TkinterDnD.Tk):
 - API Key: プレートソルブを使用する場合はAstrometry.netのキーを設定してください。
 - 保存オプション: 検出時の保存データ（動画、画像、CSV等）を選択します。"""
         ttk.Label(lf_step2, text=s2_text, justify=tk.LEFT).pack(padx=10, pady=10, anchor="w")
+        add_usage_shortcut_buttons(
+            lf_step2,
+            [
+                ("⚙️ 保存設定タブを開く", self.navigate_to_settings_tab, "#FFD700"),
+                ("🎭 検出マスク作成を表示", self.navigate_to_detection_mask_button, "#FFD700"),
+            ],
+        )
 
         # Step 3: 実行
         lf_step3 = ttk.LabelFrame(scrollable_frame, text="Step 3: 解析開始 ▶️")
@@ -395,6 +525,12 @@ class App(TkinterDnD.Tk):
 - 状況バー: 現在の処理キューの状態や進行状況が表示されます。
 - キャンセル: 途中で停止したい場合は [キャンセル] ボタンを押してください。"""
         ttk.Label(lf_step3, text=s3_text, justify=tk.LEFT).pack(padx=10, pady=10, anchor="w")
+        add_usage_shortcut_buttons(
+            lf_step3,
+            [
+                ("▶ 開始ボタンを表示", self.navigate_to_start_button, "#90EE90"),
+            ],
+        )
 
         # Step 4: 結果の確認
         lf_step4 = ttk.LabelFrame(scrollable_frame, text="Step 4: 結果の確認 📊")
@@ -407,6 +543,13 @@ class App(TkinterDnD.Tk):
 - ログ: 「処理状況」パネルの [ログ] タブで詳細を確認できます。
   [ログを保存] ボタンでテキストファイルに出力も可能です。"""
         ttk.Label(lf_step4, text=s4_text, justify=tk.LEFT).pack(padx=10, pady=10, anchor="w")
+        add_usage_shortcut_buttons(
+            lf_step4,
+            [
+                ("📝 ログタブを開く", self.navigate_to_log_tab, "#FFD700"),
+                ("📊 解析機能を表示", self.navigate_to_analysis_actions, "#FFD700"),
+            ],
+        )
 
         return frame
 
@@ -797,6 +940,22 @@ atomcam2で利用する場合は、GitHubで公開されている
         """Navigate to Source tab and highlight RTSP mask button."""
         self.notebook.select(self.tab_source)
         self._flash_button(self.btn_rtsp_mask)
+
+    def navigate_to_settings_tab(self):
+        """Navigate to Settings tab and highlight key controls."""
+        self.notebook.select(self.tab_settings)
+        if hasattr(self, "btn_detection_mask"):
+            self._flash_button(self.btn_detection_mask)
+        if hasattr(self, "btn_ps_mask"):
+            self._flash_button(self.btn_ps_mask)
+
+    def navigate_to_log_tab(self):
+        """Focus the right panel's log tab."""
+        if hasattr(self, "status_panel") and hasattr(self.status_panel, "notebook"):
+            try:
+                self.status_panel.notebook.select(self.status_panel.log_frame)
+            except Exception:
+                pass
 
     def navigate_to_detection_mask_button(self):
         """Navigate to Settings tab and highlight Detection mask button."""
@@ -1937,6 +2096,7 @@ atomcam2で利用する場合は、GitHubで公開されている
     def create_info_panel(self, parent):
         panel = status_panel.StatusPanel(parent, progress_queue=self.progress_queue, app=self)
         panel.pack(fill=tk.BOTH, expand=True, pady=5)
+        self.status_panel = panel
 
         self.log_text = panel.log_text
 
@@ -1969,12 +2129,72 @@ atomcam2で利用する場合は、GitHubで公開されている
             STATUS_CALLBACK = None
 
     def append_log(self, message: str):
+        if threading.current_thread() is not threading.main_thread():
+            self.after(0, lambda m=message: self.append_log(m))
+            return
         if not self.log_text.winfo_exists(): return
         self.log_text.config(state='normal')
         timestamp = datetime.now().strftime("%H:%M:%S")
         self.log_text.insert(tk.END, f"[{timestamp}] {message}\n")
         self.log_text.see(tk.END)
         self.log_text.config(state='disabled')
+
+    def _run_on_main_thread(self, func):
+        if threading.current_thread() is threading.main_thread():
+            return func()
+        result_queue = queue.Queue(maxsize=1)
+
+        def wrapper():
+            try:
+                result_queue.put((True, func()))
+            except Exception as e:
+                result_queue.put((False, e))
+
+        self.after(0, wrapper)
+        ok, payload = result_queue.get()
+        if ok:
+            return payload
+        raise payload
+
+    @staticmethod
+    def _format_size_bytes(size_bytes: int) -> str:
+        units = ["B", "KB", "MB", "GB", "TB"]
+        size = float(max(0, size_bytes))
+        for unit in units:
+            if size < 1024 or unit == units[-1]:
+                return f"{size:.1f} {unit}"
+            size /= 1024
+        return f"{size_bytes} B"
+
+    def _estimate_llm_storage_requirements(self, detector_module) -> Dict[str, Any]:
+        repo_id = getattr(detector_module, "MODEL_ID", "Qwen/Qwen3-VL-4B-Instruct")
+        download_bytes = int(10.0 * (1024 ** 3))
+        final_bytes = int(4.5 * (1024 ** 3))
+        overhead_bytes = int(1.5 * (1024 ** 3))
+        fetched_metadata = False
+
+        try:
+            from huggingface_hub import HfApi
+            info = HfApi().model_info(repo_id, files_metadata=True)
+            file_sizes = [s.size for s in getattr(info, "siblings", []) if getattr(s, "size", None)]
+            if file_sizes:
+                download_bytes = int(sum(file_sizes))
+                final_bytes = max(int(download_bytes * 0.45), int(3.0 * (1024 ** 3)))
+                fetched_metadata = True
+        except Exception as e:
+            self.append_log(f"モデル容量情報の取得に失敗したため既定値で見積もります: {e}")
+
+        temporary_bytes = download_bytes + final_bytes + overhead_bytes
+        free_bytes = shutil.disk_usage(os.path.abspath(".")).free
+
+        return {
+            "repo_id": repo_id,
+            "download_bytes": download_bytes,
+            "final_bytes": final_bytes,
+            "temporary_bytes": temporary_bytes,
+            "free_bytes": free_bytes,
+            "fetched_metadata": fetched_metadata,
+        }
 
     def update_start_button_state(self, *args):
         is_running = (self.worker_thread and self.worker_thread.is_alive()) or \
@@ -4081,14 +4301,63 @@ atomcam2で利用する場合は、GitHubで公開されている
     def _ensure_ai_model_loaded(self, detector_module) -> bool:
         """AI合成前に内部LLMのロード完了を保証する。"""
         self.append_log("AIモデルのロードを確認中...")
-        connected, err = detector_module.check_vlm_connection()
+
+        local_model_dir = getattr(detector_module, "LOCAL_MODEL_DIR", "./quantized_model")
+        has_local_model = False
+        try:
+            has_model_fn = getattr(detector_module, "has_quantized_model", None)
+            if callable(has_model_fn):
+                has_local_model = bool(has_model_fn())
+            else:
+                has_local_model = os.path.isdir(local_model_dir)
+        except Exception as e:
+            self.append_log(f"ローカルモデル状態の確認中にエラー: {e}")
+            has_local_model = os.path.isdir(local_model_dir)
+
+        if not has_local_model:
+            self.append_log(f"ローカルLLMモデルが見つかりません: {local_model_dir}")
+            self.append_log("必要なディスク容量を見積もり中...")
+            req = self._estimate_llm_storage_requirements(detector_module)
+
+            info_lines = [
+                "ローカルLLMモデルが見つかりませんでした。",
+                f"対象モデル: {req['repo_id']}",
+                f"一時的に必要な空き容量 (目安): {self._format_size_bytes(req['temporary_bytes'])}",
+                f"最終的に必要な容量 (目安): {self._format_size_bytes(req['final_bytes'])}",
+                f"現在の空き容量: {self._format_size_bytes(req['free_bytes'])}",
+                "",
+                "モデルをダウンロードしますか？",
+            ]
+            if not req["fetched_metadata"]:
+                info_lines.insert(4, "※ 容量は取得失敗のため既定値での目安です。")
+            if req["free_bytes"] < req["temporary_bytes"]:
+                info_lines.insert(5, "※ 警告: 空き容量が一時必要容量を下回っています。")
+
+            should_download = bool(
+                self._run_on_main_thread(
+                    lambda msg="\n".join(info_lines): messagebox.askyesno("モデルダウンロード確認", msg, parent=self)
+                )
+            )
+
+            if not should_download:
+                self.append_log("ユーザーがモデルダウンロードをキャンセルしました。")
+                return False
+
+            self.append_log("モデルダウンロードを開始します。")
+            mirror_stream = _StderrProgressStream(self.append_log, passthrough=sys.stderr)
+            with contextlib.redirect_stderr(mirror_stream), contextlib.redirect_stdout(mirror_stream):
+                connected, err = detector_module.check_vlm_connection(status_callback=self.append_log)
+            mirror_stream.flush()
+        else:
+            connected, err = detector_module.check_vlm_connection(status_callback=self.append_log)
+
         if connected:
             self.append_log("AIモデルのロードが完了しました。")
             return True
 
         error_message = f"AIモデルのロードに失敗しました: {err}"
         self.append_log(error_message)
-        self.after(0, lambda msg=error_message: messagebox.showerror("エラー", msg))
+        self.after(0, lambda msg=error_message: messagebox.showerror("エラー", msg, parent=self))
         return False
 
 
