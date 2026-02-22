@@ -114,7 +114,10 @@ def _read_frame_at_ms(
 
 
 def _preprocess_star_frame(frame_bgr: np.ndarray) -> np.ndarray:
-    gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    if frame_bgr.ndim == 2:
+        gray = frame_bgr.astype(np.float32)
+    else:
+        gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
     h, w = gray.shape[:2]
 
     # Remove vertical banding bias (common in low-light security cameras).
@@ -493,6 +496,211 @@ def _iter_sampled_frames_from_videos(
         cumulative_ms += float(duration_ms_est)
 
 
+def _iter_median_composite_frames_from_videos(
+    video_paths: Sequence[str],
+    duration_sec: float,
+    inner_sample_interval_sec: float,
+    composite_window_sec: float = 20.0,
+    composite_cycle_sec: float = 60.0,
+):
+    """
+    Yield one median-composited frame per cycle.
+    Uses all decodable frames within the first `composite_window_sec` of each cycle and skips the rest.
+    """
+    cycle_ms = max(1.0, float(composite_cycle_sec) * 1000.0)
+    window_ms = max(1.0, min(float(composite_window_sec), float(composite_cycle_sec)) * 1000.0)
+    # `inner_sample_interval_sec` is kept for compatibility/metadata, but this generator
+    # now reads all frames in each composite window.
+    _ = inner_sample_interval_sec
+    total_duration_ms = max(0.0, float(duration_sec) * 1000.0)
+    total_cycles = int(np.ceil(total_duration_ms / cycle_ms))
+
+    if total_cycles <= 0:
+        return
+
+    def _composite_window_from_cap(
+        cap: cv2.VideoCapture,
+        local_start_ms: float,
+        local_end_ms: float
+    ) -> Tuple[Optional[np.ndarray], int, int]:
+        try:
+            cap.set(cv2.CAP_PROP_POS_MSEC, float(local_start_ms))
+        except Exception:
+            pass
+
+        fps_meta = float(cap.get(cv2.CAP_PROP_FPS))
+        if not np.isfinite(fps_meta) or fps_meta <= 0:
+            fps_meta = 0.0
+
+        gray_stack = None
+        stack_capacity = 0
+        stack_count = 0
+        fail_count = 0
+        shape_hw = None
+
+        # Conservative initial capacity; expands if needed.
+        if fps_meta > 0:
+            stack_capacity = max(16, int(np.ceil((local_end_ms - local_start_ms) / 1000.0 * fps_meta)) + 8)
+        else:
+            stack_capacity = 64
+
+        while True:
+            ret, frame = cap.read()
+            if not ret or frame is None or frame.size == 0:
+                fail_count += 1
+                break
+
+            pos_ms = float(cap.get(cv2.CAP_PROP_POS_MSEC))
+            if not np.isfinite(pos_ms) or pos_ms < 0:
+                if fps_meta > 0:
+                    pos_frames = float(cap.get(cv2.CAP_PROP_POS_FRAMES))
+                    pos_ms = max(0.0, (pos_frames - 1.0) * 1000.0 / fps_meta)
+                else:
+                    pos_ms = local_start_ms + (stack_count * 1000.0 / 25.0)
+
+            # Exclude frames beyond the 20s window.
+            if pos_ms > (local_end_ms + 1e-3):
+                break
+
+            if frame.ndim == 2:
+                gray = frame
+            else:
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+            if shape_hw is None:
+                shape_hw = gray.shape[:2]
+                gray_stack = np.empty((stack_capacity, shape_hw[0], shape_hw[1]), dtype=np.uint8)
+            elif gray.shape[:2] != shape_hw:
+                gray = cv2.resize(gray, (shape_hw[1], shape_hw[0]))
+
+            if stack_count >= stack_capacity:
+                new_capacity = int(max(stack_capacity * 1.5, stack_capacity + 32))
+                new_stack = np.empty((new_capacity, shape_hw[0], shape_hw[1]), dtype=np.uint8)
+                new_stack[:stack_count] = gray_stack[:stack_count]
+                gray_stack = new_stack
+                stack_capacity = new_capacity
+
+            gray_stack[stack_count] = gray
+            stack_count += 1
+
+        if stack_count <= 0 or gray_stack is None:
+            return None, 0, fail_count
+
+        composite_gray = np.median(gray_stack[:stack_count], axis=0).astype(np.uint8)
+        return composite_gray, stack_count, fail_count
+
+    cumulative_ms = 0.0
+    cycle_idx_global = 0
+
+    for video_idx, video_path in enumerate(video_paths):
+        if cumulative_ms >= total_duration_ms or cycle_idx_global >= total_cycles:
+            break
+
+        cap = cv2.VideoCapture(str(video_path))
+        if not cap.isOpened():
+            # Emit a failed cycle placeholder if this file would have been used.
+            center_ms = min(total_duration_ms, cumulative_ms + (window_ms * 0.5))
+            yield {
+                "ok": False,
+                "frame": None,
+                "video_path": str(video_path),
+                "video_index": int(video_idx),
+                "global_actual_ms": float(center_ms),
+                "global_nominal_ms": float(center_ms),
+                "local_nominal_ms": 0.0,
+                "error": "open_failed",
+                "cycle_index": int(cycle_idx_global),
+                "window_ok_samples": 0,
+                "window_failed_samples": 1,
+                "window_total_samples": 1,
+                "strategy": "median_window_composite_all_frames",
+            }
+            cycle_idx_global += 1
+            cumulative_ms += cycle_ms
+            continue
+
+        try:
+            duration_ms_est = _estimate_video_duration_ms(cap)
+            if duration_ms_est is None or duration_ms_est <= 0:
+                # Assume one cycle if metadata is unavailable.
+                duration_ms_est = min(cycle_ms, total_duration_ms - cumulative_ms)
+
+            file_budget_ms = min(duration_ms_est, total_duration_ms - cumulative_ms)
+            local_cycle_start_ms = 0.0
+
+            while local_cycle_start_ms < file_budget_ms and cycle_idx_global < total_cycles:
+                local_window_end_ms = min(local_cycle_start_ms + window_ms, file_budget_ms)
+                global_cycle_start_ms = cumulative_ms + local_cycle_start_ms
+                center_ms = min(total_duration_ms, global_cycle_start_ms + (window_ms * 0.5))
+
+                composite_gray, ok_count, fail_count = _composite_window_from_cap(
+                    cap=cap,
+                    local_start_ms=local_cycle_start_ms,
+                    local_end_ms=local_window_end_ms
+                )
+
+                if composite_gray is not None:
+                    yield {
+                        "ok": True,
+                        "frame": composite_gray,  # grayscale composite; downstream handles grayscale
+                        "video_path": str(video_path),
+                        "video_index": int(video_idx),
+                        "global_actual_ms": float(center_ms),
+                        "global_nominal_ms": float(center_ms),
+                        "local_nominal_ms": float(local_cycle_start_ms),
+                        "error": None,
+                        "cycle_index": int(cycle_idx_global),
+                        "window_ok_samples": int(ok_count),
+                        "window_failed_samples": int(fail_count),
+                        "window_total_samples": int(ok_count + fail_count),
+                        "strategy": "median_window_composite_all_frames",
+                    }
+                else:
+                    yield {
+                        "ok": False,
+                        "frame": None,
+                        "video_path": str(video_path),
+                        "video_index": int(video_idx),
+                        "global_actual_ms": float(center_ms),
+                        "global_nominal_ms": float(center_ms),
+                        "local_nominal_ms": float(local_cycle_start_ms),
+                        "error": "no_frames_in_window",
+                        "cycle_index": int(cycle_idx_global),
+                        "window_ok_samples": int(ok_count),
+                        "window_failed_samples": int(fail_count),
+                        "window_total_samples": int(ok_count + fail_count),
+                        "strategy": "median_window_composite_all_frames",
+                    }
+
+                cycle_idx_global += 1
+                local_cycle_start_ms += cycle_ms
+
+        finally:
+            cap.release()
+
+        cumulative_ms += float(duration_ms_est)
+
+    # If duration exceeds available videos, emit placeholders for remaining cycles.
+    while cycle_idx_global < total_cycles:
+        center_ms = min(total_duration_ms, (cycle_idx_global * cycle_ms) + (window_ms * 0.5))
+        yield {
+            "ok": False,
+            "frame": None,
+            "video_path": "",
+            "video_index": -1,
+            "global_actual_ms": float(center_ms),
+            "global_nominal_ms": float(center_ms),
+            "local_nominal_ms": 0.0,
+            "error": "insufficient_video_coverage",
+            "cycle_index": int(cycle_idx_global),
+            "window_ok_samples": 0,
+            "window_failed_samples": 0,
+            "window_total_samples": 0,
+            "strategy": "median_window_composite_all_frames",
+        }
+        cycle_idx_global += 1
+
+
 def _collect_probe_frames_for_mask(
     video_path: str,
     duration_sec: float,
@@ -636,9 +844,17 @@ def estimate_distortion_map_from_night_video(
         "video_paths_selected_count": int(len(video_paths)),
         "duration_minutes_requested": float(duration_minutes),
         "sample_interval_sec": float(sample_interval_sec),
+        "sampling_strategy": "median_composite_20s_every_60s",
+        "composite_window_sec": 20.0,
+        "composite_cycle_sec": 60.0,
+        "composite_inner_sample_interval_sec": float(sample_interval_sec),
         "frames_sampled_success": 0,
         "frames_sampled_failed": 0,
-        "samples_planned": int(np.ceil(duration_sec / float(sample_interval_sec))),
+        "samples_planned": int(np.ceil(duration_sec / 60.0)),
+        "composite_windows_success": 0,
+        "composite_windows_failed": 0,
+        "composite_source_samples_success": 0,
+        "composite_source_samples_failed": 0,
         "segments_started": 0,
         "segments_completed": 0,
         "homography_failures": 0,
@@ -656,7 +872,9 @@ def estimate_distortion_map_from_night_video(
     }
 
     try:
-        planned_samples = int(np.ceil(duration_sec / float(sample_interval_sec)))
+        composite_cycle_sec = 60.0
+        composite_window_sec = 20.0
+        planned_samples = int(np.ceil(duration_sec / composite_cycle_sec))
 
         prev_pre = None
         prev_ms = None
@@ -666,19 +884,32 @@ def estimate_distortion_map_from_night_video(
         segment_active = False
         frames_in_segment = 0
 
-        max_track_gap_ms = max(6000.0, sample_interval_sec * 3000.0)
+        effective_tracking_interval_sec = composite_cycle_sec
+        max_track_gap_ms = max(6000.0, effective_tracking_interval_sec * 3000.0)
         target_active_tracks = 220
         min_tracks_for_h = 12
         min_seed_tracks = 30
         reseed_every_frames = 5
 
-        _emit(progress_callback, f"Night self-calibration: sampling up to {planned_samples} timestamps over {duration_sec:.1f}s across {len(video_paths)} video(s)...")
+        _emit(
+            progress_callback,
+            f"Night self-calibration: sampling up to {planned_samples} median-composited frames "
+            f"(20s use + 40s skip) over {duration_sec:.1f}s across {len(video_paths)} video(s)..."
+        )
 
         touched_videos = []
         touched_set = set()
-        for idx, sample in enumerate(_iter_sampled_frames_from_videos(video_paths, duration_sec, sample_interval_sec)):
+        for idx, sample in enumerate(
+            _iter_median_composite_frames_from_videos(
+                video_paths=video_paths,
+                duration_sec=duration_sec,
+                inner_sample_interval_sec=sample_interval_sec,
+                composite_window_sec=composite_window_sec,
+                composite_cycle_sec=composite_cycle_sec,
+            )
+        ):
             if progress_callback and idx % 25 == 0:
-                _emit(progress_callback, f"Night self-calibration: sampled {idx}/{planned_samples} timestamps...")
+                _emit(progress_callback, f"Night self-calibration: sampled {idx}/{planned_samples} composite frames...")
 
             sample_video_path = str(sample.get("video_path", ""))
             sample_video_idx = int(sample.get("video_index", -1))
@@ -690,14 +921,19 @@ def estimate_distortion_map_from_night_video(
                 stats["videos_touched_preview"] = touched_videos[:12]
                 _emit(progress_callback, f"Night self-calibration: using video segment {sample_video_idx + 1}: {sample_video_path}")
 
+            stats["composite_source_samples_success"] = int(stats["composite_source_samples_success"]) + int(sample.get("window_ok_samples", 0))
+            stats["composite_source_samples_failed"] = int(stats["composite_source_samples_failed"]) + int(sample.get("window_failed_samples", 0))
+
             if not sample.get("ok") or sample.get("frame") is None:
                 stats["frames_sampled_failed"] = int(stats["frames_sampled_failed"]) + 1
+                stats["composite_windows_failed"] = int(stats["composite_windows_failed"]) + 1
                 continue
             frame = sample["frame"]
             actual_ms = float(sample.get("global_actual_ms", 0.0))
             if frame.shape[:2] != (h, w):
                 frame = cv2.resize(frame, (w, h))
             stats["frames_sampled_success"] = int(stats["frames_sampled_success"]) + 1
+            stats["composite_windows_success"] = int(stats["composite_windows_success"]) + 1
 
             pre = _preprocess_star_frame(frame)
 
@@ -918,6 +1154,7 @@ def estimate_distortion_map_from_night_video(
     stats["map_shape"] = [int(h), int(w)]
     stats["map_x_path"] = str(map_x_path)
     stats["map_y_path"] = str(map_y_path)
+    stats["sampling_notes"] = "Uses one median-composited frame per minute (first 20s only, next 40s skipped)."
     if auto_mask_output_path:
         stats["auto_mask_path"] = str(auto_mask_output_path)
 
