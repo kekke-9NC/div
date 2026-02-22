@@ -622,7 +622,7 @@ def create_line_video_clips(
                                     if effective_use_plate_solve and global_wcs_info.get('wcs_file'):
                                         try:
                                             with fits.open(global_wcs_info['wcs_file']) as hdul:
-                                                wcs = WCS(hdul[0].header)
+                                                wcs = WCS(hdul[0].header, relax=True, fix=False)
                                                 sky_coord_start = wcs.pixel_to_world(x1, y1)
                                                 sky_coord_end = wcs.pixel_to_world(x2, y2)
                                                 ra_start_str, dec_start_str = f"{sky_coord_start.ra.deg:.6f}", f"{sky_coord_start.dec.deg:.6f}"
@@ -1089,7 +1089,7 @@ def create_line_video_clips(
                         if effective_use_plate_solve and global_wcs_info.get('wcs_file'):
                             try:
                                 with fits.open(global_wcs_info['wcs_file']) as hdul:
-                                    wcs = WCS(hdul[0].header)
+                                    wcs = WCS(hdul[0].header, relax=True, fix=False)
                                     sky_coord_start = wcs.pixel_to_world(x1, y1)
                                     sky_coord_end = wcs.pixel_to_world(x2, y2)
                                     ra_start_str, dec_start_str = f"{sky_coord_start.ra.deg:.6f}", f"{sky_coord_start.dec.deg:.6f}"
