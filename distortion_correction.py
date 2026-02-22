@@ -36,6 +36,51 @@ def _find_first_video_path(sources: Sequence[str]) -> Optional[Path]:
     return first_video_path
 
 
+def _list_video_paths_from_sources(sources: Sequence[str]) -> List[Path]:
+    videos: List[Path] = []
+    for source in sorted(sources):
+        path = Path(source)
+        if path.is_dir():
+            found = sorted([p for p in path.rglob('*') if p.is_file() and p.suffix.lower() in config.PERIODIC_VIDEO_EXTENSIONS])
+            videos.extend(found)
+        elif path.is_file() and path.suffix.lower() in config.PERIODIC_VIDEO_EXTENSIONS:
+            videos.append(path)
+    # Deduplicate while preserving sorted order (case-insensitive on Windows)
+    seen = set()
+    unique: List[Path] = []
+    for p in videos:
+        key = str(p.resolve()) if p.exists() else str(p)
+        key = os.path.normcase(os.path.normpath(key))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(p)
+    return unique
+
+
+def _select_video_sequence_from_sources(
+    sources: Sequence[str],
+    start_video_path: Optional[str] = None
+) -> List[Path]:
+    all_videos = _list_video_paths_from_sources(sources)
+    if not all_videos:
+        return []
+    if not start_video_path:
+        return all_videos
+
+    start_norm = os.path.normcase(os.path.normpath(os.path.abspath(start_video_path)))
+    for i, p in enumerate(all_videos):
+        p_norm = os.path.normcase(os.path.normpath(os.path.abspath(str(p))))
+        if p_norm == start_norm:
+            return all_videos[i:]
+
+    # Fallback: if the selected file is valid but outside current sources, use it alone.
+    p = Path(start_video_path)
+    if p.is_file() and p.suffix.lower() in config.PERIODIC_VIDEO_EXTENSIONS:
+        return [p]
+    return all_videos
+
+
 def _estimate_video_duration_ms(cap: cv2.VideoCapture) -> Optional[float]:
     try:
         fps = float(cap.get(cv2.CAP_PROP_FPS))
@@ -376,6 +421,78 @@ def _fit_smooth_residual_field_to_maps(
     return map_x, map_y, stats
 
 
+def _iter_sampled_frames_from_videos(
+    video_paths: Sequence[str],
+    duration_sec: float,
+    sample_interval_sec: float,
+):
+    interval_ms = max(1.0, float(sample_interval_sec) * 1000.0)
+    remaining_ms = max(0.0, float(duration_sec) * 1000.0)
+    cumulative_ms = 0.0
+
+    for video_idx, video_path in enumerate(video_paths):
+        if remaining_ms <= 0:
+            break
+
+        cap = cv2.VideoCapture(str(video_path))
+        if not cap.isOpened():
+            yield {
+                "ok": False,
+                "frame": None,
+                "video_path": str(video_path),
+                "video_index": int(video_idx),
+                "global_actual_ms": cumulative_ms,
+                "global_nominal_ms": cumulative_ms,
+                "local_nominal_ms": 0.0,
+                "error": "open_failed",
+            }
+            continue
+
+        try:
+            duration_ms_est = _estimate_video_duration_ms(cap)
+            if duration_ms_est is None or duration_ms_est <= 0:
+                # If duration metadata is missing, still try a conservative window.
+                duration_ms_est = remaining_ms
+
+            file_budget_ms = min(float(duration_ms_est), remaining_ms)
+            local_t = 0.0
+            while local_t < file_budget_ms and remaining_ms > 0:
+                frame, actual_local_ms = _read_frame_at_ms(cap, float(local_t))
+                global_nominal = cumulative_ms + local_t
+                global_actual = cumulative_ms + (actual_local_ms if actual_local_ms is not None else local_t)
+                if frame is None:
+                    yield {
+                        "ok": False,
+                        "frame": None,
+                        "video_path": str(video_path),
+                        "video_index": int(video_idx),
+                        "global_actual_ms": float(global_actual),
+                        "global_nominal_ms": float(global_nominal),
+                        "local_nominal_ms": float(local_t),
+                        "error": "decode_failed",
+                    }
+                else:
+                    yield {
+                        "ok": True,
+                        "frame": frame,
+                        "video_path": str(video_path),
+                        "video_index": int(video_idx),
+                        "global_actual_ms": float(global_actual),
+                        "global_nominal_ms": float(global_nominal),
+                        "local_nominal_ms": float(local_t),
+                        "error": None,
+                    }
+
+                local_t += interval_ms
+                remaining_ms -= interval_ms
+                if remaining_ms <= 0:
+                    break
+        finally:
+            cap.release()
+
+        cumulative_ms += float(duration_ms_est)
+
+
 def _collect_probe_frames_for_mask(
     video_path: str,
     duration_sec: float,
@@ -402,6 +519,23 @@ def _collect_probe_frames_for_mask(
     return probe_frames
 
 
+def _collect_probe_frames_for_mask_from_videos(
+    video_paths: Sequence[str],
+    duration_sec: float,
+    probe_interval_sec: float,
+    progress_callback: ProgressCallback = None
+) -> List[np.ndarray]:
+    probe_frames: List[np.ndarray] = []
+    for idx, sample in enumerate(_iter_sampled_frames_from_videos(video_paths, duration_sec, probe_interval_sec)):
+        if not sample.get("ok") or sample.get("frame") is None:
+            continue
+        frame = sample["frame"]
+        probe_frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
+        if progress_callback and idx % 8 == 0:
+            _emit(progress_callback, f"Self-cal mask probe: collected {len(probe_frames)} frames...")
+    return probe_frames
+
+
 def estimate_distortion_map_from_night_video(
     video_path: str,
     map_x_path: str,
@@ -412,6 +546,8 @@ def estimate_distortion_map_from_night_video(
     auto_mask_output_path: Optional[str] = None,
     metadata_output_path: Optional[str] = None,
     strength: float = 0.5,
+    manual_mask: Optional[np.ndarray] = None,
+    use_auto_mask: bool = True,
 ) -> Dict[str, object]:
     """
     Estimate a distortion correction map from a fixed night-sky video using stars.
@@ -425,35 +561,68 @@ def estimate_distortion_map_from_night_video(
     if sample_interval_sec <= 0:
         raise ValueError("sample_interval_sec must be > 0")
 
+    if isinstance(video_path, (list, tuple)):
+        video_paths = [str(p) for p in video_path if p]
+    else:
+        video_paths = [str(video_path)]
+    if not video_paths:
+        raise ValueError("video_path is empty")
+
     duration_sec = float(duration_minutes) * 60.0
     _emit(progress_callback, f"Night self-calibration: loading probe frames from first {duration_minutes:.1f} min...")
 
     probe_interval_sec = max(10.0, sample_interval_sec * 6.0)
-    probe_frames = _collect_probe_frames_for_mask(
-        video_path=video_path,
+    probe_frames = _collect_probe_frames_for_mask_from_videos(
+        video_paths=video_paths,
         duration_sec=duration_sec,
         probe_interval_sec=probe_interval_sec,
         progress_callback=progress_callback,
     )
     if not probe_frames:
-        raise RuntimeError("Failed to collect probe frames for automatic mask generation.")
+        raise RuntimeError("Failed to collect probe frames for mask generation.")
 
-    auto_mask = build_auto_night_selfcal_mask(probe_frames, progress_callback=progress_callback)
-    if auto_mask is None:
-        raise RuntimeError("Automatic mask generation failed.")
+    h, w = probe_frames[0].shape[:2]
 
-    h, w = auto_mask.shape[:2]
-    if auto_mask_output_path:
+    auto_mask = None
+    if use_auto_mask:
+        auto_mask = build_auto_night_selfcal_mask(probe_frames, progress_callback=progress_callback)
+        if auto_mask is None:
+            raise RuntimeError("Automatic mask generation failed.")
+        if auto_mask_output_path:
+            try:
+                os.makedirs(os.path.dirname(os.path.abspath(auto_mask_output_path)), exist_ok=True)
+                cv2.imwrite(auto_mask_output_path, auto_mask)
+                _emit(progress_callback, f"Night self-calibration: auto mask saved to {auto_mask_output_path}")
+            except Exception as e:
+                _emit(progress_callback, f"Night self-calibration: failed to save auto mask ({e})")
+    else:
+        _emit(progress_callback, "Night self-calibration: auto mask disabled (manual mask only mode).")
+
+    manual_mask_resized = None
+    if manual_mask is not None:
         try:
-            os.makedirs(os.path.dirname(os.path.abspath(auto_mask_output_path)), exist_ok=True)
-            cv2.imwrite(auto_mask_output_path, auto_mask)
-            _emit(progress_callback, f"Night self-calibration: auto mask saved to {auto_mask_output_path}")
+            mm = np.asarray(manual_mask, dtype=np.uint8)
+            if mm.ndim == 3:
+                mm = cv2.cvtColor(mm, cv2.COLOR_BGR2GRAY)
+            if mm.shape[:2] != (h, w):
+                mm = cv2.resize(mm, (w, h), interpolation=cv2.INTER_NEAREST)
+            manual_mask_resized = np.where(mm > 0, 255, 0).astype(np.uint8)
+            _emit(progress_callback, "Night self-calibration: manual mask loaded.")
         except Exception as e:
-            _emit(progress_callback, f"Night self-calibration: failed to save auto mask ({e})")
+            raise RuntimeError(f"Failed to prepare manual mask: {e}")
 
-    cap = cv2.VideoCapture(str(video_path))
-    if not cap.isOpened():
-        raise IOError(f"Cannot open video: {video_path}")
+    if auto_mask is not None and manual_mask_resized is not None:
+        work_mask = cv2.bitwise_and(auto_mask, manual_mask_resized)
+        _emit(progress_callback, "Night self-calibration: using combined mask (auto AND manual).")
+    elif auto_mask is not None:
+        work_mask = auto_mask
+        _emit(progress_callback, "Night self-calibration: using auto mask only.")
+    elif manual_mask_resized is not None:
+        work_mask = manual_mask_resized
+        _emit(progress_callback, "Night self-calibration: using manual mask only.")
+    else:
+        work_mask = np.full((h, w), 255, dtype=np.uint8)
+        _emit(progress_callback, "Night self-calibration: no mask provided; using full frame.")
 
     sample_x: List[float] = []
     sample_y: List[float] = []
@@ -462,25 +631,32 @@ def estimate_distortion_map_from_night_video(
     sample_w: List[float] = []
 
     stats: Dict[str, object] = {
-        "video_path": str(video_path),
+        "video_path": str(video_paths[0]),
+        "video_path_start": str(video_paths[0]),
+        "video_paths_selected_count": int(len(video_paths)),
         "duration_minutes_requested": float(duration_minutes),
         "sample_interval_sec": float(sample_interval_sec),
         "frames_sampled_success": 0,
         "frames_sampled_failed": 0,
+        "samples_planned": int(np.ceil(duration_sec / float(sample_interval_sec))),
         "segments_started": 0,
         "segments_completed": 0,
         "homography_failures": 0,
         "gap_resets": 0,
         "track_observations_used": 0,
-        "auto_mask_shape": [int(h), int(w)],
-        "auto_mask_nonzero_ratio": float(np.count_nonzero(auto_mask) / auto_mask.size),
+        "videos_touched_count": 0,
+        "videos_touched_preview": [],
+        "mask_shape": [int(h), int(w)],
+        "use_auto_mask": bool(use_auto_mask),
+        "manual_mask_used": bool(manual_mask_resized is not None),
+        "auto_mask_nonzero_ratio": float(np.count_nonzero(auto_mask) / auto_mask.size) if auto_mask is not None else None,
+        "manual_mask_nonzero_ratio": float(np.count_nonzero(manual_mask_resized) / manual_mask_resized.size) if manual_mask_resized is not None else None,
+        "work_mask_nonzero_ratio": float(np.count_nonzero(work_mask) / work_mask.size),
         "algorithm": "star-homography-consistency-selfcal",
     }
 
     try:
-        duration_ms_est = _estimate_video_duration_ms(cap)
-        end_ms = min(duration_sec * 1000.0, duration_ms_est) if duration_ms_est else (duration_sec * 1000.0)
-        target_times = np.arange(0.0, max(1.0, end_ms), sample_interval_sec * 1000.0, dtype=np.float64)
+        planned_samples = int(np.ceil(duration_sec / float(sample_interval_sec)))
 
         prev_pre = None
         prev_ms = None
@@ -496,16 +672,29 @@ def estimate_distortion_map_from_night_video(
         min_seed_tracks = 30
         reseed_every_frames = 5
 
-        _emit(progress_callback, f"Night self-calibration: sampling up to {len(target_times)} timestamps over {end_ms/1000.0:.1f}s...")
+        _emit(progress_callback, f"Night self-calibration: sampling up to {planned_samples} timestamps over {duration_sec:.1f}s across {len(video_paths)} video(s)...")
 
-        for idx, t_ms in enumerate(target_times):
+        touched_videos = []
+        touched_set = set()
+        for idx, sample in enumerate(_iter_sampled_frames_from_videos(video_paths, duration_sec, sample_interval_sec)):
             if progress_callback and idx % 25 == 0:
-                _emit(progress_callback, f"Night self-calibration: sampled {idx}/{len(target_times)} timestamps...")
+                _emit(progress_callback, f"Night self-calibration: sampled {idx}/{planned_samples} timestamps...")
 
-            frame, actual_ms = _read_frame_at_ms(cap, float(t_ms))
-            if frame is None:
+            sample_video_path = str(sample.get("video_path", ""))
+            sample_video_idx = int(sample.get("video_index", -1))
+            sample_vid_key = (sample_video_idx, sample_video_path)
+            if sample_vid_key not in touched_set:
+                touched_set.add(sample_vid_key)
+                touched_videos.append(sample_video_path)
+                stats["videos_touched_count"] = int(len(touched_videos))
+                stats["videos_touched_preview"] = touched_videos[:12]
+                _emit(progress_callback, f"Night self-calibration: using video segment {sample_video_idx + 1}: {sample_video_path}")
+
+            if not sample.get("ok") or sample.get("frame") is None:
                 stats["frames_sampled_failed"] = int(stats["frames_sampled_failed"]) + 1
                 continue
+            frame = sample["frame"]
+            actual_ms = float(sample.get("global_actual_ms", 0.0))
             if frame.shape[:2] != (h, w):
                 frame = cv2.resize(frame, (w, h))
             stats["frames_sampled_success"] = int(stats["frames_sampled_success"]) + 1
@@ -526,7 +715,7 @@ def estimate_distortion_map_from_night_video(
             if not segment_active:
                 seed_tracks, next_track_id = _seed_tracks(
                     preprocessed_gray=pre,
-                    base_mask=auto_mask,
+                    base_mask=work_mask,
                     current_cumulative_to_segref=np.eye(3, dtype=np.float64),
                     next_track_id=next_track_id,
                     existing_tracks=[],
@@ -594,7 +783,7 @@ def estimate_distortion_map_from_night_video(
                 xi, yi = int(round(x)), int(round(y))
                 if xi < 0 or yi < 0 or xi >= w or yi >= h:
                     continue
-                if auto_mask[yi, xi] == 0:
+                if work_mask[yi, xi] == 0:
                     continue
                 if err_flat[i] > 2.5:
                     continue
@@ -670,7 +859,7 @@ def estimate_distortion_map_from_night_video(
             if (frames_in_segment % reseed_every_frames == 0) or (len(active_tracks) < target_active_tracks // 2):
                 extra_tracks, next_track_id = _seed_tracks(
                     preprocessed_gray=pre,
-                    base_mask=auto_mask,
+                    base_mask=work_mask,
                     current_cumulative_to_segref=C_cur,
                     next_track_id=next_track_id,
                     existing_tracks=active_tracks,
@@ -696,7 +885,7 @@ def estimate_distortion_map_from_night_video(
             stats["segments_completed"] = int(stats["segments_completed"]) + 1
 
     finally:
-        cap.release()
+        pass
 
     if len(sample_x) < 500:
         raise RuntimeError(
@@ -746,6 +935,8 @@ def estimate_distortion_map_from_night_video(
         "map_x_path": map_x_path,
         "map_y_path": map_y_path,
         "auto_mask": auto_mask,
+        "manual_mask": manual_mask_resized,
+        "work_mask": work_mask,
         "stats": stats,
     }
 
@@ -760,13 +951,16 @@ def estimate_distortion_map_from_night_sources(
     auto_mask_output_path: Optional[str] = None,
     metadata_output_path: Optional[str] = None,
     strength: float = 0.5,
+    start_video_path: Optional[str] = None,
+    manual_mask: Optional[np.ndarray] = None,
+    use_auto_mask: bool = True,
 ) -> Dict[str, object]:
-    video_path = _find_first_video_path(sources)
-    if not video_path:
+    video_paths = _select_video_sequence_from_sources(sources, start_video_path=start_video_path)
+    if not video_paths:
         raise FileNotFoundError("No video file found in sources.")
-    _emit(progress_callback, f"Night self-calibration: selected video -> {video_path}")
+    _emit(progress_callback, f"Night self-calibration: selected start video -> {video_paths[0]}")
     return estimate_distortion_map_from_night_video(
-        video_path=str(video_path),
+        video_path=[str(p) for p in video_paths],
         map_x_path=map_x_path,
         map_y_path=map_y_path,
         duration_minutes=duration_minutes,
@@ -775,6 +969,8 @@ def estimate_distortion_map_from_night_sources(
         auto_mask_output_path=auto_mask_output_path,
         metadata_output_path=metadata_output_path,
         strength=strength,
+        manual_mask=manual_mask,
+        use_auto_mask=use_auto_mask,
     )
 
 def apply_distortion_correction(sources, output_path, map_x_path, map_y_path, progress_callback=None):
