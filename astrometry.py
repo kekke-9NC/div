@@ -396,8 +396,9 @@ def plate_solve_image( image_path: str, mask: Optional[np.ndarray] = None, plate
         else: print("タイムアウト"); return None
         if job_id:
             url_wcs = f'http://nova.astrometry.net/wcs_file/{job_id}'; response = requests.get(url_wcs, timeout=60); response.raise_for_status()
-            original_wcs_content = response.text; original_wcs_path = image_path + '_original.wcs'
-            with open(original_wcs_path, 'w') as f: f.write(original_wcs_content)
+            original_wcs_path = image_path + '_original.wcs'
+            # Preserve the WCS file exactly as delivered (binary FITS or text header).
+            with open(original_wcs_path, 'wb') as f: f.write(response.content)
             corrected_wcs_path = image_path + '_corrected.wcs'
             if create_corrected_wcs(
                 original_wcs_path,
@@ -424,10 +425,32 @@ def create_corrected_wcs(
     plate_solve_datetime: Optional[datetime] = None
 ) -> bool:
     try:
-        with open(original_wcs_filename, 'r') as f:
-            header_str = f.read()
-        wcs = WCS(header_str)
-        new_header = wcs.to_header()
+        source_header = None
+        wcs = None
+
+        # Prefer FITS parsing so SIP/distortion keywords are preserved.
+        try:
+            with fits.open(original_wcs_filename) as hdul:
+                source_header = hdul[0].header.copy()
+            wcs = WCS(source_header, relax=True, fix=False)
+        except Exception:
+            # Fallback: some sources may provide a plain-text WCS header.
+            with open(original_wcs_filename, 'rb') as f:
+                raw = f.read()
+            header_str = raw.decode('ascii', errors='ignore')
+            wcs = WCS(header_str, relax=True, fix=False)
+
+        # relax=True keeps non-standard but widely-used distortion terms (e.g. SIP).
+        new_header = wcs.to_header(relax=True)
+
+        # If the original header had explicit SIP keys, keep them even if Astropy omits any
+        # during serialization (defensive against version differences).
+        if source_header is not None:
+            sip_prefixes = ("A_", "B_", "AP_", "BP_")
+            for key, value in source_header.items():
+                if key in ("A_ORDER", "B_ORDER", "AP_ORDER", "BP_ORDER") or key.startswith(sip_prefixes):
+                    if key not in new_header:
+                        new_header[key] = value
 
         new_header['SIMPLE'] = True
         new_header['BITPIX'] = 8

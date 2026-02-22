@@ -3,12 +3,15 @@ opencv-python
 pillow
 astropy
 tkinterdnd2
+customtkinter
 openai
 torch
 torchvision
 matplotlib
+scikit-learn
 requests
 transformers
 qwen-vl-utils
 accelerate
 bitsandbytes
+protobuf
