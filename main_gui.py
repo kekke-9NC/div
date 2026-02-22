@@ -4990,14 +4990,7 @@ atomcam2で利用する場合は、GitHubで公開されている
             draw.rectangle([0, 0, disp_w, disp_h], fill=0)
             refresh_overlay()
 
-        def mask_top_left_timestamp():
-            tw = int(disp_w * 0.42)
-            th = int(disp_h * 0.16)
-            draw.rectangle([0, 0, tw, th], fill=255)
-            refresh_overlay()
-
         ttk.Button(sub_controls, text="クリア", command=clear_mask).pack(side=tk.LEFT, padx=(0, 5))
-        ttk.Button(sub_controls, text="左上時刻を除外", command=mask_top_left_timestamp).pack(side=tk.LEFT, padx=5)
 
         ttk.Label(
             win,
