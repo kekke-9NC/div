@@ -1431,6 +1431,13 @@ atomcam2で利用する場合は、GitHubで公開されている
         self.btn_long_exposure.pack(side=tk.LEFT, padx=(0,5))
         self.btn_distortion = ttk.Button(row2, text="ゆがみ補正", command=self.apply_distortion_correction_callback, style="Gray.TButton")
         self.btn_distortion.pack(side=tk.LEFT, padx=(0,5))
+        self.btn_distortion_selfcal = ttk.Button(
+            row2,
+            text="夜間自己校正(20分)",
+            command=self.estimate_distortion_map_night_callback,
+            style="Gray.TButton"
+        )
+        self.btn_distortion_selfcal.pack(side=tk.LEFT, padx=(0,5))
         self.btn_angle_analysis = ttk.Button(row2, text="角度分布分析", command=self.analyze_angles_callback, style="Gray.TButton")
         self.btn_angle_analysis.pack(side=tk.LEFT, padx=(0,5))
 
@@ -4800,6 +4807,108 @@ atomcam2で利用する場合は、GitHubで公開されている
             else:
                 messagebox.showerror("エラー", "ゆがみ補正画像の作成に失敗しました。ログを確認してください。")
                 self.append_log("ゆがみ補正画像の作成に失敗しました。")
+
+        threading.Thread(target=run_task, daemon=True).start()
+
+    def estimate_distortion_map_night_callback(self):
+        """Generate distortion maps from ~20 minutes of a night-sky video inside the app."""
+        if not self.check_admin_password():
+            return
+
+        if not self.folder_paths:
+            messagebox.showwarning("情報", "ソース選択タブで夜空動画のフォルダまたは動画ファイルを追加してください。")
+            return
+
+        if not messagebox.askyesno(
+            "夜間自己校正マップ生成",
+            "選択済みソースから最初に見つかった動画を使って、先頭20分で自己校正マップを生成します。\n\n"
+            "対策として自動マスク(時刻表示/グロー領域)を作成し、データ欠損区間は自動スキップします。\n"
+            "既存の distortion_map_x.npy / distortion_map_y.npy は上書きされます。\n\n"
+            "続行しますか？"
+        ):
+            return
+
+        module_dir = os.path.dirname(os.path.abspath(__file__))
+        map_x_path = os.path.join(module_dir, "distortion_map_x.npy")
+        map_y_path = os.path.join(module_dir, "distortion_map_y.npy")
+        auto_mask_output_path = os.path.join(module_dir, "distortion_selfcal_auto_mask.png")
+        metadata_output_path = os.path.join(module_dir, "distortion_selfcal_meta.json")
+
+        # Backup current maps if they exist so the user can roll back easily.
+        backup_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_map_x = None
+        backup_map_y = None
+        try:
+            if os.path.exists(map_x_path):
+                backup_map_x = os.path.join(module_dir, f"distortion_map_x.backup_{backup_ts}.npy")
+                shutil.copy2(map_x_path, backup_map_x)
+            if os.path.exists(map_y_path):
+                backup_map_y = os.path.join(module_dir, f"distortion_map_y.backup_{backup_ts}.npy")
+                shutil.copy2(map_y_path, backup_map_y)
+        except Exception as e:
+            self.append_log(f"既存ゆがみマップのバックアップ作成に失敗しました: {e}")
+
+        def run_task():
+            self.append_log("夜間自己校正マップ生成を開始します... (先頭20分, 自動マスク有効)")
+            self.append_log("注意: 固定カメラの夜空動画を前提とします。欠損区間は自動スキップします。")
+            try:
+                result = distortion_correction.estimate_distortion_map_from_night_sources(
+                    sources=self.folder_paths,
+                    map_x_path=map_x_path,
+                    map_y_path=map_y_path,
+                    duration_minutes=20.0,
+                    sample_interval_sec=2.0,
+                    progress_callback=self.append_log,
+                    auto_mask_output_path=auto_mask_output_path,
+                    metadata_output_path=metadata_output_path,
+                    strength=0.5,
+                )
+                stats = result.get("stats", {}) if isinstance(result, dict) else {}
+                sample_count = stats.get("residual_samples_before_fit", "N/A")
+                used_obs = stats.get("track_observations_used", "N/A")
+                sampled_ok = stats.get("frames_sampled_success", "N/A")
+                sampled_ng = stats.get("frames_sampled_failed", "N/A")
+                p95_resid = stats.get("p95_residual_mag_px", None)
+
+                summary_lines = [
+                    "夜間自己校正マップ生成が完了しました。",
+                    f"map_x: {map_x_path}",
+                    f"map_y: {map_y_path}",
+                    f"自動マスク: {auto_mask_output_path}",
+                    f"メタ情報: {metadata_output_path}",
+                    f"サンプル成功/失敗: {sampled_ok} / {sampled_ng}",
+                    f"残差サンプル数: {sample_count} (観測使用数: {used_obs})",
+                ]
+                if p95_resid is not None:
+                    try:
+                        summary_lines.append(f"残差95%値: {float(p95_resid):.3f} px")
+                    except Exception:
+                        pass
+                if backup_map_x or backup_map_y:
+                    backup_info = []
+                    if backup_map_x:
+                        backup_info.append(f"X: {backup_map_x}")
+                    if backup_map_y:
+                        backup_info.append(f"Y: {backup_map_y}")
+                    summary_lines.append("バックアップ作成済み")
+                    summary_lines.extend(backup_info)
+
+                self.append_log("夜間自己校正マップ生成が完了しました。")
+                self.append_log(f"  map_x: {map_x_path}")
+                self.append_log(f"  map_y: {map_y_path}")
+                self.append_log(f"  自動マスク: {auto_mask_output_path}")
+                self.append_log(f"  メタ情報: {metadata_output_path}")
+                messagebox.showinfo("完了", "\n".join(summary_lines))
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                self.append_log(f"夜間自己校正マップ生成に失敗しました: {e}")
+                messagebox.showerror(
+                    "エラー",
+                    "夜間自己校正マップ生成に失敗しました。\n"
+                    "ログを確認してください。\n\n"
+                    f"詳細: {e}"
+                )
 
         threading.Thread(target=run_task, daemon=True).start()
 
