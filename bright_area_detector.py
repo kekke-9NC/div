@@ -10,6 +10,9 @@ Qwen3-VL を使用して画像内の明るいエリア（月、街灯など）�
 """
 
 import os
+import base64
+import io
+import json
 import numpy as np
 import cv2
 import re
@@ -22,6 +25,12 @@ from PIL import Image
 
 import torch
 import shutil
+import requests
+
+try:
+    import config as app_config
+except Exception:
+    app_config = None
 
 Qwen3VLForConditionalGeneration = None
 AutoProcessor = None
@@ -36,12 +45,24 @@ LOCAL_MODEL_DIR = os.path.join(BASE_DIR, "quantized_model")
 HF_CACHE_DIR = os.path.join(BASE_DIR, "hf_cache")
 MODEL_OFFLOAD_TIMEOUT = 300
 
+AI_BACKEND_LOCAL = getattr(app_config, "AI_VLM_BACKEND_LOCAL_QWEN3_VL_4B", "local_qwen3_vl_4b")
+AI_BACKEND_LM_STUDIO = getattr(app_config, "AI_VLM_BACKEND_LM_STUDIO_QWEN35_2B", "lmstudio_qwen3_5_2b")
+DEFAULT_AI_BACKEND = getattr(app_config, "DEFAULT_AI_VLM_BACKEND", AI_BACKEND_LOCAL)
+DEFAULT_LM_STUDIO_URL = getattr(app_config, "DEFAULT_LM_STUDIO_VLM_URL", "http://localhost:1234/v1")
+DEFAULT_LM_STUDIO_MODEL_ID = getattr(app_config, "DEFAULT_LM_STUDIO_VLM_MODEL_ID", "qwen3.5-2b")
+DEFAULT_LM_STUDIO_API_KEY = getattr(app_config, "DEFAULT_LM_STUDIO_VLM_API_KEY", "lm-studio")
+
 _model = None
 _processor = None
 _model_loading = False
 _last_used_time = None
 _offload_timer = None
 _offload_lock = threading.Lock()
+_ai_backend = DEFAULT_AI_BACKEND
+_lm_studio_url = DEFAULT_LM_STUDIO_URL
+_lm_studio_model_id = DEFAULT_LM_STUDIO_MODEL_ID
+_lm_studio_api_key = DEFAULT_LM_STUDIO_API_KEY
+_lm_studio_connection_cache_key = None
 
 
 def _log(msg: str, status_callback: Optional[Callable[[str], None]] = None) -> None:
@@ -51,6 +72,231 @@ def _log(msg: str, status_callback: Optional[Callable[[str], None]] = None) -> N
             status_callback(msg)
         except Exception:
             pass
+
+
+def normalize_lm_studio_url(raw_url: str) -> str:
+    value = (raw_url or DEFAULT_LM_STUDIO_URL).strip().rstrip("/")
+    if not value:
+        value = DEFAULT_LM_STUDIO_URL.rstrip("/")
+    if value.endswith("/api/v1"):
+        value = value[: -len("/api/v1")]
+    if not value.endswith("/v1"):
+        value = f"{value}/v1"
+    return value
+
+
+def configure_ai_backend(
+    backend: Optional[str] = None,
+    lm_studio_url: Optional[str] = None,
+    lm_studio_model_id: Optional[str] = None,
+    lm_studio_api_key: Optional[str] = None,
+) -> None:
+    global _ai_backend, _lm_studio_url, _lm_studio_model_id, _lm_studio_api_key, _lm_studio_connection_cache_key
+    old_key = (_ai_backend, normalize_lm_studio_url(_lm_studio_url), _lm_studio_model_id, _lm_studio_api_key)
+
+    selected_backend = (backend or DEFAULT_AI_BACKEND).strip()
+    if selected_backend not in {AI_BACKEND_LOCAL, AI_BACKEND_LM_STUDIO}:
+        selected_backend = DEFAULT_AI_BACKEND
+
+    _ai_backend = selected_backend
+    if lm_studio_url is not None:
+        _lm_studio_url = normalize_lm_studio_url(lm_studio_url)
+    else:
+        _lm_studio_url = normalize_lm_studio_url(_lm_studio_url)
+    if lm_studio_model_id is not None:
+        _lm_studio_model_id = (lm_studio_model_id or DEFAULT_LM_STUDIO_MODEL_ID).strip() or DEFAULT_LM_STUDIO_MODEL_ID
+    if lm_studio_api_key is not None:
+        _lm_studio_api_key = (lm_studio_api_key or "").strip()
+
+    new_key = (_ai_backend, normalize_lm_studio_url(_lm_studio_url), _lm_studio_model_id, _lm_studio_api_key)
+    if new_key != old_key:
+        _lm_studio_connection_cache_key = None
+
+
+def get_ai_backend_config() -> dict:
+    return {
+        "backend": _ai_backend,
+        "lm_studio_url": _lm_studio_url,
+        "lm_studio_model_id": _lm_studio_model_id,
+        "lm_studio_api_key": _lm_studio_api_key,
+    }
+
+
+def uses_local_model() -> bool:
+    return _ai_backend == AI_BACKEND_LOCAL
+
+
+def get_active_model_name() -> str:
+    if _ai_backend == AI_BACKEND_LM_STUDIO:
+        return f"LM Studio: {_lm_studio_model_id}"
+    return MODEL_ID
+
+
+def _lm_studio_headers() -> dict:
+    headers = {"Accept": "application/json", "Content-Type": "application/json"}
+    if _lm_studio_api_key:
+        headers["Authorization"] = f"Bearer {_lm_studio_api_key}"
+    return headers
+
+
+def _lm_studio_request(method: str, path: str, payload: Optional[dict] = None, timeout: int = 120) -> dict:
+    url = f"{normalize_lm_studio_url(_lm_studio_url)}{path}"
+    try:
+        response = requests.request(
+            method,
+            url,
+            headers=_lm_studio_headers(),
+            json=payload,
+            timeout=timeout,
+        )
+    except requests.RequestException as exc:
+        raise RuntimeError(f"LM Studioに接続できません: {normalize_lm_studio_url(_lm_studio_url)}\n{exc}") from exc
+
+    if not response.ok:
+        try:
+            detail = response.json()
+        except ValueError:
+            detail = response.text.strip()
+        raise RuntimeError(f"LM Studio APIエラー ({response.status_code}): {detail}")
+
+    if not response.content:
+        return {}
+    try:
+        return response.json()
+    except ValueError as exc:
+        raise RuntimeError("LM Studio APIの応答がJSONではありません。") from exc
+
+
+def _lm_studio_list_model_ids() -> List[str]:
+    payload = _lm_studio_request("GET", "/models", timeout=20)
+    items = payload.get("data") or payload.get("models") or []
+    model_ids = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        model_id = item.get("id") or item.get("key") or item.get("model")
+        if model_id:
+            model_ids.append(str(model_id))
+    return model_ids
+
+
+def _image_to_data_uri(image: np.ndarray) -> str:
+    pil_image = _cv2_to_pil(image)
+    buffer = io.BytesIO()
+    pil_image.save(buffer, format="JPEG", quality=85)
+    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+    return f"data:image/jpeg;base64,{encoded}"
+
+
+def _call_lm_studio_chat(
+    messages: List[dict],
+    status_callback: Optional[Callable[[str], None]] = None,
+    stream_callback: Optional[Callable[[str], None]] = None,
+    max_tokens: int = 512,
+) -> str:
+    if status_callback:
+        status_callback(f"LM Studioへ送信中: {_lm_studio_model_id}")
+
+    payload = {
+        "model": _lm_studio_model_id,
+        "messages": messages,
+        "temperature": 0.1,
+        "top_p": 0.9,
+        "max_tokens": max_tokens,
+        "stream": bool(stream_callback),
+    }
+
+    if stream_callback:
+        url = f"{normalize_lm_studio_url(_lm_studio_url)}/chat/completions"
+        try:
+            response = requests.post(
+                url,
+                headers=_lm_studio_headers(),
+                json=payload,
+                timeout=300,
+                stream=True,
+            )
+        except requests.RequestException as exc:
+            raise RuntimeError(f"LM Studioに接続できません: {normalize_lm_studio_url(_lm_studio_url)}\n{exc}") from exc
+
+        if not response.ok:
+            try:
+                detail = response.json()
+            except ValueError:
+                detail = response.text.strip()
+            raise RuntimeError(f"LM Studio APIエラー ({response.status_code}): {detail}")
+
+        output_text = ""
+        for raw_line in response.iter_lines(decode_unicode=True):
+            if not raw_line:
+                continue
+            line = raw_line.strip()
+            if line.startswith("data:"):
+                line = line[len("data:"):].strip()
+            if not line or line == "[DONE]":
+                continue
+            try:
+                chunk = json.loads(line)
+            except ValueError:
+                continue
+
+            choices = chunk.get("choices") or []
+            if not choices:
+                continue
+            delta = choices[0].get("delta") or {}
+            content = delta.get("content")
+            if isinstance(content, list):
+                text = "".join(str(item.get("text", "")) for item in content if isinstance(item, dict))
+            else:
+                text = str(content or "")
+            if text:
+                output_text += text
+                stream_callback(text)
+        return output_text.strip()
+
+    data = _lm_studio_request("POST", "/chat/completions", payload=payload, timeout=300)
+    choices = data.get("choices") or []
+    if not choices:
+        raise RuntimeError("LM Studioから有効な応答が返りませんでした。")
+    content = choices[0].get("message", {}).get("content", "")
+    if isinstance(content, list):
+        text_parts = []
+        for item in content:
+            if isinstance(item, dict) and item.get("text"):
+                text_parts.append(str(item["text"]))
+        output_text = "\n".join(text_parts).strip()
+    else:
+        output_text = str(content).strip()
+    return output_text
+
+
+STRICT_BOX_SYSTEM_PROMPT = (
+    "You are a strict visual bounding-box detector. "
+    "Return only the requested coordinates in the exact text format. "
+    "Do not explain, do not use JSON, and do not use Markdown."
+)
+
+
+def _strict_box_user_prompt(target: str, ignore: str) -> str:
+    return (
+        f"Find only: {target}\n"
+        f"Ignore: {ignore}\n"
+        "Coordinates must be normalized integers from 0 to 1000.\n"
+        "Output exactly one of these two forms:\n"
+        "NONE\n"
+        "(x1,y1,x2,y2);(x1,y1,x2,y2)\n"
+        "Rules:\n"
+        "- Use digits only inside each coordinate tuple.\n"
+        "- Never write coordinate names such as x1, y1, xmin, ymin, bbox, bbox_2d.\n"
+        "- Never prefix numbers with letters, for example do not write x648 or y239.\n"
+        "- Never output JSON, arrays, labels, comments, prose, bullets, or code fences.\n"
+        "- If there is no clear target, output exactly NONE.\n"
+        "Valid example with one box: (648,239,705,263)\n"
+        "Valid example with two boxes: (648,239,705,263);(120,300,180,360)\n"
+        "Invalid examples: (x648,239),(705,263), (x1,y1,x2,y2), "
+        "{\"bbox_2d\":[648,239,705,263]}\n"
+        "Now inspect the image and output only the final answer."
+    )
 
 
 def _has_model_files(model_dir: str) -> bool:
@@ -259,15 +505,33 @@ def _get_model(status_callback: Optional[Callable[[str], None]] = None):
 
 
 
-def check_vlm_connection(status_callback: Optional[Callable[[str], None]] = None) -> tuple:
+def check_vlm_connection(
+    status_callback: Optional[Callable[[str], None]] = None,
+    force: bool = False,
+) -> tuple:
     """
     モデルの利用可否を確認する
     
     Returns:
         tuple: (利用可能なら True, モデル名または空文字列)
     """
-    global _model, _processor
+    global _model, _processor, _lm_studio_connection_cache_key
     try:
+        if _ai_backend == AI_BACKEND_LM_STUDIO:
+            cache_key = (normalize_lm_studio_url(_lm_studio_url), _lm_studio_model_id, _lm_studio_api_key)
+            if not force and _lm_studio_connection_cache_key == cache_key:
+                return (True, get_active_model_name())
+
+            model_ids = _lm_studio_list_model_ids()
+            if model_ids and _lm_studio_model_id not in model_ids:
+                return (
+                    False,
+                    f"LM Studioで指定モデルが見つかりません: {_lm_studio_model_id}\n"
+                    f"利用可能: {', '.join(model_ids)}",
+                )
+            _lm_studio_connection_cache_key = cache_key
+            return (True, get_active_model_name())
+
         if _model is not None and _processor is not None:
             _reset_offload_timer()
             return (True, MODEL_ID)
@@ -299,6 +563,20 @@ def _call_vlm(
     stream_callback: Optional[Callable[[str], None]] = None
 ) -> str:
     """VLMを呼び出してテキスト応答を取得"""
+    if _ai_backend == AI_BACKEND_LM_STUDIO:
+        data_uri = _image_to_data_uri(image)
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": user_prompt},
+                    {"type": "image_url", "image_url": {"url": data_uri}},
+                ],
+            },
+        ]
+        return _call_lm_studio_chat(messages, status_callback, stream_callback, max_tokens=128)
+
     from transformers import TextIteratorStreamer
     from qwen_vl_utils import process_vision_info
     model, processor = _get_model(status_callback)
@@ -394,6 +672,26 @@ def generate_response(
     Returns:
         応答テキスト
     """
+    if _ai_backend == AI_BACKEND_LM_STUDIO:
+        if status_callback:
+            status_callback("LM Studio接続確認中...")
+        connected, err = check_vlm_connection(status_callback)
+        if not connected:
+            return f"エラー: LM Studioモデルの確認に失敗しました: {err}"
+
+        messages = [{"role": "system", "content": system_prompt}]
+        if history:
+            messages.extend(history)
+        if image is not None:
+            user_content = [
+                {"type": "text", "text": user_prompt},
+                {"type": "image_url", "image_url": {"url": _image_to_data_uri(image)}},
+            ]
+        else:
+            user_content = user_prompt
+        messages.append({"role": "user", "content": user_content})
+        return _call_lm_studio_chat(messages, status_callback, stream_callback)
+
     from transformers import TextIteratorStreamer
     from qwen_vl_utils import process_vision_info
     if status_callback: status_callback("接続確認中...")
@@ -610,13 +908,10 @@ def detect_bright_areas(
     log("モデル準備OK。明るいエリアの検出を実行中...")
     
     try:
-        system_prompt = "Identify STATIC bright light sources (moon, streetlights). Ignore meteors/satellites."
-        
-        user_prompt = (
-            "Detect STATIC bright areas. Ignore meteors/trails. "
-            "Return bounding boxes (0-1000 norm coords): (x1,y1,x2,y2). "
-            "Output format: (x1,y1,x2,y2);(x1,y1,x2,y2) "
-            "If none, reply: NONE"
+        system_prompt = STRICT_BOX_SYSTEM_PROMPT
+        user_prompt = _strict_box_user_prompt(
+            "static bright light sources such as the moon, planets, streetlights, lamps, or fixed glare",
+            "meteors, shooting stars, satellites, aircraft trails, stars, clouds, noise, and moving light streaks",
         )
 
         result_text = _call_vlm(system_prompt, user_prompt, image)
@@ -670,13 +965,10 @@ def detect_bright_areas_with_boxes(
     log("モデル準備OK。明るいエリアの検出を実行中...")
     
     try:
-        system_prompt = "Identify STATIC bright light sources (moon, planets, streetlights). Ignore meteors/satellites."
-        
-        user_prompt = (
-            "Detect STATIC bright areas. Ignore meteors/trails. "
-            "Return bounding boxes (0-1000 norm coords): (x1,y1,x2,y2). "
-            "Output format: (x1,y1,x2,y2);(x1,y1,x2,y2) "
-            "If none, reply: NONE"
+        system_prompt = STRICT_BOX_SYSTEM_PROMPT
+        user_prompt = _strict_box_user_prompt(
+            "static bright light sources such as the moon, planets, streetlights, lamps, or fixed glare",
+            "meteors, shooting stars, satellites, aircraft trails, stars, clouds, noise, and moving light streaks",
         )
 
         result_text = _call_vlm(system_prompt, user_prompt, image)
@@ -800,13 +1092,10 @@ def detect_meteors_with_boxes(
     log("モデル準備OK。流星の検出を実行中...")
     
     try:
-        system_prompt = "Identify meteors, shooting stars, and linear light trails. Ignore static lights like moon/streetlights."
-        
-        user_prompt = (
-            "Detect meteors/shooting stars (linear light streaks). Ignore moon/stars/streetlights. "
-            "Return bounding boxes (0-1000 norm coords): (x1,y1,x2,y2). "
-            "Output format: (x1,y1,x2,y2);(x1,y1,x2,y2) "
-            "If none, reply: NONE"
+        system_prompt = STRICT_BOX_SYSTEM_PROMPT
+        user_prompt = _strict_box_user_prompt(
+            "meteors, shooting stars, or linear meteor-like light streaks",
+            "moon, stars, planets, streetlights, clouds, static bright areas, aircraft, satellites, and noise",
         )
 
         result_text = _call_vlm(system_prompt, user_prompt, image)
