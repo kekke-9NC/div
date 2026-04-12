@@ -19,7 +19,8 @@ except ImportError:
 
 # Configuration
 LM_STUDIO_URL = "http://localhost:1234/v1"
-MODEL_ID = "qwen/qwen3-vl-4b" 
+MODEL_ID = "qwen/qwen3-vl-4b"
+AVAILABLE_MODEL_IDS = ("qwen/qwen3-vl-4b", "qwen3.5-2b")
 
 class QwenVLApp:
     def __init__(self, root):
@@ -32,6 +33,7 @@ class QwenVLApp:
         self.cv_image = None  # Original PIL Image
         self.tk_image = None  # PhotoImage for display
         self.is_loading = False
+        self.model_id_var = tk.StringVar(value=MODEL_ID)
         
         # Detection state
         self.detected_shapes = []  # List of (label, points)
@@ -55,6 +57,15 @@ class QwenVLApp:
         # Control Panel
         control_frame = ttk.Frame(self.root, padding=10)
         control_frame.grid(row=0, column=0, sticky="ew")
+
+        ttk.Label(control_frame, text="AI Model:").pack(side=tk.LEFT, padx=5)
+        self.model_combo = ttk.Combobox(
+            control_frame,
+            textvariable=self.model_id_var,
+            values=AVAILABLE_MODEL_IDS,
+            width=24,
+        )
+        self.model_combo.pack(side=tk.LEFT, padx=5)
 
         ttk.Label(control_frame, text="Prompt:").pack(side=tk.LEFT, padx=5)
         self.prompt_var = tk.StringVar(value="Detect the cat")
@@ -288,7 +299,7 @@ Be thorough and detect as many distinct objects as possible. Include people, ani
             ]}
         ]
         response = self.client.chat.completions.create(
-            model=MODEL_ID,
+            model=self.model_id_var.get().strip() or MODEL_ID,
             messages=messages,
             temperature=0.1,
             top_p=0.9,
