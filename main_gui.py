@@ -341,6 +341,8 @@ class App(TkinterDnD.Tk):
         self.lm_studio_vlm_model_var = tk.StringVar(value=getattr(config, "DEFAULT_LM_STUDIO_VLM_MODEL_ID", "qwen3.5-2b"))
         self.lm_studio_vlm_api_key_var = tk.StringVar(value="")
         self.ai_vlm_status_var = tk.StringVar(value="")
+        self._last_ai_vlm_backend = self.ai_vlm_backend_var.get()
+        self._last_lm_studio_vlm_model = self.lm_studio_vlm_model_var.get()
         # store last-fetched coordinates (display only for now)
         self.current_lat_var = tk.StringVar(value="--")
         self.current_lon_var = tk.StringVar(value="--")
@@ -2513,7 +2515,47 @@ atomcam2で利用する場合は、GitHubで公開されている
         else:
             detail_frame.pack_forget()
 
+    def _unload_previous_ai_vlm_if_changed(self, new_backend, new_lm_model):
+        old_backend = getattr(self, "_last_ai_vlm_backend", new_backend)
+        old_lm_model = getattr(self, "_last_lm_studio_vlm_model", new_lm_model)
+        if old_backend == new_backend and old_lm_model == new_lm_model:
+            return
+
+        old_url = self.lm_studio_vlm_url_var.get()
+
+        def worker():
+            try:
+                import bright_area_detector
+                bright_area_detector.configure_ai_backend(
+                    backend=old_backend,
+                    lm_studio_url=old_url,
+                    lm_studio_model_id=old_lm_model,
+                    lm_studio_api_key="",
+                )
+                result = bright_area_detector.unload_selected_ai_model()
+                self.append_log(f"前のAIモデルをアンロードしました: {result}")
+            except Exception as e:
+                self.append_log(f"前のAIモデルのアンロードに失敗しました: {e}")
+            finally:
+                try:
+                    import bright_area_detector
+                    bright_area_detector.configure_ai_backend(
+                        backend=new_backend,
+                        lm_studio_url=self.lm_studio_vlm_url_var.get(),
+                        lm_studio_model_id=new_lm_model,
+                        lm_studio_api_key="",
+                    )
+                except Exception:
+                    pass
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def on_ai_vlm_backend_changed(self):
+        new_backend = self.ai_vlm_backend_var.get()
+        new_lm_model = self.lm_studio_vlm_model_var.get()
+        self._unload_previous_ai_vlm_if_changed(new_backend, new_lm_model)
+        self._last_ai_vlm_backend = new_backend
+        self._last_lm_studio_vlm_model = new_lm_model
         self.update_lm_studio_vlm_visibility()
         self.apply_ai_model_settings(show_message=False)
         if self._is_lm_studio_backend_selected():
@@ -2521,6 +2563,11 @@ atomcam2で利用する場合は、GitHubで公開されている
             self.check_ai_model_connection_async(show_success=False, only_lm_studio=True)
 
     def on_lm_studio_vlm_model_selected(self, _event=None):
+        new_backend = self.ai_vlm_backend_var.get()
+        new_lm_model = self.lm_studio_vlm_model_var.get()
+        self._unload_previous_ai_vlm_if_changed(new_backend, new_lm_model)
+        self._last_ai_vlm_backend = new_backend
+        self._last_lm_studio_vlm_model = new_lm_model
         self.apply_ai_model_settings(show_message=False)
         self.check_ai_model_connection_async(show_success=False, only_lm_studio=True)
 
@@ -2543,9 +2590,13 @@ atomcam2で利用する場合は、GitHubで公開されている
                     return
                 current = self.lm_studio_vlm_model_var.get().strip()
                 combo.configure(values=model_ids)
+                if not model_ids:
+                    self.lm_studio_vlm_model_var.set("")
+                    self.ai_vlm_status_var.set("Vision対応モデルなし")
+                    return
                 if model_ids and current not in model_ids:
                     self.lm_studio_vlm_model_var.set(model_ids[0])
-                    self.apply_ai_model_settings(show_message=False)
+                    self.on_lm_studio_vlm_model_selected()
 
             self.after(0, update)
 
@@ -4848,6 +4899,8 @@ atomcam2で利用する場合は、GitHubで公開されている
             self.lm_studio_vlm_api_key_var.set("")
             self.update_lm_studio_vlm_visibility()
             self.apply_ai_model_settings(show_message=False)
+            self._last_ai_vlm_backend = self.ai_vlm_backend_var.get()
+            self._last_lm_studio_vlm_model = self.lm_studio_vlm_model_var.get()
             # summary_video_config: 保存された順番を復元し、新項目を末尾に追加
             saved_summary_config = settings.get('summary_video_config', [])
             if saved_summary_config:

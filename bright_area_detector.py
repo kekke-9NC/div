@@ -282,6 +282,89 @@ def unload_selected_ai_model() -> str:
     return f"Unloaded: {MODEL_ID}"
 
 
+def _lm_studio_list_native_models() -> List[dict]:
+    payload = _lm_studio_runtime_request("GET", "/api/v1/models", timeout=20)
+    items = payload.get("data") or payload.get("models") or []
+    return [item for item in items if isinstance(item, dict)]
+
+
+def _extract_lm_studio_model_id(item: dict) -> str:
+    return str(item.get("key") or item.get("id") or item.get("model") or "")
+
+
+def _lm_studio_loaded_instance_ids(model_id: Optional[str] = None) -> List[str]:
+    instance_ids = []
+    for item in _lm_studio_list_native_models():
+        current_model_id = _extract_lm_studio_model_id(item)
+        if model_id is not None and current_model_id != model_id:
+            continue
+        for instance in item.get("loaded_instances") or item.get("loadedInstances") or []:
+            if isinstance(instance, dict):
+                instance_id = instance.get("id") or instance.get("identifier") or instance.get("instance_id")
+            else:
+                instance_id = instance
+            if instance_id:
+                instance_ids.append(str(instance_id))
+    return instance_ids
+
+
+def _unload_lm_studio_instances(instance_ids: List[str]) -> int:
+    global _lm_studio_connection_cache_key
+    count = 0
+    for instance_id in instance_ids:
+        _lm_studio_runtime_request("POST", "/api/v1/models/unload", {"instance_id": instance_id}, timeout=120)
+        count += 1
+    if count:
+        _lm_studio_connection_cache_key = None
+    return count
+
+
+def list_lm_studio_model_ids() -> List[str]:
+    try:
+        model_ids = []
+        for item in _lm_studio_list_native_models():
+            capabilities = item.get("capabilities") or {}
+            if item.get("type") != "llm" or not capabilities.get("vision"):
+                continue
+            model_id = _extract_lm_studio_model_id(item)
+            if model_id:
+                model_ids.append(model_id)
+        return model_ids
+    except Exception:
+        return []
+
+
+def load_lm_studio_selected_model() -> str:
+    global _lm_studio_connection_cache_key
+    if _ai_backend != AI_BACKEND_LM_STUDIO:
+        raise RuntimeError("LM Studio is not selected.")
+
+    selected_loaded = _lm_studio_loaded_instance_ids(_lm_studio_model_id)
+    other_loaded = []
+    for item in _lm_studio_list_native_models():
+        model_id = _extract_lm_studio_model_id(item)
+        capabilities = item.get("capabilities") or {}
+        if model_id and model_id != _lm_studio_model_id and item.get("type") == "llm" and capabilities.get("vision"):
+            other_loaded.extend(_lm_studio_loaded_instance_ids(model_id))
+    _unload_lm_studio_instances(other_loaded)
+
+    if selected_loaded:
+        return f"Loaded: {_lm_studio_model_id}"
+    _lm_studio_runtime_request("POST", "/api/v1/models/load", {"model": _lm_studio_model_id}, timeout=180)
+    _lm_studio_connection_cache_key = None
+    return f"Loaded: {_lm_studio_model_id}"
+
+
+def unload_lm_studio_selected_model() -> str:
+    if _ai_backend != AI_BACKEND_LM_STUDIO:
+        raise RuntimeError("LM Studio is not selected.")
+
+    unloaded = _unload_lm_studio_instances(_lm_studio_loaded_instance_ids(_lm_studio_model_id))
+    if not unloaded:
+        return f"Already unloaded: {_lm_studio_model_id}"
+    return f"Unloaded: {_lm_studio_model_id}"
+
+
 def _image_to_data_uri(image: np.ndarray) -> str:
     pil_image = _cv2_to_pil(image)
     buffer = io.BytesIO()
@@ -624,7 +707,9 @@ def check_vlm_connection(
             if not force and _lm_studio_connection_cache_key == cache_key:
                 return (True, get_active_model_name())
 
-            model_ids = _lm_studio_list_model_ids()
+            model_ids = list_lm_studio_model_ids()
+            if not model_ids:
+                return (False, "LM StudioでVision対応モデルが見つかりません。")
             if model_ids and _lm_studio_model_id not in model_ids:
                 return (
                     False,
