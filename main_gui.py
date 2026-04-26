@@ -339,7 +339,7 @@ class App(TkinterDnD.Tk):
         self.ai_vlm_backend_var = tk.StringVar(value=getattr(config, "DEFAULT_AI_VLM_BACKEND", "local_qwen3_vl_4b"))
         self.lm_studio_vlm_url_var = tk.StringVar(value=getattr(config, "DEFAULT_LM_STUDIO_VLM_URL", "http://localhost:1234/v1"))
         self.lm_studio_vlm_model_var = tk.StringVar(value=getattr(config, "DEFAULT_LM_STUDIO_VLM_MODEL_ID", "qwen3.5-2b"))
-        self.lm_studio_vlm_api_key_var = tk.StringVar(value=getattr(config, "DEFAULT_LM_STUDIO_VLM_API_KEY", "lm-studio"))
+        self.lm_studio_vlm_api_key_var = tk.StringVar(value="")
         self.ai_vlm_status_var = tk.StringVar(value="")
         # store last-fetched coordinates (display only for now)
         self.current_lat_var = tk.StringVar(value="--")
@@ -1182,7 +1182,7 @@ atomcam2で利用する場合は、GitHubで公開されている
             self._flash_button(self.btn_model_training)
 
     def navigate_to_model_selector(self):
-        self.notebook.select(self.tab_settings)
+        self.notebook.select(self.tab_advanced_settings)
         if hasattr(self, "btn_model_refresh"):
             self._flash_button(self.btn_model_refresh)
 
@@ -2201,76 +2201,6 @@ atomcam2で利用する場合は、GitHubで公開されている
         ttk.Entry(path_frame2, textvariable=self.not_meteor_save_path_var, state='readonly').pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Button(path_frame2, text="選択", command=lambda: self.select_save_path(self.not_meteor_save_path_var)).pack(side=tk.LEFT, padx=(5,0))
 
-        lf_model = ttk.LabelFrame(scrollable_frame, text="流星分類に使用するモデル")
-        lf_model.pack(fill=tk.X, pady=5)
-        model_row1 = ttk.Frame(lf_model)
-        model_row1.pack(fill=tk.X, pady=2)
-        ttk.Label(model_row1, text="モデル:", width=10).pack(side=tk.LEFT)
-        self.cmb_model_select = ttk.Combobox(
-            model_row1,
-            textvariable=self.selected_model_path_var,
-            state="readonly",
-        )
-        self.cmb_model_select.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        self.cmb_model_select.bind("<<ComboboxSelected>>", self.on_model_combobox_selected)
-        self.btn_model_refresh = ttk.Button(model_row1, text="更新", command=self.refresh_model_candidates)
-        self.btn_model_refresh.pack(side=tk.LEFT, padx=(5, 0))
-        self.btn_select_model_file = ttk.Button(model_row1, text="参照", command=self.select_model_file)
-        self.btn_select_model_file.pack(side=tk.LEFT, padx=(5, 0))
-
-        model_row2 = ttk.Frame(lf_model)
-        model_row2.pack(fill=tk.X, pady=(2, 4))
-        ttk.Button(model_row2, text="流星分類モデルとして適用", command=lambda: self.apply_selected_model(show_message=True)).pack(side=tk.LEFT)
-        ttk.Label(model_row2, textvariable=self.model_meta_info_var, foreground="#87CEEB").pack(side=tk.LEFT, padx=(10, 0))
-        self.refresh_model_candidates()
-
-        lf_ai_vlm = ttk.LabelFrame(scrollable_frame, text="AI解析に使用するVLM")
-        lf_ai_vlm.pack(fill=tk.X, pady=5)
-
-        ai_vlm_backend_frame = ttk.Frame(lf_ai_vlm)
-        ai_vlm_backend_frame.pack(fill=tk.X, pady=2)
-        ttk.Label(ai_vlm_backend_frame, text="AIモデル:", width=10).pack(side=tk.LEFT)
-        ttk.Radiobutton(
-            ai_vlm_backend_frame,
-            text="内蔵 Qwen3-VL 4B",
-            variable=self.ai_vlm_backend_var,
-            value=getattr(config, "AI_VLM_BACKEND_LOCAL_QWEN3_VL_4B", "local_qwen3_vl_4b"),
-            command=self.apply_ai_model_settings,
-        ).pack(side=tk.LEFT, padx=(0, 10))
-        ttk.Radiobutton(
-            ai_vlm_backend_frame,
-            text="LM Studio qwen3.5-2b",
-            variable=self.ai_vlm_backend_var,
-            value=getattr(config, "AI_VLM_BACKEND_LM_STUDIO_QWEN35_2B", "lmstudio_qwen3_5_2b"),
-            command=self.apply_ai_model_settings,
-        ).pack(side=tk.LEFT)
-
-        lm_row1 = ttk.Frame(lf_ai_vlm)
-        lm_row1.pack(fill=tk.X, pady=2)
-        ttk.Label(lm_row1, text="URL:", width=10).pack(side=tk.LEFT)
-        ttk.Entry(lm_row1, textvariable=self.lm_studio_vlm_url_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
-
-        lm_row2 = ttk.Frame(lf_ai_vlm)
-        lm_row2.pack(fill=tk.X, pady=2)
-        ttk.Label(lm_row2, text="モデルID:", width=10).pack(side=tk.LEFT)
-        self.cmb_lm_studio_vlm_model = ttk.Combobox(
-            lm_row2,
-            textvariable=self.lm_studio_vlm_model_var,
-            values=("qwen3.5-2b", "qwen/qwen3-vl-4b"),
-        )
-        self.cmb_lm_studio_vlm_model.pack(side=tk.LEFT, fill=tk.X, expand=True)
-
-        lm_row3 = ttk.Frame(lf_ai_vlm)
-        lm_row3.pack(fill=tk.X, pady=2)
-        ttk.Label(lm_row3, text="API Key:", width=10).pack(side=tk.LEFT)
-        ttk.Entry(lm_row3, textvariable=self.lm_studio_vlm_api_key_var, show="*").pack(side=tk.LEFT, fill=tk.X, expand=True)
-
-        ai_vlm_action_row = ttk.Frame(lf_ai_vlm)
-        ai_vlm_action_row.pack(fill=tk.X, pady=(4, 2))
-        ttk.Button(ai_vlm_action_row, text="AIモデル設定を適用", command=lambda: self.apply_ai_model_settings(show_message=True)).pack(side=tk.LEFT)
-        ttk.Button(ai_vlm_action_row, text="LM Studio接続確認", command=self.check_ai_model_connection_async).pack(side=tk.LEFT, padx=(5, 0))
-        ttk.Label(ai_vlm_action_row, textvariable=self.ai_vlm_status_var, foreground="#87CEEB").pack(side=tk.LEFT, padx=(10, 0))
-
         lf_astro = ttk.LabelFrame(scrollable_frame, text="プレートソルブ & マスク")
         lf_astro.pack(fill=tk.X, pady=5)
         
@@ -2498,6 +2428,157 @@ atomcam2で利用する場合は、GitHubで公開されている
 
         return frame
 
+    def _create_model_selection_section(self, parent):
+        lf_model = ttk.LabelFrame(parent, text="流星分類に使用するモデル")
+        lf_model.pack(fill=tk.X, pady=5)
+
+        model_row1 = ttk.Frame(lf_model)
+        model_row1.pack(fill=tk.X, pady=2)
+        ttk.Label(model_row1, text="モデル:", width=10).pack(side=tk.LEFT)
+        self.cmb_model_select = ttk.Combobox(
+            model_row1,
+            textvariable=self.selected_model_path_var,
+            state="readonly",
+        )
+        self.cmb_model_select.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.cmb_model_select.bind("<<ComboboxSelected>>", self.on_model_combobox_selected)
+        self.btn_model_refresh = ttk.Button(model_row1, text="更新", command=self.refresh_model_candidates)
+        self.btn_model_refresh.pack(side=tk.LEFT, padx=(5, 0))
+        self.btn_select_model_file = ttk.Button(model_row1, text="参照", command=self.select_model_file)
+        self.btn_select_model_file.pack(side=tk.LEFT, padx=(5, 0))
+
+        model_row2 = ttk.Frame(lf_model)
+        model_row2.pack(fill=tk.X, pady=(2, 4))
+        ttk.Button(model_row2, text="流星分類モデルとして適用", command=lambda: self.apply_selected_model(show_message=True)).pack(side=tk.LEFT)
+        ttk.Label(model_row2, textvariable=self.model_meta_info_var, foreground="#87CEEB").pack(side=tk.LEFT, padx=(10, 0))
+        self.refresh_model_candidates()
+
+    def _is_lm_studio_backend_selected(self):
+        return self.ai_vlm_backend_var.get() == getattr(config, "AI_VLM_BACKEND_LM_STUDIO_QWEN35_2B", "lmstudio_qwen3_5_2b")
+
+    def _create_ai_vlm_section(self, parent):
+        lf_ai_vlm = ttk.LabelFrame(parent, text="AI解析に使用するVLM")
+        lf_ai_vlm.pack(fill=tk.X, pady=5)
+
+        ai_vlm_backend_frame = ttk.Frame(lf_ai_vlm)
+        ai_vlm_backend_frame.pack(fill=tk.X, pady=2)
+        ttk.Label(ai_vlm_backend_frame, text="AIモデル:", width=10).pack(side=tk.LEFT)
+        ttk.Radiobutton(
+            ai_vlm_backend_frame,
+            text="内蔵 Qwen3-VL 4B",
+            variable=self.ai_vlm_backend_var,
+            value=getattr(config, "AI_VLM_BACKEND_LOCAL_QWEN3_VL_4B", "local_qwen3_vl_4b"),
+            command=self.on_ai_vlm_backend_changed,
+        ).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Radiobutton(
+            ai_vlm_backend_frame,
+            text="LM Studio",
+            variable=self.ai_vlm_backend_var,
+            value=getattr(config, "AI_VLM_BACKEND_LM_STUDIO_QWEN35_2B", "lmstudio_qwen3_5_2b"),
+            command=self.on_ai_vlm_backend_changed,
+        ).pack(side=tk.LEFT)
+
+        self.lm_studio_vlm_detail_frame = ttk.Frame(lf_ai_vlm)
+
+        lm_row1 = ttk.Frame(self.lm_studio_vlm_detail_frame)
+        lm_row1.pack(fill=tk.X, pady=2)
+        ttk.Label(lm_row1, text="URL:", width=10).pack(side=tk.LEFT)
+        ttk.Entry(lm_row1, textvariable=self.lm_studio_vlm_url_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        lm_row2 = ttk.Frame(self.lm_studio_vlm_detail_frame)
+        lm_row2.pack(fill=tk.X, pady=2)
+        ttk.Label(lm_row2, text="モデルID:", width=10).pack(side=tk.LEFT)
+        self.cmb_lm_studio_vlm_model = ttk.Combobox(
+            lm_row2,
+            textvariable=self.lm_studio_vlm_model_var,
+            values=(self.lm_studio_vlm_model_var.get(),),
+        )
+        self.cmb_lm_studio_vlm_model.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.cmb_lm_studio_vlm_model.bind("<<ComboboxSelected>>", self.on_lm_studio_vlm_model_selected)
+
+        ai_vlm_action_row = ttk.Frame(self.lm_studio_vlm_detail_frame)
+        ai_vlm_action_row.pack(fill=tk.X, pady=(4, 2))
+        ttk.Button(ai_vlm_action_row, text="Load Model", command=self.load_lm_studio_vlm_model_async).pack(side=tk.LEFT)
+        ttk.Button(ai_vlm_action_row, text="Unload Model", command=self.unload_lm_studio_vlm_model_async).pack(side=tk.LEFT, padx=(5, 0))
+
+        self.update_lm_studio_vlm_visibility()
+
+    def update_lm_studio_vlm_visibility(self):
+        detail_frame = getattr(self, "lm_studio_vlm_detail_frame", None)
+        if detail_frame is None:
+            return
+        if self._is_lm_studio_backend_selected():
+            if not detail_frame.winfo_ismapped():
+                detail_frame.pack(fill=tk.X, pady=(2, 0))
+        else:
+            detail_frame.pack_forget()
+
+    def on_ai_vlm_backend_changed(self):
+        self.update_lm_studio_vlm_visibility()
+        self.apply_ai_model_settings(show_message=False)
+        if self._is_lm_studio_backend_selected():
+            self.refresh_lm_studio_vlm_models_async()
+            self.check_ai_model_connection_async(show_success=False, only_lm_studio=True)
+
+    def on_lm_studio_vlm_model_selected(self, _event=None):
+        self.apply_ai_model_settings(show_message=False)
+        self.check_ai_model_connection_async(show_success=False, only_lm_studio=True)
+
+    def refresh_lm_studio_vlm_models_async(self):
+        if not self._is_lm_studio_backend_selected():
+            return
+        self.apply_ai_model_settings(show_message=False)
+
+        def worker():
+            try:
+                import bright_area_detector
+                model_ids = bright_area_detector.list_lm_studio_model_ids()
+            except Exception as e:
+                self.append_log(f"LM Studioモデル一覧の取得に失敗しました: {e}")
+                return
+
+            def update():
+                combo = getattr(self, "cmb_lm_studio_vlm_model", None)
+                if combo is None:
+                    return
+                current = self.lm_studio_vlm_model_var.get().strip()
+                combo.configure(values=model_ids)
+                if model_ids and current not in model_ids:
+                    self.lm_studio_vlm_model_var.set(model_ids[0])
+                    self.apply_ai_model_settings(show_message=False)
+
+            self.after(0, update)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _run_lm_studio_model_action_async(self, action_name, action_func_name):
+        if not self._is_lm_studio_backend_selected():
+            return
+        if not self.apply_ai_model_settings(show_message=False):
+            return
+        self.ai_vlm_status_var.set(f"{action_name}...")
+
+        def worker():
+            try:
+                import bright_area_detector
+                action_func = getattr(bright_area_detector, action_func_name)
+                result = action_func()
+                self.after(0, lambda: self.ai_vlm_status_var.set(result))
+                self.after(0, lambda: messagebox.showinfo("LM Studio", result, parent=self))
+                self.refresh_lm_studio_vlm_models_async()
+            except Exception as e:
+                msg = f"{action_name}に失敗しました:\n{e}"
+                self.after(0, lambda: self.ai_vlm_status_var.set("LM Studioエラー"))
+                self.after(0, lambda: messagebox.showerror("LM Studio", msg, parent=self))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def load_lm_studio_vlm_model_async(self):
+        self._run_lm_studio_model_action_async("Load Model", "load_lm_studio_selected_model")
+
+    def unload_lm_studio_vlm_model_async(self):
+        self._run_lm_studio_model_action_async("Unload Model", "unload_lm_studio_selected_model")
+
     def _model_search_dirs(self):
         candidates = [
             os.path.dirname(os.path.abspath(__file__)),
@@ -2598,7 +2679,7 @@ atomcam2で利用する場合は、GitHubで公開されている
                 backend=self.ai_vlm_backend_var.get(),
                 lm_studio_url=self.lm_studio_vlm_url_var.get(),
                 lm_studio_model_id=self.lm_studio_vlm_model_var.get(),
-                lm_studio_api_key=self.lm_studio_vlm_api_key_var.get(),
+                lm_studio_api_key="",
             )
             active_name = bright_area_detector.get_active_model_name()
             self.ai_vlm_status_var.set(active_name)
@@ -2613,7 +2694,9 @@ atomcam2で利用する場合は、GitHubで公開されている
                 messagebox.showerror("エラー", f"AIモデル設定の適用に失敗しました:\n{e}")
             return False
 
-    def check_ai_model_connection_async(self):
+    def check_ai_model_connection_async(self, show_success=True, only_lm_studio=False):
+        if only_lm_studio and not self._is_lm_studio_backend_selected():
+            return
         if not self.apply_ai_model_settings(show_message=False):
             return
         self.ai_vlm_status_var.set("接続確認中...")
@@ -2625,11 +2708,20 @@ atomcam2で利用する場合は、GitHubで公開されている
                 if connected:
                     msg = f"接続OK: {bright_area_detector.get_active_model_name()}"
                     self.after(0, lambda: self.ai_vlm_status_var.set(msg))
-                    self.after(0, lambda: messagebox.showinfo("AIモデル接続確認", msg, parent=self))
+                    if show_success:
+                        self.after(0, lambda: messagebox.showinfo("AIモデル接続確認", msg, parent=self))
                 else:
                     msg = f"接続NG: {err}"
                     self.after(0, lambda: self.ai_vlm_status_var.set("接続NG"))
-                    self.after(0, lambda: messagebox.showerror("AIモデル接続確認", msg, parent=self))
+                    if self._is_lm_studio_backend_selected():
+                        msg = (
+                            "LM Studioに接続できません。\n"
+                            "LM Studioを起動し、Local Serverを有効にしてください。\n\n"
+                            f"詳細: {err}"
+                        )
+                        self.after(0, lambda: messagebox.showerror("LM Studio 未起動", msg, parent=self))
+                    else:
+                        self.after(0, lambda: messagebox.showerror("AIモデル接続確認", msg, parent=self))
             except Exception as e:
                 msg = f"接続確認に失敗しました: {e}"
                 self.after(0, lambda: self.ai_vlm_status_var.set("接続NG"))
@@ -2692,6 +2784,8 @@ atomcam2で利用する場合は、GitHubで公開されている
 
         # 基本の処理パラメータ（保存設定タブから移設）
         self._create_basic_processing_params_section(scrollable_frame)
+        self._create_model_selection_section(scrollable_frame)
+        self._create_ai_vlm_section(scrollable_frame)
 
         lf_ps_fov = ttk.LabelFrame(scrollable_frame, text="プレートソルブ時の視野角設定")
         lf_ps_fov.pack(fill=tk.X, pady=5)
@@ -4629,7 +4723,7 @@ atomcam2で利用する場合は、GitHubで公開されている
             'ai_vlm_backend': self.ai_vlm_backend_var.get(),
             'lm_studio_vlm_url': self.lm_studio_vlm_url_var.get(),
             'lm_studio_vlm_model_id': self.lm_studio_vlm_model_var.get(),
-            'lm_studio_vlm_api_key': self.lm_studio_vlm_api_key_var.get(),
+            'lm_studio_vlm_api_key': "",
             'has_mask_image': self.mask_image is not None, 'has_plate_solve_mask_image': self.plate_solve_mask_image is not None,
             'summary_video_config': self.summary_video_config,
             'auto_time_updater_enabled': self.auto_time_updater_enabled_var.get(),
@@ -4749,7 +4843,8 @@ atomcam2で利用する場合は、GitHubで公開されている
             self.ai_vlm_backend_var.set(settings.get('ai_vlm_backend', getattr(config, "DEFAULT_AI_VLM_BACKEND", "local_qwen3_vl_4b")))
             self.lm_studio_vlm_url_var.set(settings.get('lm_studio_vlm_url', getattr(config, "DEFAULT_LM_STUDIO_VLM_URL", "http://localhost:1234/v1")))
             self.lm_studio_vlm_model_var.set(settings.get('lm_studio_vlm_model_id', getattr(config, "DEFAULT_LM_STUDIO_VLM_MODEL_ID", "qwen3.5-2b")))
-            self.lm_studio_vlm_api_key_var.set(settings.get('lm_studio_vlm_api_key', getattr(config, "DEFAULT_LM_STUDIO_VLM_API_KEY", "lm-studio")))
+            self.lm_studio_vlm_api_key_var.set("")
+            self.update_lm_studio_vlm_visibility()
             self.apply_ai_model_settings(show_message=False)
             # summary_video_config: 保存された順番を復元し、新項目を末尾に追加
             saved_summary_config = settings.get('summary_video_config', [])
@@ -5980,7 +6075,7 @@ atomcam2で利用する場合は、GitHubで公開されている
                 backend=self.ai_vlm_backend_var.get(),
                 lm_studio_url=self.lm_studio_vlm_url_var.get(),
                 lm_studio_model_id=self.lm_studio_vlm_model_var.get(),
-                lm_studio_api_key=self.lm_studio_vlm_api_key_var.get(),
+                lm_studio_api_key="",
             )
             if hasattr(detector_module, "get_active_model_name"):
                 self.append_log(f"使用AIモデル: {detector_module.get_active_model_name()}")
