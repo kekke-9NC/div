@@ -234,7 +234,7 @@ def load_lm_studio_selected_model() -> str:
     global _lm_studio_connection_cache_key
     if _ai_backend != AI_BACKEND_LM_STUDIO:
         raise RuntimeError("LM Studioが選択されていません。")
-    _lm_studio_runtime_request("POST", "/api/v1/models/load", {"model": _lm_studio_model_id, "config": {}}, timeout=180)
+    _lm_studio_runtime_request("POST", "/api/v1/models/load", {"model": _lm_studio_model_id}, timeout=180)
     _lm_studio_connection_cache_key = None
     return f"Loaded: {_lm_studio_model_id}"
 
@@ -266,6 +266,20 @@ def unload_lm_studio_selected_model() -> str:
     _lm_studio_runtime_request("POST", "/api/v1/models/unload", {"model": instance_id}, timeout=120)
     _lm_studio_connection_cache_key = None
     return f"Unloaded: {_lm_studio_model_id}"
+
+
+def load_selected_ai_model(status_callback: Optional[Callable[[str], None]] = None) -> str:
+    if _ai_backend == AI_BACKEND_LM_STUDIO:
+        return load_lm_studio_selected_model()
+    _get_model(status_callback=status_callback)
+    return f"Loaded: {MODEL_ID}"
+
+
+def unload_selected_ai_model() -> str:
+    if _ai_backend == AI_BACKEND_LM_STUDIO:
+        return unload_lm_studio_selected_model()
+    _offload_model()
+    return f"Unloaded: {MODEL_ID}"
 
 
 def _image_to_data_uri(image: np.ndarray) -> str:

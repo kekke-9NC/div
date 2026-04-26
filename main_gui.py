@@ -2496,10 +2496,10 @@ atomcam2で利用する場合は、GitHubで公開されている
         self.cmb_lm_studio_vlm_model.pack(side=tk.LEFT, fill=tk.X, expand=True)
         self.cmb_lm_studio_vlm_model.bind("<<ComboboxSelected>>", self.on_lm_studio_vlm_model_selected)
 
-        ai_vlm_action_row = ttk.Frame(self.lm_studio_vlm_detail_frame)
+        ai_vlm_action_row = ttk.Frame(lf_ai_vlm)
         ai_vlm_action_row.pack(fill=tk.X, pady=(4, 2))
-        ttk.Button(ai_vlm_action_row, text="Load Model", command=self.load_lm_studio_vlm_model_async).pack(side=tk.LEFT)
-        ttk.Button(ai_vlm_action_row, text="Unload Model", command=self.unload_lm_studio_vlm_model_async).pack(side=tk.LEFT, padx=(5, 0))
+        ttk.Button(ai_vlm_action_row, text="Load Model", command=self.load_ai_vlm_model_async).pack(side=tk.LEFT)
+        ttk.Button(ai_vlm_action_row, text="Unload Model", command=self.unload_ai_vlm_model_async).pack(side=tk.LEFT, padx=(5, 0))
 
         self.update_lm_studio_vlm_visibility()
 
@@ -2551,9 +2551,7 @@ atomcam2で利用する場合は、GitHubで公開されている
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _run_lm_studio_model_action_async(self, action_name, action_func_name):
-        if not self._is_lm_studio_backend_selected():
-            return
+    def _run_ai_vlm_model_action_async(self, action_name, action_func_name):
         if not self.apply_ai_model_settings(show_message=False):
             return
         self.ai_vlm_status_var.set(f"{action_name}...")
@@ -2562,22 +2560,26 @@ atomcam2で利用する場合は、GitHubで公開されている
             try:
                 import bright_area_detector
                 action_func = getattr(bright_area_detector, action_func_name)
-                result = action_func()
+                if action_func_name == "load_selected_ai_model":
+                    result = action_func(status_callback=self.append_log)
+                else:
+                    result = action_func()
                 self.after(0, lambda: self.ai_vlm_status_var.set(result))
-                self.after(0, lambda: messagebox.showinfo("LM Studio", result, parent=self))
-                self.refresh_lm_studio_vlm_models_async()
+                self.after(0, lambda: messagebox.showinfo("AIモデル", result, parent=self))
+                if self._is_lm_studio_backend_selected():
+                    self.refresh_lm_studio_vlm_models_async()
             except Exception as e:
                 msg = f"{action_name}に失敗しました:\n{e}"
-                self.after(0, lambda: self.ai_vlm_status_var.set("LM Studioエラー"))
-                self.after(0, lambda: messagebox.showerror("LM Studio", msg, parent=self))
+                self.after(0, lambda: self.ai_vlm_status_var.set("AIモデルエラー"))
+                self.after(0, lambda: messagebox.showerror("AIモデル", msg, parent=self))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def load_lm_studio_vlm_model_async(self):
-        self._run_lm_studio_model_action_async("Load Model", "load_lm_studio_selected_model")
+    def load_ai_vlm_model_async(self):
+        self._run_ai_vlm_model_action_async("Load Model", "load_selected_ai_model")
 
-    def unload_lm_studio_vlm_model_async(self):
-        self._run_lm_studio_model_action_async("Unload Model", "unload_lm_studio_selected_model")
+    def unload_ai_vlm_model_async(self):
+        self._run_ai_vlm_model_action_async("Unload Model", "unload_selected_ai_model")
 
     def _model_search_dirs(self):
         candidates = [
