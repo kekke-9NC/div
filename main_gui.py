@@ -343,6 +343,7 @@ class App(TkinterDnD.Tk):
         self.ai_vlm_status_var = tk.StringVar(value="")
         self._last_ai_vlm_backend = self.ai_vlm_backend_var.get()
         self._last_lm_studio_vlm_model = self.lm_studio_vlm_model_var.get()
+        self._ai_vlm_operation_lock = threading.Lock()
         # store last-fetched coordinates (display only for now)
         self.current_lat_var = tk.StringVar(value="--")
         self.current_lon_var = tk.StringVar(value="--")
@@ -2524,29 +2525,34 @@ atomcam2で利用する場合は、GitHubで公開されている
         old_url = self.lm_studio_vlm_url_var.get()
 
         def worker():
-            try:
-                import bright_area_detector
-                bright_area_detector.configure_ai_backend(
-                    backend=old_backend,
-                    lm_studio_url=old_url,
-                    lm_studio_model_id=old_lm_model,
-                    lm_studio_api_key="",
-                )
-                result = bright_area_detector.unload_selected_ai_model()
-                self.append_log(f"前のAIモデルをアンロードしました: {result}")
-            except Exception as e:
-                self.append_log(f"前のAIモデルのアンロードに失敗しました: {e}")
-            finally:
+            with self._ai_vlm_operation_lock:
                 try:
                     import bright_area_detector
-                    bright_area_detector.configure_ai_backend(
-                        backend=new_backend,
-                        lm_studio_url=self.lm_studio_vlm_url_var.get(),
-                        lm_studio_model_id=new_lm_model,
-                        lm_studio_api_key="",
-                    )
-                except Exception:
-                    pass
+                    if old_backend == getattr(config, "AI_VLM_BACKEND_LOCAL_QWEN3_VL_4B", "local_qwen3_vl_4b"):
+                        unloaded = bright_area_detector.unload_local_model()
+                        result = f"Unloaded: {getattr(bright_area_detector, 'MODEL_ID', 'local model')}" if unloaded else "Already unloaded: local model"
+                    else:
+                        bright_area_detector.configure_ai_backend(
+                            backend=old_backend,
+                            lm_studio_url=old_url,
+                            lm_studio_model_id=old_lm_model,
+                            lm_studio_api_key="",
+                        )
+                        result = bright_area_detector.unload_selected_ai_model()
+                    self.append_log(f"前のAIモデルをアンロードしました: {result}")
+                except Exception as e:
+                    self.append_log(f"前のAIモデルのアンロードに失敗しました: {e}")
+                finally:
+                    try:
+                        import bright_area_detector
+                        bright_area_detector.configure_ai_backend(
+                            backend=new_backend,
+                            lm_studio_url=self.lm_studio_vlm_url_var.get(),
+                            lm_studio_model_id=new_lm_model,
+                            lm_studio_api_key="",
+                        )
+                    except Exception:
+                        pass
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -2608,21 +2614,28 @@ atomcam2で利用する場合は、GitHubで公開されている
         self.ai_vlm_status_var.set(f"{action_name}...")
 
         def worker():
-            try:
-                import bright_area_detector
-                action_func = getattr(bright_area_detector, action_func_name)
-                if action_func_name == "load_selected_ai_model":
-                    result = action_func(status_callback=self.append_log)
-                else:
-                    result = action_func()
-                self.after(0, lambda: self.ai_vlm_status_var.set(result))
-                self.after(0, lambda: messagebox.showinfo("AIモデル", result, parent=self))
-                if self._is_lm_studio_backend_selected():
-                    self.refresh_lm_studio_vlm_models_async()
-            except Exception as e:
-                msg = f"{action_name}に失敗しました:\n{e}"
-                self.after(0, lambda: self.ai_vlm_status_var.set("AIモデルエラー"))
-                self.after(0, lambda: messagebox.showerror("AIモデル", msg, parent=self))
+            with self._ai_vlm_operation_lock:
+                try:
+                    import bright_area_detector
+                    bright_area_detector.configure_ai_backend(
+                        backend=self.ai_vlm_backend_var.get(),
+                        lm_studio_url=self.lm_studio_vlm_url_var.get(),
+                        lm_studio_model_id=self.lm_studio_vlm_model_var.get(),
+                        lm_studio_api_key="",
+                    )
+                    action_func = getattr(bright_area_detector, action_func_name)
+                    if action_func_name == "load_selected_ai_model":
+                        result = action_func(status_callback=self.append_log)
+                    else:
+                        result = action_func()
+                    self.after(0, lambda: self.ai_vlm_status_var.set(result))
+                    self.after(0, lambda: messagebox.showinfo("AIモデル", result, parent=self))
+                    if self._is_lm_studio_backend_selected():
+                        self.refresh_lm_studio_vlm_models_async()
+                except Exception as e:
+                    msg = f"{action_name}に失敗しました:\n{e}"
+                    self.after(0, lambda: self.ai_vlm_status_var.set("AIモデルエラー"))
+                    self.after(0, lambda: messagebox.showerror("AIモデル", msg, parent=self))
 
         threading.Thread(target=worker, daemon=True).start()
 
