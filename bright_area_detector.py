@@ -166,6 +166,38 @@ def _lm_studio_request(method: str, path: str, payload: Optional[dict] = None, t
     except ValueError as exc:
         raise RuntimeError("LM Studio APIの応答がJSONではありません。") from exc
 
+def _lm_studio_server_root() -> str:
+    url = normalize_lm_studio_url(_lm_studio_url)
+    return url[: -len("/v1")] if url.endswith("/v1") else url.rstrip("/")
+
+
+def _lm_studio_runtime_request(method: str, path: str, payload: Optional[dict] = None, timeout: int = 120) -> dict:
+    url = f"{_lm_studio_server_root()}{path}"
+    try:
+        response = requests.request(
+            method,
+            url,
+            headers=_lm_studio_headers(),
+            json=payload,
+            timeout=timeout,
+        )
+    except requests.RequestException as exc:
+        raise RuntimeError(f"LM Studioに接続できません: {_lm_studio_server_root()}\n{exc}") from exc
+
+    if not response.ok:
+        try:
+            detail = response.json()
+        except ValueError:
+            detail = response.text.strip()
+        raise RuntimeError(f"LM Studio APIエラー ({response.status_code}): {detail}")
+
+    if not response.content:
+        return {}
+    try:
+        return response.json()
+    except ValueError as exc:
+        raise RuntimeError("LM Studio APIの応答がJSONではありません。") from exc
+
 
 def _lm_studio_list_model_ids() -> List[str]:
     payload = _lm_studio_request("GET", "/models", timeout=20)
@@ -178,6 +210,62 @@ def _lm_studio_list_model_ids() -> List[str]:
         if model_id:
             model_ids.append(str(model_id))
     return model_ids
+
+
+def list_lm_studio_model_ids() -> List[str]:
+    try:
+        payload = _lm_studio_runtime_request("GET", "/api/v1/models", timeout=20)
+        items = payload.get("data") or payload.get("models") or []
+        model_ids = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            model_id = item.get("key") or item.get("id") or item.get("model")
+            if model_id:
+                model_ids.append(str(model_id))
+        if model_ids:
+            return model_ids
+    except Exception:
+        pass
+    return _lm_studio_list_model_ids()
+
+
+def load_lm_studio_selected_model() -> str:
+    global _lm_studio_connection_cache_key
+    if _ai_backend != AI_BACKEND_LM_STUDIO:
+        raise RuntimeError("LM Studioが選択されていません。")
+    _lm_studio_runtime_request("POST", "/api/v1/models/load", {"model": _lm_studio_model_id, "config": {}}, timeout=180)
+    _lm_studio_connection_cache_key = None
+    return f"Loaded: {_lm_studio_model_id}"
+
+
+def unload_lm_studio_selected_model() -> str:
+    global _lm_studio_connection_cache_key
+    if _ai_backend != AI_BACKEND_LM_STUDIO:
+        raise RuntimeError("LM Studioが選択されていません。")
+
+    instance_id = ""
+    payload = _lm_studio_runtime_request("GET", "/api/v1/models", timeout=20)
+    for item in payload.get("data") or payload.get("models") or []:
+        if not isinstance(item, dict):
+            continue
+        model_id = item.get("key") or item.get("id") or item.get("model")
+        if model_id != _lm_studio_model_id:
+            continue
+        loaded_instances = item.get("loaded_instances") or item.get("loadedInstances") or []
+        if loaded_instances:
+            first = loaded_instances[0]
+            if isinstance(first, dict):
+                instance_id = str(first.get("identifier") or first.get("id") or first.get("model") or "")
+            else:
+                instance_id = str(first)
+        break
+
+    if not instance_id:
+        instance_id = _lm_studio_model_id
+    _lm_studio_runtime_request("POST", "/api/v1/models/unload", {"model": instance_id}, timeout=120)
+    _lm_studio_connection_cache_key = None
+    return f"Unloaded: {_lm_studio_model_id}"
 
 
 def _image_to_data_uri(image: np.ndarray) -> str:
