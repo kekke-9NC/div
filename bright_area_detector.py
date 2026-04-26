@@ -278,7 +278,9 @@ def load_selected_ai_model(status_callback: Optional[Callable[[str], None]] = No
 def unload_selected_ai_model() -> str:
     if _ai_backend == AI_BACKEND_LM_STUDIO:
         return unload_lm_studio_selected_model()
-    _offload_model()
+    unloaded = unload_local_model()
+    if not unloaded:
+        return f"Already unloaded: {MODEL_ID}"
     return f"Unloaded: {MODEL_ID}"
 
 
@@ -339,6 +341,7 @@ def load_lm_studio_selected_model() -> str:
     if _ai_backend != AI_BACKEND_LM_STUDIO:
         raise RuntimeError("LM Studio is not selected.")
 
+    unload_local_model()
     selected_loaded = _lm_studio_loaded_instance_ids(_lm_studio_model_id)
     other_loaded = []
     for item in _lm_studio_list_native_models():
@@ -525,6 +528,45 @@ def _load_processor_compat(
             _log("AutoProcessor互換フォールバックを適用します。", status_callback)
             return auto_processor_cls.from_pretrained(model_dir)
         raise
+
+
+def unload_local_model(wait_for_loading: bool = True, timeout: float = 300.0) -> bool:
+    global _model, _processor, _model_loading, _last_used_time, _offload_timer
+
+    start = time.time()
+    while wait_for_loading:
+        with _offload_lock:
+            loading = _model_loading
+        if not loading:
+            break
+        if time.time() - start > timeout:
+            raise RuntimeError("Local model is still loading and could not be unloaded yet.")
+        time.sleep(0.2)
+
+    with _offload_lock:
+        if _offload_timer is not None:
+            try:
+                _offload_timer.cancel()
+            except Exception:
+                pass
+            _offload_timer = None
+
+        had_model = _model is not None or _processor is not None
+        if not had_model:
+            _last_used_time = None
+            return False
+
+        _model = None
+        _processor = None
+        _last_used_time = None
+
+    try:
+        torch.cuda.empty_cache()
+    except Exception:
+        pass
+    gc.collect()
+    print("Local model unloaded; GPU memory cache was released.")
+    return True
 
 
 def _offload_model():
