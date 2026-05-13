@@ -42,6 +42,22 @@ def is_within_time_range(
     else:
         return current_time >= start_time or current_time < end_time
 
+def is_rtsp_file_within_time_range(
+    file_path: str, limit_enabled: bool,
+    start_h: int, start_m: int, end_h: int, end_m: int
+) -> bool:
+    """RTSP保存ファイルの HH/MM.mp4 形式の時刻が録画時間内か判定する。"""
+    if not limit_enabled:
+        return True
+    try:
+        minute_text = os.path.splitext(os.path.basename(file_path))[0].split("_", 1)[0]
+        hour = int(os.path.basename(os.path.dirname(file_path)))
+        minute = int(minute_text)
+        file_dt = datetime.now().replace(hour=hour, minute=minute, second=0, microsecond=0)
+        return is_within_time_range(file_dt, True, start_h, start_m, end_h, end_m)
+    except (TypeError, ValueError):
+        return True
+
 def process_video_file_periodic(
     file_path: str,
     progress_callback: Optional[Callable[[Tuple[str, Optional[float]]], None]] = None,
@@ -272,12 +288,10 @@ def save_rtsp_video_segments_ffmpeg(
     was_outside_time_range = True
     
     while cancel_flag is None or not cancel_flag.is_set():
-        # 時間制限チェック（録画のみに適用）
         if time_limit_enabled:
             now = datetime.now()
             if not is_within_time_range(now, time_limit_enabled, start_hour, start_minute, end_hour, end_minute):
                 if was_outside_time_range:
-                    # 初回のみログ出力
                     print(f"[RTSP保存] 録画時間外です ({start_hour:02d}:{start_minute:02d} - {end_hour:02d}:{end_minute:02d})。録画を一時停止中...")
                     was_outside_time_range = False
                 # 30秒ごとにチェック
@@ -371,6 +385,7 @@ def save_rtsp_video_segments_ffmpeg(
             stall_start_time = None
             cancelled = False
             stalled = False
+            paused_for_time_limit = False
             last_segment_count = 0
             
             print("[RTSP保存] ネットワーク監視を開始（連続録画中）...")
@@ -390,6 +405,20 @@ def save_rtsp_video_segments_ffmpeg(
                     print("[RTSP保存] キャンセルされました")
                     cancelled = True
                     break
+
+                if time_limit_enabled:
+                    now_for_limit = datetime.now()
+                    if not is_within_time_range(now_for_limit, True, start_hour, start_minute, end_hour, end_minute):
+                        print(f"[RTSP保存] 録画終了時刻に達しました ({start_hour:02d}:{start_minute:02d} - {end_hour:02d}:{end_minute:02d})。FFmpeg録画を停止します。")
+                        process.terminate()
+                        try:
+                            process.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                            process.wait()
+                        paused_for_time_limit = True
+                        was_outside_time_range = False
+                        break
                 
                 # 起動直後はスキップ（接続確立待ち）
                 if elapsed < GRACE_PERIOD:
@@ -484,6 +513,9 @@ def save_rtsp_video_segments_ffmpeg(
             
             if cancelled:
                 break  # 外側のwhileループも抜ける
+
+            if paused_for_time_limit:
+                continue
             
             # 切断検出時 - すぐに再接続（stderrの読み取りでブロックしないように）
             if stalled:
@@ -540,7 +572,7 @@ def save_rtsp_video_segments(
     end_hour: int = 7, end_minute: int = 0
 ):
     """
-    RTSPストリームから720フレーム（1分 @ 12fps）ごとに動画ファイルを保存する。
+    RTSPストリームから設定されたフレーム数ごとに動画ファイルを保存する。
     NVIDIA GPU対応環境ではFFmpegモードを使用。
     
     ネットワーク監視機能:
@@ -564,8 +596,8 @@ def save_rtsp_video_segments(
     cap = None
     width = 0
     height = 0
-    fps = config.RTSP_FPS  # 12fps前提
-    segment_frames = config.RTSP_SEGMENT_FRAMES  # 720フレーム (12fps * 60秒)
+    fps = config.RTSP_FPS
+    segment_frames = config.RTSP_SEGMENT_FRAMES
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     
     def connect_rtsp():
@@ -586,11 +618,6 @@ def save_rtsp_video_segments(
                 time.sleep(1)
         return False
     
-    # 初回接続
-    if not connect_rtsp():
-        print("[RTSP保存] キャンセルされました")
-        return
-    
     # 時間外の場合に表示するログを抑制するためのフラグ
     was_outside_time_range_cv = True
     
@@ -602,6 +629,8 @@ def save_rtsp_video_segments(
                 if was_outside_time_range_cv:
                     print(f"[RTSP保存] 録画時間外です ({start_hour:02d}:{start_minute:02d} - {end_hour:02d}:{end_minute:02d})。録画を一時停止中...")
                     was_outside_time_range_cv = False
+                if cap is not None and cap.isOpened():
+                    cap.release()
                 for _ in range(30):
                     if cancel_flag is not None and cancel_flag.is_set():
                         break
@@ -614,6 +643,10 @@ def save_rtsp_video_segments(
         out = None
         temp_file_path = ""
         try:
+            if cap is None or not cap.isOpened():
+                if not connect_rtsp():
+                    break
+
             now = datetime.now()
             dir_path = os.path.join(save_root, now.strftime("%Y%m%d"), now.strftime("%H"))
             os.makedirs(dir_path, exist_ok=True)
@@ -631,13 +664,22 @@ def save_rtsp_video_segments(
             print(f"[RTSP保存] セグメント開始 (一時ファイル): {os.path.basename(temp_file_path)}")
             frames_written = 0
             stream_error = False
+            paused_for_time_limit = False
             consecutive_read_failures = 0
 
-            # フレーム数ベースで保存 (720フレーム = 1分 @ 12fps)
+            # フレーム数ベースで保存 (例: 1500フレーム = 1分 @ 25fps)
             while frames_written < segment_frames:
                 if cancel_flag is not None and cancel_flag.is_set():
                     stream_error = True
                     break
+
+                if time_limit_enabled:
+                    now_for_limit = datetime.now()
+                    if not is_within_time_range(now_for_limit, True, start_hour, start_minute, end_hour, end_minute):
+                        print(f"[RTSP保存] 録画終了時刻に達しました ({start_hour:02d}:{start_minute:02d} - {end_hour:02d}:{end_minute:02d})。現在のセグメントで録画を停止します。")
+                        paused_for_time_limit = True
+                        was_outside_time_range_cv = False
+                        break
 
                 ret, frame = cap.read()
                 if not ret:
@@ -658,6 +700,22 @@ def save_rtsp_video_segments(
 
             out.release()
             out = None
+
+            if paused_for_time_limit:
+                if os.path.exists(temp_file_path):
+                    try:
+                        file_size = os.path.getsize(temp_file_path)
+                        if file_size > 10000 and frames_written > 10:
+                            final_file_path = get_unique_file_path(base_file_path)
+                            os.replace(temp_file_path, final_file_path)
+                            print(f"[RTSP保存] 時間制限による部分セグメント保存: {final_file_path} ({frames_written} フレーム)")
+                        else:
+                            os.remove(temp_file_path)
+                    except OSError:
+                        pass
+                if cap is not None and cap.isOpened():
+                    cap.release()
+                continue
 
             if stream_error:
                 # 部分的なデータがあれば保存を試みる
@@ -728,7 +786,9 @@ def process_new_rtsp_files(
     save_options: Optional[Dict[str, bool]] = None, interval: float = config.DEFAULT_INTERVAL,
     duration: float = config.DEFAULT_DURATION, min_length: int = config.MIN_LINE_LENGTH,
     summary_video_config: Optional[List[Dict[str, Any]]] = None,
-    max_workers: int = 1
+    max_workers: int = 1,
+    time_limit_enabled: bool = False, start_hour: int = 17, start_minute: int = 0,
+    end_hour: int = 7, end_minute: int = 0
 ):
     new_files_to_process = []
     video_extensions = config.PERIODIC_VIDEO_EXTENSIONS
@@ -748,6 +808,12 @@ def process_new_rtsp_files(
                         continue
                     full_path = os.path.join(root_dir, file)
                     if full_path not in processed_files_set:
+                        if not is_rtsp_file_within_time_range(
+                            full_path, time_limit_enabled, start_hour, start_minute, end_hour, end_minute
+                        ):
+                            print(f"[RTSP解析] スキップ (録画時間外): {full_path}")
+                            processed_files_set.add(full_path)
+                            continue
                         # ファイルの最終更新時刻をチェック
                         try:
                             file_mtime = os.path.getmtime(full_path)
@@ -846,7 +912,7 @@ def rtsp_save_and_process_thread_target(
     else:
         print(f"[RTSP統合] 保存ディレクトリが見つからないため、初回スキャンをスキップします: {save_root}")
 
-    # 時間制限は録画のみに適用（解析は常に行う）
+    # 時間制限は録画とRTSP保存ファイルの解析対象判定に適用する
     save_thread = threading.Thread(
         target=save_rtsp_video_segments, 
         args=(rtsp_url, save_root, segment_duration, cancel_flag,
@@ -863,7 +929,8 @@ def rtsp_save_and_process_thread_target(
         process_new_rtsp_files(
             save_root, rtsp_processed_files, progress_callback, mask, global_wcs_info, plate_solve_mask,
             meteor_save_path, not_meteor_save_path, cancel_flag, save_options,
-            interval, duration, min_length, summary_video_config, max_workers
+            interval, duration, min_length, summary_video_config, max_workers,
+            time_limit_enabled, start_hour, start_minute, end_hour, end_minute
         )
         wait_message = f"[RTSP統合] 解析スキャン完了。次のスキャンまで {scan_interval} 秒待機。"
         print(wait_message)
