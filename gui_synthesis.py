@@ -1,0 +1,531 @@
+from gui_common import *
+from gui_dialogs import ProcessingOptionDialog, TimelapseDragDropWindow
+
+
+class SynthesisMixin:
+    def create_lighten_blend_video_callback(self):
+        """Callback for the 'Create Lighten Blend Video' button."""
+        initial_dir = self.meteor_save_path_var.get()
+        if not initial_dir or not os.path.exists(initial_dir):
+            initial_dir = os.path.expanduser("~")
+        
+        video_files = filedialog.askopenfilenames(
+            title="比較明合成する動画ファイルを選択（複数可）",
+            initialdir=initial_dir,
+            filetypes=[
+                ("動画ファイル", "*.mp4 *.avi *.mov *.mkv *.wmv"),
+                ("すべてのファイル", "*.*")
+            ]
+        )
+        
+        if not video_files:
+            return
+        
+        if len(video_files) < 2:
+            messagebox.showwarning("警告", "比較明合成を行うには2つ以上の動画ファイルを選択してください。")
+            return
+        
+        default_output = lighten_blend_video.get_default_output_path()
+        
+        output_path = filedialog.asksaveasfilename(
+            title="比較明合成動画の保存先",
+            initialdir=os.path.dirname(default_output),
+            initialfile=os.path.basename(default_output),
+            defaultextension=".mp4",
+            filetypes=[("MP4 Video", "*.mp4"), ("AVI Video", "*.avi"), ("All Files", "*")]
+        )
+        
+        if not output_path:
+            return
+        output_path = self._ensure_date_prefix(output_path)
+        
+        self.append_log(f"比較明合成動画の作成を開始します... ({len(video_files)}個の動画)")
+        
+        dialog = ProcessingOptionDialog(self)
+        if dialog.result is None:  # キャンセル
+            return
+            
+        mode = dialog.result  # 0:通常, 1:明るいエリアマスク, 2:流星のみ
+        # mode=1(明るいエリア)は現状 mode=2(流星のみ)と同じ扱いにする。
+        if mode == 0:
+            def run_task():
+                success = lighten_blend_video.create_lighten_blend_video(
+                    list(video_files),
+                    output_path,
+                    progress_callback=self.append_log
+                )
+                if success:
+                    messagebox.showinfo("完了", f"比較明合成動画の作成が完了しました。\\n保存先: {output_path}")
+                    self.append_log(f"比較明合成動画の作成が完了しました: {output_path}")
+                else:
+                    messagebox.showerror("エラー", "比較明合成動画の作成に失敗しました。ログを確認してください。")
+                    self.append_log("比較明合成動画の作成に失敗しました。")
+            
+            threading.Thread(target=run_task, daemon=True).start()
+        else:
+            self._create_lighten_blend_video_with_meteor_detection(video_files, output_path)
+
+    def _create_lighten_blend_video_with_meteor_detection(self, video_files, output_path):
+        """AI流星検出を使用して比較明合成動画を作成（各動画ごとに検出）"""
+        import detection_preview
+        import bright_area_detector
+        import gc
+        
+        self.append_log("各動画から比較明合成画像を作成し、流星を検出します...")
+        
+        # 動画ごとの一時ファイルパスを保存（画像はメモリに保持しない）
+        video_composites = {}  # {video_path: {'temp_path': str, 'filename': str, 'shape': (h, w)}}
+        
+        def run_prep_task():
+            if not self._ensure_ai_model_loaded(bright_area_detector):
+                return
+
+            # Step 1: 各動画から個別に比較明合成画像を作成
+            for i, vp in enumerate(video_files):
+                self.append_log(f"動画 {i+1}/{len(video_files)} から合成画像を作成中: {os.path.basename(vp)}")
+                
+                composite_image = lighten_blend_video.create_composite_from_videos(
+                    [vp],  # 1つの動画のみ
+                    progress_callback=None,  # 個別のログは抑制
+                    sample_interval=1  # 全フレームを使用（流星を見逃さないため）
+                )
+                
+                if composite_image is not None:
+                    # 一時ファイルとして保存
+                    temp_path = os.path.join(config.TEMP_CLIP_DIR, f"temp_composite_{i}_{os.path.basename(vp)}.png")
+                    h, w = composite_image.shape[:2]
+                    cv2.imwrite(temp_path, composite_image)
+                    
+                    video_composites[vp] = {
+                        'temp_path': temp_path,
+                        'filename': os.path.basename(temp_path),
+                        'shape': (h, w)  # サイズ情報のみ保持
+                    }
+                    
+                    # メモリ解放
+                    del composite_image
+                    gc.collect()
+                else:
+                    self.append_log(f"警告: 動画から合成画像を作成できませんでした: {os.path.basename(vp)}")
+            
+            if not video_composites:
+                messagebox.showerror("エラー", "有効な合成画像を作成できませんでした。")
+                return
+            
+            self.append_log(f"{len(video_composites)}個の合成画像を作成しました。")
+            
+            # メインスレッドでプレビューウィンドウを開く
+            def open_preview():
+                # 合成開始コールバック
+                def start_video_synthesis_with_results(results):
+                    # 動画ごとの個別マスクを作成（和集合ではなく、各動画に対応するマスクのみ適用）
+                    per_video_masks = {}
+                    base_shape = None
+                    has_detections = False
+                    
+                    for vp, data in video_composites.items():
+                        filename = data['filename']
+                        if filename in results:
+                            boxes = results[filename]['boxes']
+                            if boxes:
+                                has_detections = True
+                                h, w = data['shape']
+                                if base_shape is None:
+                                    base_shape = (h, w)
+                                
+                                mask = bright_area_detector.create_inclusion_mask_from_boxes(
+                                    (h, w), boxes, margin=40
+                                )
+                                
+                                # サイズが異なる場合はリサイズ
+                                if base_shape != (h, w):
+                                    mask = cv2.resize(mask, (base_shape[1], base_shape[0]))
+                                
+                                # 動画パスをキーとして個別マスクを保存
+                                per_video_masks[vp] = mask
+                    
+                    if not has_detections:
+                        if not messagebox.askyesno("確認", "流星が検出されていないか、選択されていません。\\nマスクなしで（通常の比較明合成として）作成しますか？"):
+                            # 一時ファイルのクリーンアップ
+                            for data in video_composites.values():
+                                try:
+                                    if os.path.exists(data['temp_path']):
+                                        os.remove(data['temp_path'])
+                                except:
+                                    pass
+                            return
+                    
+                    # 動画ごとのマスクを適用して動画作成
+                    def run_video_task():
+                        self.append_log("動画ごとのマスクを適用して動画を作成中...")
+                        success = lighten_blend_video.create_lighten_blend_video(
+                            list(video_files),
+                            output_path,
+                            progress_callback=self.append_log,
+                            per_video_masks=per_video_masks if per_video_masks else None
+                        )
+                        if success:
+                            messagebox.showinfo("完了", f"比較明合成動画の作成が完了しました。\\n保存先: {output_path}")
+                            self.append_log(f"比較明合成動画の作成が完了しました: {output_path}")
+                        else:
+                            messagebox.showerror("エラー", "比較明合成動画の作成に失敗しました。ログを確認してください。")
+                            self.append_log("比較明合成動画の作成に失敗しました。")
+                        
+                        # 一時ファイルのクリーンアップ
+                        for data in video_composites.values():
+                            try:
+                                if os.path.exists(data['temp_path']):
+                                    os.remove(data['temp_path'])
+                            except:
+                                pass
+                    
+                    threading.Thread(target=run_video_task, daemon=True).start()
+                
+                # プレビューウィンドウ作成
+                preview_window = detection_preview.DetectionPreviewWindow(
+                    self, start_video_synthesis_with_results
+                )
+                
+                # 各動画の合成画像に対して検出実行
+                def run_detection():
+                    total = len(video_composites)
+                    self.append_log(f"AIによる流星検出を開始します... ({total}個の画像)")
+                    
+                    if preview_window.winfo_exists():
+                        self.after(0, lambda: preview_window.start_analysis(total))
+                    
+                    for i, (vp, data) in enumerate(video_composites.items()):
+                        if not preview_window.winfo_exists():
+                            self.append_log("検出が中断されました。")
+                            return
+                        
+                        self.append_log(f"検出中 ({i+1}/{total}): {os.path.basename(vp)}")
+                        
+                        # 一時ファイルから画像を読み込み（メモリ節約）
+                        composite_img = imread_with_japanese_path(data['temp_path'])
+                        if composite_img is None:
+                            continue
+                        
+                        res = bright_area_detector.detect_meteors_with_boxes(
+                            composite_img,
+                            progress_callback=None  # 個別ログ抑制
+                        )
+                        boxes = res[1] if res else []
+                        
+                        # 検出後すぐにメモリ解放
+                        del composite_img
+                        gc.collect()
+                        
+                        def reanalyze_wrapper(image):
+                            return bright_area_detector.detect_meteors_with_boxes(image)
+                        
+                        if preview_window.winfo_exists():
+                            filename = data['filename']
+                            temp_path = data['temp_path']
+                            self.after(0, lambda fn=filename, fp=temp_path, b=boxes, cb=reanalyze_wrapper:
+                                preview_window.add_item(fn, fp, b, cb))
+                    
+                    if preview_window.winfo_exists():
+                        self.after(0, preview_window.finalize_analysis)
+                    self.append_log("全画像の検出が完了しました。結果を確認してください。")
+                
+                threading.Thread(target=run_detection, daemon=True).start()
+            
+            self.after(0, open_preview)
+        
+        threading.Thread(target=run_prep_task, daemon=True).start()
+
+    def create_lighten_blend_image_callback(self):
+        """比較明合成画像作成ボタンのコールバック"""
+        initial_dir = self.meteor_save_path_var.get()
+        if not initial_dir or not os.path.exists(initial_dir):
+            initial_dir = os.path.expanduser("~")
+        
+        # ファイル選択ダイアログで複数の画像/動画ファイルを選択
+        file_paths_tuple = filedialog.askopenfilenames(
+            title="比較明合成する画像・動画ファイルを選択（複数可）",
+            initialdir=initial_dir,
+            filetypes=[
+                ("画像・動画ファイル", "*.jpg *.jpeg *.png *.bmp *.tiff *.tif *.mp4 *.avi *.mov *.mkv *.wmv"),
+                ("画像ファイル", "*.jpg *.jpeg *.png *.bmp *.tiff *.tif"),
+                ("動画ファイル", "*.mp4 *.avi *.mov *.mkv *.wmv"),
+                ("すべてのファイル", "*.*")
+            ]
+        )
+        
+        if not file_paths_tuple:
+            return
+            
+        file_paths = set(file_paths_tuple)
+        
+        if len(file_paths) < 1:
+            messagebox.showwarning("警告", "有効なファイルが見つかりません。")
+            return
+
+        # 初期ディレクトリ設定
+        default_output = "composite.png"
+        if len(file_paths) == 1:
+            first_path = list(file_paths)[0]
+            if os.path.isdir(first_path):
+                default_output = os.path.join(os.path.dirname(first_path), f"{os.path.basename(first_path)}_composite.png")
+            else:
+                 default_output = os.path.join(os.path.dirname(first_path), f"{os.path.splitext(os.path.basename(first_path))[0]}_composite.png")
+        
+        # ユーザーに保存先を確認
+        output_path = filedialog.asksaveasfilename(
+            title="比較明合成画像の保存先",
+            initialdir=os.path.dirname(default_output),
+            initialfile=os.path.basename(default_output),
+            defaultextension=".png",
+            filetypes=[("PNG Image", "*.png"), ("JPEG Image", "*.jpg"), ("All Files", "*")]
+        )
+        
+        if not output_path:
+            return
+        output_path = self._ensure_date_prefix(output_path)
+
+        dialog = ProcessingOptionDialog(self)
+        if dialog.result is None:  # キャンセル
+            return
+            
+        mode = dialog.result  # 0:通常, 1:明るいエリアマスク, 2:流星のみ
+        is_ai_mode = (mode != 0)
+        is_meteor_mode = (mode == 2)
+        print(f"DEBUG: ProcessingOptionDialog result: mode={mode}, is_ai_mode={is_ai_mode}, is_meteor_mode={is_meteor_mode}")
+
+        if not is_ai_mode:
+            def run_normal_task():
+                self.append_log(f"比較明合成画像の作成を開始します... ({len(file_paths)}個の要素)")
+                success = lighten_blend_image.create_lighten_blend_image(
+                    list(file_paths),
+                    output_path,
+                    progress_callback=self.append_log
+                )
+                self._handle_synthesis_result(success, output_path)
+            
+            threading.Thread(target=run_normal_task, daemon=True).start()
+            return
+
+        # AI解析モードの場合
+        print("DEBUG: AI解析モードに入りました")
+        import detection_preview
+        import bright_area_detector
+        import cv2
+
+        detector_func = bright_area_detector.detect_meteors_with_boxes if is_meteor_mode else bright_area_detector.detect_bright_areas_with_boxes
+        print(f"DEBUG: detector_func = {detector_func.__name__}")
+        
+        def start_synthesis_with_results(results):
+            def run_ai_task():
+                self.append_log("AI解析結果に基づく合成処理を開始します...")
+                # Mask generation must follow the same expanded file order as synthesis.
+                
+                all_files = []
+                image_ext, video_ext = lighten_blend_image.get_supported_extensions()
+                for path in file_paths:
+                    if os.path.isdir(path):
+                        all_files.extend(lighten_blend_image.collect_files_from_folder(path))
+                    elif os.path.isfile(path):
+                        all_files.append(path)
+                
+                all_files.sort()  # 名前順で処理されると仮定
+                
+                # インデックス管理用
+                file_index = [0]
+                
+                def mask_generator(img):
+                    if file_index[0] >= len(all_files):
+                        return None
+                    
+                    current_path = all_files[file_index[0]]
+                    filename = os.path.basename(current_path)
+                    file_index[0] += 1
+                    
+                    if filename in results:
+                        boxes = results[filename]['boxes']
+                        h, w = img.shape[:2]
+                        if is_meteor_mode:
+                            return bright_area_detector.create_inclusion_mask_from_boxes((h, w), boxes)
+                        else:
+                            return bright_area_detector.create_mask_from_boxes((h, w), boxes)
+                    return None
+
+                success = lighten_blend_image.create_lighten_blend_image(
+                    all_files,
+                    output_path,
+                    progress_callback=self.append_log,
+                    mask_generator=mask_generator,
+                    inclusion_mode=is_meteor_mode
+                )
+                self._handle_synthesis_result(success, output_path)
+
+            threading.Thread(target=run_ai_task, daemon=True).start()
+
+        preview_window = detection_preview.DetectionPreviewWindow(self, start_synthesis_with_results)
+        
+        def run_analysis_task():
+            try:
+                print("DEBUG: run_analysis_task started")
+                self.append_log("AIによる画像解析を開始します...")
+
+                if not self._ensure_ai_model_loaded(bright_area_detector):
+                    if preview_window.winfo_exists():
+                        self.after(0, preview_window.destroy)
+                    return
+                
+                all_files = []
+                for path in file_paths:
+                    if os.path.isdir(path):
+                        all_files.extend(lighten_blend_image.collect_files_from_folder(path))
+                    elif os.path.isfile(path):
+                        all_files.append(path)
+                all_files.sort()
+                
+                total = len(all_files)
+                print(f"DEBUG: Processing {total} files")
+                
+                if preview_window.winfo_exists():
+                    self.after(0, lambda: preview_window.start_analysis(total))
+                
+                for i, path in enumerate(all_files):
+                    if not preview_window.winfo_exists():
+                        self.append_log("解析が中断されました。")
+                        return
+                    
+                    filename = os.path.basename(path)
+                    self.append_log(f"解析中 ({i+1}/{total}): {filename}")
+                    print(f"DEBUG: Analyzing file {i+1}/{total}: {filename}")
+                    
+                    img = imread_with_japanese_path(path)
+                    if img is None:
+                        print(f"DEBUG: Failed to read image: {path}")
+                        continue
+                    
+                    def reanalyze_wrapper(image):
+                        res = detector_func(image)
+                        return res if res else (None, [])
+                    
+                    print(f"DEBUG: Calling detector_func for {filename}")
+                    res = detector_func(img)
+                    boxes = res[1] if res else []
+                    print(f"DEBUG: Detection result for {filename}: {len(boxes)} boxes found")
+                    
+                    if preview_window.winfo_exists():
+                        self.after(0, lambda fn=filename, fp=path, b=boxes, cb=reanalyze_wrapper: 
+                                  preview_window.add_item(fn, fp, b, cb))
+                
+                self.append_log("全画像の解析が完了しました。検出結果を確認・修正してください。")
+                print("DEBUG: Analysis completed")
+                
+                if preview_window.winfo_exists():
+                     # 完了処理（未検出を先頭になど）
+                     self.after(0, preview_window.finalize_analysis)
+                     messagebox.showinfo("解析完了", "全画像の解析が完了しました。\n未検出の画像が上部に表示されています。\nプレビュー画面で結果を確認し、「修正を確定して合成を開始」ボタンを押してください。")
+            except Exception as e:
+                print(f"ERROR: run_analysis_task failed with exception: {e}")
+                import traceback
+                traceback.print_exc()
+                self.append_log(f"AI解析中にエラーが発生しました: {e}")
+
+        print("DEBUG: Starting run_analysis_task thread")
+        threading.Thread(target=run_analysis_task, daemon=True).start()
+
+    def _handle_synthesis_result(self, success, output_path):
+        if success:
+            messagebox.showinfo("完了", f"比較明合成画像の作成が完了しました。\n保存先: {output_path}")
+            self.append_log(f"比較明合成画像の作成が完了しました: {output_path}")
+        else:
+            messagebox.showerror("エラー", "比較明合成画像の作成に失敗しました。ログを確認してください。")
+            self.append_log("比較明合成画像の作成に失敗しました。")
+
+    def _ensure_ai_model_loaded(self, detector_module) -> bool:
+        """AI合成前に内部LLMのロード完了を保証する。"""
+        self.append_log("AIモデルのロードを確認中...")
+        if hasattr(detector_module, "configure_ai_backend"):
+            detector_module.configure_ai_backend(
+                backend=self.ai_vlm_backend_var.get(),
+                lm_studio_url=self.lm_studio_vlm_url_var.get(),
+                lm_studio_model_id=self.lm_studio_vlm_model_var.get(),
+                lm_studio_api_key="",
+            )
+            if hasattr(detector_module, "get_active_model_name"):
+                self.append_log(f"使用AIモデル: {detector_module.get_active_model_name()}")
+
+        uses_local_model = True
+        uses_local_model_fn = getattr(detector_module, "uses_local_model", None)
+        if callable(uses_local_model_fn):
+            uses_local_model = bool(uses_local_model_fn())
+
+        if not uses_local_model:
+            connected, err = detector_module.check_vlm_connection(status_callback=self.append_log, force=True)
+            if connected:
+                self.append_log("AIモデルの接続確認が完了しました。")
+                return True
+
+            error_message = f"AIモデルの接続確認に失敗しました: {err}"
+            self.append_log(error_message)
+            self.after(0, lambda msg=error_message: messagebox.showerror("エラー", msg, parent=self))
+            return False
+
+        local_model_dir = getattr(detector_module, "LOCAL_MODEL_DIR", "./quantized_model")
+        has_local_model = False
+        try:
+            has_model_fn = getattr(detector_module, "has_quantized_model", None)
+            if callable(has_model_fn):
+                has_local_model = bool(has_model_fn())
+            else:
+                has_local_model = os.path.isdir(local_model_dir)
+        except Exception as e:
+            self.append_log(f"ローカルモデル状態の確認中にエラー: {e}")
+            has_local_model = os.path.isdir(local_model_dir)
+
+        if not has_local_model:
+            self.append_log(f"ローカルLLMモデルが見つかりません: {local_model_dir}")
+            self.append_log("必要なディスク容量を見積もり中...")
+            req = self._estimate_llm_storage_requirements(detector_module)
+
+            info_lines = [
+                "ローカルLLMモデルが見つかりませんでした。",
+                f"対象モデル: {req['repo_id']}",
+                f"一時的に必要な空き容量 (目安): {self._format_size_bytes(req['temporary_bytes'])}",
+                f"最終的に必要な容量 (目安): {self._format_size_bytes(req['final_bytes'])}",
+                f"現在の空き容量: {self._format_size_bytes(req['free_bytes'])}",
+                "",
+                "モデルをダウンロードしますか？",
+            ]
+            if not req["fetched_metadata"]:
+                info_lines.insert(4, "※ 容量は取得失敗のため既定値での目安です。")
+            if req["free_bytes"] < req["temporary_bytes"]:
+                info_lines.insert(5, "※ 警告: 空き容量が一時必要容量を下回っています。")
+
+            should_download = bool(
+                self._run_on_main_thread(
+                    lambda msg="\n".join(info_lines): messagebox.askyesno("モデルダウンロード確認", msg, parent=self)
+                )
+            )
+
+            if not should_download:
+                self.append_log("ユーザーがモデルダウンロードをキャンセルしました。")
+                return False
+
+            self.append_log("モデルダウンロードを開始します。")
+            mirror_stream = _StderrProgressStream(self.append_log, passthrough=sys.stderr)
+            with contextlib.redirect_stderr(mirror_stream), contextlib.redirect_stdout(mirror_stream):
+                connected, err = detector_module.check_vlm_connection(status_callback=self.append_log)
+            mirror_stream.flush()
+        else:
+            connected, err = detector_module.check_vlm_connection(status_callback=self.append_log)
+
+        if connected:
+            self.append_log("AIモデルのロードが完了しました。")
+            return True
+
+        error_message = f"AIモデルのロードに失敗しました: {err}"
+        self.append_log(error_message)
+        self.after(0, lambda msg=error_message: messagebox.showerror("エラー", msg, parent=self))
+        return False
+
+    def create_timelapse_callback(self):
+        """タイムラプス作成ボタンのコールバック。ドラッグ＆ドロップウィンドウを表示する。"""
+        TimelapseDragDropWindow(self, self.append_log)
+
