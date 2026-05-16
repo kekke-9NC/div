@@ -352,6 +352,7 @@ atomcam2で利用する場合は、GitHubで公開されている
             enable = not is_running and (periodic_enabled or self.folder_paths or self.rtsp_urls)
 
         self.start_button.config(state=tk.NORMAL if enable else tk.DISABLED)
+        self._update_live_preview_button_state()
 
     def drop(self, event):
         paths = self.splitlist(event.data)

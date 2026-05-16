@@ -29,8 +29,16 @@ class PreviewMixin:
         btn_frame.pack(fill=tk.X, pady=(10,0))
         self.start_button = ttk.Button(btn_frame, text="開始", command=self.start_processing)
         self.start_button.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0,5))
+        self.live_preview_button = ttk.Button(
+            btn_frame,
+            text="ライブプレビュー",
+            command=self.open_rtsp_live_preview,
+            state=tk.DISABLED,
+        )
+        self.live_preview_button.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
         self.cancel_button = ttk.Button(btn_frame, text="キャンセル", command=self.cancel_processing, state=tk.DISABLED)
         self.cancel_button.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5,0))
+        self._update_live_preview_button_state()
 
         # Share status callback with worker-side pipeline.
         try:
