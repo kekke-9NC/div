@@ -54,6 +54,20 @@ class CameraControlMixin:
         self.camera_control_tuning_job = None
         self.camera_control_tuning_running = False
         self.camera_control_tuning_remaining = 0
+        self.camera_control_reference_roi = None
+        self.camera_control_selecting_reference = False
+        self.camera_control_reference_drag_start = None
+        self.camera_control_latest_frame_shape = None
+        self.camera_control_display_size = None
+        self.camera_control_tuning_candidates = []
+        self.camera_control_tuning_index = 0
+        self.camera_control_pending_values = None
+        self.camera_control_best_values = None
+        self.camera_control_best_score = None
+        self.camera_control_periodic_param_index = 0
+        self.camera_control_periodic_pending_values = None
+        self.camera_control_periodic_previous_values = None
+        self.camera_control_periodic_base_score = None
 
     def open_camera_control(self):
         if not self.check_admin_password():
@@ -88,6 +102,9 @@ class CameraControlMixin:
         preview_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 10))
         self.camera_control_preview_label = ttk.Label(preview_frame, text="ライブプレビュー準備中...", anchor=tk.CENTER)
         self.camera_control_preview_label.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+        self.camera_control_preview_label.bind("<ButtonPress-1>", self._on_camera_reference_press)
+        self.camera_control_preview_label.bind("<B1-Motion>", self._on_camera_reference_drag)
+        self.camera_control_preview_label.bind("<ButtonRelease-1>", self._on_camera_reference_release)
         self.camera_control_histogram_canvas = tk.Canvas(preview_frame, height=115, bg="#111927", highlightthickness=0)
         self.camera_control_histogram_canvas.pack(fill=tk.X, padx=6, pady=(0, 4))
         ttk.Label(preview_frame, textvariable=self.camera_control_metrics_var).pack(fill=tk.X, padx=6, pady=(0, 6))
@@ -139,6 +156,10 @@ class CameraControlMixin:
             variable=self.camera_control_auto_adjust_var,
             command=self.toggle_camera_auto_adjust,
         ).pack(anchor=tk.W, pady=(2, 0))
+        roi_btns = ttk.Frame(tune_frame)
+        roi_btns.pack(fill=tk.X, pady=(4, 0))
+        ttk.Button(roi_btns, text="リファレンス領域指定", command=self.start_camera_reference_selection).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(roi_btns, text="領域クリア", command=self.clear_camera_reference_selection).pack(side=tk.LEFT)
 
         ttk.Label(control_frame, textvariable=self.camera_control_status_var, wraplength=280).pack(fill=tk.X, pady=(8, 0))
 
@@ -156,6 +177,7 @@ class CameraControlMixin:
         self.camera_control_photo = None
         self.camera_control_auto_adjust_var.set(False)
         self.camera_control_tuning_running = False
+        self.camera_control_selecting_reference = False
         if self.camera_control_auto_job is not None:
             try:
                 self.after_cancel(self.camera_control_auto_job)
@@ -230,9 +252,19 @@ class CameraControlMixin:
         if not self.camera_control_last_metrics:
             self._set_camera_control_status("ライブ映像の統計を待っています。")
             return
+        current = self._current_camera_values()
+        if not current:
+            self._set_camera_control_status("現在のカメラ値を取得してから実行してください。")
+            return
         self.camera_control_tuning_running = True
-        self.camera_control_tuning_remaining = 8
-        self._set_camera_control_status("自動最適化を開始しました。")
+        self.camera_control_tuning_candidates = self._build_noise_tuning_candidates(current)
+        self.camera_control_tuning_index = 0
+        self.camera_control_pending_values = None
+        self.camera_control_best_values = current.copy()
+        self.camera_control_best_score = self._camera_noise_score(self.camera_control_last_metrics)
+        self._set_camera_control_status(
+            f"自動最適化を開始しました。基準スコア {self.camera_control_best_score:.2f}"
+        )
         self._run_camera_tuning_step()
 
     def stop_camera_auto_tune(self):
@@ -250,6 +282,8 @@ class CameraControlMixin:
             except Exception:
                 pass
             self.camera_control_tuning_job = None
+        if self.camera_control_best_values:
+            self._apply_camera_payload(self.camera_control_best_values, reason="自動調整停止時の最良値復元")
         self._set_camera_control_status("自動調整を停止しました。")
 
     def toggle_camera_auto_adjust(self):
@@ -279,23 +313,105 @@ class CameraControlMixin:
         self.camera_control_auto_job = None
         if not self.camera_control_auto_adjust_var.get():
             return
-        self._apply_camera_auto_adjust_once(reason="10秒自動調整")
+        self._apply_camera_periodic_noise_probe()
         self._schedule_camera_auto_adjust(delay_ms=10000)
 
     def _run_camera_tuning_step(self):
         if not self.camera_control_tuning_running:
             return
-        if self.camera_control_tuning_remaining <= 0:
+
+        if self.camera_control_pending_values is not None:
+            score = self._camera_noise_score(self.camera_control_last_metrics)
+            if self.camera_control_best_score is None or score < self.camera_control_best_score:
+                self.camera_control_best_score = score
+                self.camera_control_best_values = self.camera_control_pending_values.copy()
+                self._set_camera_control_status(f"自動最適化: 改善 {score:.2f} を採用しました。")
+            self.camera_control_pending_values = None
+
+        if self.camera_control_tuning_index >= len(self.camera_control_tuning_candidates):
             self.camera_control_tuning_running = False
-            self._set_camera_control_status("自動最適化が完了しました。")
+            if self.camera_control_best_values:
+                self._apply_camera_payload(self.camera_control_best_values, reason="自動最適化の最良値")
+            best = self.camera_control_best_score if self.camera_control_best_score is not None else 0.0
+            self._set_camera_control_status(f"自動最適化が完了しました。最良スコア {best:.2f}")
             return
-        applied = self._apply_camera_auto_adjust_once(reason="自動最適化")
-        self.camera_control_tuning_remaining -= 1
-        if not applied:
-            self.camera_control_tuning_running = False
-            self._set_camera_control_status("自動最適化: 調整不要または安定範囲です。")
-            return
+
+        candidate = self.camera_control_tuning_candidates[self.camera_control_tuning_index]
+        self.camera_control_tuning_index += 1
+        self.camera_control_pending_values = candidate.copy()
+        self._apply_camera_payload(candidate, reason=f"自動最適化 {self.camera_control_tuning_index}/{len(self.camera_control_tuning_candidates)}")
         self.camera_control_tuning_job = self.after(3000, self._run_camera_tuning_step)
+
+    def _build_noise_tuning_candidates(self, current):
+        params = [
+            ("exposure_time", [-2, -1, 1, 2]),
+            ("max_exposure", [-2, -1, 1, 2]),
+            ("manual_AGain", [-8, -4, 4, 8]),
+            ("manual_DGain", [-6, -3, 3, 6]),
+            ("brightness", [-4, -2, 2, 4]),
+            ("contrast", [-4, -2, 2, 4]),
+        ]
+        base = current.copy()
+        base.update({
+            "auto_exposureEx": 0,
+            "auto_gain_mode": 0,
+            "manual_AGain_enable": 1,
+            "manual_DGain_enable": 1,
+        })
+        candidates = []
+        for key, deltas in params:
+            if key not in base:
+                continue
+            for delta in deltas:
+                cand = base.copy()
+                cand[key] = self._clamp_camera_value(key, cand[key] + delta)
+                if cand[key] != base[key]:
+                    candidates.append(cand)
+        return candidates
+
+    def _apply_camera_periodic_noise_probe(self):
+        metrics = self.camera_control_last_metrics
+        current = self._current_camera_values()
+        if not metrics or not current:
+            self._set_camera_control_status("10秒自動調整: ライブ統計または現在値がありません。")
+            return
+        score = self._camera_noise_score(metrics)
+        if self.camera_control_periodic_pending_values is not None:
+            base_score = self.camera_control_periodic_base_score
+            if base_score is None or score <= base_score:
+                self._set_camera_control_status(f"10秒自動調整: 改善 {score:.2f} を採用しました。")
+            elif self.camera_control_periodic_previous_values:
+                self._apply_camera_payload(self.camera_control_periodic_previous_values, reason="10秒自動調整の復元")
+                self._set_camera_control_status(f"10秒自動調整: 悪化 {score:.2f} のため復元します。")
+            self.camera_control_periodic_pending_values = None
+            self.camera_control_periodic_previous_values = None
+            self.camera_control_periodic_base_score = None
+            return
+
+        candidates = self._build_noise_tuning_candidates(current)
+        if not candidates:
+            self._set_camera_control_status("10秒自動調整: 候補がありません。")
+            return
+        candidate = candidates[self.camera_control_periodic_param_index % len(candidates)]
+        self.camera_control_periodic_param_index += 1
+        self.camera_control_periodic_previous_values = current.copy()
+        self.camera_control_periodic_pending_values = candidate.copy()
+        self.camera_control_periodic_base_score = score
+        self._apply_camera_payload(candidate, reason="10秒自動調整プローブ")
+
+    def _camera_noise_score(self, metrics):
+        if not metrics:
+            return 9999.0
+        return (
+            float(metrics.get("reference_std", metrics.get("noise", 0.0)))
+            + float(metrics.get("bright_clip", 0.0)) * 200.0
+            + float(metrics.get("dark_clip", 0.0)) * 40.0
+            - min(float(metrics.get("contrast", 0.0)), 80.0) * 0.03
+        )
+
+    def _clamp_camera_value(self, key, value):
+        lo, hi = self.CAMERA_CONTROL_BOUNDS.get(key, (0, 255))
+        return int(max(lo, min(hi, round(value))))
 
     def _apply_camera_auto_adjust_once(self, reason="自動調整"):
         metrics = self.camera_control_last_metrics
@@ -436,6 +552,84 @@ class CameraControlMixin:
             self.camera_control_ev_target_var.set("0.0")
         return max(25.0, min(180.0, 70.0 * (2.0 ** ev)))
 
+    def start_camera_reference_selection(self):
+        self.camera_control_selecting_reference = True
+        self.camera_control_reference_drag_start = None
+        self._set_camera_control_status("プレビュー上をドラッグしてリファレンス領域を指定してください。")
+
+    def clear_camera_reference_selection(self):
+        self.camera_control_reference_roi = None
+        self.camera_control_reference_drag_start = None
+        self.camera_control_selecting_reference = False
+        self._set_camera_control_status("リファレンス領域をクリアしました。")
+
+    def _on_camera_reference_press(self, event):
+        if not self.camera_control_selecting_reference:
+            return
+        point = self._camera_display_to_frame_point(event.x, event.y)
+        if point is None:
+            return
+        self.camera_control_reference_drag_start = point
+
+    def _on_camera_reference_drag(self, event):
+        if not self.camera_control_selecting_reference or self.camera_control_reference_drag_start is None:
+            return
+        point = self._camera_display_to_frame_point(event.x, event.y)
+        if point is None:
+            return
+        x0, y0 = self.camera_control_reference_drag_start
+        x1, y1 = point
+        self.camera_control_reference_roi = self._normalize_camera_roi(x0, y0, x1, y1)
+
+    def _on_camera_reference_release(self, event):
+        if not self.camera_control_selecting_reference or self.camera_control_reference_drag_start is None:
+            return
+        point = self._camera_display_to_frame_point(event.x, event.y)
+        if point is None:
+            return
+        x0, y0 = self.camera_control_reference_drag_start
+        x1, y1 = point
+        roi = self._normalize_camera_roi(x0, y0, x1, y1)
+        if roi is not None:
+            self.camera_control_reference_roi = roi
+            self._set_camera_control_status(f"リファレンス領域を設定しました: {roi}")
+        self.camera_control_selecting_reference = False
+        self.camera_control_reference_drag_start = None
+
+    def _normalize_camera_roi(self, x0, y0, x1, y1):
+        if self.camera_control_latest_frame_shape is None:
+            return None
+        height, width = self.camera_control_latest_frame_shape
+        left = max(0, min(width - 1, min(x0, x1)))
+        right = max(0, min(width, max(x0, x1)))
+        top = max(0, min(height - 1, min(y0, y1)))
+        bottom = max(0, min(height, max(y0, y1)))
+        if right - left < 10 or bottom - top < 10:
+            return None
+        return (int(left), int(top), int(right), int(bottom))
+
+    def _camera_display_to_frame_point(self, x, y):
+        label = self.camera_control_preview_label
+        if (
+            label is None
+            or self.camera_control_latest_frame_shape is None
+            or self.camera_control_display_size is None
+        ):
+            return None
+        frame_h, frame_w = self.camera_control_latest_frame_shape
+        display_w, display_h = self.camera_control_display_size
+        label_w = max(label.winfo_width(), display_w)
+        label_h = max(label.winfo_height(), display_h)
+        offset_x = max(0, (label_w - display_w) // 2)
+        offset_y = max(0, (label_h - display_h) // 2)
+        img_x = x - offset_x
+        img_y = y - offset_y
+        if img_x < 0 or img_y < 0 or img_x >= display_w or img_y >= display_h:
+            return None
+        frame_x = int(img_x * frame_w / display_w)
+        frame_y = int(img_y * frame_h / display_h)
+        return frame_x, frame_y
+
     def _after_camera_apply(self, changed):
         self._set_camera_control_status("適用しました: " + ", ".join(changed))
         self.fetch_camera_control_settings()
@@ -498,6 +692,7 @@ class CameraControlMixin:
                 self.after(0, lambda metrics=metrics, hist=hist: self._update_camera_histogram(metrics, hist))
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             height, width = rgb.shape[:2]
+            self.camera_control_latest_frame_shape = (height, width)
             max_w, max_h = 820, 560
             scale = min(max_w / width, max_h / height, 1.0)
             if scale < 1.0:
@@ -508,7 +703,16 @@ class CameraControlMixin:
 
     def _analyze_camera_control_frame(self, frame):
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        sample = gray[::4, ::4]
+        roi = self.camera_control_reference_roi
+        if roi is not None:
+            x0, y0, x1, y1 = roi
+            gray_for_stats = gray[y0:y1, x0:x1]
+            if gray_for_stats.size < 100:
+                gray_for_stats = gray
+        else:
+            gray_for_stats = gray
+
+        sample = gray_for_stats[::4, ::4]
         valid = sample[sample > 2]
         if valid.size < 100:
             valid = sample.reshape(-1)
@@ -525,15 +729,18 @@ class CameraControlMixin:
         residual = cv2.absdiff(sample, blur)
         valid_residual = residual[sample > 2]
         noise = float(np.median(valid_residual) * 1.4826) if valid_residual.size else 0.0
+        reference_std = float(np.std(valid)) if valid.size else 0.0
         hist = np.histogram(valid, bins=64, range=(0, 256))[0].astype(np.float32)
         metrics = {
             "mean": mean,
             "median": median,
             "contrast": contrast,
             "noise": noise,
+            "reference_std": reference_std,
             "dark_clip": dark_clip,
             "bright_clip": bright_clip,
             "target": self._camera_target_median(),
+            "roi": roi,
         }
         self.camera_control_last_metrics = metrics
         self.camera_control_last_histogram = hist
@@ -566,13 +773,15 @@ class CameraControlMixin:
 
         self.camera_control_metrics_var.set(
             "中央値 {median:.1f} / 目標 {target:.1f} / コントラスト {contrast:.1f} / "
-            "ノイズ {noise:.1f} / 黒潰れ {dark:.1%} / 白飛び {bright:.1%}".format(
+            "ノイズ {noise:.1f} / 標準偏差 {std:.1f} / 黒潰れ {dark:.1%} / 白飛び {bright:.1%}{roi}".format(
                 median=metrics["median"],
                 target=metrics["target"],
                 contrast=metrics["contrast"],
                 noise=metrics["noise"],
+                std=metrics["reference_std"],
                 dark=metrics["dark_clip"],
                 bright=metrics["bright_clip"],
+                roi=" / ROI" if metrics.get("roi") else "",
             )
         )
 
@@ -581,7 +790,18 @@ class CameraControlMixin:
         win = self.camera_control_window
         if label is None or win is None or not win.winfo_exists() or not label.winfo_exists():
             return
-        image = Image.fromarray(rgb_frame)
+        display = rgb_frame.copy()
+        self.camera_control_display_size = (display.shape[1], display.shape[0])
+        if self.camera_control_reference_roi is not None and self.camera_control_latest_frame_shape is not None:
+            frame_h, frame_w = self.camera_control_latest_frame_shape
+            disp_h, disp_w = display.shape[:2]
+            x0, y0, x1, y1 = self.camera_control_reference_roi
+            sx = disp_w / frame_w
+            sy = disp_h / frame_h
+            p0 = (int(x0 * sx), int(y0 * sy))
+            p1 = (int(x1 * sx), int(y1 * sy))
+            cv2.rectangle(display, p0, p1, (255, 209, 102), 2)
+        image = Image.fromarray(display)
         photo = ImageTk.PhotoImage(image)
         self.camera_control_photo = photo
         label.config(image=photo, text="")
