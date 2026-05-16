@@ -76,26 +76,51 @@ class LivePreviewMixin:
     def _rtsp_live_preview_loop(self, url, stop_event):
         previous_options = os.environ.get("OPENCV_FFMPEG_CAPTURE_OPTIONS")
         if getattr(config, "RTSP_USE_TCP", False):
-            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
+            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
+                "rtsp_transport;tcp|fflags;nobuffer|flags;low_delay|loglevel;quiet"
+            )
+
+        previous_log_level = None
+        try:
+            if hasattr(cv2, "getLogLevel"):
+                previous_log_level = cv2.getLogLevel()
+            if hasattr(cv2, "setLogLevel"):
+                cv2.setLogLevel(0)
+        except Exception:
+            previous_log_level = None
 
         cap = None
         try:
-            cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
-            try:
-                cap.set(cv2.CAP_PROP_BUFFERSIZE, getattr(config, "RTSP_BUFFER_SIZE", 3))
-            except Exception:
-                pass
-
-            if not cap.isOpened():
-                self.after(0, lambda: self._set_live_preview_status("RTSP映像に接続できませんでした。"))
-                return
-
+            cap = self._open_rtsp_preview_capture(url)
+            consecutive_failures = 0
             while not stop_event.is_set():
-                ok, frame = cap.read()
-                if not ok or frame is None:
-                    self.after(0, lambda: self._set_live_preview_status("RTSP映像を待機中..."))
-                    time.sleep(0.2)
+                if cap is None or not cap.isOpened():
+                    self.after(0, lambda: self._set_live_preview_status("RTSP映像に再接続中..."))
+                    self._sleep_live_preview(stop_event, 1.0)
+                    cap = self._open_rtsp_preview_capture(url)
                     continue
+
+                try:
+                    ok, frame = cap.read()
+                except cv2.error:
+                    ok, frame = False, None
+                except Exception:
+                    ok, frame = False, None
+
+                if not ok or frame is None:
+                    consecutive_failures += 1
+                    if consecutive_failures == 1:
+                        self.after(0, lambda: self._set_live_preview_status("RTSP映像を待機中..."))
+                    if consecutive_failures >= 10:
+                        try:
+                            cap.release()
+                        except Exception:
+                            pass
+                        cap = None
+                        consecutive_failures = 0
+                    self._sleep_live_preview(stop_event, 0.15)
+                    continue
+                consecutive_failures = 0
 
                 frame = self._apply_live_preview_masks(frame)
                 rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -107,7 +132,7 @@ class LivePreviewMixin:
                     rgb = cv2.resize(rgb, (int(width * scale), int(height * scale)), interpolation=cv2.INTER_AREA)
 
                 self.after(0, self._show_live_preview_frame, rgb)
-                time.sleep(1 / 15)
+                self._sleep_live_preview(stop_event, 1 / 15)
         except Exception as e:
             self.after(0, lambda err=e: self._set_live_preview_status(f"ライブプレビューでエラーが発生しました: {err}"))
         finally:
@@ -117,6 +142,22 @@ class LivePreviewMixin:
                 os.environ.pop("OPENCV_FFMPEG_CAPTURE_OPTIONS", None)
             else:
                 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = previous_options
+            if previous_log_level is not None and hasattr(cv2, "setLogLevel"):
+                try:
+                    cv2.setLogLevel(previous_log_level)
+                except Exception:
+                    pass
+
+    def _open_rtsp_preview_capture(self, url):
+        cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
+        try:
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, getattr(config, "RTSP_BUFFER_SIZE", 3))
+        except Exception:
+            pass
+        return cap
+
+    def _sleep_live_preview(self, stop_event, seconds):
+        stop_event.wait(seconds)
 
     def _apply_live_preview_masks(self, frame):
         masked = frame.copy()
