@@ -226,7 +226,8 @@ def save_rtsp_video_segments_ffmpeg(
     rtsp_url: str, save_root: str = config.RTSP_SAVE_ROOT,
     segment_duration: int = config.RTSP_SEGMENT_DURATION, cancel_flag: Optional[threading.Event] = None,
     time_limit_enabled: bool = False, start_hour: int = 17, start_minute: int = 0,
-    end_hour: int = 7, end_minute: int = 0
+    end_hour: int = 7, end_minute: int = 0,
+    preview_callback: Optional[Callable[[np.ndarray], None]] = None
 ):
     """
     FFmpegのsegment muxerを使用してRTSPストリームを連続録画する。
