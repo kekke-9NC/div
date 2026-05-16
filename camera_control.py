@@ -22,6 +22,28 @@ class CameraControlClient:
     base_url: str
     timeout: float = 5.0
 
+    IMAGE_ADJUSTMENT_KEYS = [
+        "hue", "brightness", "sharpness", "contrast", "saturation", "gamma",
+        "antiDIS", "blc_level", "max_exposure", "max_a_gain", "antiFog",
+        "frameTurbo_pro", "sceneMode", "AE_strategy_mode", "auto_exposureEx",
+        "exposure_time", "exposure_time_max", "auto_gain_mode", "auto_DGain_max",
+        "auto_AGain_max", "max_sys_gain", "manual_AGain_enable", "manual_AGain",
+        "manual_DGain_enable", "manual_DGain", "ai_isp", "auto_awb", "awb_red",
+        "awb_green", "awb_blue", "awb_auto_mode", "awb_style_red",
+        "awb_style_green", "awb_style_blue", "rotate",
+    ]
+    IMAGE_ADJUSTMENT_EX_KEYS = [
+        "scene_mode", "auto_iris", "color_black", "flip", "hlc_enable",
+        "infr_day_h", "infr_day_m", "infr_detect_mode", "infr_night_h",
+        "infr_night_m", "mirror", "wdr_sensor", "wdr_level",
+        "wdr_level_sensor", "power_freq", "sens_day_to_night",
+        "sens_night_to_day", "blc_level", "ircut_level", "ldr_level",
+        "led_control_mode", "lamp_type", "led_level", "ir_level",
+        "led_control_avail", "led_control", "low_farme_rate",
+        "noiseReduction", "anti_flicker", "_2DNR_level", "lens_correction",
+        "byLDC_XOffset", "byLDC_YOffset", "byLDC_Ratio",
+    ]
+
     def __post_init__(self):
         self.base_url = (self.base_url or "").strip().rstrip("/")
         if not self.base_url:
@@ -39,12 +61,18 @@ class CameraControlClient:
     def set_image_adjustment(self, values: Dict[str, Any]) -> Dict[str, Any]:
         if not values:
             return {"code": 0}
-        return self._request("POST", "/action/setImageAdjustment", values)
+        current = self.get_image_adjustment()
+        payload = {key: current[key] for key in self.IMAGE_ADJUSTMENT_KEYS if key in current}
+        payload.update(values)
+        return self._request("POST", "/action/setImageAdjustment", payload)
 
     def set_image_adjustment_ex(self, values: Dict[str, Any]) -> Dict[str, Any]:
         if not values:
             return {"code": 0}
-        return self._request("POST", "/action/setImageAdjustmentEx", values)
+        current = self.get_image_adjustment_ex()
+        payload = {key: current[key] for key in self.IMAGE_ADJUSTMENT_EX_KEYS if key in current}
+        payload.update(values)
+        return self._request("POST", "/action/setImageAdjustmentEx", payload)
 
     def _request(self, method: str, path: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         url = self.base_url + path
