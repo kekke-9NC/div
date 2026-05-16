@@ -114,7 +114,7 @@ class ProcessingMixin:
                 params['save_options'], params['interval_sec'], params['duration_sec'],
                 config.MIN_LINE_LENGTH, params['summary_config'],
                 rtsp_time_limit, rtsp_sh, rtsp_sm, rtsp_eh, rtsp_em,
-                params['max_workers']
+                params['max_workers'], self.handle_rtsp_live_preview_frame
             )
             self.rtsp_thread = threading.Thread(target=file_utils.rtsp_save_and_process_thread_target, args=rtsp_args, daemon=True)
             self.rtsp_thread.start()
@@ -312,4 +312,3 @@ def worker_main_loop(
 
     except Exception as e:
         progress_queue.put((f"パイプライン実行中に例外が発生しました: {e}", None))
-
