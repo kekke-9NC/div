@@ -68,6 +68,13 @@ class LivePreviewMixin:
         self._update_live_preview_button_state()
 
     def handle_rtsp_live_preview_frame(self, frame):
+        camera_handler = getattr(self, "handle_camera_control_shared_frame", None)
+        if camera_handler is not None:
+            try:
+                camera_handler(frame)
+            except Exception as e:
+                print(f"Camera control shared preview error: {e}")
+
         if self.live_preview_window is None or self.live_preview_stop_event is None:
             return
         if self.live_preview_stop_event.is_set():

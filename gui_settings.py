@@ -757,6 +757,7 @@ class SettingsMixin:
             'auto_time_updater_enabled': self.auto_time_updater_enabled_var.get(),
             'rtsp_preset': self.rtsp_preset_var.get(),
             'rtsp_fps': self.rtsp_fps_var.get(),
+            'camera_control_base_url': self.camera_control_base_url_var.get(),
             # RTSP time limit settings
             'rtsp_time_limit_enabled': self.rtsp_time_limit_var.get(),
             'rtsp_start_hour': self.rtsp_start_hour_var.get(), 'rtsp_start_minute': self.rtsp_start_min_var.get(),
@@ -836,6 +837,7 @@ class SettingsMixin:
                 # For restored paths, show path only (no FPS calculation to avoid delay)
                 self._add_folder_item("--", p)
             self.rtsp_urls = settings.get('rtsp_urls', [])
+            self.camera_control_base_url_var.set(settings.get('camera_control_base_url', ''))
             # Clear and restore RTSP items
             for item in self.rtsp_item_frames:
                 item['frame'].destroy()
