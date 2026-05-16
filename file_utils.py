@@ -275,6 +275,10 @@ def save_rtsp_video_segments_ffmpeg(
         print(f"[RTSP保存] デコーダー確認中にエラー: {e}。ソフトウェアデコードを使用します。")
         use_cuvid = False
     
+    if preview_callback is not None and use_cuvid:
+        use_cuvid = False
+        print("[RTSP保存] ライブプレビュー有効時は同一入力からプレビューを分岐するため、ソフトウェアデコードを使用します。")
+
     if use_cuvid:
         print("[RTSP保存] NVIDIAハードウェアデコード (h264_cuvid) を使用 - 連続録画モード")
     else:
@@ -329,8 +333,10 @@ def save_rtsp_video_segments_ffmpeg(
                 ffmpeg_cmd.extend(['-rtsp_transport', 'tcp'])
             
             # 入力と出力設定（segment muxer）
+            ffmpeg_cmd.extend(['-i', rtsp_url])
+
             ffmpeg_cmd.extend([
-                '-i', rtsp_url,
+                '-map', '0:v:0',
                 '-c:v', 'libx264',
                 '-preset', 'ultrafast',
                 '-an',  # オーディオなし
@@ -342,15 +348,54 @@ def save_rtsp_video_segments_ffmpeg(
                 '-strftime_mkdir', '1',  # 必要なディレクトリを自動作成
                 segment_pattern
             ])
+
+            if preview_callback is not None:
+                ffmpeg_cmd.extend([
+                    '-map', '0:v:0',
+                    '-vf', 'fps=3,scale=960:-2',
+                    '-q:v', '5',
+                    '-an',
+                    '-f', 'mjpeg',
+                    'pipe:1'
+                ])
             
             print(f"[RTSP保存] 連続録画開始 (FFmpeg segment muxer): {segment_pattern}")
             
             # FFmpegプロセスを実行
             process = subprocess.Popen(
                 ffmpeg_cmd,
-                stdout=subprocess.DEVNULL,
+                stdout=subprocess.PIPE if preview_callback is not None else subprocess.DEVNULL,
                 stderr=subprocess.PIPE
             )
+
+            def read_preview_stdout():
+                if preview_callback is None or process.stdout is None:
+                    return
+                buffer = bytearray()
+                try:
+                    while process.poll() is None and (cancel_flag is None or not cancel_flag.is_set()):
+                        chunk = process.stdout.read(8192)
+                        if not chunk:
+                            break
+                        buffer.extend(chunk)
+                        while True:
+                            start = buffer.find(b'\xff\xd8')
+                            end = buffer.find(b'\xff\xd9', start + 2) if start != -1 else -1
+                            if start == -1:
+                                if len(buffer) > 1024 * 1024:
+                                    del buffer[:-2]
+                                break
+                            if end == -1:
+                                if start > 0:
+                                    del buffer[:start]
+                                break
+                            jpg = bytes(buffer[start:end + 2])
+                            del buffer[:end + 2]
+                            img = cv2.imdecode(np.frombuffer(jpg, dtype=np.uint8), cv2.IMREAD_COLOR)
+                            if img is not None:
+                                preview_callback(img)
+                except Exception as e:
+                    print(f"[RTSPライブプレビュー] プレビューフレーム読み取りエラー: {e}")
             
             # FFmpeg stderrを非同期で読み取るスレッド
             ffmpeg_errors = []
@@ -361,9 +406,12 @@ def save_rtsp_video_segments_ffmpeg(
                         if line:
                             decoded = line.decode('utf-8', errors='ignore').strip()
                             if decoded:
+                                lower_decoded = decoded.lower()
+                                if "error while decoding mb" in lower_decoded or "concealing" in lower_decoded:
+                                    continue
                                 ffmpeg_errors.append(decoded)
                                 # エラー関連のキーワードを含む場合のみ出力
-                                if any(kw in decoded.lower() for kw in ['error', 'fail', 'invalid', 'disconnect']):
+                                if any(kw in lower_decoded for kw in ['error', 'fail', 'invalid', 'disconnect']):
                                     print(f"[FFmpeg] {decoded}")
                                 # ネットワーク関連の致命的エラーを検出
                                 # -10054: WSAECONNRESET (接続がリセットされた)
@@ -377,6 +425,9 @@ def save_rtsp_video_segments_ffmpeg(
             
             stderr_thread = threading.Thread(target=read_ffmpeg_stderr, daemon=True)
             stderr_thread.start()
+            if preview_callback is not None:
+                preview_thread = threading.Thread(target=read_preview_stdout, daemon=True)
+                preview_thread.start()
             
             # ネットワーク監視変数
             start_time = time.time()
@@ -569,7 +620,8 @@ def save_rtsp_video_segments(
     rtsp_url: str, save_root: str = config.RTSP_SAVE_ROOT,
     segment_duration: int = config.RTSP_SEGMENT_DURATION, cancel_flag: Optional[threading.Event] = None,
     time_limit_enabled: bool = False, start_hour: int = 17, start_minute: int = 0,
-    end_hour: int = 7, end_minute: int = 0
+    end_hour: int = 7, end_minute: int = 0,
+    preview_callback: Optional[Callable[[np.ndarray], None]] = None
 ):
     """
     RTSPストリームから設定されたフレーム数ごとに動画ファイルを保存する。
@@ -585,7 +637,8 @@ def save_rtsp_video_segments(
         if shutil.which("ffmpeg"):
             return save_rtsp_video_segments_ffmpeg(
                 rtsp_url, save_root, segment_duration, cancel_flag,
-                time_limit_enabled, start_hour, start_minute, end_hour, end_minute
+                time_limit_enabled, start_hour, start_minute, end_hour, end_minute,
+                preview_callback
             )
     
     # ネットワーク監視パラメータ
@@ -695,6 +748,11 @@ def save_rtsp_video_segments(
                 
                 # 成功時はリセット
                 consecutive_read_failures = 0
+                if preview_callback is not None:
+                    try:
+                        preview_callback(frame)
+                    except Exception as e:
+                        print(f"[RTSPライブプレビュー] プレビューフレーム送信エラー: {e}")
                 out.write(frame)
                 frames_written += 1
 
@@ -888,7 +946,8 @@ def rtsp_save_and_process_thread_target(
     summary_video_config: Optional[List[Dict[str, Any]]] = None,
     time_limit_enabled: bool = False, start_hour: int = 17, start_minute: int = 0,
     end_hour: int = 7, end_minute: int = 0,
-    max_workers: int = 1
+    max_workers: int = 1,
+    preview_callback: Optional[Callable[[np.ndarray], None]] = None
 ):
     global rtsp_processed_files
     video_extensions = config.PERIODIC_VIDEO_EXTENSIONS
@@ -916,7 +975,7 @@ def rtsp_save_and_process_thread_target(
     save_thread = threading.Thread(
         target=save_rtsp_video_segments, 
         args=(rtsp_url, save_root, segment_duration, cancel_flag,
-              time_limit_enabled, start_hour, start_minute, end_hour, end_minute), 
+              time_limit_enabled, start_hour, start_minute, end_hour, end_minute, preview_callback), 
         daemon=True
     )
     save_thread.start()

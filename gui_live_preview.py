@@ -34,7 +34,6 @@ class LivePreviewMixin:
             self.live_preview_window.focus_force()
             return
 
-        url = self.rtsp_urls[0]
         self.live_preview_stop_event = threading.Event()
 
         win = Toplevel(self)
@@ -55,12 +54,7 @@ class LivePreviewMixin:
 
         win.protocol("WM_DELETE_WINDOW", self.close_rtsp_live_preview)
 
-        self.live_preview_thread = threading.Thread(
-            target=self._rtsp_live_preview_loop,
-            args=(url, self.live_preview_stop_event),
-            daemon=True,
-        )
-        self.live_preview_thread.start()
+        self._set_live_preview_status("録画中のRTSP映像を待機中...")
 
     def close_rtsp_live_preview(self):
         if self.live_preview_stop_event:
@@ -73,91 +67,22 @@ class LivePreviewMixin:
             win.destroy()
         self._update_live_preview_button_state()
 
-    def _rtsp_live_preview_loop(self, url, stop_event):
-        previous_options = os.environ.get("OPENCV_FFMPEG_CAPTURE_OPTIONS")
-        if getattr(config, "RTSP_USE_TCP", False):
-            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
-                "rtsp_transport;tcp|fflags;nobuffer|flags;low_delay|loglevel;quiet"
-            )
-
-        previous_log_level = None
+    def handle_rtsp_live_preview_frame(self, frame):
+        if self.live_preview_window is None or self.live_preview_stop_event is None:
+            return
+        if self.live_preview_stop_event.is_set():
+            return
         try:
-            if hasattr(cv2, "getLogLevel"):
-                previous_log_level = cv2.getLogLevel()
-            if hasattr(cv2, "setLogLevel"):
-                cv2.setLogLevel(0)
-        except Exception:
-            previous_log_level = None
-
-        cap = None
-        try:
-            cap = self._open_rtsp_preview_capture(url)
-            consecutive_failures = 0
-            while not stop_event.is_set():
-                if cap is None or not cap.isOpened():
-                    self.after(0, lambda: self._set_live_preview_status("RTSP映像に再接続中..."))
-                    self._sleep_live_preview(stop_event, 1.0)
-                    cap = self._open_rtsp_preview_capture(url)
-                    continue
-
-                try:
-                    ok, frame = cap.read()
-                except cv2.error:
-                    ok, frame = False, None
-                except Exception:
-                    ok, frame = False, None
-
-                if not ok or frame is None:
-                    consecutive_failures += 1
-                    if consecutive_failures == 1:
-                        self.after(0, lambda: self._set_live_preview_status("RTSP映像を待機中..."))
-                    if consecutive_failures >= 10:
-                        try:
-                            cap.release()
-                        except Exception:
-                            pass
-                        cap = None
-                        consecutive_failures = 0
-                    self._sleep_live_preview(stop_event, 0.15)
-                    continue
-                consecutive_failures = 0
-
-                frame = self._apply_live_preview_masks(frame)
-                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-
-                height, width = rgb.shape[:2]
-                max_w, max_h = 960, 540
-                scale = min(max_w / width, max_h / height, 1.0)
-                if scale < 1.0:
-                    rgb = cv2.resize(rgb, (int(width * scale), int(height * scale)), interpolation=cv2.INTER_AREA)
-
-                self.after(0, self._show_live_preview_frame, rgb)
-                self._sleep_live_preview(stop_event, 1 / 15)
+            frame = self._apply_live_preview_masks(frame)
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            height, width = rgb.shape[:2]
+            max_w, max_h = 960, 540
+            scale = min(max_w / width, max_h / height, 1.0)
+            if scale < 1.0:
+                rgb = cv2.resize(rgb, (int(width * scale), int(height * scale)), interpolation=cv2.INTER_AREA)
+            self.after(0, self._show_live_preview_frame, rgb)
         except Exception as e:
-            self.after(0, lambda err=e: self._set_live_preview_status(f"ライブプレビューでエラーが発生しました: {err}"))
-        finally:
-            if cap is not None:
-                cap.release()
-            if previous_options is None:
-                os.environ.pop("OPENCV_FFMPEG_CAPTURE_OPTIONS", None)
-            else:
-                os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = previous_options
-            if previous_log_level is not None and hasattr(cv2, "setLogLevel"):
-                try:
-                    cv2.setLogLevel(previous_log_level)
-                except Exception:
-                    pass
-
-    def _open_rtsp_preview_capture(self, url):
-        cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
-        try:
-            cap.set(cv2.CAP_PROP_BUFFERSIZE, getattr(config, "RTSP_BUFFER_SIZE", 3))
-        except Exception:
-            pass
-        return cap
-
-    def _sleep_live_preview(self, stop_event, seconds):
-        stop_event.wait(seconds)
+            print(f"ライブプレビューフレーム表示エラー: {e}")
 
     def _apply_live_preview_masks(self, frame):
         masked = frame.copy()
