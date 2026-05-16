@@ -94,6 +94,8 @@ class AnalysisMixin:
 
         row4 = ttk.Frame(action_frame)
         row4.pack(fill=tk.X, pady=2)
+        self.btn_camera_control = ttk.Button(row4, text="カメラコントロール", command=self.open_camera_control, style="Gray.TButton")
+        self.btn_camera_control.pack(side=tk.LEFT, padx=(0, 5))
         self.btn_model_training = ttk.Button(row4, text="機械学習モデル作成", command=self.open_model_training_tool)
         self.btn_model_training.pack(side=tk.LEFT, padx=(0, 5))
 

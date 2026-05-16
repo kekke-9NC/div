@@ -12,12 +12,13 @@ from gui_masks import MaskMixin
 from gui_tools import ToolsMixin
 from gui_synthesis import SynthesisMixin
 from gui_live_preview import LivePreviewMixin
+from gui_camera_control import CameraControlMixin
 
 
 class App(
     NavigationMixin, UsageMixin, SourceMixin, AnalysisMixin, SettingsMixin, AdvancedSettingsMixin,
     PreviewMixin, PlateSolveMixin, ProcessingMixin, MaskMixin, ToolsMixin, SynthesisMixin,
-    LivePreviewMixin,
+    LivePreviewMixin, CameraControlMixin,
     TkinterDnD.Tk,
 ):
     def __init__(self):
@@ -66,6 +67,7 @@ class App(
         self.progress_queue = queue.Queue()
         self.start_time_gui = None
         self._init_live_preview_state()
+        self._init_camera_control_state()
 
         self.setup_variables()
         self.setup_ui()
@@ -249,6 +251,7 @@ class App(
         self.video_concat_codec_var = tk.StringVar(value="h264")
         self.video_concat_fps_var = tk.StringVar(value="Auto")
         self.video_concat_safe_mode_var = tk.BooleanVar(value=True) 
+        self.camera_control_base_url_var = tk.StringVar(value="")
 
         # Advanced settings variables (config.py values)
         # 検出関連
@@ -338,6 +341,7 @@ class App(
             self.append_log("設定を保存しています...")
             self._hide_summary_preview()
             self.close_rtsp_live_preview()
+            self.close_camera_control()
             self.save_settings()
             # 自動更新を停止
             if self.auto_updater:

@@ -60,7 +60,7 @@ a = Analysis(
         'coordinate_manager', 'config', 'file_utils', 'video_processing', 'astrometry',
         'image_processing', 'model', 'utils', 'location_utils', 'sun_times', 'auto_time_updater',
         'long_exposure_map', 'distortion_correction', 'meteor_angle_analysis',
-        'lighten_blend_video', 'lighten_blend_image', 'gui_dialogs', 'gui_synthesis', 'gui_live_preview', 'gui_tools', 'gui_masks', 'gui_processing', 'gui_plate_solve', 'gui_preview', 'gui_advanced', 'gui_settings', 'gui_analysis', 'gui_source', 'gui_navigation', 'gui_common', 'gui_usage', 'timelapse_creator',
+        'lighten_blend_video', 'lighten_blend_image', 'requests', 'camera_control', 'gui_camera_control', 'gui_dialogs', 'gui_synthesis', 'gui_live_preview', 'gui_tools', 'gui_masks', 'gui_processing', 'gui_plate_solve', 'gui_preview', 'gui_advanced', 'gui_settings', 'gui_analysis', 'gui_source', 'gui_navigation', 'gui_common', 'gui_usage', 'timelapse_creator',
         'scipy.special.cython_special', 'tkinterdnd2.TkinterDnD'
     ],
     hookspath=[],
