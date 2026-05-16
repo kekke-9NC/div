@@ -758,6 +758,7 @@ class SettingsMixin:
             'rtsp_preset': self.rtsp_preset_var.get(),
             'rtsp_fps': self.rtsp_fps_var.get(),
             'camera_control_base_url': self.camera_control_base_url_var.get(),
+            'camera_control_ev_target': self.camera_control_ev_target_var.get(),
             # RTSP time limit settings
             'rtsp_time_limit_enabled': self.rtsp_time_limit_var.get(),
             'rtsp_start_hour': self.rtsp_start_hour_var.get(), 'rtsp_start_minute': self.rtsp_start_min_var.get(),
@@ -838,6 +839,7 @@ class SettingsMixin:
                 self._add_folder_item("--", p)
             self.rtsp_urls = settings.get('rtsp_urls', [])
             self.camera_control_base_url_var.set(settings.get('camera_control_base_url', ''))
+            self.camera_control_ev_target_var.set(settings.get('camera_control_ev_target', '0.0'))
             # Clear and restore RTSP items
             for item in self.rtsp_item_frames:
                 item['frame'].destroy()
@@ -977,4 +979,3 @@ class SettingsMixin:
             config.RTSP_SCALE_UPPER = float(self.cfg_rtsp_scale_upper_var.get())
         except Exception as e:
             self.append_log(f"詳細設定の適用中にエラーが発生しました: {e}")
-
