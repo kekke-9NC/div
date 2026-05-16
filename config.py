@@ -93,7 +93,7 @@ PERIODIC_VIDEO_EXTENSIONS = ('.mp4', '.avi', '.mov')
 DEFAULT_SCAN_INTERVAL = 60 # 定期スキャンのデフォルト間隔（秒）
 RTSP_SAVE_ROOT = os.path.join(EXE_DIR, "rtsp")
 RTSP_FPS = 25 # RTSPストリームの前提FPS
-RTSP_SEGMENT_FRAMES = 1500 # 1セグメントあたりのフレーム数 (25fps * 60秒 = 1500フレーム)
+RTSP_SEGMENT_FRAMES = 1500 # 旧OpenCV保存用の互換値。現在のRTSP保存長はRTSP_SEGMENT_DURATIONとFPSから計算。
 RTSP_SEGMENT_DURATION = 60 # RTSP動画の1セグメントあたりの秒数（参考値）
 RTSP_BUFFER_DURATION = 10 # RTSP処理時にメモリ上に保持するバッファの秒数 (float)
 

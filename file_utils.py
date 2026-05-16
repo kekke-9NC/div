@@ -285,9 +285,7 @@ def save_rtsp_video_segments_ffmpeg(
     else:
         print("[RTSP保存] ソフトウェアデコードを使用 - 連続録画モード")
     
-    fps = config.RTSP_FPS
-    segment_frames = config.RTSP_SEGMENT_FRAMES
-    duration_secs = segment_frames / fps  # 60秒
+    duration_secs = int(segment_duration)
     
     # 時間外の場合に表示するログを抑制するためのフラグ
     was_outside_time_range = True
@@ -340,9 +338,11 @@ def save_rtsp_video_segments_ffmpeg(
                 '-map', '0:v:0',
                 '-c:v', 'libx264',
                 '-preset', 'ultrafast',
+                '-force_key_frames', f'expr:gte(t,n_forced*{duration_secs})',
                 '-an',  # オーディオなし
                 '-f', 'segment',  # セグメントmuxer
-                '-segment_time', str(int(duration_secs)),  # セグメント長（秒）
+                '-segment_time', str(duration_secs),  # セグメント長（秒）
+                '-segment_time_delta', '0.5',
                 '-segment_format', 'mp4',
                 '-reset_timestamps', '1',  # 各セグメントのタイムスタンプをリセット
                 '-strftime', '1',  # strftimeでファイル名生成
@@ -651,18 +651,22 @@ def save_rtsp_video_segments(
     width = 0
     height = 0
     fps = config.RTSP_FPS
-    segment_frames = config.RTSP_SEGMENT_FRAMES
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     
     def connect_rtsp():
         """RTSPストリームに接続。成功するまで無限リトライ"""
-        nonlocal cap, width, height
+        nonlocal cap, width, height, fps
         while cancel_flag is None or not cancel_flag.is_set():
             print(f"[RTSP保存] ストリームに接続中: {rtsp_url}")
             cap = utils.create_rtsp_capture(rtsp_url)
             if cap.isOpened():
                 width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
                 height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                detected_fps = float(cap.get(cv2.CAP_PROP_FPS) or 0)
+                if detected_fps > 0:
+                    fps = detected_fps
+                else:
+                    fps = config.RTSP_FPS
                 print(f"[RTSP保存] ストリーム接続成功 ({width}x{height} @ {fps} fps)")
                 return True
             print(f"[RTSP保存] 接続失敗。{RECONNECT_WAIT}秒後に再試行...")
@@ -700,6 +704,7 @@ def save_rtsp_video_segments(
             if cap is None or not cap.isOpened():
                 if not connect_rtsp():
                     break
+            segment_frames = max(1, int(round(fps * segment_duration)))
 
             now = datetime.now()
             dir_path = os.path.join(save_root, now.strftime("%Y%m%d"), now.strftime("%H"))
@@ -721,7 +726,7 @@ def save_rtsp_video_segments(
             paused_for_time_limit = False
             consecutive_read_failures = 0
 
-            # フレーム数ベースで保存 (例: 1500フレーム = 1分 @ 25fps)
+            # フレーム数ベースで保存 (例: 720フレーム = 1分 @ 12fps)
             while frames_written < segment_frames:
                 if cancel_flag is not None and cancel_flag.is_set():
                     stream_error = True
