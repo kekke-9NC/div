@@ -118,6 +118,7 @@ class ProcessingMixin:
             )
             self.rtsp_thread = threading.Thread(target=file_utils.rtsp_save_and_process_thread_target, args=rtsp_args, daemon=True)
             self.rtsp_thread.start()
+            self._update_live_preview_button_state()
 
         elif self.folder_paths:
             sources_to_process = []
@@ -179,6 +180,8 @@ class ProcessingMixin:
             # restore start button state and label when requested by caller
             self.update_start_button_state()
             self.status_label.config(text="停止")
+        self.close_rtsp_live_preview()
+        self._update_live_preview_button_state()
 
     def update_progress(self):
         if self.start_time_gui:
@@ -256,6 +259,7 @@ class ProcessingMixin:
                     if is_complete:
                         self.update_start_button_state()
                         self.cancel_button.config(state=tk.DISABLED)
+                        self.close_rtsp_live_preview()
                         self.status_label.config(text="完了/停止")
                         if "すべての処理が完了しました" in message:
                             self.progress['value'] = self.progress['maximum']

@@ -11,11 +11,13 @@ from gui_processing import ProcessingMixin
 from gui_masks import MaskMixin
 from gui_tools import ToolsMixin
 from gui_synthesis import SynthesisMixin
+from gui_live_preview import LivePreviewMixin
 
 
 class App(
     NavigationMixin, UsageMixin, SourceMixin, AnalysisMixin, SettingsMixin, AdvancedSettingsMixin,
     PreviewMixin, PlateSolveMixin, ProcessingMixin, MaskMixin, ToolsMixin, SynthesisMixin,
+    LivePreviewMixin,
     TkinterDnD.Tk,
 ):
     def __init__(self):
@@ -63,6 +65,7 @@ class App(
         self.cancel_flag = threading.Event()
         self.progress_queue = queue.Queue()
         self.start_time_gui = None
+        self._init_live_preview_state()
 
         self.setup_variables()
         self.setup_ui()
@@ -334,6 +337,7 @@ class App(
         if messagebox.askokcancel("終了", "アプリケーションを終了しますか？"):
             self.append_log("設定を保存しています...")
             self._hide_summary_preview()
+            self.close_rtsp_live_preview()
             self.save_settings()
             # 自動更新を停止
             if self.auto_updater:
