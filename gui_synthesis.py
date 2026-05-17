@@ -314,7 +314,8 @@ class SynthesisMixin:
 
         detector_func = bright_area_detector.detect_meteors_with_boxes if is_meteor_mode else bright_area_detector.detect_bright_areas_with_boxes
         print(f"DEBUG: detector_func = {detector_func.__name__}")
-        analysis_temp_paths = []
+        analysis_cache_paths = {}
+        cache_run_dir = [None]
         
         def start_synthesis_with_results(results):
             def run_ai_task():
@@ -332,14 +333,19 @@ class SynthesisMixin:
                 all_files.sort()  # 名前順で処理されると仮定
                 
                 # インデックス管理用
+                synthesis_items = [
+                    {'path': analysis_cache_paths.get(path, path), 'result_key': os.path.basename(path)}
+                    for path in all_files
+                ]
+                synthesis_files = [item['path'] for item in synthesis_items]
                 file_index = [0]
                 
                 def mask_generator(img):
-                    if file_index[0] >= len(all_files):
+                    if file_index[0] >= len(synthesis_items):
                         return None
                     
-                    current_path = all_files[file_index[0]]
-                    filename = os.path.basename(current_path)
+                    item = synthesis_items[file_index[0]]
+                    filename = item['result_key']
                     file_index[0] += 1
                     
                     if filename in results:
@@ -352,18 +358,14 @@ class SynthesisMixin:
                     return None
 
                 success = lighten_blend_image.create_lighten_blend_image(
-                    all_files,
+                    synthesis_files,
                     output_path,
                     progress_callback=self.append_log,
                     mask_generator=mask_generator,
                     inclusion_mode=is_meteor_mode
                 )
-                for temp_path in analysis_temp_paths:
-                    try:
-                        if os.path.exists(temp_path):
-                            os.remove(temp_path)
-                    except OSError:
-                        pass
+                if cache_run_dir[0]:
+                    shutil.rmtree(cache_run_dir[0], ignore_errors=True)
                 self._handle_synthesis_result(success, output_path)
 
             threading.Thread(target=run_ai_task, daemon=True).start()
@@ -388,6 +390,11 @@ class SynthesisMixin:
                         all_files.append(path)
                 all_files.sort()
                 _, video_ext = lighten_blend_image.get_supported_extensions()
+                cache_run_dir[0] = os.path.join(
+                    config.LIGHTEN_BLEND_CACHE_DIR,
+                    datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+                )
+                os.makedirs(cache_run_dir[0], exist_ok=True)
                 
                 total = len(all_files)
                 print(f"DEBUG: Processing {total} files")
@@ -416,11 +423,10 @@ class SynthesisMixin:
                         if img is None:
                             print(f"DEBUG: Failed to create composite from video: {path}")
                             continue
-                        os.makedirs(config.TEMP_CLIP_DIR, exist_ok=True)
                         safe_name = re.sub(r'[^A-Za-z0-9_.-]+', '_', os.path.splitext(filename)[0])
-                        display_path = os.path.join(config.TEMP_CLIP_DIR, f"ai_composite_{i}_{safe_name}.png")
+                        display_path = os.path.join(cache_run_dir[0], f"{i:04d}_{safe_name}_composite.png")
                         cv2.imwrite(display_path, img)
-                        analysis_temp_paths.append(display_path)
+                        analysis_cache_paths[path] = display_path
                     else:
                         img = imread_with_japanese_path(path)
                         if img is None:
