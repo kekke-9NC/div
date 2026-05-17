@@ -59,6 +59,7 @@ class App(
         self.settings_file = os.path.join(base_path, "app_settings.json")
         self.masks_file = os.path.join(base_path, "app_masks.npz")
         self._migrate_legacy_settings_files()
+        self._clear_lighten_blend_cache()
 
         self.worker_thread = None
         self.rtsp_thread = None
@@ -95,6 +96,14 @@ class App(
                 print(f"マスクファイルを移動しました: {legacy_masks} -> {target_masks}")
         except Exception as e:
             print(f"設定ファイル移動の確認中にエラーが発生しました: {e}")
+
+    def _clear_lighten_blend_cache(self):
+        """Clear stale lighten-blend composites on app startup."""
+        try:
+            shutil.rmtree(config.LIGHTEN_BLEND_CACHE_DIR, ignore_errors=True)
+            os.makedirs(config.LIGHTEN_BLEND_CACHE_DIR, exist_ok=True)
+        except Exception as e:
+            print(f"比較明合成キャッシュの初期化中にエラーが発生しました: {e}")
 
     def check_admin_password(self):
         """Prompt for admin password and return True if correct."""

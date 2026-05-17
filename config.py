@@ -67,6 +67,7 @@ VELOCITY_CONSISTENCY_THRESHOLD = 2    # 飛行機判定用の速度一貫性チ�
 DEFAULT_METEOR_SAVE_PATH = os.path.join(EXE_DIR, "meteor")
 DEFAULT_NOT_METEOR_SAVE_PATH = os.path.join(EXE_DIR, "not_meteor")
 TEMP_CLIP_DIR = os.path.join(EXE_DIR, "temp_clips")
+LIGHTEN_BLEND_CACHE_DIR = os.path.join(EXE_DIR, "lighten_blend_cache")
 VIDEO_FOURCC = 'avc1'
 
 # --- Astrometry.net 関連 ---
@@ -173,4 +174,3 @@ DEFAULT_SAVE_FULL_DIFF = False
 DEFAULT_SAVE_COMPOSITE = True
 DEFAULT_SAVE_DETECTION_INFO = True
 DEFAULT_SAVE_FULL_VIDEO = False  # フルサイズ動画（トリミングなし）
-
