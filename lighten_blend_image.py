@@ -249,14 +249,14 @@ def create_lighten_blend_image(
     
     # 動画からのフレーム抽出設定（メモリ制限に基づく）
     # 1GBで処理できるフレーム数を計算
-    max_video_frames_in_memory = max(1, (MAX_MEMORY_BYTES // 2) // single_frame_memory)
-    
-    composite = first_frame.astype(np.float32)
-    processed = 1
+    composite = np.zeros((base_height, base_width, 3), dtype=np.float32)
+    processed = 0
+    # first_frame is only used to decide the output size. Every selected file,
+    # including the first video, is streamed through the loop below.
     
     # 最初のフレームにもマスクを適用
     if mask_generator is not None:
-        first_mask = mask_generator(first_frame)
+        first_mask = None
         if first_mask is not None:
             if first_mask.shape[0] != base_height or first_mask.shape[1] != base_width:
                 first_mask = cv2.resize(first_mask, (base_width, base_height), interpolation=cv2.INTER_NEAREST)
@@ -277,8 +277,10 @@ def create_lighten_blend_image(
             resized_mask = cv2.resize(bright_area_mask, (base_width, base_height), interpolation=cv2.INTER_NEAREST)
         else:
             resized_mask = bright_area_mask
+
+    del first_frame
     
-    for idx, file_path in enumerate(all_files[1:], start=2):
+    for idx, file_path in enumerate(all_files, start=1):
         try:
             file_ext = Path(file_path).suffix.lower()
             
@@ -320,31 +322,35 @@ def create_lighten_blend_image(
                     total_video_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
                     
                     # メモリを超えないようにステップを計算
-                    step = max(1, total_video_frames // max_video_frames_in_memory)
-                    
                     frame_idx = 0
                     video_frames_processed = 0
+                    video_mask = resized_mask
+                    video_mask_ready = False
                     
                     while True:
                         ret, frame = cap.read()
                         if not ret:
                             break
                         
-                        if frame_idx % step == 0:
+                        # Process every frame; memory stays bounded by the composite buffer plus one frame.
+                        if frame is not None:
                             if frame.shape[1] != base_width or frame.shape[0] != base_height:
                                 frame = cv2.resize(frame, (base_width, base_height))
                             
                             frame_float = frame.astype(np.float32)
                             
                             # 動的マスク生成（全画像処理）
-                            current_mask = resized_mask
-                            if mask_generator is not None:
+                            current_mask = video_mask
+                            if mask_generator is not None and not video_mask_ready:
                                 generated = mask_generator(frame)
                                 if generated is not None:
                                     if generated.shape[0] != base_height or generated.shape[1] != base_width:
                                         current_mask = cv2.resize(generated, (base_width, base_height), interpolation=cv2.INTER_NEAREST)
+                                        video_mask = current_mask
                                     else:
                                         current_mask = generated
+                                        video_mask = current_mask
+                            video_mask_ready = True
 
                             if current_mask is not None:
                                 # マスク領域（0の部分）は合成しない

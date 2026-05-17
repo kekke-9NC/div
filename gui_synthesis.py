@@ -314,6 +314,7 @@ class SynthesisMixin:
 
         detector_func = bright_area_detector.detect_meteors_with_boxes if is_meteor_mode else bright_area_detector.detect_bright_areas_with_boxes
         print(f"DEBUG: detector_func = {detector_func.__name__}")
+        analysis_temp_paths = []
         
         def start_synthesis_with_results(results):
             def run_ai_task():
@@ -357,6 +358,12 @@ class SynthesisMixin:
                     mask_generator=mask_generator,
                     inclusion_mode=is_meteor_mode
                 )
+                for temp_path in analysis_temp_paths:
+                    try:
+                        if os.path.exists(temp_path):
+                            os.remove(temp_path)
+                    except OSError:
+                        pass
                 self._handle_synthesis_result(success, output_path)
 
             threading.Thread(target=run_ai_task, daemon=True).start()
@@ -380,6 +387,7 @@ class SynthesisMixin:
                     elif os.path.isfile(path):
                         all_files.append(path)
                 all_files.sort()
+                _, video_ext = lighten_blend_image.get_supported_extensions()
                 
                 total = len(all_files)
                 print(f"DEBUG: Processing {total} files")
@@ -396,10 +404,28 @@ class SynthesisMixin:
                     self.append_log(f"解析中 ({i+1}/{total}): {filename}")
                     print(f"DEBUG: Analyzing file {i+1}/{total}: {filename}")
                     
-                    img = imread_with_japanese_path(path)
-                    if img is None:
-                        print(f"DEBUG: Failed to read image: {path}")
-                        continue
+                    display_path = path
+                    file_ext = Path(path).suffix.lower()
+                    if file_ext in video_ext:
+                        self.append_log(f"動画 {filename} から全フレーム比較明合成画像を作成中...")
+                        img = lighten_blend_video.create_composite_from_videos(
+                            [path],
+                            progress_callback=self.append_log,
+                            sample_interval=1
+                        )
+                        if img is None:
+                            print(f"DEBUG: Failed to create composite from video: {path}")
+                            continue
+                        os.makedirs(config.TEMP_CLIP_DIR, exist_ok=True)
+                        safe_name = re.sub(r'[^A-Za-z0-9_.-]+', '_', os.path.splitext(filename)[0])
+                        display_path = os.path.join(config.TEMP_CLIP_DIR, f"ai_composite_{i}_{safe_name}.png")
+                        cv2.imwrite(display_path, img)
+                        analysis_temp_paths.append(display_path)
+                    else:
+                        img = imread_with_japanese_path(path)
+                        if img is None:
+                            print(f"DEBUG: Failed to read image: {path}")
+                            continue
                     
                     def reanalyze_wrapper(image):
                         res = detector_func(image)
@@ -411,8 +437,8 @@ class SynthesisMixin:
                     print(f"DEBUG: Detection result for {filename}: {len(boxes)} boxes found")
                     
                     if preview_window.winfo_exists():
-                        self.after(0, lambda fn=filename, fp=path, b=boxes, cb=reanalyze_wrapper: 
-                                  preview_window.add_item(fn, fp, b, cb))
+                        add_preview_item = lambda fn=filename, fp=display_path, b=boxes, cb=reanalyze_wrapper: preview_window.add_item(fn, fp, b, cb)
+                        self.after(0, add_preview_item)
                 
                 self.append_log("全画像の解析が完了しました。検出結果を確認・修正してください。")
                 print("DEBUG: Analysis completed")
@@ -528,4 +554,3 @@ class SynthesisMixin:
     def create_timelapse_callback(self):
         """タイムラプス作成ボタンのコールバック。ドラッグ＆ドロップウィンドウを表示する。"""
         TimelapseDragDropWindow(self, self.append_log)
-

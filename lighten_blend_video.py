@@ -116,6 +116,8 @@ def create_composite_from_videos(
             count += 1
             
         cap.release()
+        if progress_callback:
+            progress_callback(f"動画比較明合成完了: {os.path.basename(vp)} ({count}フレーム読込, 間引き={sample_interval})")
         
     return composite_image
 
