@@ -1,0 +1,85 @@
+{
+    "periodic_scan_enabled": false,
+    "periodic_scan_directory": "",
+    "periodic_scan_interval": "60",
+    "periodic_time_limit_enabled": false,
+    "periodic_start_hour": "17",
+    "periodic_start_minute": "00",
+    "periodic_end_hour": "07",
+    "periodic_end_minute": "00",
+    "folder_paths": [],
+    "rtsp_urls": [],
+    "save_options": {
+        "video": true,
+        "cutout": true,
+        "full": false,
+        "composite": true,
+        "info": true,
+        "summary": true,
+        "full_video": false
+    },
+    "plate_solve_wcs_path": "",
+    "plate_solve_video_path": "",
+    "use_plate_solve": true,
+    "apply_mask": false,
+    "mask_path_or_status": "",
+    "concurrency": "4",
+    "interval": "1",
+    "duration": "1",
+    "meteor_save_path": "C:\\Users\\kekke\\Desktop\\my_app\\meteor",
+    "not_meteor_save_path": "C:\\Users\\kekke\\Desktop\\my_app\\not_meteor",
+    "has_mask_image": false,
+    "has_plate_solve_mask_image": false,
+    "summary_video_config": [
+        {
+            "name": "Composite Image",
+            "enabled": true,
+            "duration": 1.0
+        },
+        {
+            "name": "Annotated Image",
+            "enabled": false,
+            "duration": 2.0
+        },
+        {
+            "name": "Full Size Video",
+            "enabled": true
+        },
+        {
+            "name": "Zoom Sequence",
+            "enabled": false,
+            "duration": 2.0
+        },
+        {
+            "name": "Cutout Video",
+            "enabled": true
+        }
+    ],
+    "auto_time_updater_enabled": false,
+    "rtsp_preset": "cloudy",
+    "rtsp_fps": "25",
+    "rtsp_time_limit_enabled": false,
+    "rtsp_start_hour": "17",
+    "rtsp_start_minute": "00",
+    "plate_solve_mode": "local",
+    "rtsp_end_hour": "07",
+    "rtsp_end_minute": "00",
+    "astrometry_api_key": "",
+    "advanced_settings": {
+        "min_line_length": "25",
+        "border_size": "30",
+        "duplicate_thresh": "100",
+        "meteor_prob": "0.5",
+        "finer_window_sec": "4.0",
+        "finer_comp_step": "3",
+        "finer_min_length": "15",
+        "finer_padding_sec": "0.5",
+        "finer_cutout_size": "384",
+        "airplane_dur_thresh": "7",
+        "airplane_frame_thresh": "7",
+        "tracking_dist_thresh": "200",
+        "max_clip_dur": "2",
+        "clip_dur_sec": "3.0",
+        "cutout_size": "256"
+    }
+}

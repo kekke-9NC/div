@@ -643,7 +643,7 @@ class CameraControlMixin:
         self._set_camera_control_status("現在値を取得しました。")
 
     def _start_camera_control_preview(self):
-        if self._is_rtsp_preview_available():
+        if self._is_rtsp_shared_preview_available():
             self._set_camera_control_status("録画中のRTSP共有プレビューを表示します。")
             return
 

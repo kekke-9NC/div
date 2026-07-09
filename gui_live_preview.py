@@ -8,14 +8,18 @@ class LivePreviewMixin:
         self.live_preview_photo = None
         self.live_preview_stop_event = None
         self.live_preview_thread = None
+        self.live_preview_apply_dark_var = None
 
-    def _is_rtsp_preview_available(self):
+    def _is_rtsp_shared_preview_available(self):
         return bool(
             self.rtsp_urls
             and self.rtsp_thread
             and self.rtsp_thread.is_alive()
             and not self.cancel_flag.is_set()
         )
+
+    def _is_rtsp_preview_available(self):
+        return bool(self.rtsp_urls)
 
     def _update_live_preview_button_state(self):
         button = getattr(self, "live_preview_button", None)
@@ -25,7 +29,7 @@ class LivePreviewMixin:
 
     def open_rtsp_live_preview(self):
         if not self._is_rtsp_preview_available():
-            messagebox.showinfo("ライブプレビュー", "RTSP処理中のみライブプレビューを表示できます。")
+            messagebox.showinfo("ライブプレビュー", "RTSP URLを追加してからライブプレビューを開いてください。")
             self._update_live_preview_button_state()
             return
 
@@ -50,11 +54,26 @@ class LivePreviewMixin:
 
         controls = ttk.Frame(container)
         controls.pack(fill=tk.X, pady=(8, 0))
+        if self.live_preview_apply_dark_var is None:
+            default_dark = False
+            if hasattr(self, "apply_rtsp_dark_var"):
+                default_dark = bool(self.apply_rtsp_dark_var.get())
+            self.live_preview_apply_dark_var = tk.BooleanVar(value=default_dark)
+        ttk.Checkbutton(
+            controls,
+            text="ダーク適用して表示",
+            variable=self.live_preview_apply_dark_var,
+            command=self._on_live_preview_dark_changed,
+        ).pack(side=tk.LEFT)
         ttk.Button(controls, text="閉じる", command=self.close_rtsp_live_preview).pack(side=tk.RIGHT)
 
         win.protocol("WM_DELETE_WINDOW", self.close_rtsp_live_preview)
 
-        self._set_live_preview_status("録画中のRTSP映像を待機中...")
+        if self._is_rtsp_shared_preview_available():
+            self._set_live_preview_status("録画中のRTSP映像を待機中...")
+        else:
+            self._set_live_preview_status("RTSPに直接接続中...")
+            self._start_live_preview_direct_reader()
 
     def close_rtsp_live_preview(self):
         if self.live_preview_stop_event:
@@ -63,9 +82,54 @@ class LivePreviewMixin:
         self.live_preview_window = None
         self.live_preview_label = None
         self.live_preview_photo = None
+        self.live_preview_thread = None
         if win and win.winfo_exists():
             win.destroy()
         self._update_live_preview_button_state()
+
+    def _start_live_preview_direct_reader(self):
+        rtsp_url = self.rtsp_urls[0] if self.rtsp_urls else ""
+        if not rtsp_url:
+            self._set_live_preview_status("RTSP URLがありません。")
+            return
+        stop_event = self.live_preview_stop_event
+
+        def worker():
+            reconnect_wait = 2
+            while stop_event and not stop_event.is_set():
+                cap = None
+                try:
+                    cap = utils.create_rtsp_capture(rtsp_url)
+                    if not cap or not cap.isOpened():
+                        self.after(0, lambda: self._set_live_preview_status("RTSPに接続できません。再試行中..."))
+                        time.sleep(reconnect_wait)
+                        continue
+
+                    consecutive_failures = 0
+                    self.after(0, lambda: self._set_live_preview_status("RTSP映像を取得中..."))
+                    while stop_event and not stop_event.is_set():
+                        ok, frame = cap.read()
+                        if not ok or frame is None:
+                            consecutive_failures += 1
+                            if consecutive_failures >= 30:
+                                self.after(0, lambda: self._set_live_preview_status("RTSP映像が途切れました。再接続中..."))
+                                break
+                            time.sleep(0.1)
+                            continue
+                        consecutive_failures = 0
+                        if self.live_preview_stop_event is not stop_event:
+                            break
+                        self.handle_rtsp_live_preview_frame(frame)
+                except Exception as exc:
+                    message = f"プレビューエラー: {exc}"
+                    self.after(0, lambda message=message: self._set_live_preview_status(message))
+                    time.sleep(reconnect_wait)
+                finally:
+                    if cap is not None:
+                        cap.release()
+
+        self.live_preview_thread = threading.Thread(target=worker, daemon=True)
+        self.live_preview_thread.start()
 
     def handle_rtsp_live_preview_frame(self, frame):
         camera_handler = getattr(self, "handle_camera_control_shared_frame", None)
@@ -80,6 +144,7 @@ class LivePreviewMixin:
         if self.live_preview_stop_event.is_set():
             return
         try:
+            frame = self._apply_live_preview_dark(frame)
             frame = self._apply_live_preview_masks(frame)
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             height, width = rgb.shape[:2]
@@ -90,6 +155,37 @@ class LivePreviewMixin:
             self.after(0, self._show_live_preview_frame, rgb)
         except Exception as e:
             print(f"ライブプレビューフレーム表示エラー: {e}")
+
+    def _on_live_preview_dark_changed(self):
+        enabled = bool(self.live_preview_apply_dark_var and self.live_preview_apply_dark_var.get())
+        if enabled and getattr(self, "rtsp_dark_frame", None) is None:
+            if not self.load_rtsp_dark_frame():
+                self.live_preview_apply_dark_var.set(False)
+                messagebox.showwarning("ライブプレビュー", "適用できるダークフレームがありません。先に「ダークを撮る」を実行してください。")
+                enabled = False
+        state = "ON" if enabled else "OFF"
+        try:
+            self.append_log(f"ライブプレビューダーク表示: {state}")
+        except Exception:
+            pass
+
+    def _apply_live_preview_dark(self, frame):
+        if not (self.live_preview_apply_dark_var and self.live_preview_apply_dark_var.get()):
+            return frame
+        if getattr(self, "rtsp_dark_frame", None) is None and not self.load_rtsp_dark_frame():
+            return frame
+        try:
+            dark = self.rtsp_dark_frame
+            if dark is None:
+                return frame
+            if dark.shape[:2] != frame.shape[:2]:
+                dark = cv2.resize(dark, (frame.shape[1], frame.shape[0]))
+            if dark.dtype != np.uint8:
+                dark = np.clip(dark, 0, 255).astype(np.uint8)
+            return cv2.subtract(frame, dark)
+        except Exception as e:
+            print(f"ライブプレビューダーク適用エラー: {e}")
+            return frame
 
     def _apply_live_preview_masks(self, frame):
         masked = frame.copy()

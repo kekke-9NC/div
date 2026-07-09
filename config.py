@@ -3,6 +3,9 @@
 import os
 import sys
 
+IS_MAC = sys.platform == "darwin"
+IS_WINDOWS = sys.platform == "win32"
+
 # --- Determine Base Paths for Portable/Frozen execution ---
 if getattr(sys, 'frozen', False):
     # Running as compiled exe
@@ -11,13 +14,8 @@ if getattr(sys, 'frozen', False):
 else:
     # Running as script (Development)
     SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-    # Assuming standard structure: my_app/div/config.py
-    # So base dir for resources/output should be parent of div
-    PARENT_DIR = os.path.dirname(SCRIPT_DIR)
-    
-    # Decide where base ref is. Original code was hardcoded to C:\Users\kekke\Desktop\my_app
-    # calculated PARENT_DIR should match that.
-    EXE_DIR = PARENT_DIR 
+    # Keep generated working folders next to the source files on macOS/dev runs.
+    EXE_DIR = SCRIPT_DIR
 
 # Resolve model path relative to this file (portable/exe-friendly).
 _MODEL_CANDIDATES = [
@@ -83,7 +81,7 @@ ASTROMETRY_INTERVAL = 10   # Astrometry.netのソルブ結果確認間隔（秒�
 ASTROMETRY_RATE_LIMIT_WAIT = 20 # Astrometry.net APIのレートリミットのための待機時間（秒）
 
 # --- Local Plate Solve (WSL solve-field) 関連 ---
-LOCAL_SOLVER_ENABLED = True           # ローカルソルバーを有効化（WSLが利用可能な場合）
+LOCAL_SOLVER_ENABLED = IS_WINDOWS     # Windows/WSL以外ではAstrometry.net APIを既定にする
 LOCAL_SOLVER_INDEX_DIR = "/usr/share/astrometry/data"  # WSL内のインデックスファイルパス
 
 # --- 天体カタログ関連 ---
@@ -105,7 +103,7 @@ RTSP_SCALE_UPPER = 100    # RTSP用視野角推定の上限（度）- 対角約9
 # --- RTSP最適化設定 ---
 RTSP_USE_TCP = True  # TCPトランスポートを使用（パケット損失防止）
 RTSP_BUFFER_SIZE = 3  # VideoCaptureバッファサイズ（フレーム数、遅延低減のため最小値）
-RTSP_USE_NVIDIA_HWACCEL = True  # NVIDIA GPU (RTX/GTX) のハードウェアデコードを使用
+RTSP_USE_NVIDIA_HWACCEL = not IS_MAC  # NVIDIA GPU (RTX/GTX) のハードウェアデコードを使用
 RTSP_PARALLEL_ENABLED = True  # RTSP並列処理の有効/無効
 RTSP_PARALLEL_WORKERS = None  # 並列ワーカー数 (None=CPU数自動, 数値=固定)
 
@@ -148,7 +146,7 @@ MASK_PREVIEW_SIZE = (100, 100) # Tuple of ints
 # --- AI / VLM model selection ---
 AI_VLM_BACKEND_LOCAL_QWEN3_VL_4B = "local_qwen3_vl_4b"
 AI_VLM_BACKEND_LM_STUDIO_QWEN35_2B = "lmstudio_qwen3_5_2b"
-DEFAULT_AI_VLM_BACKEND = AI_VLM_BACKEND_LOCAL_QWEN3_VL_4B
+DEFAULT_AI_VLM_BACKEND = AI_VLM_BACKEND_LM_STUDIO_QWEN35_2B if IS_MAC else AI_VLM_BACKEND_LOCAL_QWEN3_VL_4B
 DEFAULT_LM_STUDIO_VLM_URL = "http://localhost:1234/v1"
 DEFAULT_LM_STUDIO_VLM_MODEL_ID = "qwen3.5-2b"
 DEFAULT_LM_STUDIO_VLM_API_KEY = ""
