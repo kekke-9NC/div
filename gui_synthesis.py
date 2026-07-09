@@ -1,8 +1,73 @@
 from gui_common import *
 from gui_dialogs import ProcessingOptionDialog, TimelapseDragDropWindow
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 class SynthesisMixin:
+    def _run_synthesis_task_async(self, task, *, output_path, item_label, cleanup=None):
+        """Run a CPU/IO-heavy synthesis task without ever touching Tk from its worker.
+
+        Tcl/Tk (especially on macOS) is not thread-safe.  A number of synthesis
+        paths used to call ``append_log`` and ``messagebox`` directly from their
+        worker thread, which could terminate the application instead of merely
+        reporting a failed conversion.  The worker now communicates through a
+        queue and this method performs every UI operation on the Tk thread.
+        """
+        events = queue.Queue()
+        completed = {"value": False}
+
+        def poll_events():
+            try:
+                while True:
+                    event_type, *payload = events.get_nowait()
+                    if event_type == "log":
+                        self.append_log(payload[0])
+                    elif event_type == "done":
+                        completed["value"] = True
+                        success = payload[0]
+                        if success:
+                            messagebox.showinfo(
+                                "完了",
+                                f"{item_label}の作成が完了しました。\n保存先: {output_path}",
+                                parent=self,
+                            )
+                            self.append_log(f"{item_label}の作成が完了しました: {output_path}")
+                        else:
+                            messagebox.showerror(
+                                "エラー",
+                                f"{item_label}の作成に失敗しました。ログを確認してください。",
+                                parent=self,
+                            )
+                            self.append_log(f"{item_label}の作成に失敗しました。")
+                    elif event_type == "error":
+                        completed["value"] = True
+                        self.append_log(f"{item_label}の作成中にエラーが発生しました: {payload[0]}")
+                        messagebox.showerror(
+                            "エラー", f"{item_label}の作成中にエラーが発生しました。\n{payload[0]}", parent=self
+                        )
+            except queue.Empty:
+                pass
+            if not completed["value"]:
+                self.after(50, poll_events)
+
+        def run_task():
+            try:
+                success = bool(task(lambda message: events.put(("log", message))))
+                events.put(("done", success))
+            except Exception as exc:
+                import traceback
+                traceback.print_exc()
+                events.put(("error", str(exc)))
+            finally:
+                if cleanup is not None:
+                    try:
+                        cleanup()
+                    except Exception:
+                        pass
+
+        self.after(50, poll_events)
+        threading.Thread(target=run_task, daemon=True).start()
+
     def create_lighten_blend_video_callback(self):
         """Callback for the 'Create Lighten Blend Video' button."""
         initial_dir = self.meteor_save_path_var.get()
@@ -48,20 +113,15 @@ class SynthesisMixin:
         mode = dialog.result  # 0:通常, 1:明るいエリアマスク, 2:流星のみ
         # mode=1(明るいエリア)は現状 mode=2(流星のみ)と同じ扱いにする。
         if mode == 0:
-            def run_task():
-                success = lighten_blend_video.create_lighten_blend_video(
+            self._run_synthesis_task_async(
+                lambda progress_callback: lighten_blend_video.create_lighten_blend_video(
                     list(video_files),
                     output_path,
-                    progress_callback=self.append_log
-                )
-                if success:
-                    messagebox.showinfo("完了", f"比較明合成動画の作成が完了しました。\\n保存先: {output_path}")
-                    self.append_log(f"比較明合成動画の作成が完了しました: {output_path}")
-                else:
-                    messagebox.showerror("エラー", "比較明合成動画の作成に失敗しました。ログを確認してください。")
-                    self.append_log("比較明合成動画の作成に失敗しました。")
-            
-            threading.Thread(target=run_task, daemon=True).start()
+                    progress_callback=progress_callback,
+                ),
+                output_path=output_path,
+                item_label="比較明合成動画",
+            )
         else:
             self._create_lighten_blend_video_with_meteor_detection(video_files, output_path)
 
@@ -75,14 +135,18 @@ class SynthesisMixin:
         
         # 動画ごとの一時ファイルパスを保存（画像はメモリに保持しない）
         video_composites = {}  # {video_path: {'temp_path': str, 'filename': str, 'shape': (h, w)}}
-        
-        def run_prep_task():
-            if not self._ensure_ai_model_loaded(bright_area_detector):
+        prep_events = queue.Queue()
+        prep_finished = {"value": False}
+
+        def _run_prep_task():
+            worker_log = lambda message: prep_events.put(("log", message))
+            if not self._ensure_ai_model_loaded(bright_area_detector, log_callback=worker_log):
+                prep_events.put(("error", "AIモデルのロードまたは接続確認に失敗しました。"))
                 return
 
             # Step 1: 各動画から個別に比較明合成画像を作成
             for i, vp in enumerate(video_files):
-                self.append_log(f"動画 {i+1}/{len(video_files)} から合成画像を作成中: {os.path.basename(vp)}")
+                worker_log(f"動画 {i+1}/{len(video_files)} から合成画像を作成中: {os.path.basename(vp)}")
                 
                 composite_image = lighten_blend_video.create_composite_from_videos(
                     [vp],  # 1つの動画のみ
@@ -106,13 +170,13 @@ class SynthesisMixin:
                     del composite_image
                     gc.collect()
                 else:
-                    self.append_log(f"警告: 動画から合成画像を作成できませんでした: {os.path.basename(vp)}")
+                    worker_log(f"警告: 動画から合成画像を作成できませんでした: {os.path.basename(vp)}")
             
             if not video_composites:
-                messagebox.showerror("エラー", "有効な合成画像を作成できませんでした。")
+                prep_events.put(("error", "有効な合成画像を作成できませんでした。"))
                 return
             
-            self.append_log(f"{len(video_composites)}個の合成画像を作成しました。")
+            worker_log(f"{len(video_composites)}個の合成画像を作成しました。")
             
             # メインスレッドでプレビューウィンドウを開く
             def open_preview():
@@ -156,83 +220,135 @@ class SynthesisMixin:
                             return
                     
                     # 動画ごとのマスクを適用して動画作成
-                    def run_video_task():
-                        self.append_log("動画ごとのマスクを適用して動画を作成中...")
-                        success = lighten_blend_video.create_lighten_blend_video(
+                    def video_synthesis_task(progress_callback):
+                        progress_callback("動画ごとのマスクを適用して動画を作成中...")
+                        return lighten_blend_video.create_lighten_blend_video(
                             list(video_files),
                             output_path,
-                            progress_callback=self.append_log,
+                            progress_callback=progress_callback,
                             per_video_masks=per_video_masks if per_video_masks else None
                         )
-                        if success:
-                            messagebox.showinfo("完了", f"比較明合成動画の作成が完了しました。\\n保存先: {output_path}")
-                            self.append_log(f"比較明合成動画の作成が完了しました: {output_path}")
-                        else:
-                            messagebox.showerror("エラー", "比較明合成動画の作成に失敗しました。ログを確認してください。")
-                            self.append_log("比較明合成動画の作成に失敗しました。")
-                        
-                        # 一時ファイルのクリーンアップ
+
+                    def cleanup_temp_files():
                         for data in video_composites.values():
                             try:
                                 if os.path.exists(data['temp_path']):
                                     os.remove(data['temp_path'])
                             except:
                                 pass
-                    
-                    threading.Thread(target=run_video_task, daemon=True).start()
+
+                    self._run_synthesis_task_async(
+                        video_synthesis_task,
+                        output_path=output_path,
+                        item_label="比較明合成動画",
+                        cleanup=cleanup_temp_files,
+                    )
                 
                 # プレビューウィンドウ作成
                 preview_window = detection_preview.DetectionPreviewWindow(
                     self, start_video_synthesis_with_results
                 )
+                detection_events = queue.Queue()
+                detection_finished = {"value": False}
+
+                def poll_detection_events():
+                    try:
+                        while True:
+                            event_type, *payload = detection_events.get_nowait()
+                            if event_type == "log":
+                                self.append_log(payload[0])
+                            elif event_type == "start" and preview_window.winfo_exists():
+                                preview_window.start_analysis(payload[0])
+                            elif event_type == "item" and preview_window.winfo_exists():
+                                filename, temp_path, boxes = payload
+                                preview_window.add_item(
+                                    filename,
+                                    temp_path,
+                                    boxes,
+                                    lambda image: bright_area_detector.detect_meteors_with_boxes(image) or (None, []),
+                                )
+                            elif event_type == "done":
+                                detection_finished["value"] = True
+                                if preview_window.winfo_exists():
+                                    preview_window.finalize_analysis()
+                            elif event_type == "error":
+                                detection_finished["value"] = True
+                                self.append_log(f"AI検出中にエラーが発生しました: {payload[0]}")
+                                if preview_window.winfo_exists():
+                                    preview_window.destroy()
+                                messagebox.showerror("AI解析エラー", payload[0], parent=self)
+                    except queue.Empty:
+                        pass
+                    if not detection_finished["value"]:
+                        self.after(50, poll_detection_events)
                 
                 # 各動画の合成画像に対して検出実行
                 def run_detection():
-                    total = len(video_composites)
-                    self.append_log(f"AIによる流星検出を開始します... ({total}個の画像)")
-                    
-                    if preview_window.winfo_exists():
-                        self.after(0, lambda: preview_window.start_analysis(total))
-                    
-                    for i, (vp, data) in enumerate(video_composites.items()):
-                        if not preview_window.winfo_exists():
-                            self.append_log("検出が中断されました。")
-                            return
-                        
-                        self.append_log(f"検出中 ({i+1}/{total}): {os.path.basename(vp)}")
-                        
-                        # 一時ファイルから画像を読み込み（メモリ節約）
-                        composite_img = imread_with_japanese_path(data['temp_path'])
-                        if composite_img is None:
-                            continue
-                        
-                        res = bright_area_detector.detect_meteors_with_boxes(
-                            composite_img,
-                            progress_callback=None  # 個別ログ抑制
-                        )
-                        boxes = res[1] if res else []
-                        
-                        # 検出後すぐにメモリ解放
-                        del composite_img
-                        gc.collect()
-                        
-                        def reanalyze_wrapper(image):
-                            return bright_area_detector.detect_meteors_with_boxes(image)
-                        
-                        if preview_window.winfo_exists():
+                    try:
+                        total = len(video_composites)
+                        detection_events.put(("log", f"AIによる流星検出を開始します... ({total}個の画像)"))
+                        detection_events.put(("start", total))
+
+                        for i, (vp, data) in enumerate(video_composites.items()):
+                            detection_events.put(("log", f"検出中 ({i+1}/{total}): {os.path.basename(vp)}"))
+
+                            # 一時ファイルから画像を読み込み（メモリ節約）
+                            composite_img = imread_with_japanese_path(data['temp_path'])
+                            if composite_img is None:
+                                detection_events.put(("log", f"警告: 画像を読み込めませんでした: {data['filename']}"))
+                                continue
+
+                            res = bright_area_detector.detect_meteors_with_boxes(
+                                composite_img,
+                                progress_callback=None,  # 個別ログ抑制
+                            )
+                            boxes = res[1] if res else []
+                            del composite_img
+                            gc.collect()
+
                             filename = data['filename']
                             temp_path = data['temp_path']
-                            self.after(0, lambda fn=filename, fp=temp_path, b=boxes, cb=reanalyze_wrapper:
-                                preview_window.add_item(fn, fp, b, cb))
-                    
-                    if preview_window.winfo_exists():
-                        self.after(0, preview_window.finalize_analysis)
-                    self.append_log("全画像の検出が完了しました。結果を確認してください。")
+                            detection_events.put(("item", filename, temp_path, boxes))
+
+                        detection_events.put(("log", "全画像の検出が完了しました。結果を確認してください。"))
+                        detection_events.put(("done",))
+                    except Exception as exc:
+                        import traceback
+                        traceback.print_exc()
+                        detection_events.put(("error", str(exc)))
                 
+                self.after(50, poll_detection_events)
                 threading.Thread(target=run_detection, daemon=True).start()
             
-            self.after(0, open_preview)
+            prep_events.put(("ready", open_preview))
+
+        def run_prep_task():
+            try:
+                _run_prep_task()
+            except Exception as exc:
+                import traceback
+                traceback.print_exc()
+                prep_events.put(("error", str(exc)))
         
+        def poll_prep_events():
+            try:
+                while True:
+                    event_type, *payload = prep_events.get_nowait()
+                    if event_type == "log":
+                        self.append_log(payload[0])
+                    elif event_type == "error":
+                        prep_finished["value"] = True
+                        self.append_log(f"AI解析準備中にエラーが発生しました: {payload[0]}")
+                        messagebox.showerror("AI解析エラー", payload[0], parent=self)
+                    elif event_type == "ready":
+                        prep_finished["value"] = True
+                        payload[0]()
+            except queue.Empty:
+                pass
+            if not prep_finished["value"]:
+                self.after(50, poll_prep_events)
+
+        self.after(50, poll_prep_events)
         threading.Thread(target=run_prep_task, daemon=True).start()
 
     def create_lighten_blend_image_callback(self):
@@ -294,16 +410,15 @@ class SynthesisMixin:
         print(f"DEBUG: ProcessingOptionDialog result: mode={mode}, is_ai_mode={is_ai_mode}, is_meteor_mode={is_meteor_mode}")
 
         if not is_ai_mode:
-            def run_normal_task():
-                self.append_log(f"比較明合成画像の作成を開始します... ({len(file_paths)}個の要素)")
-                success = lighten_blend_image.create_lighten_blend_image(
+            self._run_synthesis_task_async(
+                lambda progress_callback: lighten_blend_image.create_lighten_blend_image(
                     list(file_paths),
                     output_path,
-                    progress_callback=self.append_log
-                )
-                self._handle_synthesis_result(success, output_path)
-            
-            threading.Thread(target=run_normal_task, daemon=True).start()
+                    progress_callback=progress_callback,
+                ),
+                output_path=output_path,
+                item_label="比較明合成画像",
+            )
             return
 
         # AI解析モードの場合
@@ -318,8 +433,8 @@ class SynthesisMixin:
         cache_run_dir = [None]
         
         def start_synthesis_with_results(results):
-            def run_ai_task():
-                self.append_log("AI解析結果に基づく合成処理を開始します...")
+            def synthesis_task(progress_callback):
+                progress_callback("AI解析結果に基づく合成処理を開始します...")
                 # Mask generation must follow the same expanded file order as synthesis.
                 
                 all_files = []
@@ -360,28 +475,76 @@ class SynthesisMixin:
                 success = lighten_blend_image.create_lighten_blend_image(
                     synthesis_files,
                     output_path,
-                    progress_callback=self.append_log,
+                    progress_callback=progress_callback,
                     mask_generator=mask_generator,
                     inclusion_mode=is_meteor_mode
                 )
-                if cache_run_dir[0]:
-                    shutil.rmtree(cache_run_dir[0], ignore_errors=True)
-                self._handle_synthesis_result(success, output_path)
+                return success
 
-            threading.Thread(target=run_ai_task, daemon=True).start()
+            self._run_synthesis_task_async(
+                synthesis_task,
+                output_path=output_path,
+                item_label="比較明合成画像",
+                cleanup=lambda: cache_run_dir[0] and shutil.rmtree(cache_run_dir[0], ignore_errors=True),
+            )
 
         preview_window = detection_preview.DetectionPreviewWindow(self, start_synthesis_with_results)
-        
+        ai_config = {
+            "backend": self.ai_vlm_backend_var.get(),
+            "lm_studio_url": self.lm_studio_vlm_url_var.get(),
+            "lm_studio_model_id": self.lm_studio_vlm_model_var.get(),
+        }
+        ui_events = queue.Queue()
+        analysis_finished = {"value": False}
+
+        def poll_analysis_events():
+            """解析ワーカーの結果を、Tkメインスレッドでだけ表示する。"""
+            try:
+                while True:
+                    event_type, *payload = ui_events.get_nowait()
+                    if event_type == "log":
+                        self.append_log(payload[0])
+                    elif event_type == "start" and preview_window.winfo_exists():
+                        preview_window.start_analysis(payload[0])
+                    elif event_type == "item" and preview_window.winfo_exists():
+                        path, filename, display_path, boxes = payload
+                        analysis_cache_paths[path] = display_path
+                        preview_window.add_item(
+                            filename, display_path, boxes,
+                            lambda image: detector_func(image) or (None, []),
+                        )
+                    elif event_type == "done":
+                        analysis_finished["value"] = True
+                        if preview_window.winfo_exists():
+                            preview_window.finalize_analysis()
+                            messagebox.showinfo(
+                                "解析完了",
+                                "全画像の解析が完了しました。\n未検出の画像が上部に表示されています。\n"
+                                "プレビュー画面で結果を確認し、「修正を確定して合成を開始」ボタンを押してください。",
+                                parent=self,
+                            )
+                    elif event_type == "error":
+                        analysis_finished["value"] = True
+                        self.append_log(f"AI解析中にエラーが発生しました: {payload[0]}")
+                        if preview_window.winfo_exists():
+                            preview_window.destroy()
+                        messagebox.showerror("AI解析エラー", payload[0], parent=self)
+            except queue.Empty:
+                pass
+            if not analysis_finished["value"] and preview_window.winfo_exists():
+                self.after(50, poll_analysis_events)
+
         def run_analysis_task():
             try:
-                print("DEBUG: run_analysis_task started")
-                self.append_log("AIによる画像解析を開始します...")
-
-                if not self._ensure_ai_model_loaded(bright_area_detector):
-                    if preview_window.winfo_exists():
-                        self.after(0, preview_window.destroy)
+                ui_events.put(("log", "AIによる画像解析を開始します..."))
+                if not self._ensure_ai_model_loaded(
+                    bright_area_detector,
+                    ai_config,
+                    log_callback=lambda message: ui_events.put(("log", message)),
+                ):
+                    ui_events.put(("error", "AIモデルのロードまたは接続確認に失敗しました。"))
                     return
-                
+
                 all_files = []
                 for path in file_paths:
                     if os.path.isdir(path):
@@ -395,71 +558,61 @@ class SynthesisMixin:
                     datetime.now().strftime("%Y%m%d_%H%M%S_%f")
                 )
                 os.makedirs(cache_run_dir[0], exist_ok=True)
-                
-                total = len(all_files)
-                print(f"DEBUG: Processing {total} files")
-                
-                if preview_window.winfo_exists():
-                    self.after(0, lambda: preview_window.start_analysis(total))
-                
-                for i, path in enumerate(all_files):
-                    if not preview_window.winfo_exists():
-                        self.append_log("解析が中断されました。")
-                        return
-                    
+
+                # 動画はまず比較明合成画像へ変換し、その後のVLM判定を並列化する。
+                prepared_items = []
+                for index, path in enumerate(all_files):
                     filename = os.path.basename(path)
-                    self.append_log(f"解析中 ({i+1}/{total}): {filename}")
-                    print(f"DEBUG: Analyzing file {i+1}/{total}: {filename}")
-                    
                     display_path = path
-                    file_ext = Path(path).suffix.lower()
-                    if file_ext in video_ext:
-                        self.append_log(f"動画 {filename} から全フレーム比較明合成画像を作成中...")
-                        img = lighten_blend_video.create_composite_from_videos(
-                            [path],
-                            progress_callback=self.append_log,
-                            sample_interval=1
+                    if Path(path).suffix.lower() in video_ext:
+                        ui_events.put(("log", f"動画から比較明合成画像を作成中: {filename}"))
+                        image = lighten_blend_video.create_composite_from_videos(
+                            [path], progress_callback=None, sample_interval=1
                         )
-                        if img is None:
-                            print(f"DEBUG: Failed to create composite from video: {path}")
+                        if image is None:
+                            ui_events.put(("log", f"警告: 合成画像を作成できませんでした: {filename}"))
                             continue
                         safe_name = re.sub(r'[^A-Za-z0-9_.-]+', '_', os.path.splitext(filename)[0])
-                        display_path = os.path.join(cache_run_dir[0], f"{i:04d}_{safe_name}_composite.png")
-                        cv2.imwrite(display_path, img)
-                        analysis_cache_paths[path] = display_path
-                    else:
-                        img = imread_with_japanese_path(path)
-                        if img is None:
-                            print(f"DEBUG: Failed to read image: {path}")
-                            continue
-                    
-                    def reanalyze_wrapper(image):
-                        res = detector_func(image)
-                        return res if res else (None, [])
-                    
-                    print(f"DEBUG: Calling detector_func for {filename}")
-                    res = detector_func(img)
-                    boxes = res[1] if res else []
-                    print(f"DEBUG: Detection result for {filename}: {len(boxes)} boxes found")
-                    
-                    if preview_window.winfo_exists():
-                        add_preview_item = lambda fn=filename, fp=display_path, b=boxes, cb=reanalyze_wrapper: preview_window.add_item(fn, fp, b, cb)
-                        self.after(0, add_preview_item)
-                
-                self.append_log("全画像の解析が完了しました。検出結果を確認・修正してください。")
-                print("DEBUG: Analysis completed")
-                
-                if preview_window.winfo_exists():
-                     # 完了処理（未検出を先頭になど）
-                     self.after(0, preview_window.finalize_analysis)
-                     messagebox.showinfo("解析完了", "全画像の解析が完了しました。\n未検出の画像が上部に表示されています。\nプレビュー画面で結果を確認し、「修正を確定して合成を開始」ボタンを押してください。")
-            except Exception as e:
-                print(f"ERROR: run_analysis_task failed with exception: {e}")
+                        display_path = os.path.join(cache_run_dir[0], f"{index:04d}_{safe_name}_composite.png")
+                        cv2.imwrite(display_path, image)
+                    prepared_items.append((path, filename, display_path))
+
+                if not prepared_items:
+                    ui_events.put(("error", "解析できる画像または動画がありません。"))
+                    return
+
+                uses_local_model = bool(getattr(bright_area_detector, "uses_local_model", lambda: True)())
+                max_workers = 1 if uses_local_model else min(
+                    config.AI_VLM_MAX_PARALLEL_REQUESTS, len(prepared_items)
+                )
+                ui_events.put(("log", f"VLM解析を並列数 {max_workers} で開始します。"))
+                ui_events.put(("start", len(prepared_items)))
+
+                def analyze_item(item):
+                    path, filename, display_path = item
+                    image = imread_with_japanese_path(display_path)
+                    if image is None:
+                        raise RuntimeError(f"画像を読み込めませんでした: {filename}")
+                    result = detector_func(image)
+                    boxes = result[1] if result else []
+                    return path, filename, display_path, boxes
+
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    futures = [executor.submit(analyze_item, item) for item in prepared_items]
+                    for future in as_completed(futures):
+                        try:
+                            ui_events.put(("item", *future.result()))
+                        except Exception as exc:
+                            ui_events.put(("log", f"警告: 個別解析に失敗しました: {exc}"))
+
+                ui_events.put(("log", "全画像の解析が完了しました。検出結果を確認・修正してください。"))
+                ui_events.put(("done",))
+            except Exception as exc:
                 import traceback
                 traceback.print_exc()
-                self.append_log(f"AI解析中にエラーが発生しました: {e}")
+                ui_events.put(("error", str(exc)))
 
-        print("DEBUG: Starting run_analysis_task thread")
+        self.after(50, poll_analysis_events)
         threading.Thread(target=run_analysis_task, daemon=True).start()
 
     def _handle_synthesis_result(self, success, output_path):
@@ -470,18 +623,24 @@ class SynthesisMixin:
             messagebox.showerror("エラー", "比較明合成画像の作成に失敗しました。ログを確認してください。")
             self.append_log("比較明合成画像の作成に失敗しました。")
 
-    def _ensure_ai_model_loaded(self, detector_module) -> bool:
+    def _ensure_ai_model_loaded(self, detector_module, ai_config=None, log_callback=None) -> bool:
         """AI合成前に内部LLMのロード完了を保証する。"""
-        self.append_log("AIモデルのロードを確認中...")
+        log = log_callback or self.append_log
+        log("AIモデルのロードを確認中...")
         if hasattr(detector_module, "configure_ai_backend"):
+            selected_config = ai_config or {
+                "backend": self.ai_vlm_backend_var.get(),
+                "lm_studio_url": self.lm_studio_vlm_url_var.get(),
+                "lm_studio_model_id": self.lm_studio_vlm_model_var.get(),
+            }
             detector_module.configure_ai_backend(
-                backend=self.ai_vlm_backend_var.get(),
-                lm_studio_url=self.lm_studio_vlm_url_var.get(),
-                lm_studio_model_id=self.lm_studio_vlm_model_var.get(),
+                backend=selected_config["backend"],
+                lm_studio_url=selected_config["lm_studio_url"],
+                lm_studio_model_id=selected_config["lm_studio_model_id"],
                 lm_studio_api_key="",
             )
             if hasattr(detector_module, "get_active_model_name"):
-                self.append_log(f"使用AIモデル: {detector_module.get_active_model_name()}")
+                log(f"使用AIモデル: {detector_module.get_active_model_name()}")
 
         uses_local_model = True
         uses_local_model_fn = getattr(detector_module, "uses_local_model", None)
@@ -489,14 +648,19 @@ class SynthesisMixin:
             uses_local_model = bool(uses_local_model_fn())
 
         if not uses_local_model:
-            connected, err = detector_module.check_vlm_connection(status_callback=self.append_log, force=True)
+            try:
+                load_result = detector_module.load_selected_ai_model(status_callback=log)
+                log(f"AIモデルを準備しました: {load_result}")
+            except Exception as exc:
+                log(f"LM Studioモデルのロードに失敗しました: {exc}")
+                return False
+            connected, err = detector_module.check_vlm_connection(status_callback=log, force=True)
             if connected:
-                self.append_log("AIモデルの接続確認が完了しました。")
+                log("AIモデルの接続確認が完了しました。")
                 return True
 
             error_message = f"AIモデルの接続確認に失敗しました: {err}"
-            self.append_log(error_message)
-            self.after(0, lambda msg=error_message: messagebox.showerror("エラー", msg, parent=self))
+            log(error_message)
             return False
 
         local_model_dir = getattr(detector_module, "LOCAL_MODEL_DIR", "./quantized_model")
@@ -508,12 +672,18 @@ class SynthesisMixin:
             else:
                 has_local_model = os.path.isdir(local_model_dir)
         except Exception as e:
-            self.append_log(f"ローカルモデル状態の確認中にエラー: {e}")
+            log(f"ローカルモデル状態の確認中にエラー: {e}")
             has_local_model = os.path.isdir(local_model_dir)
 
         if not has_local_model:
-            self.append_log(f"ローカルLLMモデルが見つかりません: {local_model_dir}")
-            self.append_log("必要なディスク容量を見積もり中...")
+            log(f"ローカルLLMモデルが見つかりません: {local_model_dir}")
+            # A worker must never open a Tk dialog.  Synthesis calls this method
+            # from a worker, so let the caller show a normal error instead.
+            if threading.current_thread() is not threading.main_thread():
+                log("ローカルモデルを先に「Load Model」で読み込んでから再実行してください。")
+                return False
+
+            log("必要なディスク容量を見積もり中...")
             req = self._estimate_llm_storage_requirements(detector_module)
 
             info_lines = [
@@ -537,24 +707,23 @@ class SynthesisMixin:
             )
 
             if not should_download:
-                self.append_log("ユーザーがモデルダウンロードをキャンセルしました。")
+                log("ユーザーがモデルダウンロードをキャンセルしました。")
                 return False
 
-            self.append_log("モデルダウンロードを開始します。")
-            mirror_stream = _StderrProgressStream(self.append_log, passthrough=sys.stderr)
+            log("モデルダウンロードを開始します。")
+            mirror_stream = _StderrProgressStream(log, passthrough=sys.stderr)
             with contextlib.redirect_stderr(mirror_stream), contextlib.redirect_stdout(mirror_stream):
-                connected, err = detector_module.check_vlm_connection(status_callback=self.append_log)
+                connected, err = detector_module.check_vlm_connection(status_callback=log)
             mirror_stream.flush()
         else:
-            connected, err = detector_module.check_vlm_connection(status_callback=self.append_log)
+            connected, err = detector_module.check_vlm_connection(status_callback=log)
 
         if connected:
-            self.append_log("AIモデルのロードが完了しました。")
+            log("AIモデルのロードが完了しました。")
             return True
 
         error_message = f"AIモデルのロードに失敗しました: {err}"
-        self.append_log(error_message)
-        self.after(0, lambda msg=error_message: messagebox.showerror("エラー", msg, parent=self))
+        log(error_message)
         return False
 
     def create_timelapse_callback(self):
