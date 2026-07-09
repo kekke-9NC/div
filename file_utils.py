@@ -622,7 +622,8 @@ def save_rtsp_video_segments(
     segment_duration: int = config.RTSP_SEGMENT_DURATION, cancel_flag: Optional[threading.Event] = None,
     time_limit_enabled: bool = False, start_hour: int = 17, start_minute: int = 0,
     end_hour: int = 7, end_minute: int = 0,
-    preview_callback: Optional[Callable[[np.ndarray], None]] = None
+    preview_callback: Optional[Callable[[np.ndarray], None]] = None,
+    dark_frame: Optional[np.ndarray] = None
 ):
     """
     RTSPストリームから設定されたフレーム数ごとに動画ファイルを保存する。
@@ -633,7 +634,7 @@ def save_rtsp_video_segments(
     - 切断検出時は即座に再接続（無限リトライ）
     """
     # NVIDIAハードウェアデコードが有効ならFFmpegモードを使用
-    if config.RTSP_USE_NVIDIA_HWACCEL:
+    if config.RTSP_USE_NVIDIA_HWACCEL and dark_frame is None:
         import shutil
         if shutil.which("ffmpeg"):
             return save_rtsp_video_segments_ffmpeg(
@@ -652,6 +653,22 @@ def save_rtsp_video_segments(
     height = 0
     fps = config.RTSP_FPS
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    dark_frame_cache = None
+    dark_frame_cache_shape = None
+
+    def apply_dark_frame(frame: np.ndarray) -> np.ndarray:
+        nonlocal dark_frame_cache, dark_frame_cache_shape
+        if dark_frame is None:
+            return frame
+        if dark_frame_cache is None or dark_frame_cache_shape != frame.shape:
+            if dark_frame.shape[:2] != frame.shape[:2]:
+                dark_frame_cache = cv2.resize(dark_frame, (frame.shape[1], frame.shape[0]))
+            else:
+                dark_frame_cache = dark_frame
+            if dark_frame_cache.dtype != np.uint8:
+                dark_frame_cache = np.clip(dark_frame_cache, 0, 255).astype(np.uint8)
+            dark_frame_cache_shape = frame.shape
+        return cv2.subtract(frame, dark_frame_cache)
     
     def connect_rtsp():
         """RTSPストリームに接続。成功するまで無限リトライ"""
@@ -754,6 +771,7 @@ def save_rtsp_video_segments(
                 
                 # 成功時はリセット
                 consecutive_read_failures = 0
+                frame = apply_dark_frame(frame)
                 if preview_callback is not None:
                     try:
                         preview_callback(frame)
@@ -953,7 +971,8 @@ def rtsp_save_and_process_thread_target(
     time_limit_enabled: bool = False, start_hour: int = 17, start_minute: int = 0,
     end_hour: int = 7, end_minute: int = 0,
     max_workers: int = 1,
-    preview_callback: Optional[Callable[[np.ndarray], None]] = None
+    preview_callback: Optional[Callable[[np.ndarray], None]] = None,
+    dark_frame: Optional[np.ndarray] = None
 ):
     global rtsp_processed_files
     video_extensions = config.PERIODIC_VIDEO_EXTENSIONS
@@ -981,7 +1000,7 @@ def rtsp_save_and_process_thread_target(
     save_thread = threading.Thread(
         target=save_rtsp_video_segments, 
         args=(rtsp_url, save_root, segment_duration, cancel_flag,
-              time_limit_enabled, start_hour, start_minute, end_hour, end_minute, preview_callback), 
+              time_limit_enabled, start_hour, start_minute, end_hour, end_minute, preview_callback, dark_frame), 
         daemon=True
     )
     save_thread.start()

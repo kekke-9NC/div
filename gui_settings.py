@@ -581,12 +581,12 @@ class SettingsMixin:
             self.custom_model_paths,
             recursive=False,
         )
-        if current and current not in discovered:
+        if current and os.path.exists(current) and current not in discovered:
             discovered.append(current)
         self.available_model_paths = discovered
         if hasattr(self, "cmb_model_select"):
             self.cmb_model_select.configure(values=discovered)
-        if (not current) and discovered:
+        if (not current or not os.path.exists(current)) and discovered:
             self.selected_model_path_var.set(discovered[0])
         self.update_model_meta_info(self.selected_model_path_var.get())
 
@@ -671,6 +671,20 @@ class SettingsMixin:
             if show_message:
                 messagebox.showerror("エラー", f"AIモデル設定の適用に失敗しました:\n{e}")
             return False
+
+    def _normalize_output_directory(self, saved_path, default_path, folder_name):
+        if not saved_path:
+            return default_path
+
+        saved_abs = os.path.abspath(saved_path)
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        legacy_parent_path = os.path.join(os.path.dirname(script_dir), folder_name)
+
+        if saved_abs == os.path.abspath(legacy_parent_path):
+            return default_path
+        if not os.path.isdir(os.path.dirname(saved_abs)):
+            return default_path
+        return saved_path
 
     def check_ai_model_connection_async(self, show_success=True, only_lm_studio=False):
         if only_lm_studio and not self._is_lm_studio_backend_selected():
@@ -762,6 +776,7 @@ class SettingsMixin:
             # RTSP time limit settings
             'rtsp_time_limit_enabled': self.rtsp_time_limit_var.get(),
             'rtsp_start_hour': self.rtsp_start_hour_var.get(), 'rtsp_start_minute': self.rtsp_start_min_var.get(),
+            'apply_rtsp_dark': self.apply_rtsp_dark_var.get(),
             # Plate solve mode
             'plate_solve_mode': self.plate_solve_mode_var.get(),
             'rtsp_end_hour': self.rtsp_end_hour_var.get(), 'rtsp_end_minute': self.rtsp_end_min_var.get(),
@@ -826,6 +841,8 @@ class SettingsMixin:
             self.rtsp_time_limit_var.set(settings.get('rtsp_time_limit_enabled', False))
             self.rtsp_start_hour_var.set(settings.get('rtsp_start_hour', '17')); self.rtsp_start_min_var.set(settings.get('rtsp_start_minute', '00'))
             self.rtsp_end_hour_var.set(settings.get('rtsp_end_hour', '07')); self.rtsp_end_min_var.set(settings.get('rtsp_end_minute', '00'))
+            self.load_rtsp_dark_frame()
+            self.apply_rtsp_dark_var.set(bool(settings.get('apply_rtsp_dark', False)) and self.rtsp_dark_frame is not None)
             self.toggle_rtsp_time_limit_frame()
 
             self.folder_paths = settings.get('folder_paths', [])
@@ -854,7 +871,12 @@ class SettingsMixin:
             self.plate_solve_wcs_path_var.set(settings.get('plate_solve_wcs_path', ''))
             self.plate_solve_video_path_var.set(settings.get('plate_solve_video_path', ''))
             self.use_plate_solve_var.set(settings.get('use_plate_solve', True))
-            self.plate_solve_mode_var.set(settings.get('plate_solve_mode', 'local'))
+            saved_plate_solve_mode = settings.get('plate_solve_mode', 'api')
+            self.plate_solve_mode_var.set(
+                'local'
+                if saved_plate_solve_mode == 'local' and getattr(config, "LOCAL_SOLVER_ENABLED", False)
+                else 'api'
+            )
             
             if settings.get('global_wcs_info'):
                 self.global_wcs_info = settings['global_wcs_info']
@@ -867,12 +889,34 @@ class SettingsMixin:
             self.concurrency_var.set(settings.get('concurrency', str(config.DEFAULT_CONCURRENCY)))
             self.interval_var.set(settings.get('interval', str(config.DEFAULT_INTERVAL)))
             self.duration_var.set(settings.get('duration', str(config.DEFAULT_DURATION)))
-            self.meteor_save_path_var.set(settings.get('meteor_save_path', config.DEFAULT_METEOR_SAVE_PATH))
-            self.not_meteor_save_path_var.set(settings.get('not_meteor_save_path', config.DEFAULT_NOT_METEOR_SAVE_PATH))
+            meteor_save_path = self._normalize_output_directory(
+                settings.get('meteor_save_path', config.DEFAULT_METEOR_SAVE_PATH),
+                config.DEFAULT_METEOR_SAVE_PATH,
+                'meteor',
+            )
+            not_meteor_save_path = self._normalize_output_directory(
+                settings.get('not_meteor_save_path', config.DEFAULT_NOT_METEOR_SAVE_PATH),
+                config.DEFAULT_NOT_METEOR_SAVE_PATH,
+                'not_meteor',
+            )
+            self.meteor_save_path_var.set(meteor_save_path)
+            self.not_meteor_save_path_var.set(not_meteor_save_path)
             self.custom_model_paths = [str(p) for p in settings.get('custom_model_paths', []) if isinstance(p, str)]
-            self.selected_model_path_var.set(settings.get('selected_model_path', config.MODEL_PATH))
+            saved_model_path = settings.get('selected_model_path', config.MODEL_PATH)
+            self.selected_model_path_var.set(
+                saved_model_path if saved_model_path and os.path.exists(saved_model_path) else config.MODEL_PATH
+            )
             self.refresh_model_candidates()
-            self.ai_vlm_backend_var.set(settings.get('ai_vlm_backend', getattr(config, "DEFAULT_AI_VLM_BACKEND", "local_qwen3_vl_4b")))
+            saved_ai_backend = settings.get(
+                'ai_vlm_backend',
+                getattr(config, "DEFAULT_AI_VLM_BACKEND", "local_qwen3_vl_4b"),
+            )
+            if (
+                sys.platform == 'darwin'
+                and saved_ai_backend == getattr(config, "AI_VLM_BACKEND_LOCAL_QWEN3_VL_4B", "local_qwen3_vl_4b")
+            ):
+                saved_ai_backend = getattr(config, "AI_VLM_BACKEND_LM_STUDIO_QWEN35_2B", "lmstudio_qwen3_5_2b")
+            self.ai_vlm_backend_var.set(saved_ai_backend)
             self.lm_studio_vlm_url_var.set(settings.get('lm_studio_vlm_url', getattr(config, "DEFAULT_LM_STUDIO_VLM_URL", "http://localhost:1234/v1")))
             self.lm_studio_vlm_model_var.set(settings.get('lm_studio_vlm_model_id', getattr(config, "DEFAULT_LM_STUDIO_VLM_MODEL_ID", "qwen3.5-2b")))
             self.lm_studio_vlm_api_key_var.set("")

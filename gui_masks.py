@@ -197,6 +197,7 @@ class MaskMixin:
                 if not ret or frame is None:
                     result_holder['error'] = "RTSPストリームからフレームを読み込めませんでした。"
                 else:
+                    frame = self.apply_rtsp_dark_to_frame(frame)
                     result_holder['frame'] = frame
             except Exception as e:
                 result_holder['error'] = str(e)

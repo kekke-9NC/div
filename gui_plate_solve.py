@@ -91,12 +91,14 @@ class PlateSolveMixin:
             for _ in range(num_frames):
                 ret, frame = cap.read()
                 if ret and frame is not None:
+                    frame = self.apply_rtsp_dark_to_frame(frame)
                     frames.append(frame)
                 else:
                     # フレーム取得に失敗した場合、少し待って再試行
                     time.sleep(0.01)
                     ret, frame = cap.read()
                     if ret and frame is not None:
+                        frame = self.apply_rtsp_dark_to_frame(frame)
                         frames.append(frame)
             cap.release()
             

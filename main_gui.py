@@ -43,6 +43,7 @@ class App(
         self.mask_image = None
         self.plate_solve_mask_image = None
         self.selfcal_mask_image = None
+        self.rtsp_dark_frame = None
         self.global_wcs_info = None
         self.summary_video_config = [
             {'name': "Composite Image", 'enabled': True, 'duration': 1.0},
@@ -58,6 +59,8 @@ class App(
             base_path = os.path.dirname(os.path.abspath(__file__))
         self.settings_file = os.path.join(base_path, "app_settings.json")
         self.masks_file = os.path.join(base_path, "app_masks.npz")
+        self.rtsp_dark_file = os.path.join(base_path, "rtsp_dark_frame.npz")
+        self.rtsp_dark_preview_file = os.path.join(base_path, "rtsp_dark_preview.jpg")
         self._migrate_legacy_settings_files()
         self._clear_lighten_blend_cache()
 
@@ -131,7 +134,14 @@ class App(
             
             icon_path = os.path.join(base_path, "icon.ico")
 
-            if os.path.exists(icon_path):
+            if sys.platform == "darwin":
+                jpg_icon_path = os.path.join(base_path, "icon.jpg")
+                if os.path.exists(jpg_icon_path):
+                    img = Image.open(jpg_icon_path)
+                    img.thumbnail((256, 256))
+                    self._app_icon_image = ImageTk.PhotoImage(img)
+                    self.iconphoto(True, self._app_icon_image)
+            elif os.path.exists(icon_path):
                 self.iconbitmap(icon_path)
             else:
                 print(f"警告: アイコンファイルが見つかりません: {icon_path}")
@@ -253,7 +263,9 @@ class App(
         self.rtsp_start_min_var = tk.StringVar(value="00")
         self.rtsp_end_hour_var = tk.StringVar(value="07")
         self.rtsp_end_min_var = tk.StringVar(value="00")
-        self.plate_solve_mode_var = tk.StringVar(value="local")
+        self.apply_rtsp_dark_var = tk.BooleanVar(value=False)
+        self.rtsp_dark_status_var = tk.StringVar(value="ダーク: 未撮影")
+        self.plate_solve_mode_var = tk.StringVar(value="api")
         self.astrometry_api_key_var = tk.StringVar(value="")
         self.video_concat_files = []
         self.video_concat_bitrate_var = tk.StringVar(value="8000k")

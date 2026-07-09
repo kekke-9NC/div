@@ -1,0 +1,24 @@
+name: meteor_detector_mac
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - numpy
+  - pillow
+  - astropy
+  - matplotlib
+  - requests
+  - pip:
+      - opencv-python
+      - tkinterdnd2
+      - customtkinter
+      - openai
+      - torch
+      - torchvision
+      - scikit-learn
+      - transformers
+      - qwen-vl-utils
+      - accelerate
+      - protobuf
+      - ipykernel

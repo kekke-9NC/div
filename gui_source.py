@@ -197,6 +197,17 @@ class SourceMixin:
         self.btn_rtsp_plate_solve.pack(side=tk.LEFT, padx=(10, 2))
         self.btn_rtsp_mask = ttk.Button(rtsp_btn_frame, text="RTSPからマスク作成", command=self.create_rtsp_mask)
         self.btn_rtsp_mask.pack(side=tk.LEFT, padx=2)
+        self.btn_rtsp_dark_capture = ttk.Button(rtsp_btn_frame, text="ダークを撮る", command=self.capture_rtsp_dark_frame)
+        self.btn_rtsp_dark_capture.pack(side=tk.LEFT, padx=(10, 2))
+        self.chk_apply_rtsp_dark = ttk.Checkbutton(
+            rtsp_btn_frame,
+            text="ダーク適用",
+            variable=self.apply_rtsp_dark_var,
+            command=self.on_apply_rtsp_dark_changed,
+        )
+        self.chk_apply_rtsp_dark.pack(side=tk.LEFT, padx=2)
+        ttk.Label(rtsp_btn_frame, textvariable=self.rtsp_dark_status_var).pack(side=tk.LEFT, padx=(8, 0))
+        self.load_rtsp_dark_frame()
         
         rtsp_time_frame = ttk.Frame(lf_rtsp)
         rtsp_time_frame.pack(fill=tk.X, pady=(8,0))
@@ -615,6 +626,180 @@ atomcam2で利用する場合は、GitHubで公開されている
             self.rtsp_selected_indices.clear()
             self.update_start_button_state()
 
+    def _current_rtsp_url_for_dark(self):
+        url = self.rtsp_url_var.get().strip()
+        if url:
+            return url
+        if self.rtsp_selected_indices:
+            selected_index = min(self.rtsp_selected_indices)
+            if 0 <= selected_index < len(self.rtsp_urls):
+                return self.rtsp_urls[selected_index]
+        if self.rtsp_urls:
+            return self.rtsp_urls[0]
+        return ""
+
+    def load_rtsp_dark_frame(self):
+        try:
+            if os.path.exists(self.rtsp_dark_file):
+                with np.load(self.rtsp_dark_file, allow_pickle=False) as data:
+                    dark = data["dark_frame"]
+                if dark.ndim == 3 and dark.shape[2] == 3:
+                    self.rtsp_dark_frame = dark.astype(np.uint8)
+                    self.rtsp_dark_status_var.set(f"ダーク: 読込済み {dark.shape[1]}x{dark.shape[0]}")
+                    return True
+            self.rtsp_dark_frame = None
+            self.rtsp_dark_status_var.set("ダーク: 未撮影")
+            return False
+        except Exception as e:
+            self.rtsp_dark_frame = None
+            self.rtsp_dark_status_var.set("ダーク: 読込失敗")
+            self.append_log(f"RTSPダーク読み込み失敗: {e}")
+            return False
+
+    def on_apply_rtsp_dark_changed(self):
+        if self.apply_rtsp_dark_var.get() and self.rtsp_dark_frame is None:
+            if not self.load_rtsp_dark_frame():
+                self.apply_rtsp_dark_var.set(False)
+                messagebox.showwarning("RTSPダーク", "適用できるダークフレームがありません。先に「ダークを撮る」を実行してください。")
+                return
+        state = "ON" if self.apply_rtsp_dark_var.get() else "OFF"
+        self.append_log(f"RTSPダーク適用: {state}")
+
+    def get_active_rtsp_dark_frame(self):
+        if not self.apply_rtsp_dark_var.get():
+            return None
+        if self.rtsp_dark_frame is None:
+            self.load_rtsp_dark_frame()
+        return self.rtsp_dark_frame
+
+    def apply_rtsp_dark_to_frame(self, frame):
+        dark = self.get_active_rtsp_dark_frame()
+        if dark is None or frame is None:
+            return frame
+        if dark.shape[:2] != frame.shape[:2]:
+            dark = cv2.resize(dark, (frame.shape[1], frame.shape[0]))
+        if dark.dtype != np.uint8:
+            dark = np.clip(dark, 0, 255).astype(np.uint8)
+        return cv2.subtract(frame, dark)
+
+    def capture_rtsp_dark_frame(self):
+        rtsp_url = self._current_rtsp_url_for_dark()
+        if not rtsp_url:
+            messagebox.showwarning("RTSPダーク", "RTSP URLを入力または追加してください。")
+            return
+        if not messagebox.askokcancel(
+            "RTSPダーク撮影",
+            "レンズにキャップをするなど、光が入らない状態にしてからOKを押してください。\n"
+            "現在のRTSP映像から約60フレームを平均してダークを作成します。"
+        ):
+            return
+
+        self.btn_rtsp_dark_capture.config(state=tk.DISABLED)
+        self.rtsp_dark_status_var.set("ダーク: 撮影中...")
+        self.append_log(f"RTSPダーク撮影開始: {rtsp_url}")
+        dark_queue = queue.Queue()
+
+        def worker():
+            error = None
+            result_line = ""
+            dark_frame = None
+            try:
+                worker_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rtsp_dark_capture_worker.py")
+                cmd = [
+                    sys.executable,
+                    worker_script,
+                    "--url", rtsp_url,
+                    "--output", self.rtsp_dark_file,
+                    "--preview", self.rtsp_dark_preview_file,
+                    "--frames", "60",
+                    "--warmup", "10",
+                ]
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                )
+
+                start_time = time.time()
+                while True:
+                    line = proc.stdout.readline() if proc.stdout is not None else ""
+                    if line:
+                        line = line.strip()
+                        if line.startswith("PROGRESS "):
+                            _tag, captured, total = line.split()[:3]
+                            dark_queue.put(("progress", captured, total))
+                        elif line.startswith("STATUS "):
+                            message = line[len("STATUS "):]
+                            dark_queue.put(("status", message))
+                        elif line.startswith("RESULT "):
+                            result_line = line
+                            dark_queue.put(("result", line[len("RESULT "):]))
+                        elif line.startswith("ERROR "):
+                            error = RuntimeError(line[len("ERROR "):])
+                        else:
+                            dark_queue.put(("status", line))
+
+                    if proc.poll() is not None:
+                        break
+                    if time.time() - start_time > 45:
+                        proc.kill()
+                        raise RuntimeError("ダーク撮影がタイムアウトしました。RTSP接続を確認してください。")
+
+                return_code = proc.wait()
+                if return_code != 0:
+                    raise error or RuntimeError(f"ダーク撮影ワーカーが失敗しました (exit={return_code})")
+
+                dark_frame = None
+                with np.load(self.rtsp_dark_file, allow_pickle=False) as data:
+                    dark_frame = data["dark_frame"].astype(np.uint8)
+            except Exception as exc:
+                error = exc
+                dark_frame = None
+
+            dark_queue.put(("done", error, dark_frame, result_line[len("RESULT "):] if result_line else ""))
+
+        def poll_dark_queue():
+            finished = False
+            while True:
+                try:
+                    item = dark_queue.get_nowait()
+                except queue.Empty:
+                    break
+
+                kind = item[0]
+                if kind == "progress":
+                    _, captured, total = item
+                    self.rtsp_dark_status_var.set(f"ダーク: 撮影中 {captured}/{total}")
+                    self.append_log(f"RTSPダーク撮影中: {captured}/{total}")
+                elif kind == "status":
+                    self.append_log(f"RTSPダーク: {item[1]}")
+                elif kind == "result":
+                    self.append_log(f"RTSPダーク撮影完了情報: {item[1]}")
+                elif kind == "done":
+                    _, error, dark_frame, result_summary = item
+                    self.btn_rtsp_dark_capture.config(state=tk.NORMAL)
+                    if error is not None or dark_frame is None:
+                        self.rtsp_dark_status_var.set("ダーク: 撮影失敗")
+                        self.append_log(f"RTSPダーク撮影失敗: {error}")
+                        messagebox.showerror("RTSPダーク", f"ダーク撮影に失敗しました:\n{error}")
+                    else:
+                        self.rtsp_dark_frame = dark_frame
+                        self.apply_rtsp_dark_var.set(True)
+                        self.rtsp_dark_status_var.set(f"ダーク: 撮影済み {dark_frame.shape[1]}x{dark_frame.shape[0]}")
+                        self.append_log(f"RTSPダーク撮影完了: {self.rtsp_dark_file}")
+                        if result_summary:
+                            self.append_log(result_summary)
+                        messagebox.showinfo("RTSPダーク", "ダーク撮影が完了しました。ダーク適用をONにしました。")
+                    finished = True
+
+            if not finished:
+                self.after(100, poll_dark_queue)
+
+        threading.Thread(target=worker, daemon=True).start()
+        self.after(100, poll_dark_queue)
+
     def select_periodic_dir(self):
         dir_selected = filedialog.askdirectory(title="監視するフォルダを選択")
         if dir_selected: self.periodic_dir_var.set(dir_selected)
@@ -763,4 +948,3 @@ atomcam2で利用する場合は、GitHubで公開されている
     def select_save_path(self, path_var):
         directory = filedialog.askdirectory(title="保存先を選択", initialdir=path_var.get())
         if directory: path_var.set(directory)
-

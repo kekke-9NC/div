@@ -1,0 +1,90 @@
+{
+  "version": "0.1.0",
+  "base_url": "https://example.com/meteor-detector/releases",
+  "assets": [
+    {
+      "name": "torch_cuda_wheels",
+      "description": "CUDA 11.8 torch+torchvision wheel bundle",
+      "files": [
+        {
+          "filename": "torch-2.2.0+cu118-cp310-cp310-win_amd64.whl",
+          "url": "${base_url}/wheels/torch-2.2.0+cu118-cp310-cp310-win_amd64.whl",
+          "sha256": "REPLACE_ME"
+        },
+        {
+          "filename": "torchvision-0.17.0+cu118-cp310-cp310-win_amd64.whl",
+          "url": "${base_url}/wheels/torchvision-0.17.0+cu118-cp310-cp310-win_amd64.whl",
+          "sha256": "REPLACE_ME"
+        }
+      ]
+    },
+    {
+      "name": "torch_cpu_wheels",
+      "description": "CPU-only torch bundle",
+      "files": [
+        {
+          "filename": "torch-2.2.0+cpu-cp310-cp310-win_amd64.whl",
+          "url": "${base_url}/wheels/torch-2.2.0+cpu-cp310-cp310-win_amd64.whl",
+          "sha256": "REPLACE_ME"
+        },
+        {
+          "filename": "torchvision-0.17.0+cpu-cp310-cp310-win_amd64.whl",
+          "url": "${base_url}/wheels/torchvision-0.17.0+cpu-cp310-cp310-win_amd64.whl",
+          "sha256": "REPLACE_ME"
+        }
+      ]
+    },
+    {
+      "name": "core_model",
+      "description": "Meteor detection CNN",
+      "files": [
+        {
+          "filename": "model_latest_1.pth",
+          "url": "${base_url}/models/model_latest_1.pth",
+          "sha256": "REPLACE_ME",
+          "target": "assets/model_latest_1.pth"
+        }
+      ]
+    },
+    {
+      "name": "masks_and_maps",
+      "description": "Mask and distortion correction data",
+      "files": [
+        {
+          "filename": "app_masks.npz",
+          "url": "${base_url}/data/app_masks.npz",
+          "sha256": "REPLACE_ME",
+          "target": "assets/app_masks.npz"
+        },
+        {
+          "filename": "distortion_map_x.npy",
+          "url": "${base_url}/data/distortion_map_x.npy",
+          "sha256": "REPLACE_ME",
+          "target": "assets/distortion_map_x.npy"
+        },
+        {
+          "filename": "distortion_map_y.npy",
+          "url": "${base_url}/data/distortion_map_y.npy",
+          "sha256": "REPLACE_ME",
+          "target": "assets/distortion_map_y.npy"
+        }
+      ]
+    },
+    {
+      "name": "qwen_quantized",
+      "description": "Qwen 4B quantized weights and tokenizer",
+      "files": [
+        {
+          "filename": "qwen4b.zip",
+          "url": "${base_url}/models/qwen4b.zip",
+          "sha256": "REPLACE_ME",
+          "target": "assets/qwen4b.zip",
+          "extract": {
+            "format": "zip",
+            "destination": "assets/quantized_model"
+          }
+        }
+      ]
+    }
+  ]
+}
