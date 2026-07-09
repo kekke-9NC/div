@@ -207,6 +207,7 @@ class App(
         self.end_min_var = tk.StringVar(value="00")
         self.periodic_dir_var = tk.StringVar()
         self.periodic_interval_var = tk.StringVar(value=str(config.DEFAULT_SCAN_INTERVAL))
+        self.processing_source_priority = list(ui_state.SOURCE_PRIORITY_DEFAULT)
         self.save_options_vars = {
             k: tk.BooleanVar(value=v) for k, v in {
                 'video': config.DEFAULT_SAVE_VIDEO_CLIP, 'cutout': config.DEFAULT_SAVE_CUTOUT_DIFF,
@@ -215,6 +216,15 @@ class App(
                 'full_video': config.DEFAULT_SAVE_FULL_VIDEO
             }.items()
         }
+        self.full_video_timestamp_enabled_var = tk.BooleanVar(
+            value=config.FULL_VIDEO_TIMESTAMP_ENABLED
+        )
+        self.full_video_timestamp_position_var = tk.StringVar(
+            value="右下"
+        )
+        self.full_video_timestamp_size_var = tk.StringVar(
+            value=str(config.FULL_VIDEO_TIMESTAMP_SIZE_PERCENT)
+        )
         self.plate_solve_wcs_path_var = tk.StringVar()
         self.plate_solve_video_path_var = tk.StringVar()
         self.plate_solve_status_var = tk.StringVar(value="プレートソルブ: 未実行")

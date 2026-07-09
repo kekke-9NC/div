@@ -1,4 +1,5 @@
 from gui_common import *
+import ui_state
 
 
 class SourceMixin:
@@ -41,6 +42,7 @@ class SourceMixin:
         
         # ===== ここから内部ウィジェット =====
         # Note: pack()の親は scrollable_frame にする
+        self._create_processing_priority_section(scrollable_frame)
         
         lf_folder = ttk.LabelFrame(scrollable_frame, text="フォルダ / 動画ファイル")
         lf_folder.pack(fill=tk.X, expand=True, pady=5)
@@ -336,6 +338,117 @@ atomcam2で利用する場合は、GitHubで公開されている
         self.toggle_time_limit_frame()
 
         return frame
+
+    def _create_processing_priority_section(self, parent):
+        """処理入力の優先順位を、ドラッグ操作で並べ替えるUI。"""
+        frame = ttk.LabelFrame(parent, text="処理対象の優先順位")
+        frame.pack(fill=tk.X, expand=True, pady=(0, 5))
+        tk.Label(
+            frame,
+            text="カードをドラッグして並べ替えます。複数の入力が有効な場合は、最上位の1種類だけを実行します。",
+            bg="#2E3F5B",
+            fg="#A9C9EF",
+            anchor=tk.W,
+        ).pack(fill=tk.X, padx=8, pady=(6, 2))
+
+        self.processing_priority_cards_frame = tk.Frame(frame, bg="#2E3F5B")
+        self.processing_priority_cards_frame.pack(fill=tk.X, padx=8, pady=(2, 6))
+        self._processing_priority_drag_key = None
+        self._processing_priority_drop_key = None
+        self._processing_priority_cards = {}
+
+        controls = ttk.Frame(frame)
+        controls.pack(fill=tk.X, padx=8, pady=(0, 6))
+        ttk.Button(controls, text="標準に戻す", command=self.reset_processing_source_priority).pack(side=tk.RIGHT)
+        self._refresh_processing_priority_cards()
+
+    def set_processing_source_priority(self, priority):
+        self.processing_source_priority = ui_state.normalize_source_priority(priority)
+        if getattr(self, "processing_priority_cards_frame", None) is not None:
+            self._refresh_processing_priority_cards()
+
+    def reset_processing_source_priority(self):
+        self.set_processing_source_priority(ui_state.SOURCE_PRIORITY_DEFAULT)
+
+    def _refresh_processing_priority_cards(self):
+        container = self.processing_priority_cards_frame
+        for child in container.winfo_children():
+            child.destroy()
+        self._processing_priority_cards = {}
+
+        labels = {
+            "periodic": "定期スキャン",
+            "rtsp": "RTSPストリーム",
+            "folder": "フォルダ／動画ファイル",
+        }
+        for index, source_type in enumerate(self.processing_source_priority, start=1):
+            card = tk.Frame(
+                container, bg="#3A4D6B", highlightbackground="#6E91BF",
+                highlightthickness=1, cursor="fleur", pady=6,
+            )
+            card.pack(fill=tk.X, pady=2)
+            rank = tk.Label(
+                card, text=str(index), bg="#5476A8", fg="#FFFFFF", width=3,
+                font=("Segoe UI", 10, "bold"), cursor="fleur",
+            )
+            rank.pack(side=tk.LEFT, padx=(6, 8))
+            handle = tk.Label(card, text="⠿", bg="#3A4D6B", fg="#A9C9EF", font=("Segoe UI", 14), cursor="fleur")
+            handle.pack(side=tk.LEFT, padx=(0, 8))
+            text = tk.Label(
+                card, text=labels[source_type], bg="#3A4D6B", fg="#F0F4FA",
+                font=("Segoe UI", 10, "bold"), anchor=tk.W, cursor="fleur",
+            )
+            text.pack(side=tk.LEFT, fill=tk.X, expand=True)
+            self._processing_priority_cards[source_type] = (card, rank, handle, text)
+            for widget in (card, rank, handle, text):
+                widget.bind("<ButtonPress-1>", lambda event, key=source_type: self._on_processing_priority_press(key, event))
+                widget.bind("<B1-Motion>", self._on_processing_priority_motion)
+                widget.bind("<ButtonRelease-1>", self._on_processing_priority_release)
+
+    def _set_processing_priority_card_highlight(self, source_type, highlighted):
+        widgets = self._processing_priority_cards.get(source_type)
+        if not widgets:
+            return
+        card, rank, handle, text = widgets
+        card_color = "#597EAE" if highlighted else "#3A4D6B"
+        for widget in (card, handle, text):
+            widget.configure(bg=card_color)
+        card.configure(highlightbackground="#9AC4FF" if highlighted else "#6E91BF")
+        rank.configure(bg="#6E9DDD" if highlighted else "#5476A8")
+
+    def _on_processing_priority_press(self, source_type, _event):
+        self._processing_priority_drag_key = source_type
+        self._processing_priority_drop_key = source_type
+        self._set_processing_priority_card_highlight(source_type, True)
+
+    def _on_processing_priority_motion(self, event):
+        drag_key = self._processing_priority_drag_key
+        if not drag_key:
+            return
+        pointer_y = event.y_root
+        target_key = drag_key
+        for source_type in self.processing_source_priority:
+            card = self._processing_priority_cards[source_type][0]
+            midpoint = card.winfo_rooty() + card.winfo_height() / 2
+            if pointer_y < midpoint:
+                target_key = source_type
+                break
+            target_key = source_type
+        if target_key != self._processing_priority_drop_key:
+            self._set_processing_priority_card_highlight(self._processing_priority_drop_key, False)
+            self._processing_priority_drop_key = target_key
+            self._set_processing_priority_card_highlight(target_key, True)
+
+    def _on_processing_priority_release(self, _event):
+        drag_key = self._processing_priority_drag_key
+        target_key = self._processing_priority_drop_key
+        if drag_key and target_key and drag_key != target_key:
+            order = list(self.processing_source_priority)
+            order.pop(order.index(drag_key))
+            order.insert(order.index(target_key), drag_key)
+            self.set_processing_source_priority(order)
+        self._processing_priority_drag_key = None
+        self._processing_priority_drop_key = None
 
     def update_start_button_state(self, *args):
         is_running = (self.worker_thread and self.worker_thread.is_alive()) or \

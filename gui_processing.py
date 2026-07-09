@@ -1,5 +1,6 @@
 from gui_common import *
 import gui_common as common
+import ui_state
 
 
 class ProcessingMixin:
@@ -32,6 +33,15 @@ class ProcessingMixin:
                 'rtsp_dark_frame': self.rtsp_dark_frame if self.apply_rtsp_dark_var.get() else None,
                 'summary_config': [item.copy() for item in self.summary_video_config]
             }
+            try:
+                timestamp_size_percent = float(self.full_video_timestamp_size_var.get())
+            except ValueError:
+                timestamp_size_percent = config.FULL_VIDEO_TIMESTAMP_SIZE_PERCENT
+            params['save_options'].update({
+                'full_video_timestamp_enabled': self.full_video_timestamp_enabled_var.get(),
+                'full_video_timestamp_position': self.full_video_timestamp_position_var.get(),
+                'full_video_timestamp_size_percent': timestamp_size_percent,
+            })
             
             if self.rtsp_preset_var.get() == "clear":
                 preset = config.RTSP_PRESET_CLEAR_SKY
@@ -67,8 +77,22 @@ class ProcessingMixin:
         self.start_time_gui = time.time()
 
         is_periodic = self.periodic_scan_var.get()
+        selected_source = ui_state.select_source_by_priority(
+            getattr(self, "processing_source_priority", ui_state.SOURCE_PRIORITY_DEFAULT),
+            periodic_enabled=is_periodic,
+            has_rtsp=bool(self.rtsp_urls),
+            has_folder=bool(self.folder_paths),
+        )
+        active_source_count = sum((is_periodic, bool(self.rtsp_urls), bool(self.folder_paths)))
+        if active_source_count > 1 and selected_source:
+            source_labels = {
+                "periodic": "定期スキャン",
+                "rtsp": "RTSPストリーム",
+                "folder": "フォルダ／動画ファイル",
+            }
+            self.append_log(f"複数の入力が有効です。優先順位により「{source_labels[selected_source]}」のみ実行します。")
 
-        if is_periodic:
+        if selected_source == "periodic":
             periodic_dir = self.periodic_dir_var.get().strip()
             if not periodic_dir or not os.path.isdir(periodic_dir):
                 messagebox.showerror("設定エラー", "定期スキャン用の有効な監視フォルダを選択してください。")
@@ -95,7 +119,7 @@ class ProcessingMixin:
             self.periodic_scan_thread = threading.Thread(target=file_utils.monitor_directory, kwargs=monitor_kwargs, daemon=True)
             self.periodic_scan_thread.start()
 
-        elif self.rtsp_urls:
+        elif selected_source == "rtsp":
             url = self.rtsp_urls[0]
             rtsp_time_limit = self.rtsp_time_limit_var.get()
             rtsp_sh = int(self.rtsp_start_hour_var.get())
@@ -123,7 +147,7 @@ class ProcessingMixin:
             self.rtsp_thread.start()
             self._update_live_preview_button_state()
 
-        elif self.folder_paths:
+        elif selected_source == "folder":
             sources_to_process = []
             self.append_log(f"{len(self.folder_paths)}個の項目を処理します...")
             for path_item in self.folder_paths:

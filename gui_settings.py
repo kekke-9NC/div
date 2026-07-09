@@ -62,6 +62,63 @@ class SettingsMixin:
             var = self.save_options_vars[key]
             chk = ttk.Checkbutton(f, text=text, variable=var)
             chk.pack(side=tk.LEFT, anchor=tk.W)
+            if key == 'full_video':
+                # フルサイズ動画の時刻表示は、対象チェックボックスの直下にまとめる。
+                timestamp_frame = ttk.Frame(lf_save)
+                timestamp_frame.pack(fill=tk.X, padx=(28, 0), pady=(0, 2))
+                self.full_video_timestamp_settings_widgets = []
+
+                timestamp_check = ttk.Checkbutton(
+                    timestamp_frame,
+                    text="時刻を表示",
+                    variable=self.full_video_timestamp_enabled_var,
+                    command=self.toggle_full_video_timestamp_settings,
+                )
+                timestamp_check.pack(side=tk.LEFT)
+                self.full_video_timestamp_settings_widgets.append(timestamp_check)
+
+                ttk.Label(timestamp_frame, text="位置:").pack(side=tk.LEFT, padx=(12, 3))
+                position_box = ttk.Combobox(
+                    timestamp_frame,
+                    textvariable=self.full_video_timestamp_position_var,
+                    values=("右下", "左下", "右上", "左上"),
+                    state="readonly",
+                    width=6,
+                )
+                position_box.pack(side=tk.LEFT)
+                self.full_video_timestamp_settings_widgets.append(position_box)
+
+                ttk.Label(timestamp_frame, text="文字サイズ:").pack(side=tk.LEFT, padx=(12, 3))
+                size_spin = ttk.Spinbox(
+                    timestamp_frame,
+                    from_=0.8,
+                    to=4.0,
+                    increment=0.1,
+                    textvariable=self.full_video_timestamp_size_var,
+                    width=4,
+                )
+                size_spin.pack(side=tk.LEFT)
+                self.full_video_timestamp_settings_widgets.append(size_spin)
+                ttk.Label(timestamp_frame, text="%（画面高）").pack(side=tk.LEFT, padx=(3, 0))
+                preview_button = ttk.Button(
+                    timestamp_frame,
+                    text="プレビュー...",
+                    command=self.open_full_video_timestamp_preview,
+                )
+                preview_button.pack(side=tk.LEFT, padx=(12, 0))
+                self.full_video_timestamp_settings_widgets.append(preview_button)
+
+                var.trace_add("write", lambda *_: self.toggle_full_video_timestamp_settings())
+                self.full_video_timestamp_enabled_var.trace_add(
+                    "write", lambda *_: self._render_full_video_timestamp_preview()
+                )
+                self.full_video_timestamp_position_var.trace_add(
+                    "write", lambda *_: self._render_full_video_timestamp_preview()
+                )
+                self.full_video_timestamp_size_var.trace_add(
+                    "write", lambda *_: self._render_full_video_timestamp_preview()
+                )
+                self.toggle_full_video_timestamp_settings()
             if key == 'summary':
                 # ヘルプの?マーク
                 summary_help_label = tk.Label(f, text="?", font=("", 9, "bold"), fg="#87CEEB", bg="#2E3F5B", cursor="hand2")
@@ -343,6 +400,146 @@ class SettingsMixin:
 
         return frame
 
+    def toggle_full_video_timestamp_settings(self):
+        """フルサイズ動画と時刻表示の選択状態に応じて設定欄を有効化する。"""
+        widgets = getattr(self, "full_video_timestamp_settings_widgets", [])
+        full_video_enabled = bool(self.save_options_vars['full_video'].get())
+        timestamp_enabled = bool(self.full_video_timestamp_enabled_var.get())
+        for index, widget in enumerate(widgets):
+            try:
+                if index == 0:
+                    widget.configure(state=tk.NORMAL if full_video_enabled else tk.DISABLED)
+                elif isinstance(widget, ttk.Button):
+                    widget.configure(state=tk.NORMAL if full_video_enabled else tk.DISABLED)
+                else:
+                    widget.configure(
+                        state=("readonly" if isinstance(widget, ttk.Combobox) else tk.NORMAL)
+                        if full_video_enabled and timestamp_enabled else tk.DISABLED
+                    )
+            except Exception:
+                pass
+
+    def open_full_video_timestamp_preview(self):
+        """時刻表示の位置と大きさを確認・選択できるプレビューを開く。"""
+        win = getattr(self, "_full_video_timestamp_preview_window", None)
+        if win is not None and win.winfo_exists():
+            win.lift()
+            win.focus_force()
+            self._render_full_video_timestamp_preview()
+            return
+
+        win = tk.Toplevel(self)
+        win.title("フルサイズ動画の時刻表示プレビュー")
+        win.configure(bg="#18263A")
+        win.resizable(False, False)
+        self._full_video_timestamp_preview_window = win
+
+        body = tk.Frame(win, bg="#18263A", padx=12, pady=12)
+        body.pack(fill=tk.BOTH, expand=True)
+        tk.Label(
+            body,
+            text="プレビュー内の四隅をクリックすると、時刻の位置を変更できます。",
+            bg="#18263A",
+            fg="#D9E5FF",
+            anchor=tk.W,
+        ).pack(fill=tk.X, pady=(0, 8))
+
+        canvas = tk.Canvas(
+            body, width=640, height=360, bg="#050A10", highlightthickness=1,
+            highlightbackground="#7896BF", cursor="crosshair",
+        )
+        canvas.pack()
+        canvas.bind("<Button-1>", self._on_full_video_timestamp_preview_click)
+        self._full_video_timestamp_preview_canvas = canvas
+
+        self._full_video_timestamp_preview_status = tk.Label(
+            body,
+            bg="#18263A",
+            fg="#A9C9EF",
+            anchor=tk.W,
+        )
+        self._full_video_timestamp_preview_status.pack(fill=tk.X, pady=(8, 0))
+
+        ttk.Button(body, text="閉じる", command=self._close_full_video_timestamp_preview).pack(
+            anchor=tk.E, pady=(8, 0)
+        )
+        win.protocol("WM_DELETE_WINDOW", self._close_full_video_timestamp_preview)
+        self._render_full_video_timestamp_preview()
+
+    def _close_full_video_timestamp_preview(self):
+        win = getattr(self, "_full_video_timestamp_preview_window", None)
+        self._full_video_timestamp_preview_window = None
+        self._full_video_timestamp_preview_canvas = None
+        self._full_video_timestamp_preview_status = None
+        if win is not None and win.winfo_exists():
+            win.destroy()
+
+    def _on_full_video_timestamp_preview_click(self, event):
+        canvas = getattr(self, "_full_video_timestamp_preview_canvas", None)
+        if canvas is None:
+            return
+        horizontal = "左" if event.x < canvas.winfo_width() / 2 else "右"
+        vertical = "上" if event.y < canvas.winfo_height() / 2 else "下"
+        self.full_video_timestamp_position_var.set(f"{horizontal}{vertical}")
+
+    def _render_full_video_timestamp_preview(self):
+        canvas = getattr(self, "_full_video_timestamp_preview_canvas", None)
+        win = getattr(self, "_full_video_timestamp_preview_window", None)
+        if canvas is None or win is None or not win.winfo_exists():
+            return
+
+        width, height = 640, 360
+        canvas.delete("all")
+        # 暗い空を模した背景。配置の見え方を確認しやすくするため固定配置の星を置く。
+        for index in range(110):
+            x = (index * 83 + 41) % width
+            y = (index * 47 + 19) % height
+            brightness = 65 + (index * 29) % 130
+            radius = 1 if index % 5 else 2
+            color = f"#{brightness:02x}{brightness:02x}{min(255, brightness + 18):02x}"
+            canvas.create_oval(x - radius, y - radius, x + radius, y + radius, fill=color, outline="")
+
+        try:
+            size_percent = float(self.full_video_timestamp_size_var.get())
+        except (TypeError, ValueError):
+            size_percent = config.FULL_VIDEO_TIMESTAMP_SIZE_PERCENT
+        size_percent = max(0.8, min(4.0, size_percent))
+        position = self.full_video_timestamp_position_var.get()
+        if position not in ("右下", "左下", "右上", "左上"):
+            position = "右下"
+            self.full_video_timestamp_position_var.set(position)
+
+        text = "2026/07/10 03:24:49.350"
+        # 実寸比率を保ちつつ、小さ過ぎて確認できない場合だけプレビュー上で拡大する。
+        font_size = max(11, int(round(height * size_percent / 100.0)))
+        font = ("Helvetica", font_size, "bold")
+        margin = max(10, int(round(font_size * 0.8)))
+        anchor = {
+            "右下": "se", "左下": "sw", "右上": "ne", "左上": "nw",
+        }[position]
+        x = margin if "左" in position else width - margin
+        y = margin if "上" in position else height - margin
+        text_id = canvas.create_text(x, y, text=text, anchor=anchor, fill="#F5F5F5", font=font)
+        left, top, right, bottom = canvas.bbox(text_id)
+        padding = max(4, font_size // 3)
+        background = canvas.create_rectangle(
+            left - padding, top - padding, right + padding, bottom + padding,
+            fill="#000000", outline="", stipple="gray50",
+        )
+        canvas.tag_lower(background, text_id)
+
+        enabled = self.full_video_timestamp_enabled_var.get()
+        if not enabled:
+            canvas.itemconfigure(text_id, state=tk.HIDDEN)
+            canvas.itemconfigure(background, state=tk.HIDDEN)
+
+        status = getattr(self, "_full_video_timestamp_preview_status", None)
+        if status is not None:
+            state = "表示" if enabled else "非表示"
+            status.configure(
+                text=f"現在: {state} / {position} / 文字サイズ {size_percent:.1f}%（画面高）"
+            )
+
     def _create_model_selection_section(self, parent):
         lf_model = ttk.LabelFrame(parent, text="流星分類に使用するモデル")
         lf_model.pack(fill=tk.X, pady=5)
@@ -406,17 +603,29 @@ class SettingsMixin:
         self.cmb_lm_studio_vlm_model = ttk.Combobox(
             lm_row2,
             textvariable=self.lm_studio_vlm_model_var,
-            values=(self.lm_studio_vlm_model_var.get(),),
+            values=(),
+            state="readonly",
         )
         self.cmb_lm_studio_vlm_model.pack(side=tk.LEFT, fill=tk.X, expand=True)
         self.cmb_lm_studio_vlm_model.bind("<<ComboboxSelected>>", self.on_lm_studio_vlm_model_selected)
+        self.btn_lm_studio_refresh_models = ttk.Button(
+            lm_row2, text="モデル一覧を更新", command=self.refresh_lm_studio_vlm_models_async
+        )
+        self.btn_lm_studio_refresh_models.pack(side=tk.LEFT, padx=(5, 0))
 
-        ai_vlm_action_row = ttk.Frame(lf_ai_vlm)
+        ai_vlm_action_row = ttk.Frame(self.lm_studio_vlm_detail_frame)
         ai_vlm_action_row.pack(fill=tk.X, pady=(4, 2))
-        ttk.Button(ai_vlm_action_row, text="Load Model", command=self.load_ai_vlm_model_async).pack(side=tk.LEFT)
-        ttk.Button(ai_vlm_action_row, text="Unload Model", command=self.unload_ai_vlm_model_async).pack(side=tk.LEFT, padx=(5, 0))
+        self.btn_load_ai_vlm = ttk.Button(ai_vlm_action_row, text="Load Model", command=self.load_ai_vlm_model_async)
+        self.btn_load_ai_vlm.pack(side=tk.LEFT)
+        self.btn_unload_ai_vlm = ttk.Button(ai_vlm_action_row, text="Unload Model", command=self.unload_ai_vlm_model_async)
+        self.btn_unload_ai_vlm.pack(side=tk.LEFT, padx=(5, 0))
+        ttk.Label(ai_vlm_action_row, textvariable=self.ai_vlm_status_var, foreground="#87CEEB").pack(side=tk.LEFT, padx=(10, 0))
+
+        self.lm_studio_vlm_url_var.trace_add("write", lambda *_: self._set_lm_studio_action_buttons_state())
 
         self.update_lm_studio_vlm_visibility()
+        if self._is_lm_studio_backend_selected():
+            self.after(100, self.refresh_lm_studio_vlm_models_async)
 
     def update_lm_studio_vlm_visibility(self):
         detail_frame = getattr(self, "lm_studio_vlm_detail_frame", None)
@@ -427,6 +636,18 @@ class SettingsMixin:
                 detail_frame.pack(fill=tk.X, pady=(2, 0))
         else:
             detail_frame.pack_forget()
+
+    def _set_lm_studio_action_buttons_state(self, busy=False):
+        is_lm_studio = self._is_lm_studio_backend_selected()
+        has_model = bool(self.lm_studio_vlm_model_var.get().strip())
+        state = tk.NORMAL if is_lm_studio and has_model and not busy else tk.DISABLED
+        for name in ("btn_load_ai_vlm", "btn_unload_ai_vlm"):
+            button = getattr(self, name, None)
+            if button is not None:
+                button.configure(state=state)
+        refresh_button = getattr(self, "btn_lm_studio_refresh_models", None)
+        if refresh_button is not None:
+            refresh_button.configure(state=tk.NORMAL if is_lm_studio and not busy else tk.DISABLED)
 
     def _unload_previous_ai_vlm_if_changed(self, new_backend, new_lm_model):
         old_backend = getattr(self, "_last_ai_vlm_backend", new_backend)
@@ -471,68 +692,108 @@ class SettingsMixin:
     def on_ai_vlm_backend_changed(self):
         new_backend = self.ai_vlm_backend_var.get()
         new_lm_model = self.lm_studio_vlm_model_var.get()
-        self._unload_previous_ai_vlm_if_changed(new_backend, new_lm_model)
         self._last_ai_vlm_backend = new_backend
         self._last_lm_studio_vlm_model = new_lm_model
         self.update_lm_studio_vlm_visibility()
         self.apply_ai_model_settings(show_message=False)
         if self._is_lm_studio_backend_selected():
             self.refresh_lm_studio_vlm_models_async()
-            self.check_ai_model_connection_async(show_success=False, only_lm_studio=True)
+        self._set_lm_studio_action_buttons_state()
 
     def on_lm_studio_vlm_model_selected(self, _event=None):
         new_backend = self.ai_vlm_backend_var.get()
         new_lm_model = self.lm_studio_vlm_model_var.get()
-        self._unload_previous_ai_vlm_if_changed(new_backend, new_lm_model)
         self._last_ai_vlm_backend = new_backend
         self._last_lm_studio_vlm_model = new_lm_model
         self.apply_ai_model_settings(show_message=False)
-        self.check_ai_model_connection_async(show_success=False, only_lm_studio=True)
+        self.ai_vlm_status_var.set(f"選択中: {new_lm_model}")
+        self._set_lm_studio_action_buttons_state()
 
     def refresh_lm_studio_vlm_models_async(self):
         if not self._is_lm_studio_backend_selected():
             return
-        self.apply_ai_model_settings(show_message=False)
+        backend = self.ai_vlm_backend_var.get()
+        lm_url = self.lm_studio_vlm_url_var.get().strip()
+        current_model = self.lm_studio_vlm_model_var.get().strip()
+        self.ai_vlm_status_var.set("Vision対応モデルを取得中...")
+        self._set_lm_studio_action_buttons_state(busy=True)
+        result_queue = queue.Queue(maxsize=1)
 
         def worker():
             try:
                 import bright_area_detector
+                bright_area_detector.configure_ai_backend(
+                    backend=backend,
+                    lm_studio_url=lm_url,
+                    lm_studio_model_id=current_model,
+                    lm_studio_api_key="",
+                )
                 model_ids = bright_area_detector.list_lm_studio_model_ids()
+                result_queue.put(("ok", model_ids))
             except Exception as e:
-                self.append_log(f"LM Studioモデル一覧の取得に失敗しました: {e}")
+                result_queue.put(("error", str(e)))
+
+        def update_from_result_queue():
+            """Tkのメインスレッドだけで、取得結果をウィジェットへ反映する。"""
+            try:
+                result_type, payload = result_queue.get_nowait()
+            except queue.Empty:
+                if self._is_lm_studio_backend_selected():
+                    self.after(50, update_from_result_queue)
                 return
 
-            def update():
-                combo = getattr(self, "cmb_lm_studio_vlm_model", None)
-                if combo is None:
-                    return
-                current = self.lm_studio_vlm_model_var.get().strip()
-                combo.configure(values=model_ids)
-                if not model_ids:
-                    self.lm_studio_vlm_model_var.set("")
-                    self.ai_vlm_status_var.set("Vision対応モデルなし")
-                    return
-                if model_ids and current not in model_ids:
-                    self.lm_studio_vlm_model_var.set(model_ids[0])
-                    self.on_lm_studio_vlm_model_selected()
+            if not self._is_lm_studio_backend_selected():
+                return
+            if result_type == "error":
+                self.ai_vlm_status_var.set("モデル一覧の取得に失敗")
+                self.append_log(f"LM Studioモデル一覧の取得に失敗しました: {payload}")
+                self._set_lm_studio_action_buttons_state()
+                return
 
-            self.after(0, update)
+            model_ids = payload
+            combo = getattr(self, "cmb_lm_studio_vlm_model", None)
+            if combo is None:
+                return
+            combo.configure(values=model_ids)
+            if not model_ids:
+                self.lm_studio_vlm_model_var.set("")
+                self.ai_vlm_status_var.set("Vision対応モデルなし（LM StudioのLocal Serverを確認）")
+                self._set_lm_studio_action_buttons_state()
+                return
+            current = self.lm_studio_vlm_model_var.get().strip()
+            if current not in model_ids:
+                self.lm_studio_vlm_model_var.set(model_ids[0])
+                current = model_ids[0]
+            self.apply_ai_model_settings(show_message=False)
+            self.ai_vlm_status_var.set(f"Vision対応モデル: {len(model_ids)}件 / 選択中: {current}")
+            self._set_lm_studio_action_buttons_state()
 
+        # after()の登録自体は必ずメインスレッドで行う。
+        self.after(50, update_from_result_queue)
         threading.Thread(target=worker, daemon=True).start()
 
     def _run_ai_vlm_model_action_async(self, action_name, action_func_name):
-        if not self.apply_ai_model_settings(show_message=False):
+        backend = self.ai_vlm_backend_var.get()
+        lm_url = self.lm_studio_vlm_url_var.get().strip()
+        lm_model_id = self.lm_studio_vlm_model_var.get().strip()
+        if backend != getattr(config, "AI_VLM_BACKEND_LM_STUDIO_QWEN35_2B", "lmstudio_qwen3_5_2b"):
+            messagebox.showinfo("AIモデル", "モデルのロード・アンロードはLM Studio選択時に利用できます。")
+            return
+        if not lm_model_id:
+            messagebox.showwarning("AIモデル", "Vision対応モデルを選択してから実行してください。")
             return
         self.ai_vlm_status_var.set(f"{action_name}...")
+        self._set_lm_studio_action_buttons_state(busy=True)
+        result_queue = queue.Queue(maxsize=1)
 
         def worker():
             with self._ai_vlm_operation_lock:
                 try:
                     import bright_area_detector
                     bright_area_detector.configure_ai_backend(
-                        backend=self.ai_vlm_backend_var.get(),
-                        lm_studio_url=self.lm_studio_vlm_url_var.get(),
-                        lm_studio_model_id=self.lm_studio_vlm_model_var.get(),
+                        backend=backend,
+                        lm_studio_url=lm_url,
+                        lm_studio_model_id=lm_model_id,
                         lm_studio_api_key="",
                     )
                     action_func = getattr(bright_area_detector, action_func_name)
@@ -540,15 +801,27 @@ class SettingsMixin:
                         result = action_func(status_callback=self.append_log)
                     else:
                         result = action_func()
-                    self.after(0, lambda: self.ai_vlm_status_var.set(result))
-                    self.after(0, lambda: messagebox.showinfo("AIモデル", result, parent=self))
-                    if self._is_lm_studio_backend_selected():
-                        self.refresh_lm_studio_vlm_models_async()
+                    result_queue.put(("ok", result))
                 except Exception as e:
-                    msg = f"{action_name}に失敗しました:\n{e}"
-                    self.after(0, lambda: self.ai_vlm_status_var.set("AIモデルエラー"))
-                    self.after(0, lambda: messagebox.showerror("AIモデル", msg, parent=self))
+                    result_queue.put(("error", str(e)))
 
+        def update_from_result_queue():
+            try:
+                result_type, payload = result_queue.get_nowait()
+            except queue.Empty:
+                self.after(50, update_from_result_queue)
+                return
+            if result_type == "ok":
+                self.ai_vlm_status_var.set(payload)
+                self._set_lm_studio_action_buttons_state()
+                messagebox.showinfo("AIモデル", payload, parent=self)
+                self.refresh_lm_studio_vlm_models_async()
+                return
+            self.ai_vlm_status_var.set("AIモデルエラー")
+            self._set_lm_studio_action_buttons_state()
+            messagebox.showerror("AIモデル", f"{action_name}に失敗しました:\n{payload}", parent=self)
+
+        self.after(50, update_from_result_queue)
         threading.Thread(target=worker, daemon=True).start()
 
     def load_ai_vlm_model_async(self):
@@ -687,7 +960,8 @@ class SettingsMixin:
         return saved_path
 
     def check_ai_model_connection_async(self, show_success=True, only_lm_studio=False):
-        if only_lm_studio and not self._is_lm_studio_backend_selected():
+        is_lm_studio = self._is_lm_studio_backend_selected()
+        if only_lm_studio and not is_lm_studio:
             return
         if not self.apply_ai_model_settings(show_message=False):
             return
@@ -705,7 +979,7 @@ class SettingsMixin:
                 else:
                     msg = f"接続NG: {err}"
                     self.after(0, lambda: self.ai_vlm_status_var.set("接続NG"))
-                    if self._is_lm_studio_backend_selected():
+                    if is_lm_studio:
                         msg = (
                             "LM Studioに接続できません。\n"
                             "LM Studioを起動し、Local Serverを有効にしてください。\n\n"
@@ -754,7 +1028,13 @@ class SettingsMixin:
             'periodic_start_hour': self.start_hour_var.get(), 'periodic_start_minute': self.start_min_var.get(),
             'periodic_end_hour': self.end_hour_var.get(), 'periodic_end_minute': self.end_min_var.get(),
             'folder_paths': self.folder_paths, 'rtsp_urls': self.rtsp_urls,
+            'processing_source_priority': list(self.processing_source_priority),
             'save_options': {k: v.get() for k, v in self.save_options_vars.items()},
+            'full_video_timestamp': {
+                'enabled': self.full_video_timestamp_enabled_var.get(),
+                'position': self.full_video_timestamp_position_var.get(),
+                'size_percent': self.full_video_timestamp_size_var.get(),
+            },
             'plate_solve_wcs_path': self.plate_solve_wcs_path_var.get(), 'plate_solve_video_path': self.plate_solve_video_path_var.get(),
             'use_plate_solve': self.use_plate_solve_var.get(), 'apply_mask': self.apply_mask_var.get(),
             'mask_path_or_status': self.mask_path_var.get(), 'concurrency': self.concurrency_var.get(),
@@ -846,6 +1126,7 @@ class SettingsMixin:
             self.toggle_rtsp_time_limit_frame()
 
             self.folder_paths = settings.get('folder_paths', [])
+            self.set_processing_source_priority(settings.get('processing_source_priority', []))
             # Clear existing items and add restored paths
             for item in self.folder_item_frames:
                 item['frame'].destroy()
@@ -867,6 +1148,21 @@ class SettingsMixin:
 
             saved_opts = settings.get('save_options', {})
             for key, var in self.save_options_vars.items(): var.set(saved_opts.get(key, True))
+            timestamp_settings = settings.get('full_video_timestamp', {})
+            self.full_video_timestamp_enabled_var.set(
+                timestamp_settings.get('enabled', config.FULL_VIDEO_TIMESTAMP_ENABLED)
+            )
+            position = timestamp_settings.get('position', config.FULL_VIDEO_TIMESTAMP_POSITION)
+            position = {
+                'bottom_right': '右下', 'bottom_left': '左下',
+                'top_right': '右上', 'top_left': '左上',
+            }.get(position, position)
+            if position in ("右下", "左下", "右上", "左上"):
+                self.full_video_timestamp_position_var.set(position)
+            self.full_video_timestamp_size_var.set(str(
+                timestamp_settings.get('size_percent', config.FULL_VIDEO_TIMESTAMP_SIZE_PERCENT)
+            ))
+            self.toggle_full_video_timestamp_settings()
 
             self.plate_solve_wcs_path_var.set(settings.get('plate_solve_wcs_path', ''))
             self.plate_solve_video_path_var.set(settings.get('plate_solve_video_path', ''))
@@ -924,6 +1220,8 @@ class SettingsMixin:
             self.apply_ai_model_settings(show_message=False)
             self._last_ai_vlm_backend = self.ai_vlm_backend_var.get()
             self._last_lm_studio_vlm_model = self.lm_studio_vlm_model_var.get()
+            if self._is_lm_studio_backend_selected():
+                self.after(0, self.refresh_lm_studio_vlm_models_async)
             # summary_video_config: 保存された順番を復元し、新項目を末尾に追加
             saved_summary_config = settings.get('summary_video_config', [])
             if saved_summary_config:

@@ -172,3 +172,9 @@ DEFAULT_SAVE_FULL_DIFF = False
 DEFAULT_SAVE_COMPOSITE = True
 DEFAULT_SAVE_DETECTION_INFO = True
 DEFAULT_SAVE_FULL_VIDEO = False  # フルサイズ動画（トリミングなし）
+
+# --- フルサイズ動画の時刻表示 ---
+# 画面高に対する比率で文字サイズを指定するため、HD/4K どちらでも大きくなり過ぎない。
+FULL_VIDEO_TIMESTAMP_ENABLED = True
+FULL_VIDEO_TIMESTAMP_POSITION = "bottom_right"
+FULL_VIDEO_TIMESTAMP_SIZE_PERCENT = 1.8
