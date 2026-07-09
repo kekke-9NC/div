@@ -322,34 +322,36 @@ def _unload_lm_studio_instances(instance_ids: List[str]) -> int:
 
 
 def list_lm_studio_model_ids() -> List[str]:
-    try:
-        model_ids = []
-        for item in _lm_studio_list_native_models():
-            capabilities = item.get("capabilities") or {}
-            if item.get("type") != "llm" or not capabilities.get("vision"):
-                continue
-            model_id = _extract_lm_studio_model_id(item)
-            if model_id:
-                model_ids.append(model_id)
-        return model_ids
-    except Exception:
-        return []
+    """LM StudioのローカルAPIからVision対応モデルだけを取得する。"""
+    model_ids = []
+    seen = set()
+    for item in _lm_studio_list_native_models():
+        model_type = item.get("type")
+        capabilities = item.get("capabilities") or {}
+        if isinstance(capabilities, dict):
+            supports_vision = bool(capabilities.get("vision"))
+        elif isinstance(capabilities, (list, tuple, set)):
+            supports_vision = "vision" in {str(value).lower() for value in capabilities}
+        else:
+            supports_vision = bool(item.get("vision"))
+        if model_type not in (None, "llm") or not supports_vision:
+            continue
+        model_id = _extract_lm_studio_model_id(item)
+        if model_id and model_id not in seen:
+            seen.add(model_id)
+            model_ids.append(model_id)
+    return model_ids
 
 
 def load_lm_studio_selected_model() -> str:
     global _lm_studio_connection_cache_key
     if _ai_backend != AI_BACKEND_LM_STUDIO:
         raise RuntimeError("LM Studio is not selected.")
+    if not _lm_studio_model_id:
+        raise RuntimeError("Vision対応モデルを選択してください。")
 
     unload_local_model()
     selected_loaded = _lm_studio_loaded_instance_ids(_lm_studio_model_id)
-    other_loaded = []
-    for item in _lm_studio_list_native_models():
-        model_id = _extract_lm_studio_model_id(item)
-        capabilities = item.get("capabilities") or {}
-        if model_id and model_id != _lm_studio_model_id and item.get("type") == "llm" and capabilities.get("vision"):
-            other_loaded.extend(_lm_studio_loaded_instance_ids(model_id))
-    _unload_lm_studio_instances(other_loaded)
 
     if selected_loaded:
         return f"Loaded: {_lm_studio_model_id}"

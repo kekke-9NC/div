@@ -22,6 +22,146 @@ import utils
 import video_creation
 
 
+_FULL_VIDEO_TIMESTAMP_POSITIONS = {
+    "右下": "bottom_right",
+    "左下": "bottom_left",
+    "右上": "top_right",
+    "左上": "top_left",
+    "bottom_right": "bottom_right",
+    "bottom_left": "bottom_left",
+    "top_right": "top_right",
+    "top_left": "top_left",
+}
+
+
+def _get_full_video_timestamp_settings(save_options: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """保存設定からフルサイズ動画用の時刻表示設定を正規化する。"""
+    options = save_options or {}
+    position = _FULL_VIDEO_TIMESTAMP_POSITIONS.get(
+        str(options.get('full_video_timestamp_position', config.FULL_VIDEO_TIMESTAMP_POSITION)),
+        config.FULL_VIDEO_TIMESTAMP_POSITION,
+    )
+    try:
+        size_percent = float(
+            options.get('full_video_timestamp_size_percent', config.FULL_VIDEO_TIMESTAMP_SIZE_PERCENT)
+        )
+    except (TypeError, ValueError):
+        size_percent = config.FULL_VIDEO_TIMESTAMP_SIZE_PERCENT
+    return {
+        'enabled': bool(options.get('full_video_timestamp_enabled', config.FULL_VIDEO_TIMESTAMP_ENABLED)),
+        'position': position,
+        # 画面を覆わず読み取り可能な範囲に制限する。
+        'size_percent': max(0.8, min(4.0, size_percent)),
+    }
+
+
+def add_full_video_timestamp(
+    frame: np.ndarray,
+    timestamp: datetime,
+    timestamp_settings: Dict[str, Any],
+) -> np.ndarray:
+    """フルサイズ動画フレームの隅に、読みやすい時刻表示を描画する。"""
+    if not timestamp_settings.get('enabled', False):
+        return frame
+
+    output = frame.copy()
+    height, width = output.shape[:2]
+    if height <= 0 or width <= 0:
+        return output
+
+    text = timestamp.strftime("%Y/%m/%d %H:%M:%S.%f")[:-3]
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    desired_height = max(12, int(round(height * timestamp_settings['size_percent'] / 100.0)))
+    unit_height = max(1, cv2.getTextSize("Ag", font, 1.0, 1)[0][1])
+    font_scale = desired_height / unit_height
+    thickness = max(1, int(round(desired_height / 18)))
+    (text_width, text_height), baseline = cv2.getTextSize(text, font, font_scale, thickness)
+    margin = max(8, int(round(desired_height * 0.55)))
+    position = timestamp_settings['position']
+
+    x = margin if position.endswith("left") else width - text_width - margin
+    y = text_height + margin if position.startswith("top") else height - margin
+    x = max(0, min(x, max(0, width - text_width)))
+    y = max(text_height, min(y, max(text_height, height - baseline)))
+
+    padding = max(3, desired_height // 4)
+    left = max(0, x - padding)
+    top = max(0, y - text_height - padding)
+    right = min(width, x + text_width + padding)
+    bottom = min(height, y + baseline + padding)
+    if right > left and bottom > top:
+        roi = output[top:bottom, left:right]
+        shade = np.zeros_like(roi)
+        output[top:bottom, left:right] = cv2.addWeighted(roi, 0.45, shade, 0.55, 0)
+
+    # 黒い縁取りと白文字にして、雲や街明かりの上でも読めるようにする。
+    cv2.putText(output, text, (x, y), font, font_scale, (0, 0, 0), thickness + 2, cv2.LINE_AA)
+    cv2.putText(output, text, (x, y), font, font_scale, (245, 245, 245), thickness, cv2.LINE_AA)
+    return output
+
+
+def write_full_size_video(
+    frames: List[np.ndarray],
+    output_path: str,
+    frame_rate: float,
+    clip_start_datetime: datetime,
+    save_options: Optional[Dict[str, Any]],
+) -> bool:
+    """時刻表示を適用してフルサイズ動画を書き出す。"""
+    if not frames:
+        return False
+    height, width = frames[0].shape[:2]
+    writer = cv2.VideoWriter(
+        output_path,
+        cv2.VideoWriter_fourcc(*config.VIDEO_FOURCC),
+        frame_rate,
+        (width, height),
+    )
+    if not writer.isOpened():
+        return False
+
+    timestamp_settings = _get_full_video_timestamp_settings(save_options)
+    safe_frame_rate = frame_rate if frame_rate > 0 else config.DEFAULT_FPS
+    try:
+        for index, frame in enumerate(frames):
+            timestamp = clip_start_datetime + timedelta(seconds=index / safe_frame_rate)
+            writer.write(add_full_video_timestamp(frame, timestamp, timestamp_settings))
+    except Exception as exc:
+        print(f"フルサイズ動画への時刻表示中にエラー: {exc}")
+        return False
+    finally:
+        writer.release()
+    return True
+
+
+def get_rtsp_recording_start_datetime(
+    source: str,
+    total_frames: int,
+    frame_rate: float,
+) -> Tuple[Optional[datetime], str]:
+    """RTSP保存ファイルの開始時刻を、作成日時を優先して決定する。
+
+    RTSPセグメントは書き込み開始時に作成されるため、macOS/Windowsで取得できる
+    作成日時（birth time）が最も直接的な開始時刻になる。ファイルをコピーした場合や
+    作成日時を提供しないファイルシステムでは、更新日時から動画長を引く。
+    """
+    try:
+        stat_result = os.stat(source)
+        birth_time = getattr(stat_result, "st_birthtime", None)
+        if birth_time is not None and birth_time > 0:
+            return datetime.fromtimestamp(birth_time), "ファイル作成日時"
+
+        duration_seconds = total_frames / frame_rate if total_frames > 0 and frame_rate > 0 else 0
+        if stat_result.st_mtime > 0:
+            return (
+                datetime.fromtimestamp(stat_result.st_mtime) - timedelta(seconds=duration_seconds),
+                "最終更新日時−動画長",
+            )
+    except OSError as exc:
+        print(f"警告: RTSP保存ファイルの日時取得に失敗しました: {exc}")
+    return None, "取得不可"
+
+
 def _process_finer_detection_worker(
     frames_data: List[np.ndarray],
     cx: int,
@@ -171,20 +311,20 @@ def create_line_video_clips(
         video_path_for_naming = "rtsp_stream"
     else:
         video_path_for_naming = source
-        # RTSP録画ファイルの場合は、ファイル更新時刻から動画長を引いて開始時刻を計算
+        # RTSP録画ファイルは、書き込み開始時に作られるファイルの作成日時を開始時刻に使う。
+        # 作成日時が取得できない場合のみ、更新日時から動画長を引く従来方式へフォールバックする。
         is_rtsp_recorded_file_for_time = config.RTSP_SAVE_ROOT in source
         if is_rtsp_recorded_file_for_time:
-            try:
-                # ファイルの更新時刻（録画完了時刻）を取得
-                file_mtime = os.path.getmtime(source)
-                file_end_datetime = datetime.fromtimestamp(file_mtime)
-                # 動画の長さを計算
-                video_duration_seconds = total_frames / frame_rate if total_frames > 0 and frame_rate > 0 else 0
-                # 録画開始時刻 = 録画完了時刻 - 動画長
-                base_datetime = file_end_datetime - timedelta(seconds=video_duration_seconds)
-                print(f"[RTSP録画] ファイル更新時刻から基準時刻を計算: 終了={file_end_datetime.strftime('%H:%M:%S')}, 長さ={video_duration_seconds:.1f}秒, 開始={base_datetime.strftime('%H:%M:%S')}")
-            except Exception as e:
-                print(f"警告: ファイル時刻からの基準日時計算に失敗しました。パスから解析します: {e}")
+            base_datetime, time_source = get_rtsp_recording_start_datetime(
+                source, total_frames, frame_rate
+            )
+            if base_datetime is not None:
+                print(
+                    f"[RTSP録画] {time_source}から基準時刻を取得: "
+                    f"開始={base_datetime.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}"
+                )
+            else:
+                print("警告: ファイル日時から基準時刻を取得できませんでした。パスから解析します。")
                 base_datetime = astrometry.extract_datetime_from_video_path(video_path_for_naming)
         else:
             base_datetime = astrometry.extract_datetime_from_video_path(video_path_for_naming)
@@ -566,13 +706,14 @@ def create_line_video_clips(
                             
                                 if save_options.get('full_video', False) and final_frames_for_clip:
                                     full_video_path = os.path.join(save_dir, f"{base_filename}_full.mp4")
-                                    fourcc = cv2.VideoWriter_fourcc(*config.VIDEO_FOURCC)
-                                    full_h, full_w = final_frames_for_clip[0].shape[:2]
-                                    out_full = cv2.VideoWriter(full_video_path, fourcc, frame_rate, (full_w, full_h))
-                                    if out_full.isOpened():
-                                        for frame in final_frames_for_clip:
-                                            out_full.write(frame)
-                                        out_full.release()
+                                    clip_start_frame = actual_start_final if is_rtsp else adjusted_start_frame
+                                    clip_start_datetime = base_datetime + timedelta(
+                                        seconds=clip_start_frame / frame_rate
+                                    )
+                                    if write_full_size_video(
+                                        final_frames_for_clip, full_video_path, frame_rate,
+                                        clip_start_datetime, save_options,
+                                    ):
                                         saved_paths['full_video'] = full_video_path
                                         print(f"フルサイズ動画を保存しました: {full_video_path}")
                                     else:
@@ -1033,13 +1174,14 @@ def create_line_video_clips(
 
                     if save_options.get('full_video', False) and final_frames_for_clip:
                         full_video_path = os.path.join(save_dir, f"{base_filename}_full.mp4")
-                        fourcc = cv2.VideoWriter_fourcc(*config.VIDEO_FOURCC)
-                        full_h, full_w = final_frames_for_clip[0].shape[:2]
-                        out_full = cv2.VideoWriter(full_video_path, fourcc, frame_rate, (full_w, full_h))
-                        if out_full.isOpened():
-                            for frame in final_frames_for_clip:
-                                out_full.write(frame)
-                            out_full.release()
+                        clip_start_frame = actual_start_final if is_rtsp else adjusted_start_frame
+                        clip_start_datetime = base_datetime + timedelta(
+                            seconds=clip_start_frame / frame_rate
+                        )
+                        if write_full_size_video(
+                            final_frames_for_clip, full_video_path, frame_rate,
+                            clip_start_datetime, save_options,
+                        ):
                             saved_paths['full_video'] = full_video_path
                             print(f"フルサイズ動画を保存しました: {full_video_path}")
                         else:
