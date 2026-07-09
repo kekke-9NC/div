@@ -79,6 +79,7 @@ def detect_lines(
 
     detected_lines: List[Tuple[Tuple[int, int], Tuple[int, int]]] = []
     if lines is not None:
+        lines = lines.reshape(-1, 1, 4)  # shape 正規化: 恰好1本の検出時にも (N,1,4) を保証
         for line in lines:
             if cancel_flag is not None and cancel_flag.is_set():
                 print("線検出中にキャンセルされました。")
