@@ -9,6 +9,7 @@ from datetime import datetime, time as dt_time
 import config
 import video_processing
 import utils  # RTSP最適化用
+from fixed_pattern import apply_fixed_pattern_correction
 
 rtsp_processed_files: Set[str] = set()
 
@@ -666,10 +667,8 @@ def save_rtsp_video_segments(
                 dark_frame_cache = cv2.resize(dark_frame, (frame.shape[1], frame.shape[0]))
             else:
                 dark_frame_cache = dark_frame
-            if dark_frame_cache.dtype != np.uint8:
-                dark_frame_cache = np.clip(dark_frame_cache, 0, 255).astype(np.uint8)
             dark_frame_cache_shape = frame.shape
-        return cv2.subtract(frame, dark_frame_cache)
+        return apply_fixed_pattern_correction(frame, dark_frame_cache)
     
     def connect_rtsp():
         """RTSPストリームに接続。成功するまで無限リトライ"""

@@ -1,5 +1,6 @@
 from gui_common import *
 import ui_state
+from fixed_pattern import apply_fixed_pattern_correction
 
 
 class SourceMixin:
@@ -212,11 +213,13 @@ class SourceMixin:
         self.btn_rtsp_plate_solve.pack(side=tk.LEFT, padx=(10, 2))
         self.btn_rtsp_mask = ttk.Button(rtsp_btn_frame, text="RTSPからマスク作成", command=self.create_rtsp_mask)
         self.btn_rtsp_mask.pack(side=tk.LEFT, padx=2)
-        self.btn_rtsp_dark_capture = ttk.Button(rtsp_btn_frame, text="ダークを撮る", command=self.capture_rtsp_dark_frame)
+        self.btn_rtsp_dark_capture = ttk.Button(rtsp_btn_frame, text="固定パターンを撮る（30秒）", command=self.capture_rtsp_dark_frame)
         self.btn_rtsp_dark_capture.pack(side=tk.LEFT, padx=(10, 2))
+        self.btn_rtsp_dark_video = ttk.Button(rtsp_btn_frame, text="保存動画から作成", command=self.load_rtsp_dark_video)
+        self.btn_rtsp_dark_video.pack(side=tk.LEFT, padx=2)
         self.chk_apply_rtsp_dark = ttk.Checkbutton(
             rtsp_btn_frame,
-            text="ダーク適用",
+            text="固定パターン適用",
             variable=self.apply_rtsp_dark_var,
             command=self.on_apply_rtsp_dark_changed,
         )
@@ -768,10 +771,15 @@ atomcam2で利用する場合は、GitHubで公開されている
         try:
             if os.path.exists(self.rtsp_dark_file):
                 with np.load(self.rtsp_dark_file, allow_pickle=False) as data:
-                    dark = data["dark_frame"]
-                if dark.ndim == 3 and dark.shape[2] == 3:
-                    self.rtsp_dark_frame = dark.astype(np.uint8)
-                    self.rtsp_dark_status_var.set(f"ダーク: 読込済み {dark.shape[1]}x{dark.shape[0]}")
+                    if "fixed_correction" in data:
+                        dark = data["fixed_correction"].astype(np.int16)
+                        method = "固定補正"
+                    else:
+                        dark = data["dark_frame"].astype(np.uint8)
+                        method = "旧ダーク"
+                if dark.ndim in (2, 3):
+                    self.rtsp_dark_frame = dark
+                    self.rtsp_dark_status_var.set(f"{method}: 読込済み {dark.shape[1]}x{dark.shape[0]}")
                     return True
             self.rtsp_dark_frame = None
             self.rtsp_dark_status_var.set("ダーク: 未撮影")
@@ -804,9 +812,7 @@ atomcam2で利用する場合は、GitHubで公開されている
             return frame
         if dark.shape[:2] != frame.shape[:2]:
             dark = cv2.resize(dark, (frame.shape[1], frame.shape[0]))
-        if dark.dtype != np.uint8:
-            dark = np.clip(dark, 0, 255).astype(np.uint8)
-        return cv2.subtract(frame, dark)
+        return apply_fixed_pattern_correction(frame, dark)
 
     def capture_rtsp_dark_frame(self):
         rtsp_url = self._current_rtsp_url_for_dark()
@@ -814,15 +820,45 @@ atomcam2で利用する場合は、GitHubで公開されている
             messagebox.showwarning("RTSPダーク", "RTSP URLを入力または追加してください。")
             return
         if not messagebox.askokcancel(
-            "RTSPダーク撮影",
+            "固定パターン撮影",
             "レンズにキャップをするなど、光が入らない状態にしてからOKを押してください。\n"
-            "現在のRTSP映像から約60フレームを平均してダークを作成します。"
+            "30秒間の動画を保存し、90枚の明るさ正規化中央値から固定パターンを作成します。\n"
+            "滑らかな光漏れの勾配は補正対象から除外します。"
         ):
             return
 
+        base_dir = os.path.dirname(self.rtsp_dark_file)
+        capture_dir = os.path.join(base_dir, "rtsp_fixed_pattern_captures")
+        filename = f"rtsp_fixed_pattern_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
+        command = [
+            sys.executable, os.path.join(base_dir, "rtsp_dark_capture_worker.py"),
+            "--url", rtsp_url, "--output", self.rtsp_dark_file,
+            "--preview", self.rtsp_dark_preview_file,
+            "--video", os.path.join(capture_dir, filename),
+            "--duration", "30", "--samples", "90",
+        ]
+        self._start_rtsp_fixed_pattern_worker(command, "RTSP固定パターン撮影")
+
+    def load_rtsp_dark_video(self):
+        video_path = filedialog.askopenfilename(
+            title="保存済み固定パターン動画を選択",
+            filetypes=[("動画ファイル", "*.mp4 *.mov *.mkv *.avi *.m4v"), ("すべてのファイル", "*.*")],
+        )
+        if not video_path:
+            return
+        command = [
+            sys.executable, os.path.join(os.path.dirname(self.rtsp_dark_file), "rtsp_dark_capture_worker.py"),
+            "--input-video", video_path, "--output", self.rtsp_dark_file,
+            "--preview", self.rtsp_dark_preview_file, "--samples", "90",
+        ]
+        self._start_rtsp_fixed_pattern_worker(command, "保存動画から固定パターン作成")
+
+    def _start_rtsp_fixed_pattern_worker(self, command, job_name):
         self.btn_rtsp_dark_capture.config(state=tk.DISABLED)
-        self.rtsp_dark_status_var.set("ダーク: 撮影中...")
-        self.append_log(f"RTSPダーク撮影開始: {rtsp_url}")
+        if hasattr(self, "btn_rtsp_dark_video"):
+            self.btn_rtsp_dark_video.config(state=tk.DISABLED)
+        self.rtsp_dark_status_var.set("固定補正: 作成中...")
+        self.append_log(f"{job_name}開始")
         dark_queue = queue.Queue()
 
         def worker():
@@ -830,18 +866,8 @@ atomcam2で利用する場合は、GitHubで公開されている
             result_line = ""
             dark_frame = None
             try:
-                worker_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rtsp_dark_capture_worker.py")
-                cmd = [
-                    sys.executable,
-                    worker_script,
-                    "--url", rtsp_url,
-                    "--output", self.rtsp_dark_file,
-                    "--preview", self.rtsp_dark_preview_file,
-                    "--frames", "60",
-                    "--warmup", "10",
-                ]
                 proc = subprocess.Popen(
-                    cmd,
+                    command,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     text=True,
@@ -856,6 +882,9 @@ atomcam2で利用する場合は、GitHubで公開されている
                         if line.startswith("PROGRESS "):
                             _tag, captured, total = line.split()[:3]
                             dark_queue.put(("progress", captured, total))
+                        elif line.startswith("CAPTURE "):
+                            _tag, elapsed, total, captured, sample_total = line.split()[:5]
+                            dark_queue.put(("capture", elapsed, total, captured, sample_total))
                         elif line.startswith("STATUS "):
                             message = line[len("STATUS "):]
                             dark_queue.put(("status", message))
@@ -869,9 +898,9 @@ atomcam2で利用する場合は、GitHubで公開されている
 
                     if proc.poll() is not None:
                         break
-                    if time.time() - start_time > 45:
+                    if time.time() - start_time > 75:
                         proc.kill()
-                        raise RuntimeError("ダーク撮影がタイムアウトしました。RTSP接続を確認してください。")
+                        raise RuntimeError("固定パターン撮影がタイムアウトしました。RTSP接続を確認してください。")
 
                 return_code = proc.wait()
                 if return_code != 0:
@@ -879,7 +908,7 @@ atomcam2で利用する場合は、GitHubで公開されている
 
                 dark_frame = None
                 with np.load(self.rtsp_dark_file, allow_pickle=False) as data:
-                    dark_frame = data["dark_frame"].astype(np.uint8)
+                    dark_frame = data["fixed_correction"].astype(np.int16)
             except Exception as exc:
                 error = exc
                 dark_frame = None
@@ -897,8 +926,11 @@ atomcam2で利用する場合は、GitHubで公開されている
                 kind = item[0]
                 if kind == "progress":
                     _, captured, total = item
-                    self.rtsp_dark_status_var.set(f"ダーク: 撮影中 {captured}/{total}")
-                    self.append_log(f"RTSPダーク撮影中: {captured}/{total}")
+                    self.rtsp_dark_status_var.set(f"固定補正: 解析中 {captured}/{total}")
+                    self.append_log(f"固定パターン解析中: {captured}/{total}")
+                elif kind == "capture":
+                    _, elapsed, total, captured, sample_total = item
+                    self.rtsp_dark_status_var.set(f"固定補正: 録画中 {elapsed}/{total}秒 ({captured}/{sample_total})")
                 elif kind == "status":
                     self.append_log(f"RTSPダーク: {item[1]}")
                 elif kind == "result":
@@ -906,18 +938,20 @@ atomcam2で利用する場合は、GitHubで公開されている
                 elif kind == "done":
                     _, error, dark_frame, result_summary = item
                     self.btn_rtsp_dark_capture.config(state=tk.NORMAL)
+                    if hasattr(self, "btn_rtsp_dark_video"):
+                        self.btn_rtsp_dark_video.config(state=tk.NORMAL)
                     if error is not None or dark_frame is None:
-                        self.rtsp_dark_status_var.set("ダーク: 撮影失敗")
-                        self.append_log(f"RTSPダーク撮影失敗: {error}")
-                        messagebox.showerror("RTSPダーク", f"ダーク撮影に失敗しました:\n{error}")
+                        self.rtsp_dark_status_var.set("固定補正: 作成失敗")
+                        self.append_log(f"固定パターン作成失敗: {error}")
+                        messagebox.showerror("固定パターン", f"固定パターン作成に失敗しました:\n{error}")
                     else:
                         self.rtsp_dark_frame = dark_frame
                         self.apply_rtsp_dark_var.set(True)
-                        self.rtsp_dark_status_var.set(f"ダーク: 撮影済み {dark_frame.shape[1]}x{dark_frame.shape[0]}")
-                        self.append_log(f"RTSPダーク撮影完了: {self.rtsp_dark_file}")
+                        self.rtsp_dark_status_var.set(f"固定補正: 作成済み {dark_frame.shape[1]}x{dark_frame.shape[0]}")
+                        self.append_log(f"固定パターン作成完了: {self.rtsp_dark_file}")
                         if result_summary:
                             self.append_log(result_summary)
-                        messagebox.showinfo("RTSPダーク", "ダーク撮影が完了しました。ダーク適用をONにしました。")
+                        messagebox.showinfo("固定パターン", "固定パターンを作成し、適用をONにしました。保存動画は後日再利用できます。")
                     finished = True
 
             if not finished:

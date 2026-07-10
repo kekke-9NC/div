@@ -1,4 +1,5 @@
 from gui_common import *
+from fixed_pattern import apply_fixed_pattern_correction
 
 
 class LivePreviewMixin:
@@ -180,9 +181,7 @@ class LivePreviewMixin:
                 return frame
             if dark.shape[:2] != frame.shape[:2]:
                 dark = cv2.resize(dark, (frame.shape[1], frame.shape[0]))
-            if dark.dtype != np.uint8:
-                dark = np.clip(dark, 0, 255).astype(np.uint8)
-            return cv2.subtract(frame, dark)
+            return apply_fixed_pattern_correction(frame, dark)
         except Exception as e:
             print(f"ライブプレビューダーク適用エラー: {e}")
             return frame
