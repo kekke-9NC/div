@@ -130,6 +130,11 @@ class SynthesisMixin:
         import detection_preview
         import bright_area_detector
         import gc
+        ai_config = {
+            "backend": self.ai_vlm_backend_var.get(),
+            "lm_studio_url": self.lm_studio_vlm_url_var.get(),
+            "lm_studio_model_id": self.lm_studio_vlm_model_var.get(),
+        }
         
         self.append_log("各動画から比較明合成画像を作成し、流星を検出します...")
         
@@ -140,7 +145,11 @@ class SynthesisMixin:
 
         def _run_prep_task():
             worker_log = lambda message: prep_events.put(("log", message))
-            if not self._ensure_ai_model_loaded(bright_area_detector, log_callback=worker_log):
+            if not self._ensure_ai_model_loaded(
+                bright_area_detector,
+                ai_config,
+                log_callback=worker_log,
+            ):
                 prep_events.put(("error", "AIモデルのロードまたは接続確認に失敗しました。"))
                 return
 
@@ -289,26 +298,47 @@ class SynthesisMixin:
                         detection_events.put(("log", f"AIによる流星検出を開始します... ({total}個の画像)"))
                         detection_events.put(("start", total))
 
-                        for i, (vp, data) in enumerate(video_composites.items()):
-                            detection_events.put(("log", f"検出中 ({i+1}/{total}): {os.path.basename(vp)}"))
+                        uses_local_model = bool(
+                            getattr(bright_area_detector, "uses_local_model", lambda: True)()
+                        )
+                        max_workers = 1 if uses_local_model else min(
+                            config.AI_VLM_MAX_PARALLEL_REQUESTS, total
+                        )
+                        detection_events.put(("log", f"VLM解析を並列数 {max_workers} で開始します。"))
 
-                            # 一時ファイルから画像を読み込み（メモリ節約）
+                        def analyze_video(item):
+                            vp, data = item
                             composite_img = imread_with_japanese_path(data['temp_path'])
                             if composite_img is None:
-                                detection_events.put(("log", f"警告: 画像を読み込めませんでした: {data['filename']}"))
-                                continue
+                                raise RuntimeError(f"画像を読み込めませんでした: {data['filename']}")
+                            try:
+                                res = bright_area_detector.detect_meteors_with_boxes(
+                                    composite_img,
+                                    progress_callback=None,
+                                )
+                                boxes = res[1] if res else []
+                                if not boxes:
+                                    detection_events.put(("log", f"未検出のため再検出します (1/1): {os.path.basename(vp)}"))
+                                    retry_res = bright_area_detector.detect_meteors_with_boxes(
+                                        composite_img,
+                                        progress_callback=None,
+                                    )
+                                    boxes = retry_res[1] if retry_res else []
+                                return data['filename'], data['temp_path'], boxes
+                            finally:
+                                del composite_img
+                                gc.collect()
 
-                            res = bright_area_detector.detect_meteors_with_boxes(
-                                composite_img,
-                                progress_callback=None,  # 個別ログ抑制
-                            )
-                            boxes = res[1] if res else []
-                            del composite_img
-                            gc.collect()
-
-                            filename = data['filename']
-                            temp_path = data['temp_path']
-                            detection_events.put(("item", filename, temp_path, boxes))
+                        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                            futures = [
+                                executor.submit(analyze_video, item)
+                                for item in video_composites.items()
+                            ]
+                            for future in as_completed(futures):
+                                try:
+                                    detection_events.put(("item", *future.result()))
+                                except Exception as exc:
+                                    detection_events.put(("log", f"警告: 個別解析に失敗しました: {exc}"))
 
                         detection_events.put(("log", "全画像の検出が完了しました。結果を確認してください。"))
                         detection_events.put(("done",))
@@ -595,6 +625,11 @@ class SynthesisMixin:
                         raise RuntimeError(f"画像を読み込めませんでした: {filename}")
                     result = detector_func(image)
                     boxes = result[1] if result else []
+                    if is_meteor_mode and not boxes:
+                        # 初回で流星なしだった場合のみ、同じ画像を一度だけ再検出する。
+                        ui_events.put(("log", f"未検出のため再検出します (1/1): {filename}"))
+                        retry_result = detector_func(image)
+                        boxes = retry_result[1] if retry_result else []
                     return path, filename, display_path, boxes
 
                 with ThreadPoolExecutor(max_workers=max_workers) as executor:
