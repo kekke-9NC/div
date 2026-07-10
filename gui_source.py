@@ -158,6 +158,19 @@ class SourceMixin:
         
         self.btn_add_rtsp = ttk.Button(entry_frame, text="追加", command=self.add_rtsp_url)
         self.btn_add_rtsp.pack(side=tk.LEFT, padx=(5,0))
+
+        rtsp_notification_frame = ttk.Frame(lf_rtsp)
+        rtsp_notification_frame.pack(fill=tk.X, pady=(6, 0))
+        ttk.Checkbutton(
+            rtsp_notification_frame,
+            text="流星検出時に通知音を鳴らす",
+            variable=self.rtsp_notification_sound_var,
+        ).pack(side=tk.LEFT)
+        ttk.Button(
+            rtsp_notification_frame,
+            text="テスト再生",
+            command=utils.play_notification_sound,
+        ).pack(side=tk.LEFT, padx=(8, 0))
         
         # RTSP list (styled)
         rtsp_list_container = ttk.Frame(lf_rtsp)

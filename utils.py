@@ -11,6 +11,7 @@ from typing import Set, Optional, Callable, Dict, Any, Tuple
 import cv2
 import numpy as np
 import platform
+import subprocess
 
 import config
 import video_processing
@@ -635,17 +636,32 @@ def rtsp_save_and_process_thread_target(
         save_thread.join(timeout=10)
 
 
-def play_notification_sound():
-    """検出時に通知音を鳴らす"""
+def play_notification_sound() -> bool:
+    """検出時の通知音をOS標準の方法で非同期再生する。"""
     try:
-        if platform.system() == "Windows" and winsound:
+        system = platform.system()
+        if system == "Windows" and winsound:
             winsound.MessageBeep(winsound.MB_ICONASTERISK)
-        else:
-            # Tkinterのbell()など、他のOS向けの代替手段
-            # ここでは単純に標準出力にBEL文字を出す
-            print("\a")
+            return True
+
+        if system == "Darwin":
+            # Finderから起動した場合も確実に見つかる絶対パスを使用する。
+            # Popenにして、RTSPの解析スレッドを音の再生中に停止させない。
+            sound_path = "/System/Library/Sounds/Glass.aiff"
+            if os.path.isfile(sound_path):
+                subprocess.Popen(
+                    ["/usr/bin/afplay", sound_path],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                return True
+
+        # その他の環境、またはmacOS標準音がない場合のフォールバック。
+        print("\a", end="", flush=True)
+        return True
     except Exception as e:
         print(f"通知音の再生中にエラー: {e}")
+        return False
 
 
 if __name__ == '__main__':
