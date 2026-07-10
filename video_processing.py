@@ -21,6 +21,7 @@ import tracking
 import utils
 import video_creation
 import video_denoising
+import video_enhancement
 
 
 _FULL_VIDEO_TIMESTAMP_POSITIONS = {
@@ -189,6 +190,18 @@ def write_denoised_full_size_video(
         'after_sigma': after_sigma,
         'reduction_percent': video_denoising.noise_reduction_percent(before_sigma, after_sigma),
     }
+
+
+def _brightness_composite_and_diff(frames: List[np.ndarray]) -> Tuple[np.ndarray, np.ndarray]:
+    """Build max/min composite difference without stacking every full-HD frame."""
+    if not frames:
+        raise ValueError("frames must not be empty")
+    maximum = frames[0].copy()
+    minimum = frames[0].copy()
+    for frame in frames[1:]:
+        maximum = cv2.max(maximum, frame)
+        minimum = cv2.min(minimum, frame)
+    return maximum, cv2.absdiff(maximum, minimum)
 
 
 def get_rtsp_recording_start_datetime(
@@ -378,7 +391,8 @@ def create_line_video_clips(
     cancel_flag: Optional[threading.Event] = None,
     save_options: Optional[Dict[str, bool]] = None,
     notify_on_detection: bool = False,
-    summary_video_config: Optional[List[Dict[str, Any]]] = None
+    summary_video_config: Optional[List[Dict[str, Any]]] = None,
+    fixed_pattern_correction: Optional[np.ndarray] = None,
 ) -> List[Dict[str, Any]]:
     """
     動画ソースから流星候補の線分を検出し、詳細検出を行い、関連情報を保存する。
@@ -392,7 +406,7 @@ def create_line_video_clips(
         'full': config.DEFAULT_SAVE_FULL_DIFF, 'composite': config.DEFAULT_SAVE_COMPOSITE,
         'info': config.DEFAULT_SAVE_DETECTION_INFO, 'summary': True,
         'full_video': config.DEFAULT_SAVE_FULL_VIDEO,
-        'denoised_full_video': config.DEFAULT_SAVE_DENOISED_FULL_VIDEO,
+        'denoised_full_video': False,
     }
     if save_options is None:
         save_options = default_save_options
@@ -749,6 +763,21 @@ def create_line_video_clips(
                                             print(f"最終クリップフレームへのマスク適用中にエラー: {e}")
                                             masked_frames_final.append(frame)
                                     final_frames_for_clip = masked_frames_final
+
+                                enhancement_result: Optional[video_enhancement.EnhancementResult] = None
+                                if fixed_pattern_correction is not None:
+                                    enhancement_result = video_enhancement.enhance_frames(
+                                        final_frames_for_clip,
+                                        fixed_pattern_correction,
+                                        detected_line=((x1, y1), (x2, y2)),
+                                    )
+                                    final_frames_for_clip = enhancement_result.frames
+                                    brightness_composite, diff_img = _brightness_composite_and_diff(final_frames_for_clip)
+                                    print(
+                                        "保存物補正: 固定パターン "
+                                        f"{enhancement_result.correction_strength:.3f}倍 + 21フレーム平均 "
+                                        f"(時間ノイズ {enhancement_result.noise_reduction_percent:.1f}%低減)"
+                                    )
                             
                                 detection_counter += 1
                                 print(f"--- 検出確定 {detection_counter} (並列処理) ---")
@@ -842,7 +871,11 @@ def create_line_video_clips(
                                     else:
                                         print(f"エラー: フルサイズ動画の書き込み開始に失敗 ({full_video_path})")
 
-                                if save_options.get('denoised_full_video', False) and final_frames_for_clip:
+                                if (
+                                    fixed_pattern_correction is None
+                                    and save_options.get('denoised_full_video', False)
+                                    and final_frames_for_clip
+                                ):
                                     denoised_full_video_path = os.path.join(save_dir, f"{base_filename}_full_denoised.mp4")
                                     clip_start_frame = actual_start_final if is_rtsp else adjusted_start_frame
                                     clip_start_datetime = base_datetime + timedelta(
@@ -886,7 +919,7 @@ def create_line_video_clips(
                             
                                 if save_options.get('composite', False) and final_frames_for_clip:
                                     try:
-                                        composite_image = np.max(np.array(final_frames_for_clip), axis=0).astype(np.uint8)
+                                        composite_image, _ = _brightness_composite_and_diff(final_frames_for_clip)
                                         composite_path = os.path.join(save_dir, f"{base_filename}_composite.jpg")
                                         if cv2.imwrite(composite_path, composite_image):
                                             saved_paths['composite'] = composite_path
@@ -932,6 +965,12 @@ def create_line_video_clips(
                                                 f.write(f"Denoise Noise Sigma Before: {denoise_metrics['before_sigma']:.4f}\n")
                                                 f.write(f"Denoise Noise Sigma After: {denoise_metrics['after_sigma']:.4f}\n")
                                                 f.write(f"Denoise Noise Reduction (%): {denoise_metrics['reduction_percent']:.2f}\n")
+                                            if enhancement_result is not None:
+                                                f.write(f"Adaptive Fixed Pattern Strength: {enhancement_result.correction_strength:.4f}\n")
+                                                f.write("Temporal Enhancement: 21-frame mean\n")
+                                                f.write(f"Enhancement Noise Sigma Before: {enhancement_result.noise_before:.4f}\n")
+                                                f.write(f"Enhancement Noise Sigma After: {enhancement_result.noise_after:.4f}\n")
+                                                f.write(f"Enhancement Noise Reduction (%): {enhancement_result.noise_reduction_percent:.2f}\n")
                                             f.write(f"RA Start (deg): {ra_start_str}\nDec Start (deg): {dec_start_str}\n")
                                             f.write(f"RA End (deg): {ra_end_str}\nDec End (deg): {dec_end_str}\n")
                                             for key, path in saved_paths.items(): f.write(f"Saved {key.capitalize()} Path: {path}\n")
@@ -1261,6 +1300,21 @@ def create_line_video_clips(
                                 masked_frames_final.append(frame)
                         final_frames_for_clip = masked_frames_final
 
+                    enhancement_result: Optional[video_enhancement.EnhancementResult] = None
+                    if fixed_pattern_correction is not None:
+                        enhancement_result = video_enhancement.enhance_frames(
+                            final_frames_for_clip,
+                            fixed_pattern_correction,
+                            detected_line=((x1, y1), (x2, y2)),
+                        )
+                        final_frames_for_clip = enhancement_result.frames
+                        brightness_composite, diff_img = _brightness_composite_and_diff(final_frames_for_clip)
+                        print(
+                            "保存物補正: 固定パターン "
+                            f"{enhancement_result.correction_strength:.3f}倍 + 21フレーム平均 "
+                            f"(時間ノイズ {enhancement_result.noise_reduction_percent:.1f}%低減)"
+                        )
+
                     detection_counter += 1
                     print(f"--- 検出確定 {detection_counter} ---")
 
@@ -1354,7 +1408,11 @@ def create_line_video_clips(
                         else:
                             print(f"エラー: フルサイズ動画の書き込み開始に失敗 ({full_video_path})")
 
-                    if save_options.get('denoised_full_video', False) and final_frames_for_clip:
+                    if (
+                        fixed_pattern_correction is None
+                        and save_options.get('denoised_full_video', False)
+                        and final_frames_for_clip
+                    ):
                         denoised_full_video_path = os.path.join(save_dir, f"{base_filename}_full_denoised.mp4")
                         clip_start_frame = actual_start_final if is_rtsp else adjusted_start_frame
                         clip_start_datetime = base_datetime + timedelta(
@@ -1398,7 +1456,7 @@ def create_line_video_clips(
 
                     if save_options.get('composite', False) and final_frames_for_clip:
                         try:
-                            composite_image = np.max(np.array(final_frames_for_clip), axis=0).astype(np.uint8)
+                            composite_image, _ = _brightness_composite_and_diff(final_frames_for_clip)
                             composite_path = os.path.join(save_dir, f"{base_filename}_composite.jpg")
                             if cv2.imwrite(composite_path, composite_image):
                                 saved_paths['composite'] = composite_path
@@ -1444,6 +1502,12 @@ def create_line_video_clips(
                                     f.write(f"Denoise Noise Sigma Before: {denoise_metrics['before_sigma']:.4f}\n")
                                     f.write(f"Denoise Noise Sigma After: {denoise_metrics['after_sigma']:.4f}\n")
                                     f.write(f"Denoise Noise Reduction (%): {denoise_metrics['reduction_percent']:.2f}\n")
+                                if enhancement_result is not None:
+                                    f.write(f"Adaptive Fixed Pattern Strength: {enhancement_result.correction_strength:.4f}\n")
+                                    f.write("Temporal Enhancement: 21-frame mean\n")
+                                    f.write(f"Enhancement Noise Sigma Before: {enhancement_result.noise_before:.4f}\n")
+                                    f.write(f"Enhancement Noise Sigma After: {enhancement_result.noise_after:.4f}\n")
+                                    f.write(f"Enhancement Noise Reduction (%): {enhancement_result.noise_reduction_percent:.2f}\n")
                                 f.write(f"RA Start (deg): {ra_start_str}\nDec Start (deg): {dec_start_str}\n")
                                 f.write(f"RA End (deg): {ra_end_str}\nDec End (deg): {dec_end_str}\n")
                                 for key, path in saved_paths.items(): f.write(f"Saved {key.capitalize()} Path: {path}\n")

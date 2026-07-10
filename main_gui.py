@@ -222,7 +222,6 @@ class App(
                 'full': config.DEFAULT_SAVE_FULL_DIFF, 'composite': config.DEFAULT_SAVE_COMPOSITE,
                 'info': config.DEFAULT_SAVE_DETECTION_INFO, 'summary': True,
                 'full_video': config.DEFAULT_SAVE_FULL_VIDEO,
-                'denoised_full_video': config.DEFAULT_SAVE_DENOISED_FULL_VIDEO,
             }.items()
         }
         self.full_video_timestamp_enabled_var = tk.BooleanVar(
@@ -288,10 +287,11 @@ class App(
         self.plate_solve_mode_var = tk.StringVar(value="api")
         self.astrometry_api_key_var = tk.StringVar(value="")
         self.video_concat_files = []
-        self.video_concat_bitrate_var = tk.StringVar(value="8000k")
+        self.video_concat_bitrate_var = tk.StringVar(value="Auto")
         self.video_concat_codec_var = tk.StringVar(value="h264")
         self.video_concat_fps_var = tk.StringVar(value="Auto")
         self.video_concat_safe_mode_var = tk.BooleanVar(value=True) 
+        self.video_concat_enhancement_var = tk.BooleanVar(value=False)
         self.camera_control_base_url_var = tk.StringVar(value="")
 
         # Advanced settings variables (config.py values)

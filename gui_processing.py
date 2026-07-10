@@ -30,7 +30,7 @@ class ProcessingMixin:
                 'mask': self.mask_image if self.apply_mask_var.get() else None,
                 'global_wcs_info': self.global_wcs_info if self.use_plate_solve_var.get() else None,
                 'plate_solve_mask': self.plate_solve_mask_image,
-                'rtsp_dark_frame': self.rtsp_dark_frame if self.apply_rtsp_dark_var.get() else None,
+                'fixed_pattern_correction': self.rtsp_dark_frame if self.apply_rtsp_dark_var.get() else None,
                 'rtsp_notification_sound': self.rtsp_notification_sound_var.get(),
                 'summary_config': [item.copy() for item in self.summary_video_config]
             }
@@ -111,7 +111,8 @@ class ProcessingMixin:
                 'min_length': config.MIN_LINE_LENGTH, 'summary_video_config': params['summary_config'],
                 'time_limit_enabled': self.periodic_time_limit_var.get(),
                 'start_hour': int(self.start_hour_var.get()), 'start_minute': int(self.start_min_var.get()),
-                'end_hour': int(self.end_hour_var.get()), 'end_minute': int(self.end_min_var.get())
+                'end_hour': int(self.end_hour_var.get()), 'end_minute': int(self.end_min_var.get()),
+                'fixed_pattern_correction': params['fixed_pattern_correction'],
             }
             if monitor_kwargs['time_limit_enabled']:
                 log_msg += f", 時間制限: {monitor_kwargs['start_hour']:02d}:{monitor_kwargs['start_minute']:02d} - {monitor_kwargs['end_hour']:02d}:{monitor_kwargs['end_minute']:02d}"
@@ -135,8 +136,8 @@ class ProcessingMixin:
             self.append_log(
                 f"流星検出通知音: {'ON' if params['rtsp_notification_sound'] else 'OFF'}"
             )
-            if params['rtsp_dark_frame'] is not None:
-                self.append_log("RTSPダーク補正: ON")
+            if params['fixed_pattern_correction'] is not None:
+                self.append_log("保存物補正: 適応固定パターン＋21フレーム平均 ON")
             
             rtsp_args = (
                 url, config.RTSP_SAVE_ROOT, config.RTSP_SEGMENT_DURATION, 60, self.progress_queue.put,
@@ -145,7 +146,7 @@ class ProcessingMixin:
                 params['save_options'], params['interval_sec'], params['duration_sec'],
                 config.MIN_LINE_LENGTH, params['summary_config'],
                 rtsp_time_limit, rtsp_sh, rtsp_sm, rtsp_eh, rtsp_em,
-                params['max_workers'], self.handle_rtsp_live_preview_frame, params['rtsp_dark_frame'],
+                params['max_workers'], self.handle_rtsp_live_preview_frame, params['fixed_pattern_correction'],
                 params['rtsp_notification_sound']
             )
             self.rtsp_thread = threading.Thread(target=file_utils.rtsp_save_and_process_thread_target, args=rtsp_args, daemon=True)
@@ -177,7 +178,7 @@ class ProcessingMixin:
                 self.progress_queue, sources_to_process, params['max_workers'], params['interval_sec'], 
                 params['duration_sec'], params['mask'], params['global_wcs_info'], params['plate_solve_mask'],
                 params['meteor_save_path'], params['not_meteor_save_path'], self.cancel_flag,
-                params['save_options'], params['summary_config']
+                params['save_options'], params['summary_config'], params['fixed_pattern_correction']
             )
             self.worker_thread = threading.Thread(target=worker_main_loop, args=worker_args, daemon=True)
             self.worker_thread.start()
@@ -308,7 +309,8 @@ def worker_main_loop(
     progress_queue: queue.Queue, sources: List[Dict[str, Any]], max_workers: int, interval: float, duration: float,
     mask: Optional[np.ndarray], global_wcs_info: Optional[Dict], plate_solve_mask: Optional[np.ndarray],
     meteor_save_path: str, not_meteor_save_path: str, cancel_flag: threading.Event,
-    save_options: Dict[str, bool], summary_video_config: List[Dict[str, Any]]
+    save_options: Dict[str, bool], summary_video_config: List[Dict[str, Any]],
+    fixed_pattern_correction: Optional[np.ndarray] = None,
 ):
     total_videos = len(sources)
     if total_videos == 0: return
@@ -335,6 +337,7 @@ def worker_main_loop(
             summary_video_config=summary_video_config,
             tmp_root=tmp_root_dir,
             status_callback=common.STATUS_CALLBACK,
+            fixed_pattern_correction=fixed_pattern_correction,
         )
 
         if not cancel_flag.is_set():

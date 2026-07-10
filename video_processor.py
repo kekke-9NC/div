@@ -12,7 +12,10 @@ import tempfile
 import json
 import re
 import time
+import shutil
 from typing import List, Callable, Optional, Tuple
+
+import video_enhancement
 
 # NVENCの利用可否をキャッシュ
 _nvenc_available: Optional[bool] = None
@@ -197,6 +200,110 @@ def parse_ffmpeg_progress(line: str, total_duration: float) -> Optional[float]:
     return None
 
 
+def parse_quality_metrics(text: str) -> Tuple[float, float]:
+    """Parse FFmpeg SSIM and PSNR summaries."""
+    ssim_matches = re.findall(r"All:([0-9.]+)", text)
+    psnr_matches = re.findall(r"average:([0-9.]+)", text)
+    ssim = float(ssim_matches[-1]) if ssim_matches else 0.0
+    psnr = float(psnr_matches[-1]) if psnr_matches else 0.0
+    return ssim, psnr
+
+
+def automatic_bitrate_candidates(codec: str, width: int, height: int, fps: float) -> List[str]:
+    """Return a small ascending benchmark set scaled to resolution and FPS."""
+    scale = max(0.35, (width * height * max(fps, 1.0)) / (1920 * 1080 * 25.0))
+    base = [750, 1000, 1500, 2000, 3000, 4000, 6000, 8000, 10000, 12000]
+    if codec.lower() in ("h265", "hevc"):
+        base = [500, 750, 1000, 1500, 2000, 3000, 4000, 6000, 8000]
+    values = sorted({max(500, int(round(value * scale / 250) * 250)) for value in base})
+    return [f"{value}k" for value in values]
+
+
+def benchmark_automatic_bitrate(
+    source: str,
+    codec: str,
+    fps: Optional[float] = None,
+    progress_callback: Optional[Callable[[float, str], None]] = None,
+) -> Tuple[str, float, float]:
+    """Quickly choose the lowest bitrate meeting conservative SSIM/PSNR targets."""
+    info = get_video_info(source) or {}
+    stream = next((item for item in info.get("streams", []) if item.get("codec_type") == "video"), {})
+    width = int(stream.get("width", 1920) or 1920)
+    height = int(stream.get("height", 1080) or 1080)
+    effective_fps = fps or get_video_fps(source) or 25.0
+    duration = get_video_duration(source)
+    sample_duration = min(2.0, max(0.5, duration))
+    sample_start = max(0.0, (duration - sample_duration) / 2.0)
+    candidates = automatic_bitrate_candidates(codec, width, height, effective_fps)
+    encoder = "libx265" if codec.lower() in ("h265", "hevc") else "libx264"
+    selected = candidates[-1]
+    selected_ssim = 0.0
+    selected_psnr = 0.0
+    benchmark_results: List[Tuple[str, float, float]] = []
+
+    with tempfile.TemporaryDirectory(prefix="bitrate_benchmark_") as temp_dir:
+        reference = os.path.join(temp_dir, "reference.mkv")
+        extract = subprocess.run(
+            [
+                get_ffmpeg_path(), "-y", "-hide_banner", "-loglevel", "error",
+                "-ss", f"{sample_start:.3f}", "-t", f"{sample_duration:.3f}",
+                "-i", source, "-an", "-c:v", "ffv1", reference,
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if extract.returncode != 0:
+            raise RuntimeError(f"自動ビットレート用サンプルを作成できません: {extract.stderr[-300:]}")
+
+        for index, candidate in enumerate(candidates, 1):
+            if progress_callback:
+                progress_callback(0.0, f"自動ビットレート試験 {index}/{len(candidates)}: {candidate}")
+            encoded = os.path.join(temp_dir, f"candidate_{candidate}.mp4")
+            encode = subprocess.run(
+                [
+                    get_ffmpeg_path(), "-y", "-hide_banner", "-loglevel", "error",
+                    "-i", reference, "-an", "-c:v", encoder, "-preset", "fast",
+                    "-b:v", candidate, "-pix_fmt", "yuv420p", encoded,
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            if encode.returncode != 0:
+                continue
+            ssim_run = subprocess.run(
+                [get_ffmpeg_path(), "-hide_banner", "-i", reference, "-i", encoded,
+                 "-lavfi", "ssim", "-f", "null", "-"],
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+            )
+            psnr_run = subprocess.run(
+                [get_ffmpeg_path(), "-hide_banner", "-i", reference, "-i", encoded,
+                 "-lavfi", "psnr", "-f", "null", "-"],
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+            )
+            ssim, _ = parse_quality_metrics(ssim_run.stderr)
+            _, psnr = parse_quality_metrics(psnr_run.stderr)
+            benchmark_results.append((candidate, ssim, psnr))
+            if progress_callback:
+                progress_callback(0.0, f"  品質: SSIM={ssim:.4f}, PSNR={psnr:.2f}dB")
+        if benchmark_results:
+            # Use the highest tested bitrate as the local visual-quality ceiling,
+            # then choose the smallest bitrate whose loss is practically negligible.
+            _, ceiling_ssim, ceiling_psnr = benchmark_results[-1]
+            selected, selected_ssim, selected_psnr = benchmark_results[-1]
+            for candidate, ssim, psnr in benchmark_results:
+                if (
+                    ssim >= max(0.975, ceiling_ssim - 0.006)
+                    and psnr >= max(40.0, ceiling_psnr - 3.0)
+                ):
+                    selected, selected_ssim, selected_psnr = candidate, ssim, psnr
+                    break
+    return selected, selected_ssim, selected_psnr
+
+
 def concatenate_videos(
     input_files: List[str],
     output_path: str,
@@ -205,7 +312,9 @@ def concatenate_videos(
     fps: Optional[float] = None,
     safe_mode: bool = False,
     progress_callback: Optional[Callable[[float, str], None]] = None,
-    cancel_check: Optional[Callable[[], bool]] = None
+    cancel_check: Optional[Callable[[], bool]] = None,
+    apply_enhancement: bool = False,
+    fixed_pattern_path: Optional[str] = None,
 ) -> Tuple[bool, str]:
     """
     複数の動画ファイルを連結する
@@ -345,6 +454,67 @@ def concatenate_videos(
     
     if progress_callback:
         progress_callback(0.0, f"有効なファイル: {len(valid_files)}/{len(input_files)} (エンコーダ: {encoder_info})")
+
+    enhancement_temp_dir = None
+    enhancement_temp_files: List[str] = []
+    base_files = valid_files
+    if apply_enhancement:
+        if not fixed_pattern_path or not os.path.isfile(fixed_pattern_path):
+            return False, "固定パターン＋21フレーム平均を適用するには、有効な補正マップが必要です"
+        try:
+            correction = video_enhancement.load_fixed_correction(fixed_pattern_path)
+            enhancement_temp_dir = tempfile.mkdtemp(prefix="enhanced_concat_")
+            for index, source_file in enumerate(valid_files):
+                if cancel_check and cancel_check():
+                    if enhancement_temp_dir:
+                        shutil.rmtree(enhancement_temp_dir, ignore_errors=True)
+                    return False, "処理がキャンセルされました"
+                output_file = os.path.join(enhancement_temp_dir, f"enhanced_{index:04d}.mp4")
+                if progress_callback:
+                    progress_callback(
+                        0.0,
+                        f"保存物補正 {index + 1}/{len(valid_files)}: {os.path.basename(source_file)}",
+                    )
+
+                def enhancement_progress(done, total, item=index):
+                    if progress_callback and (done == total or done % 50 == 0):
+                        progress_callback(
+                            0.0,
+                            f"21フレーム平均中 {item + 1}/{len(valid_files)}: {done}/{total}",
+                        )
+
+                strength = video_enhancement.enhance_video_file(
+                    source_file,
+                    output_file,
+                    correction,
+                    progress_callback=enhancement_progress,
+                )
+                enhancement_temp_files.append(output_file)
+                if progress_callback:
+                    progress_callback(0.0, f"適応固定パターン強度: {strength:.3f}倍")
+            base_files = enhancement_temp_files
+        except Exception as exc:
+            if enhancement_temp_dir:
+                shutil.rmtree(enhancement_temp_dir, ignore_errors=True)
+            return False, f"固定パターン＋21フレーム平均の前処理に失敗しました: {exc}"
+
+    automatic_bitrate_summary = ""
+    if str(bitrate).strip().lower() == "auto":
+        try:
+            bitrate, benchmark_ssim, benchmark_psnr = benchmark_automatic_bitrate(
+                base_files[0], codec, fps=fps, progress_callback=progress_callback
+            )
+            automatic_bitrate_summary = (
+                f"自動ビットレート={bitrate} "
+                f"(SSIM={benchmark_ssim:.4f}, PSNR={benchmark_psnr:.2f}dB)"
+            )
+            if progress_callback:
+                progress_callback(0.0, automatic_bitrate_summary)
+        except Exception as exc:
+            bitrate = "8000k"
+            automatic_bitrate_summary = f"自動試験失敗のため8000kを使用: {exc}"
+            if progress_callback:
+                progress_callback(0.0, automatic_bitrate_summary)
     
     # デバッグ用: 合計再生時間をログ出力
     if progress_callback:
@@ -365,7 +535,7 @@ def concatenate_videos(
 
     # セーフモード: すべてのファイルを一時MPEG-TSに変換
     ts_temp_files = []
-    files_to_concat = valid_files # デフォルトは元のファイル
+    files_to_concat = base_files # デフォルトは元ファイルまたは補正済み一時ファイル
 
     if safe_mode:
         if progress_callback:
@@ -374,7 +544,7 @@ def concatenate_videos(
         try:
             ts_dir = tempfile.mkdtemp(prefix="safe_concat_")
             
-            for i, vf in enumerate(valid_files):
+            for i, vf in enumerate(base_files):
                 # キャンセル確認
                 if cancel_check and cancel_check():
                     # Cleanup below will handle removing created files
@@ -444,22 +614,22 @@ def concatenate_videos(
                     ts_temp_files.append(ts_path)
                 
                 if progress_callback and i % 5 == 0:
-                     progress_callback(0.0, f"セーフモード: 変換中 ({i+1}/{len(valid_files)})")
+                     progress_callback(0.0, f"セーフモード: 変換中 ({i+1}/{len(base_files)})")
             
             # 変換できたファイルのみを連結対象とする
             if ts_temp_files:
                 files_to_concat = ts_temp_files
                 if progress_callback:
-                    progress_callback(0.0, f"セーフモード: 変換完了 ({len(ts_temp_files)}/{len(valid_files)}ファイル)")
+                    progress_callback(0.0, f"セーフモード: 変換完了 ({len(ts_temp_files)}/{len(base_files)}ファイル)")
             else:
                 if progress_callback:
                     progress_callback(0.0, "エラー: 有効なファイルが一つも変換できませんでした -> 元ファイルを使用します")
-                files_to_concat = valid_files
+                files_to_concat = base_files
 
         except Exception as e:
             if progress_callback:
                 progress_callback(0.0, f"セーフモード初期化エラー: {e} -> 通常モードで続行")
-            files_to_concat = valid_files
+            files_to_concat = base_files
 
     
     # concat demuxer用の一時ファイルを作成
@@ -664,11 +834,13 @@ def concatenate_videos(
                 if progress_callback:
                     progress_callback(1.0, f"連結完了（警告あり） (処理時間: {elapsed_str})")
                 
-                return True, f"{warning_msg}\n出力パス: {output_path}\n詳細ログ: {debug_stderr_path}"
+                auto_line = f"\n{automatic_bitrate_summary}" if automatic_bitrate_summary else ""
+                return True, f"{warning_msg}\n出力パス: {output_path}{auto_line}\n詳細ログ: {debug_stderr_path}"
             
             if progress_callback:
                 progress_callback(1.0, f"連結完了 (処理時間: {elapsed_str})")
-            return True, f"連結が完了しました: {output_path}"
+            auto_line = f"\n{automatic_bitrate_summary}" if automatic_bitrate_summary else ""
+            return True, f"連結が完了しました: {output_path}{auto_line}"
         else:
             # エラー詳細を取得
             error_detail = ""
@@ -697,6 +869,11 @@ def concatenate_videos(
             try:
                 os.rmdir(os.path.dirname(ts_temp_files[0]))
             except:
+                pass
+        if enhancement_temp_dir:
+            try:
+                shutil.rmtree(enhancement_temp_dir)
+            except OSError:
                 pass
 
 

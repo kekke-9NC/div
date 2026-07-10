@@ -147,7 +147,7 @@ class AnalysisMixin:
         
         ttk.Label(concat_settings_frame, text="ビットレート:").pack(side=tk.LEFT, padx=(0,5))
         bitrate_combo = ttk.Combobox(concat_settings_frame, textvariable=self.video_concat_bitrate_var, 
-                                      values=["1000k","2000k","4000k", "8000k", "12000k", "16000k", "20000k"], width=8, state="readonly")
+                                      values=["Auto", "1000k","2000k","4000k", "8000k", "12000k", "16000k", "20000k"], width=8, state="readonly")
         bitrate_combo.pack(side=tk.LEFT, padx=(0,15))
         
         ttk.Label(concat_settings_frame, text="コーデック:").pack(side=tk.LEFT, padx=(0,5))
@@ -162,6 +162,11 @@ class AnalysisMixin:
         concat_settings_row2 = ttk.Frame(lf_concat)
         concat_settings_row2.pack(fill=tk.X, pady=(0, 5))
         ttk.Checkbutton(concat_settings_row2, text="セーフモード（タイムスタンプ補正）", variable=self.video_concat_safe_mode_var).pack(side=tk.LEFT, padx=(5,0))
+        ttk.Checkbutton(
+            concat_settings_row2,
+            text="適応固定パターン＋21フレーム平均を適用",
+            variable=self.video_concat_enhancement_var,
+        ).pack(side=tk.LEFT, padx=(12, 0))
         help_label = tk.Label(concat_settings_row2, text="?", font=("", 9, "bold"), fg="#87CEEB", bg="#2E3F5B", cursor="hand2")
         
         help_label.pack(side=tk.LEFT, padx=(2, 5))
@@ -550,6 +555,7 @@ class AnalysisMixin:
         codec = self.video_concat_codec_var.get()
         fps_str = self.video_concat_fps_var.get()
         safe_mode = self.video_concat_safe_mode_var.get()
+        apply_enhancement = self.video_concat_enhancement_var.get()
         files = list(self.video_concat_files)
         
         fps_val = None
@@ -565,16 +571,19 @@ class AnalysisMixin:
                 pass
         
         self.append_log(f"動画連結を開始: {len(files)}ファイル")
-        self.append_log(f"設定: ビットレート={bitrate}, コーデック={codec}, FPS={fps_str}")
+        self.append_log(
+            f"設定: ビットレート={bitrate}, コーデック={codec}, FPS={fps_str}, "
+            f"保存物補正={'ON' if apply_enhancement else 'OFF'}"
+        )
         
         thread = threading.Thread(
             target=self._video_concat_worker,
-            args=(files, output_path, bitrate, codec, fps_val, safe_mode),
+            args=(files, output_path, bitrate, codec, fps_val, safe_mode, apply_enhancement),
             daemon=True
         )
         thread.start()
 
-    def _video_concat_worker(self, files, output_path, bitrate, codec, fps, safe_mode):
+    def _video_concat_worker(self, files, output_path, bitrate, codec, fps, safe_mode, apply_enhancement):
         """動画連結のバックグラウンド処理"""
         def progress_callback(progress, message):
             self.after(0, lambda: self.append_log(message))
@@ -591,7 +600,9 @@ class AnalysisMixin:
                 fps=fps,
                 safe_mode=safe_mode,
                 progress_callback=progress_callback,
-                cancel_check=cancel_check
+                cancel_check=cancel_check,
+                apply_enhancement=apply_enhancement,
+                fixed_pattern_path=self.rtsp_dark_file,
             )
             
             if success:
@@ -713,4 +724,3 @@ class AnalysisMixin:
                 )
             except Exception as e:
                 print(f"Failed to draw custom point {name}: {e}")
-

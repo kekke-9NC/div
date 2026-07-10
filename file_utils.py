@@ -73,7 +73,8 @@ def process_video_file_periodic(
     duration: float = config.DEFAULT_DURATION,
     min_length: int = config.MIN_LINE_LENGTH,
     summary_video_config: Optional[List[Dict[str, Any]]] = None,
-    notify_on_detection: bool = True
+    notify_on_detection: bool = True,
+    fixed_pattern_correction: Optional[np.ndarray] = None,
 ) -> bool:
     # 開始ログはvideo_processing側で出力されるため、ここでは出力しない
     try:
@@ -83,7 +84,8 @@ def process_video_file_periodic(
             meteor_save_path=meteor_save_path, not_meteor_save_path=not_meteor_save_path,
             use_plate_solve=(global_wcs_info is not None), global_wcs_info=global_wcs_info,
             plate_solve_mask=plate_solve_mask, cancel_flag=cancel_flag, save_options=save_options,
-            notify_on_detection=notify_on_detection, summary_video_config=summary_video_config
+            notify_on_detection=notify_on_detection, summary_video_config=summary_video_config,
+            fixed_pattern_correction=fixed_pattern_correction,
         )
         # 完了ログはvideo_processing側で出力されるため、ここでは出力しない
         return True
@@ -110,7 +112,8 @@ def monitor_directory(
     save_options: Optional[Dict[str, bool]] = None, interval: float = config.DEFAULT_INTERVAL,
     duration: float = config.DEFAULT_DURATION, min_length: int = config.MIN_LINE_LENGTH,
     summary_video_config: Optional[List[Dict[str, Any]]] = None, time_limit_enabled: bool = False,
-    start_hour: int = 17, start_minute: int = 0, end_hour: int = 7, end_minute: int = 0
+    start_hour: int = 17, start_minute: int = 0, end_hour: int = 7, end_minute: int = 0,
+    fixed_pattern_correction: Optional[np.ndarray] = None,
 ):
     processed_files: Set[str] = set()
     video_extensions = config.PERIODIC_VIDEO_EXTENSIONS
@@ -194,7 +197,8 @@ def monitor_directory(
                           processed_successfully = process_video_file_periodic(
                               file_path, progress_callback, mask, global_wcs_info, plate_solve_mask,
                               meteor_save_path, not_meteor_save_path, cancel_flag, save_options,
-                              interval, duration, min_length, summary_video_config
+                              interval, duration, min_length, summary_video_config,
+                              fixed_pattern_correction=fixed_pattern_correction,
                           )
                           if processed_successfully:
                               processed_files.add(file_path)
@@ -871,7 +875,8 @@ def process_new_rtsp_files(
     max_workers: int = 1,
     time_limit_enabled: bool = False, start_hour: int = 17, start_minute: int = 0,
     end_hour: int = 7, end_minute: int = 0,
-    notify_on_detection: bool = True
+    notify_on_detection: bool = True,
+    fixed_pattern_correction: Optional[np.ndarray] = None,
 ):
     new_files_to_process = []
     video_extensions = config.PERIODIC_VIDEO_EXTENSIONS
@@ -926,7 +931,8 @@ def process_new_rtsp_files(
                     result = process_video_file_periodic(
                         fp, progress_callback, mask, global_wcs_info, plate_solve_mask,
                         meteor_save_path, not_meteor_save_path, cancel_flag, save_options,
-                        interval, duration, min_length, summary_video_config, notify_on_detection
+                        interval, duration, min_length, summary_video_config, notify_on_detection,
+                        fixed_pattern_correction,
                     )
                     return fp, result
                 
@@ -948,7 +954,8 @@ def process_new_rtsp_files(
                     processed_successfully = process_video_file_periodic(
                          file_path, progress_callback, mask, global_wcs_info, plate_solve_mask,
                          meteor_save_path, not_meteor_save_path, cancel_flag, save_options,
-                         interval, duration, min_length, summary_video_config, notify_on_detection
+                         interval, duration, min_length, summary_video_config, notify_on_detection,
+                         fixed_pattern_correction,
                     )
                     if processed_successfully:
                         processed_files_set.add(file_path)
@@ -1002,7 +1009,7 @@ def rtsp_save_and_process_thread_target(
     save_thread = threading.Thread(
         target=save_rtsp_video_segments, 
         args=(rtsp_url, save_root, segment_duration, cancel_flag,
-              time_limit_enabled, start_hour, start_minute, end_hour, end_minute, preview_callback, dark_frame), 
+              time_limit_enabled, start_hour, start_minute, end_hour, end_minute, preview_callback, None),
         daemon=True
     )
     save_thread.start()
@@ -1017,7 +1024,7 @@ def rtsp_save_and_process_thread_target(
             meteor_save_path, not_meteor_save_path, cancel_flag, save_options,
             interval, duration, min_length, summary_video_config, max_workers,
             time_limit_enabled, start_hour, start_minute, end_hour, end_minute,
-            notify_on_detection
+            notify_on_detection, dark_frame
         )
         wait_message = f"[RTSP統合] 解析スキャン完了。次のスキャンまで {scan_interval} 秒待機。"
         print(wait_message)

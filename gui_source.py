@@ -231,7 +231,11 @@ class SourceMixin:
 
         rtsp_pattern = ttk.LabelFrame(rtsp_tools, text="固定パターン補正", style="Section.TLabelframe")
         rtsp_pattern.grid(row=0, column=1, sticky=tk.NSEW, padx=(3, 0))
-        ttk.Label(rtsp_pattern, text="30秒のダーク動画から補正マップを作成します。", style="Hint.TLabel").pack(anchor=tk.W, pady=(0, 6))
+        ttk.Label(
+            rtsp_pattern,
+            text="補正マップを作成し、保存する全動画・画像へ適応補正＋21フレーム平均を適用します。",
+            style="Hint.TLabel",
+        ).pack(anchor=tk.W, pady=(0, 6))
         rtsp_pattern_buttons = ttk.Frame(rtsp_pattern)
         rtsp_pattern_buttons.pack(anchor=tk.W)
         self.btn_rtsp_dark_capture = ttk.Button(rtsp_pattern_buttons, text="撮影（30秒）", style="Primary.TButton", command=self.capture_rtsp_dark_frame)
@@ -240,7 +244,7 @@ class SourceMixin:
         self.btn_rtsp_dark_video.pack(side=tk.LEFT, padx=(0, 8))
         self.chk_apply_rtsp_dark = ttk.Checkbutton(
             rtsp_pattern_buttons,
-            text="適用",
+            text="保存物へ適用",
             variable=self.apply_rtsp_dark_var,
             command=self.on_apply_rtsp_dark_changed,
         )
@@ -815,10 +819,10 @@ atomcam2で利用する場合は、GitHubで公開されている
         if self.apply_rtsp_dark_var.get() and self.rtsp_dark_frame is None:
             if not self.load_rtsp_dark_frame():
                 self.apply_rtsp_dark_var.set(False)
-                messagebox.showwarning("RTSPダーク", "適用できるダークフレームがありません。先に「ダークを撮る」を実行してください。")
+                messagebox.showwarning("固定パターン補正", "適用できる補正マップがありません。先に補正マップを作成してください。")
                 return
         state = "ON" if self.apply_rtsp_dark_var.get() else "OFF"
-        self.append_log(f"RTSPダーク適用: {state}")
+        self.append_log(f"保存物への適応固定パターン＋21フレーム平均: {state}")
 
     def get_active_rtsp_dark_frame(self):
         if not self.apply_rtsp_dark_var.get():
