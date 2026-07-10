@@ -546,6 +546,52 @@ def _create_flipped_wcs(original_wcs: WCS, image_shape: Tuple[int, int]) -> WCS:
         raise ValueError("WCSにCDまたはPCマトリックスがありません。")
     return flipped_wcs
 
+
+def _draw_meteor_marker(
+    image: np.ndarray,
+    detected_line: Tuple[Tuple[int, int], Tuple[int, int]],
+) -> np.ndarray:
+    """流星の軌跡を枠と矢印で強調した画像を返す。
+
+    WCS の有無にかかわらず、概要動画で一目で検出箇所を確認できるようにする。
+    ``image`` は RGB/RGBA のどちらでも扱い、元の型・スケールを維持する。
+    """
+    if image is None or image.size == 0:
+        return image
+
+    was_float = np.issubdtype(image.dtype, np.floating)
+    normalized = was_float and float(np.nanmax(image)) <= 1.0
+    canvas = np.clip(image * 255.0 if normalized else image, 0, 255).astype(np.uint8).copy()
+    height, width = canvas.shape[:2]
+    (x1, y1), (x2, y2) = detected_line
+    x1, x2 = int(np.clip(x1, 0, width - 1)), int(np.clip(x2, 0, width - 1))
+    y1, y2 = int(np.clip(y1, 0, height - 1)), int(np.clip(y2, 0, height - 1))
+
+    line_length = max(1.0, float(np.hypot(x2 - x1, y2 - y1)))
+    padding = int(max(36, min(120, line_length * 0.55)))
+    left, right = max(0, min(x1, x2) - padding), min(width - 1, max(x1, x2) + padding)
+    top, bottom = max(0, min(y1, y2) - padding), min(height - 1, max(y1, y2) + padding)
+    thickness = max(2, int(round(min(width, height) / 420)))
+    marker_color = (255, 220, 0)  # RGB: 視認性の高い黄色
+
+    cv2.rectangle(canvas, (left, top), (right, bottom), marker_color, thickness, cv2.LINE_AA)
+    cv2.arrowedLine(canvas, (x1, y1), (x2, y2), marker_color, thickness + 1, cv2.LINE_AA, tipLength=0.22)
+    label = "METEOR"
+    font_scale = max(0.55, min(width, height) / 1500)
+    text_thickness = max(1, thickness // 2)
+    (text_width, text_height), baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, text_thickness)
+    label_x = min(max(0, left), max(0, width - text_width - 12))
+    label_y = max(text_height + 10, top - 8)
+    cv2.rectangle(
+        canvas,
+        (max(0, label_x - 5), max(0, label_y - text_height - 6)),
+        (min(width - 1, label_x + text_width + 5), min(height - 1, label_y + baseline + 5)),
+        (0, 0, 0),
+        -1,
+    )
+    cv2.putText(canvas, label, (label_x, label_y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, marker_color, text_thickness, cv2.LINE_AA)
+    return canvas.astype(np.float32) / 255.0 if normalized else canvas
+
 def annotate_image_with_wcs(
     image_path: str,
     wcs_info: Dict,
@@ -553,7 +599,8 @@ def annotate_image_with_wcs(
     detection_datetime: Optional[datetime] = None,
     timestamp: Optional[str] = None,
     cancel_flag: Optional[threading.Event] = None,
-    flip_vertically: bool = True
+    flip_vertically: bool = True,
+    detected_line: Optional[Tuple[Tuple[int, int], Tuple[int, int]]] = None,
 ) -> Optional[str]:
     """
     WCS情報を使用して画像に注釈を描画し、保存する。
@@ -563,6 +610,8 @@ def annotate_image_with_wcs(
     if not wcs_info or 'wcs_file' not in wcs_info or not os.path.exists(wcs_info['wcs_file']):
         try:
             with Image.open(image_path) as image:
+                if detected_line:
+                    image = Image.fromarray(_draw_meteor_marker(np.asarray(image.convert("RGB")), detected_line))
                 if flip_vertically: image = image.transpose(Image.FLIP_TOP_BOTTOM)
                 draw = ImageDraw.Draw(image)
                 if timestamp:
@@ -586,6 +635,8 @@ def annotate_image_with_wcs(
         
         wcs_file_path = wcs_info['wcs_file']
         image_data = plt.imread(image_path)
+        if detected_line:
+            image_data = _draw_meteor_marker(image_data, detected_line)
         image_shape = image_data.shape[:2]
         
         with fits.open(wcs_file_path) as hdul:

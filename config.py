@@ -48,8 +48,14 @@ METEOR_PROBABILITY_THRESHOLD = 0.5 # 流星と判定する確率閾値 (float)
 FINER_DETECT_WINDOW_SECONDS = 4.0 # 詳細検出用に取得する秒数 (float)
 FINER_COMPOSITE_STEP = 3          # 詳細検出時の比較明合成ステップ数（デフォルト値、FPSから動的計算される）
 FINER_DETECT_MIN_LENGTH = 15      # 詳細検出時の最小線長(ピクセル)
-FINER_DETECT_PADDING_SECONDS = 0.5 # 詳細検出で特定した範囲へのパディング秒数 (float)
+# 流星の前後に残す余白。従来の 0.5 秒から 0.25 秒へ短縮し、
+# 実際の発光が短い流星で空白の方が長くならないようにする。
+FINER_DETECT_PADDING_SECONDS = 0.25 # 詳細検出で特定した範囲へのパディング秒数 (float)
 FINER_CUTOUT_SIZE = 384           # 詳細検出時のカットアウトサイズ（線検出用、保存用CUTOUTとは別）
+# 詳細検出で、粗検出した流星候補と同じ軌跡とみなす許容値。
+# 雲の縁など、カットアウト内の無関係な線でクリップ時間が延びるのを防ぐ。
+FINER_LINE_MATCH_DISTANCE = 70    # 粗検出線分からの最大距離 (px)
+FINER_LINE_MATCH_ANGLE_DEG = 35   # 粗検出線分との最大角度差 (deg)
 
 # --- オブジェクトトラッキング・飛行機判定関連 ---
 TRACKED_OBJECT_POSITIONS_MAXLEN = 30 # オブジェクトが保持する過去の位置情報の最大数
@@ -173,6 +179,14 @@ DEFAULT_SAVE_FULL_DIFF = False
 DEFAULT_SAVE_COMPOSITE = True
 DEFAULT_SAVE_DETECTION_INFO = True
 DEFAULT_SAVE_FULL_VIDEO = False  # フルサイズ動画（トリミングなし）
+DEFAULT_SAVE_DENOISED_FULL_VIDEO = True  # 閲覧用のノイズ低減フルサイズ動画
+
+# --- 検出クリップの閲覧用ノイズ低減 ---
+# 5フレーム（前後2枚）の時間中央値を主体にし、検出線付近の明るい過渡成分を原画から戻す。
+DENOISE_TEMPORAL_RADIUS = 2
+DENOISE_ORIGINAL_BLEND = 0.12
+DENOISE_TRANSIENT_THRESHOLD = 10.0
+DENOISE_PROTECT_LINE_WIDTH = 32
 
 # --- フルサイズ動画の時刻表示 ---
 # 画面高に対する比率で文字サイズを指定するため、HD/4K どちらでも大きくなり過ぎない。

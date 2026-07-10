@@ -203,6 +203,12 @@ def _format_bytes(value: int) -> str:
         number /= 1024
     return f"{number:.1f}TB"
 
+
+def _is_unfinished_video(path: str) -> bool:
+    """Return whether a path follows the recorder's in-progress naming scheme."""
+    name = os.path.basename(path).lower()
+    return name.startswith(".") or "_temp_" in name
+
 # NVENC利用可能フラグ（キャッシュ）
 _nvenc_available: Optional[bool] = None
 _ffmpeg_encoder_names: Optional[set] = None
@@ -286,7 +292,7 @@ def get_files_from_path(path: str) -> Tuple[List[str], List[str]]:
         ext = Path(path).suffix.lower()
         if ext in IMAGE_EXTENSIONS:
             images.append(path)
-        elif ext in VIDEO_EXTENSIONS:
+        elif ext in VIDEO_EXTENSIONS and not _is_unfinished_video(path):
             videos.append(path)
     elif os.path.isdir(path):
         for ext in IMAGE_EXTENSIONS:
@@ -297,9 +303,15 @@ def get_files_from_path(path: str) -> Tuple[List[str], List[str]]:
         
         for ext in VIDEO_EXTENSIONS:
             pattern = os.path.join(path, f'*{ext}')
-            videos.extend(glob.glob(pattern, recursive=False))
+            videos.extend(
+                item for item in glob.glob(pattern, recursive=False)
+                if not _is_unfinished_video(item)
+            )
             pattern_upper = os.path.join(path, f'*{ext.upper()}')
-            videos.extend(glob.glob(pattern_upper, recursive=False))
+            videos.extend(
+                item for item in glob.glob(pattern_upper, recursive=False)
+                if not _is_unfinished_video(item)
+            )
     
     images = sorted(list(set(images)))
     videos = sorted(list(set(videos)))
@@ -1126,6 +1138,22 @@ def create_timelapse(
         progress_callback("総フレーム数を計算中...")
     
     total_frames, sources = count_total_frames(all_images, all_videos, progress_callback)
+
+    # A file can disappear, remain headerless, or be replaced between folder
+    # discovery and metadata probing. Only sources that produced a valid frame
+    # count may enter the native concat path.
+    valid_video_paths = [
+        source_path
+        for source_path, _start, _count in sources
+        if Path(source_path).suffix.lower() in VIDEO_EXTENSIONS
+    ]
+    skipped_video_count = len(all_videos) - len(valid_video_paths)
+    if skipped_video_count > 0:
+        _report_progress(
+            progress_callback,
+            f"未完成または読み取り不能な動画 {skipped_video_count}本を除外しました",
+        )
+    all_videos = valid_video_paths
     
     if total_frames == 0:
         if progress_callback:

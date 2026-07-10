@@ -221,7 +221,8 @@ class App(
                 'video': config.DEFAULT_SAVE_VIDEO_CLIP, 'cutout': config.DEFAULT_SAVE_CUTOUT_DIFF,
                 'full': config.DEFAULT_SAVE_FULL_DIFF, 'composite': config.DEFAULT_SAVE_COMPOSITE,
                 'info': config.DEFAULT_SAVE_DETECTION_INFO, 'summary': True,
-                'full_video': config.DEFAULT_SAVE_FULL_VIDEO
+                'full_video': config.DEFAULT_SAVE_FULL_VIDEO,
+                'denoised_full_video': config.DEFAULT_SAVE_DENOISED_FULL_VIDEO,
             }.items()
         }
         self.full_video_timestamp_enabled_var = tk.BooleanVar(

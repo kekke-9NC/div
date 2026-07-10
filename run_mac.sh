@@ -3,6 +3,9 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
+# Finder から起動した場合でも Homebrew の ffmpeg を検出できるようにする。
+export PATH="/opt/homebrew/bin:/usr/local/bin:${PATH}"
+
 PYTHON_BIN="${PYTHON_BIN:-}"
 if [[ -z "$PYTHON_BIN" ]]; then
   if command -v python3.11 >/dev/null 2>&1; then

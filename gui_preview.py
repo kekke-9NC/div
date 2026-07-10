@@ -63,12 +63,14 @@ class PreviewMixin:
         self.log_text.insert(tk.END, f"[{timestamp}] {message}\n")
         summary_ref = self._extract_summary_video_ref(message)
         if summary_ref:
-            line_no = self.log_text.index("end-2c").split('.')[0]
-            self.log_text.tag_add("summary_hover", f"{line_no}.0", f"{line_no}.end")
-            self._summary_log_line_map[line_no] = {
-                "summary_ref": summary_ref,
-                "resolved_path": self._resolve_summary_video_path(summary_ref),
-            }
+            resolved_path = self._resolve_summary_video_path(summary_ref)
+            if resolved_path:
+                line_no = self.log_text.index("end-2c").split('.')[0]
+                self.log_text.tag_add("summary_hover", f"{line_no}.0", f"{line_no}.end")
+                self._summary_log_line_map[line_no] = {
+                    "summary_ref": summary_ref,
+                    "resolved_path": resolved_path,
+                }
 
         if follow_tail:
             self.log_text.see(tk.END)
@@ -178,8 +180,6 @@ class PreviewMixin:
         if self._active_summary_line != line_no:
             self._active_summary_line = line_no
             self._show_summary_preview_for_line(meta, event)
-        else:
-            self._move_summary_preview(event)
 
     def _on_log_text_leave_for_summary_preview(self, _event):
         self._schedule_summary_preview_hide(260)
@@ -241,6 +241,9 @@ class PreviewMixin:
                 meta["resolved_path"] = summary_path
 
         win = tk.Toplevel(self)
+        # macOS では表示済みの overrideredirect ウィンドウを構築中に何度も
+        # geometry/update_idletasks すると一瞬ちらつく。完成するまで非表示にする。
+        win.withdraw()
         win.overrideredirect(True)
         win.attributes("-topmost", True)
         win.configure(bg="#0F1724")
@@ -304,6 +307,7 @@ class PreviewMixin:
 
         self._summary_preview_window = win
         self._move_summary_preview(event)
+        win.deiconify()
 
         if not summary_path or not os.path.exists(summary_path):
             self._summary_preview_image_label.configure(text="summary.mp4 の場所を特定できません")
@@ -364,9 +368,9 @@ class PreviewMixin:
         if not self._summary_preview_window or not self._summary_preview_window.winfo_exists():
             return
 
-        self._summary_preview_window.update_idletasks()
-        ww = self._summary_preview_window.winfo_width()
-        wh = self._summary_preview_window.winfo_height()
+        # サイズは生成時に固定している。マウス移動のたびに同期レイアウトを
+        # 実行・再配置すると、macOS の透明でないポップアップが瞬間的に乱れる。
+        ww, wh = 392, 300
         sw = self.winfo_screenwidth()
         sh = self.winfo_screenheight()
 
@@ -518,4 +522,3 @@ class PreviewMixin:
             "free_bytes": free_bytes,
             "fetched_metadata": fetched_metadata,
         }
-

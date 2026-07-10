@@ -1,10 +1,32 @@
 import unittest
 from unittest import mock
+import tempfile
+from pathlib import Path
 
 import timelapse_creator
 
 
 class TimelapseCreatorTests(unittest.TestCase):
+    def test_folder_scan_excludes_recorder_temp_video(self):
+        with tempfile.TemporaryDirectory() as directory:
+            complete = Path(directory, "09.mp4")
+            unfinished = Path(directory, "09_temp_1783620548963395000.mp4")
+            complete.touch()
+            unfinished.touch()
+
+            _images, videos = timelapse_creator.get_files_from_path(directory)
+
+        self.assertEqual(videos, [str(complete)])
+
+    def test_explicit_recorder_temp_video_is_excluded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            unfinished = Path(directory, "09_temp_1783620548963395000.mp4")
+            unfinished.touch()
+
+            _images, videos = timelapse_creator.get_files_from_path(str(unfinished))
+
+        self.assertEqual(videos, [])
+
     def test_progress_event_remains_string_compatible(self):
         event = timelapse_creator.TimelapseProgress("working", 0.25, 12.5)
 
@@ -88,6 +110,33 @@ class TimelapseCreatorTests(unittest.TestCase):
         slow_cache.assert_not_called()
         loader.cleanup.assert_called_once()
         self.assertTrue(any("自動切り替えしません" in str(item) for item in messages))
+
+    def test_invalid_probed_video_is_not_sent_to_fast_concat(self):
+        loader = mock.MagicMock()
+        loader.load_frame.return_value = timelapse_creator.np.zeros(
+            (16, 16, 3), dtype=timelapse_creator.np.uint8
+        )
+
+        with (
+            mock.patch.object(
+                timelapse_creator, "get_files_from_path",
+                return_value=([], ["complete.mp4", "broken.mp4"]),
+            ),
+            mock.patch.object(
+                timelapse_creator, "count_total_frames",
+                return_value=(1000, [("complete.mp4", 0, 1000)]),
+            ),
+            mock.patch.object(timelapse_creator, "FrameLoader", return_value=loader),
+            mock.patch.object(
+                timelapse_creator, "_create_video_timelapse_fast", return_value=True
+            ) as fast_path,
+        ):
+            result = timelapse_creator.create_timelapse(
+                ["folder"], "output.mp4", progress_callback=lambda _message: None
+            )
+
+        self.assertTrue(result)
+        self.assertEqual(fast_path.call_args.args[0], ["complete.mp4"])
 
 
 if __name__ == "__main__":
