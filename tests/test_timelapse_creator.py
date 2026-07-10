@@ -1,4 +1,5 @@
 import unittest
+from unittest import mock
 
 import timelapse_creator
 
@@ -56,6 +57,37 @@ class TimelapseCreatorTests(unittest.TestCase):
         )
 
         self.assertIsNone(graph)
+
+    def test_runtime_fast_failure_does_not_silently_use_slow_path(self):
+        loader = mock.MagicMock()
+        loader.load_frame.return_value = timelapse_creator.np.zeros(
+            (16, 16, 3), dtype=timelapse_creator.np.uint8
+        )
+        messages = []
+
+        with (
+            mock.patch.object(
+                timelapse_creator, "get_files_from_path",
+                return_value=([], ["input.mp4"]),
+            ),
+            mock.patch.object(
+                timelapse_creator, "count_total_frames",
+                return_value=(1000, [("input.mp4", 0, 1000)]),
+            ),
+            mock.patch.object(timelapse_creator, "FrameLoader", return_value=loader),
+            mock.patch.object(
+                timelapse_creator, "_create_video_timelapse_fast", return_value=False
+            ),
+            mock.patch.object(timelapse_creator, "TemporalMeanFrameCache") as slow_cache,
+        ):
+            result = timelapse_creator.create_timelapse(
+                ["input.mp4"], "output.mp4", progress_callback=messages.append
+            )
+
+        self.assertFalse(result)
+        slow_cache.assert_not_called()
+        loader.cleanup.assert_called_once()
+        self.assertTrue(any("自動切り替えしません" in str(item) for item in messages))
 
 
 if __name__ == "__main__":
