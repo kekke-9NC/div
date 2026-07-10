@@ -845,36 +845,41 @@ def _build_fast_filter_graph(
         last_forward_index = total_frames - 1 - radius
         main_count = bisect.bisect_right(sample_indices, last_forward_index)
         tail_samples = sample_indices[main_count:]
-        if main_count <= 0 or not tail_samples:
+        if main_count <= 0:
             return None
-        reverse_positions = [
-            total_frames - 1 - max(0, index - radius) for index in tail_samples
-        ]
-        if len(set(reverse_positions)) != len(reverse_positions):
-            return None
-        tail_trim_start = max(0, tail_samples[0] - radius)
-        tail_select = "+".join(
-            f"eq(n\\,{position})" for position in sorted(reverse_positions)
+        forward_filter = (
+            f"tmix=frames={radius * 2 + 1}:weights=1,"
+            f"select=gte(n\\,{radius})*lt(selected_n\\,{main_count})*"
+            f"gte(n-{radius}\\,floor(selected_n*{total_frames}/{output_count}))"
         )
-        filters.extend([
-            "[0:v]split=2[mean_forward][mean_tail]",
-            (
-                f"[mean_forward]tmix=frames={radius * 2 + 1}:weights=1,"
-                f"select=gte(n\\,{radius})*lt(selected_n\\,{main_count})*"
-                f"gte(n-{radius}\\,floor(selected_n*{total_frames}/{output_count})),"
-                "setpts=PTS-STARTPTS[mean_main]"
-            ),
-            (
-                f"[mean_tail]trim=start_frame={tail_trim_start},setpts=PTS-STARTPTS,"
-                f"reverse,tmix=frames={radius * 2 + 1}:weights=1,"
-                f"select={tail_select},setpts=PTS-STARTPTS,reverse,"
-                "setpts=PTS-STARTPTS[mean_end]"
-            ),
-            (
-                f"[mean_main][mean_end]concat=n=2:v=1:a=0,"
-                f"setpts=N/({OUTPUT_FPS}*TB)[sampled]"
-            ),
-        ])
+        if not tail_samples:
+            filters.append(
+                f"[0:v]{forward_filter},setpts=N/({OUTPUT_FPS}*TB)[sampled]"
+            )
+        else:
+            reverse_positions = [
+                total_frames - 1 - max(0, index - radius) for index in tail_samples
+            ]
+            if len(set(reverse_positions)) != len(reverse_positions):
+                return None
+            tail_trim_start = max(0, tail_samples[0] - radius)
+            tail_select = "+".join(
+                f"eq(n\\,{position})" for position in sorted(reverse_positions)
+            )
+            filters.extend([
+                "[0:v]split=2[mean_forward][mean_tail]",
+                f"[mean_forward]{forward_filter},setpts=PTS-STARTPTS[mean_main]",
+                (
+                    f"[mean_tail]trim=start_frame={tail_trim_start},setpts=PTS-STARTPTS,"
+                    f"reverse,tmix=frames={radius * 2 + 1}:weights=1,"
+                    f"select={tail_select},setpts=PTS-STARTPTS,reverse,"
+                    "setpts=PTS-STARTPTS[mean_end]"
+                ),
+                (
+                    f"[mean_main][mean_end]concat=n=2:v=1:a=0,"
+                    f"setpts=N/({OUTPUT_FPS}*TB)[sampled]"
+                ),
+            ])
 
     current = "sampled"
     width, height = target_size
