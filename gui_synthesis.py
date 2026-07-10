@@ -15,6 +15,7 @@ class SynthesisMixin:
         """
         events = queue.Queue()
         completed = {"value": False}
+        progress_seen = {"value": False}
 
         def poll_events():
             try:
@@ -22,9 +23,30 @@ class SynthesisMixin:
                     event_type, *payload = events.get_nowait()
                     if event_type == "log":
                         self.append_log(payload[0])
+                    elif event_type == "progress":
+                        progress_seen["value"] = True
+                        fraction, eta_seconds = payload
+                        percent = max(0.0, min(100.0, float(fraction) * 100.0))
+                        self.progress["maximum"] = 100
+                        self.progress["value"] = percent
+                        self.status_label.config(
+                            text=f"{item_label}を作成中... ({percent:.1f}%)"
+                        )
+                        if eta_seconds is None:
+                            self.eta_label.config(text="ETA: 計算中...")
+                        else:
+                            eta_value = max(0, int(round(float(eta_seconds))))
+                            self.eta_label.config(
+                                text=f"ETA: {time.strftime('%H:%M:%S', time.gmtime(eta_value))}"
+                            )
                     elif event_type == "done":
                         completed["value"] = True
                         success = payload[0]
+                        if progress_seen["value"]:
+                            if success:
+                                self.progress["value"] = 100
+                                self.eta_label.config(text="ETA: 00:00:00")
+                            self.status_label.config(text="完了" if success else "失敗")
                         if success:
                             messagebox.showinfo(
                                 "完了",
@@ -41,6 +63,8 @@ class SynthesisMixin:
                             self.append_log(f"{item_label}の作成に失敗しました。")
                     elif event_type == "error":
                         completed["value"] = True
+                        if progress_seen["value"]:
+                            self.status_label.config(text="失敗")
                         self.append_log(f"{item_label}の作成中にエラーが発生しました: {payload[0]}")
                         messagebox.showerror(
                             "エラー", f"{item_label}の作成中にエラーが発生しました。\n{payload[0]}", parent=self
@@ -52,7 +76,17 @@ class SynthesisMixin:
 
         def run_task():
             try:
-                success = bool(task(lambda message: events.put(("log", message))))
+                def report(message):
+                    events.put(("log", str(message)))
+                    fraction = getattr(message, "fraction", None)
+                    if fraction is not None:
+                        events.put((
+                            "progress",
+                            fraction,
+                            getattr(message, "eta_seconds", None),
+                        ))
+
+                success = bool(task(report))
                 events.put(("done", success))
             except Exception as exc:
                 import traceback

@@ -16,6 +16,7 @@ import os
 import gc
 import cv2
 import numpy as np
+import bisect
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import List, Optional, Callable, Tuple, Dict
@@ -25,6 +26,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 import config
 import sys
+import tempfile
+import time
 
 
 _TIMESTAMP_POSITIONS = {
@@ -32,6 +35,37 @@ _TIMESTAMP_POSITIONS = {
     "bottom_right": "bottom_right", "bottom_left": "bottom_left",
     "top_right": "top_right", "top_left": "top_left",
 }
+
+
+class TimelapseProgress(str):
+    """String-compatible progress event with optional GUI metadata."""
+
+    def __new__(cls, message: str, fraction: Optional[float] = None,
+                eta_seconds: Optional[float] = None):
+        value = super().__new__(cls, message)
+        value.fraction = fraction
+        value.eta_seconds = eta_seconds
+        return value
+
+
+def _report_progress(
+    callback: Optional[Callable[[str], None]],
+    message: str,
+    fraction: Optional[float] = None,
+    eta_seconds: Optional[float] = None,
+) -> None:
+    """Keep the historical string callback API while attaching GUI progress."""
+    if callback:
+        callback(TimelapseProgress(message, fraction, eta_seconds))
+
+
+def _format_eta(seconds: Optional[float]) -> str:
+    if seconds is None or not np.isfinite(seconds) or seconds < 0:
+        return "計算中"
+    seconds = int(round(seconds))
+    hours, remainder = divmod(seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
 
 def _normalize_timestamp_settings(timestamp_settings: Optional[Dict]) -> Dict:
@@ -171,6 +205,60 @@ def _format_bytes(value: int) -> str:
 
 # NVENC利用可能フラグ（キャッシュ）
 _nvenc_available: Optional[bool] = None
+_ffmpeg_encoder_names: Optional[set] = None
+
+
+def _get_ffmpeg_encoder_names() -> set:
+    """Return FFmpeg video encoder names once per process."""
+    global _ffmpeg_encoder_names
+    if _ffmpeg_encoder_names is not None:
+        return _ffmpeg_encoder_names
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-encoders"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        names = set()
+        for line in result.stdout.splitlines():
+            fields = line.split()
+            if len(fields) >= 2 and fields[0].startswith("V"):
+                names.add(fields[1])
+        _ffmpeg_encoder_names = names
+    except Exception:
+        _ffmpeg_encoder_names = set()
+    return _ffmpeg_encoder_names
+
+
+def _select_h264_encoder() -> Tuple[str, List[str], str]:
+    """Choose the fastest available native H.264 encoder for this machine."""
+    encoders = _get_ffmpeg_encoder_names()
+    if sys.platform == "darwin" and "h264_videotoolbox" in encoders:
+        return (
+            "h264_videotoolbox",
+            [
+                "-c:v", "h264_videotoolbox", "-profile:v", "high",
+                "-q:v", "80", "-prio_speed", "1", "-realtime", "0",
+                "-allow_sw", "0",
+            ],
+            "Apple VideoToolbox GPU",
+        )
+    if "h264_nvenc" in encoders:
+        return (
+            "h264_nvenc",
+            [
+                "-c:v", "h264_nvenc", "-preset", "p1", "-rc", "vbr",
+                "-cq", "19", "-b:v", "0",
+            ],
+            "NVIDIA NVENC GPU",
+        )
+    return (
+        "libx264",
+        ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-threads", "0"],
+        "CPU (libx264/veryfast)",
+    )
 
 
 def is_nvenc_available() -> bool:
@@ -182,16 +270,7 @@ def is_nvenc_available() -> bool:
     if _nvenc_available is not None:
         return _nvenc_available
     
-    try:
-        result = subprocess.run(
-            ['ffmpeg', '-hide_banner', '-encoders'],
-            capture_output=True,
-            text=True,
-            timeout=10
-        )
-        _nvenc_available = 'h264_nvenc' in result.stdout
-    except Exception:
-        _nvenc_available = False
+    _nvenc_available = "h264_nvenc" in _get_ffmpeg_encoder_names()
     
     return _nvenc_available
 
@@ -631,6 +710,352 @@ def load_frame_wrapper(args):
     return (idx, frame)
 
 
+def _videos_are_concat_compatible(
+    video_paths: List[str], target_size: Tuple[int, int]
+) -> bool:
+    """The concat demuxer is safe only for matching video stream parameters."""
+    expected = None
+    for path in video_paths:
+        cap = cv2.VideoCapture(path)
+        if not cap.isOpened():
+            return False
+        signature = (
+            int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
+            int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
+            round(float(cap.get(cv2.CAP_PROP_FPS)), 3),
+            int(cap.get(cv2.CAP_PROP_FOURCC)),
+        )
+        cap.release()
+        if signature[0:2] != target_size or signature[2] <= 0:
+            return False
+        if expected is None:
+            expected = signature
+        elif signature != expected:
+            return False
+    return bool(expected)
+
+
+def _ffconcat_escape(path: str) -> str:
+    """Quote an absolute path for an ffconcat list file."""
+    return os.path.abspath(path).replace("'", "'\\''")
+
+
+def _create_timestamp_overlay_video(
+    loader: FrameLoader,
+    sample_indices: List[int],
+    target_size: Tuple[int, int],
+    settings: Dict,
+    output_path: str,
+) -> Optional[Tuple[int, int]]:
+    """Create a tiny alpha video so timestamping stays inside FFmpeg's pipeline."""
+    width, height = target_size
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    desired_height = max(12, int(round(height * settings["size_percent"] / 100.0)))
+    unit_height = max(1, cv2.getTextSize("Ag", font, 1.0, 1)[0][1])
+    font_scale = desired_height / unit_height
+    thickness = max(1, int(round(desired_height / 18)))
+    sample_text = "2000/01/01 00:00:00.000"
+    (text_width, text_height), baseline = cv2.getTextSize(
+        sample_text, font, font_scale, thickness
+    )
+    padding = max(3, desired_height // 4)
+    overlay_width = text_width + padding * 2
+    overlay_height = text_height + baseline + padding * 2
+    margin = max(8, int(round(desired_height * 0.55)))
+    position = settings["position"]
+    overlay_x = (
+        max(0, margin - padding)
+        if position.endswith("left")
+        else max(0, width - text_width - margin - padding)
+    )
+    overlay_y = (
+        max(0, margin - padding)
+        if position.startswith("top")
+        else max(0, height - margin - text_height - padding)
+    )
+
+    command = [
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+        "-f", "rawvideo", "-pix_fmt", "bgra",
+        "-s", f"{overlay_width}x{overlay_height}",
+        "-r", str(OUTPUT_FPS), "-i", "-", "-an",
+        "-c:v", "qtrle", "-pix_fmt", "argb", output_path,
+    ]
+    try:
+        proc = subprocess.Popen(
+            command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
+        )
+    except (FileNotFoundError, OSError):
+        return None
+
+    try:
+        if proc.stdin is None:
+            return None
+        for global_index in sample_indices:
+            canvas = np.zeros((overlay_height, overlay_width, 4), dtype=np.uint8)
+            canvas[:, :, 3] = 140  # same 55% black background used by _draw_timestamp
+            text = loader.timestamp_for_index(global_index).strftime(
+                "%Y/%m/%d %H:%M:%S.%f"
+            )[:-3]
+            origin = (padding, text_height + padding)
+            cv2.putText(
+                canvas, text, origin, font, font_scale,
+                (0, 0, 0, 255), thickness + 2, cv2.LINE_AA,
+            )
+            cv2.putText(
+                canvas, text, origin, font, font_scale,
+                (245, 245, 245, 255), thickness, cv2.LINE_AA,
+            )
+            proc.stdin.write(canvas.tobytes())
+        proc.stdin.close()
+        return_code = proc.wait(timeout=60)
+    except (BrokenPipeError, OSError, subprocess.TimeoutExpired):
+        try:
+            proc.kill()
+        except OSError:
+            pass
+        proc.wait()
+        return None
+    return (overlay_x, overlay_y) if return_code == 0 else None
+
+
+def _build_fast_filter_graph(
+    total_frames: int,
+    sample_indices: List[int],
+    radius: int,
+    target_size: Tuple[int, int],
+    timestamp_input: Optional[Tuple[int, int, int]],
+    mask_input_index: Optional[int],
+) -> Optional[str]:
+    """Build a centered temporal mean with fixed-size endpoint padding."""
+    output_count = len(sample_indices)
+    if output_count <= 0:
+        return None
+    filters: List[str] = []
+
+    if radius <= 0:
+        filters.append(
+            f"[0:v]select=gte(n\\,floor(selected_n*{total_frames}/{output_count})),"
+            f"setpts=N/({OUTPUT_FPS}*TB)[sampled]"
+        )
+    else:
+        # Forward tmix covers the beginning and middle. At the end, reverse
+        # only the final <=2*radius frames. FFmpeg repeats the nearest endpoint
+        # where a full window is unavailable, avoiding a whole-video buffer.
+        last_forward_index = total_frames - 1 - radius
+        main_count = bisect.bisect_right(sample_indices, last_forward_index)
+        tail_samples = sample_indices[main_count:]
+        if main_count <= 0 or not tail_samples:
+            return None
+        reverse_positions = [
+            total_frames - 1 - max(0, index - radius) for index in tail_samples
+        ]
+        if len(set(reverse_positions)) != len(reverse_positions):
+            return None
+        tail_trim_start = max(0, tail_samples[0] - radius)
+        tail_select = "+".join(
+            f"eq(n\\,{position})" for position in sorted(reverse_positions)
+        )
+        filters.extend([
+            "[0:v]split=2[mean_forward][mean_tail]",
+            (
+                f"[mean_forward]tmix=frames={radius * 2 + 1}:weights=1,"
+                f"select=gte(n\\,{radius})*lt(selected_n\\,{main_count})*"
+                f"gte(n-{radius}\\,floor(selected_n*{total_frames}/{output_count})),"
+                "setpts=PTS-STARTPTS[mean_main]"
+            ),
+            (
+                f"[mean_tail]trim=start_frame={tail_trim_start},setpts=PTS-STARTPTS,"
+                f"reverse,tmix=frames={radius * 2 + 1}:weights=1,"
+                f"select={tail_select},setpts=PTS-STARTPTS,reverse,"
+                "setpts=PTS-STARTPTS[mean_end]"
+            ),
+            (
+                f"[mean_main][mean_end]concat=n=2:v=1:a=0,"
+                f"setpts=N/({OUTPUT_FPS}*TB)[sampled]"
+            ),
+        ])
+
+    current = "sampled"
+    width, height = target_size
+    if mask_input_index is not None:
+        filters.extend([
+            f"[{mask_input_index}:v]format=gray[mask_gray]",
+            f"color=c=black:s={width}x{height}:r={OUTPUT_FPS}[black]",
+            f"[black][{current}][mask_gray]maskedmerge[masked]",
+        ])
+        current = "masked"
+    if timestamp_input is not None:
+        input_index, overlay_x, overlay_y = timestamp_input
+        filters.append(
+            f"[{current}][{input_index}:v]overlay=x={overlay_x}:y={overlay_y}:"
+            "shortest=1[stamped]"
+        )
+        current = "stamped"
+    filters.append(f"[{current}]format=yuv420p,setpts=N/({OUTPUT_FPS}*TB)[out]")
+    return ";".join(filters)
+
+
+def _create_video_timelapse_fast(
+    video_paths: List[str],
+    output_path: str,
+    total_frames: int,
+    sample_indices: List[int],
+    loader: FrameLoader,
+    target_size: Tuple[int, int],
+    radius: int,
+    mask: Optional[np.ndarray],
+    timestamp_settings: Dict,
+    progress_callback: Optional[Callable[[str], None]],
+) -> Optional[bool]:
+    """Run the all-video path as one parallel FFmpeg filter/encode pipeline.
+
+    ``None`` means the inputs are not suitable and the caller should use the
+    portable Python path. ``False`` means FFmpeg failed and fallback is safe.
+    """
+    if not _videos_are_concat_compatible(video_paths, target_size):
+        return None
+    if radius > 0 and total_frames <= radius * 2:
+        return None
+
+    encoder_name, encoder_args, encoder_label = _select_h264_encoder()
+    _report_progress(
+        progress_callback,
+        f"高速タイムラプス処理を使用します "
+        f"({max(1, os.cpu_count() or 1)}コア対応FFmpeg + {encoder_label})",
+        0.0,
+        None,
+    )
+
+    with tempfile.TemporaryDirectory(prefix="meteor_timelapse_") as temp_dir:
+        concat_path = os.path.join(temp_dir, "inputs.ffconcat")
+        with open(concat_path, "w", encoding="utf-8") as concat_file:
+            concat_file.write("ffconcat version 1.0\n")
+            for path in video_paths:
+                concat_file.write(f"file '{_ffconcat_escape(path)}'\n")
+
+        command = [
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-filter_complex_threads", str(max(1, os.cpu_count() or 1)),
+            "-f", "concat", "-safe", "0", "-i", concat_path,
+        ]
+        next_input_index = 1
+        timestamp_input = None
+        if timestamp_settings["enabled"]:
+            overlay_path = os.path.join(temp_dir, "timestamp.mov")
+            overlay_position = _create_timestamp_overlay_video(
+                loader, sample_indices, target_size, timestamp_settings, overlay_path
+            )
+            if overlay_position is None:
+                return False
+            command.extend(["-i", overlay_path])
+            timestamp_input = (next_input_index, *overlay_position)
+            next_input_index += 1
+
+        mask_input_index = None
+        if mask is not None:
+            width, height = target_size
+            resized_mask = (
+                cv2.resize(mask, (width, height), interpolation=cv2.INTER_NEAREST)
+                if mask.shape[:2] != (height, width) else mask
+            )
+            if resized_mask.ndim == 3:
+                resized_mask = cv2.cvtColor(resized_mask, cv2.COLOR_BGR2GRAY)
+            resized_mask = np.where(resized_mask > 0, 255, 0).astype(np.uint8)
+            mask_path = os.path.join(temp_dir, "mask.png")
+            if not cv2.imwrite(mask_path, resized_mask):
+                return False
+            command.extend([
+                "-loop", "1", "-framerate", str(OUTPUT_FPS), "-i", mask_path
+            ])
+            mask_input_index = next_input_index
+
+        filter_graph = _build_fast_filter_graph(
+            total_frames,
+            sample_indices,
+            radius,
+            target_size,
+            timestamp_input,
+            mask_input_index,
+        )
+        if filter_graph is None:
+            return None
+
+        command.extend([
+            "-filter_complex", filter_graph,
+            "-map", "[out]", "-frames:v", str(len(sample_indices)),
+            "-r", str(OUTPUT_FPS), "-an", *encoder_args,
+            "-pix_fmt", "yuv420p", "-stats_period", "0.25",
+            "-progress", "pipe:1", "-nostats",
+        ])
+        if Path(output_path).suffix.lower() in {".mp4", ".mov", ".m4v"}:
+            command.extend(["-movflags", "+faststart"])
+        command.append(output_path)
+
+        _report_progress(
+            progress_callback,
+            f"ネイティブ並列処理を開始します (エンコーダ: {encoder_name})",
+            0.0,
+            None,
+        )
+        try:
+            proc = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+            )
+        except (FileNotFoundError, OSError) as exc:
+            _report_progress(progress_callback, f"高速処理を開始できませんでした: {exc}")
+            return False
+
+        phase_start = time.monotonic()
+        last_reported = -1
+        if proc.stdout is not None:
+            for raw_line in proc.stdout:
+                key, separator, value = raw_line.strip().partition("=")
+                if key != "frame" or not separator:
+                    continue
+                try:
+                    completed = min(len(sample_indices), max(0, int(value)))
+                except ValueError:
+                    continue
+                if completed == last_reported:
+                    continue
+                last_reported = completed
+                elapsed = time.monotonic() - phase_start
+                eta = (
+                    elapsed * (len(sample_indices) - completed) / completed
+                    if completed > 0 else None
+                )
+                fraction = completed / max(1, len(sample_indices))
+                _report_progress(
+                    progress_callback,
+                    f"処理中: {completed}/{len(sample_indices)} フレーム "
+                    f"({fraction * 100:.1f}%) / ETA: {_format_eta(eta)}",
+                    fraction,
+                    eta,
+                )
+
+        return_code = proc.wait()
+        stderr_output = proc.stderr.read() if proc.stderr is not None else ""
+        if return_code != 0:
+            _report_progress(
+                progress_callback,
+                f"高速FFmpeg処理に失敗しました: {stderr_output[-800:]}",
+            )
+            return False
+
+    _report_progress(
+        progress_callback,
+        f"タイムラプス動画を保存しました: {output_path}",
+        1.0,
+        0.0,
+    )
+    return True
+
+
 def create_timelapse(
     input_paths: List[str],
     output_path: str,
@@ -738,6 +1163,39 @@ def create_timelapse(
     base_height, base_width = first_frame.shape[:2]
     target_size = (base_width, base_height)
 
+    # Common recording-folder workloads contain only matching video segments.
+    # Keep decode, temporal averaging, sampling, masking, timestamp overlay and
+    # encode in one FFmpeg graph so all CPU cores and the native GPU encoder can
+    # work concurrently without copying full frames through Python.
+    if all_videos and not all_images:
+        fast_result = _create_video_timelapse_fast(
+            all_videos,
+            output_path,
+            total_frames,
+            sample_indices,
+            loader,
+            target_size,
+            temporal_mean_radius,
+            mask,
+            timestamp_settings,
+            progress_callback,
+        )
+        if fast_result is True:
+            loader.cleanup()
+            del first_frame
+            gc.collect()
+            return True
+        if fast_result is False:
+            _report_progress(
+                progress_callback,
+                "高速処理に失敗したため、互換処理へ自動的に切り替えます",
+            )
+        else:
+            _report_progress(
+                progress_callback,
+                "入力動画の形式が一致しないため、互換処理を使用します",
+            )
+
     if progress_callback:
         progress_callback(
             f"各採用フレームを前後{temporal_mean_radius}フレームの時間平均で作成します"
@@ -810,37 +1268,16 @@ def create_timelapse(
         mode = "全フレーム先読み＋スライド平均" if temporal_mean_cache._retain_all_frames else "ローリングキャッシュ＋スライド平均"
         progress_callback(f"時間平均: 前後{temporal_mean_radius}フレーム、方式: {mode}")
     
-    # FFMPEGを起動（GPU利用可能ならNVENCを使用）
-    use_nvenc = is_nvenc_available()
-    
-    if use_nvenc:
-        # NVIDIA GPU (NVENC) を使用 - RTX 4050等の場合高速エンコード
-        if progress_callback:
-            progress_callback("GPU エンコード (NVENC) を使用します")
-        command = [
-            'ffmpeg', '-y', '-f', 'rawvideo', '-vcodec', 'rawvideo',
-            '-s', f'{base_width}x{base_height}', '-pix_fmt', 'bgr24',
-            '-r', str(OUTPUT_FPS), '-i', '-', '-an',
-            '-c:v', 'h264_nvenc',
-            '-preset', 'p5',  # p1(最速)～p7(最高品質), p5は高品質バランス
-            '-rc', 'vbr',  # 可変ビットレート
-            '-cq', '21',  # 品質レベル (0=ロスレス, 51=最低), 21は高品質
-            '-b:v', '0',  # cqに任せる
-            '-threads', '0',  # ffmpegに利用可能なCPUスレッド数を自動で全て使わせる
-            '-pix_fmt', 'yuv420p',
-            output_path
-        ]
-    else:
-        # CPUエンコード (libx264)
-        if progress_callback:
-            progress_callback("CPU エンコード (libx264) を使用します")
-        command = [
-            'ffmpeg', '-y', '-f', 'rawvideo', '-vcodec', 'rawvideo',
-            '-s', f'{base_width}x{base_height}', '-pix_fmt', 'bgr24',
-            '-r', str(OUTPUT_FPS), '-i', '-', '-an', '-c:v', 'libx264', '-threads', '0',
-            '-preset', 'medium', '-crf', '18', '-pix_fmt', 'yuv420p',
-            output_path
-        ]
+    # FFMPEGを起動（macOSではVideoToolbox、NVIDIA環境ではNVENCを優先）
+    _encoder_name, encoder_args, encoder_label = _select_h264_encoder()
+    if progress_callback:
+        progress_callback(f"エンコード: {encoder_label}")
+    command = [
+        "ffmpeg", "-y", "-f", "rawvideo", "-vcodec", "rawvideo",
+        "-s", f"{base_width}x{base_height}", "-pix_fmt", "bgr24",
+        "-r", str(OUTPUT_FPS), "-i", "-", "-an", *encoder_args,
+        "-pix_fmt", "yuv420p", output_path,
+    ]
     
     try:
         proc = subprocess.Popen(
@@ -874,6 +1311,8 @@ def create_timelapse(
         remaining_indices = sample_indices[1:]
         total_output = len(sample_indices)
         processed = 1
+        processing_started = time.monotonic()
+        last_progress_emit = 0.0
 
         for global_idx in remaining_indices:
             frame = temporal_mean_cache.mean_for_index(global_idx)
@@ -891,11 +1330,24 @@ def create_timelapse(
                     )
                 proc.stdin.write(frame.tobytes())
             processed += 1
-            gc.collect()
+            if processed % 120 == 0:
+                gc.collect()
 
-            if progress_callback:
-                progress = processed / max(1, total_output) * 100
-                progress_callback(f"処理中: {processed}/{total_output} フレーム ({progress:.1f}%)")
+            now = time.monotonic()
+            if progress_callback and (
+                now - last_progress_emit >= 0.25 or processed == total_output
+            ):
+                last_progress_emit = now
+                elapsed = now - processing_started
+                fraction = processed / max(1, total_output)
+                eta = elapsed * (total_output - processed) / max(1, processed - 1)
+                _report_progress(
+                    progress_callback,
+                    f"処理中: {processed}/{total_output} フレーム "
+                    f"({fraction * 100:.1f}%) / ETA: {_format_eta(eta)}",
+                    fraction,
+                    eta,
+                )
         
         return_code, stderr_output = _finish_ffmpeg_process(proc)
 
@@ -922,8 +1374,12 @@ def create_timelapse(
         loader.cleanup()
         gc.collect()
     
-    if progress_callback:
-        progress_callback(f"タイムラプス動画を保存しました: {output_path}")
+    _report_progress(
+        progress_callback,
+        f"タイムラプス動画を保存しました: {output_path}",
+        1.0,
+        0.0,
+    )
     
     return True
 
