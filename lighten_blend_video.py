@@ -21,6 +21,40 @@ import subprocess
 MAX_MEMORY_BYTES = 1 * 1024 * 1024 * 1024
 
 
+def _finish_ffmpeg_process(proc: subprocess.Popen) -> tuple[int, bytes]:
+    """Close ffmpeg stdin and collect stderr without calling ``communicate``.
+
+    ``Popen.communicate()`` attempts to flush stdin even when the caller has
+    already closed it.  Python then raises ``ValueError: flush of closed file``.
+    Video generation deliberately closes stdin to signal EOF to ffmpeg, so use
+    wait/read instead and tolerate a broken pipe from an already-failed ffmpeg.
+    """
+    stdin = proc.stdin
+    if stdin is not None and not stdin.closed:
+        try:
+            stdin.close()
+        except (BrokenPipeError, OSError, ValueError):
+            pass
+
+    try:
+        proc.wait(timeout=120)
+    except subprocess.TimeoutExpired:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+
+    stderr_output = b""
+    if proc.stderr is not None:
+        try:
+            stderr_output = proc.stderr.read() or b""
+        except (OSError, ValueError):
+            pass
+    return proc.returncode if proc.returncode is not None else -1, stderr_output
+
+
 def get_video_info(video_path: str) -> dict:
     """
     動画ファイルの情報を取得する。
@@ -297,11 +331,9 @@ def _create_single_video_with_mask(
                 progress_callback(f"処理中: {frame_idx + 1}/{frame_count} フレーム ({progress:.1f}%)")
     finally:
         cap.release()
-        if proc.stdin:
-            proc.stdin.close()
-        proc.wait()
+        return_code, _ = _finish_ffmpeg_process(proc)
     
-    return proc.returncode == 0
+    return return_code == 0
 
 
 def _create_lighten_blend_video_streaming(
@@ -464,11 +496,8 @@ def _create_lighten_blend_video_streaming(
         for c in caps:
             c['cap'].release()
         
-        if proc.stdin:
-            proc.stdin.close()
-        
-        stderr_output = proc.communicate()[1]
-        if proc.returncode != 0:
+        return_code, stderr_output = _finish_ffmpeg_process(proc)
+        if return_code != 0:
             if progress_callback:
                 progress_callback("警告: FFMPEGがエラーを返しました。")
                 try:

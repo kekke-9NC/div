@@ -10,9 +10,20 @@ class TimelapseDragDropWindow(Toplevel):
         self.log_callback = log_callback
         self.dropped_paths = []
         self.timelapse_mask = None  # タイムラプス用マスク
+        self.timelapse_timestamp_enabled_var = tk.BooleanVar(
+            value=config.TIMELAPSE_TIMESTAMP_ENABLED
+        )
+        self.timelapse_timestamp_position_var = tk.StringVar(value="右下")
+        self.timelapse_timestamp_size_var = tk.StringVar(
+            value=str(config.TIMELAPSE_TIMESTAMP_SIZE_PERCENT)
+        )
+        self.temporal_mean_radius_var = tk.IntVar(
+            value=config.TIMELAPSE_TEMPORAL_MEAN_RADIUS_FRAMES
+        )
+        self.temporal_mean_summary_var = tk.StringVar()
         
         self.title("タイムラプス作成")
-        self.geometry("500x600")
+        self.geometry("500x780")
         self.resizable(False, False)
         
         self.setup_ui()
@@ -86,12 +97,118 @@ class TimelapseDragDropWindow(Toplevel):
         
         self.mask_status_label = ttk.Label(mask_controls, text="マスクなし")
         self.mask_status_label.pack(side=tk.LEFT, padx=10)
+
+        timestamp_frame = ttk.LabelFrame(main_frame, text="時刻表示", padding=10)
+        timestamp_frame.pack(fill=tk.X, pady=(0, 10))
+
+        timestamp_check = ttk.Checkbutton(
+            timestamp_frame,
+            text="時刻を表示（ファイル作成時刻を基準）",
+            variable=self.timelapse_timestamp_enabled_var,
+            command=self._toggle_timelapse_timestamp_settings,
+        )
+        timestamp_check.pack(side=tk.LEFT)
+        ttk.Label(timestamp_frame, text="位置:").pack(side=tk.LEFT, padx=(12, 3))
+        self.timelapse_timestamp_position_box = ttk.Combobox(
+            timestamp_frame,
+            textvariable=self.timelapse_timestamp_position_var,
+            values=("右下", "左下", "右上", "左上"),
+            state="readonly",
+            width=6,
+        )
+        self.timelapse_timestamp_position_box.pack(side=tk.LEFT)
+        ttk.Label(timestamp_frame, text="文字サイズ:").pack(side=tk.LEFT, padx=(10, 3))
+        self.timelapse_timestamp_size_spin = ttk.Spinbox(
+            timestamp_frame,
+            from_=0.8,
+            to=4.0,
+            increment=0.1,
+            textvariable=self.timelapse_timestamp_size_var,
+            width=4,
+        )
+        self.timelapse_timestamp_size_spin.pack(side=tk.LEFT)
+        ttk.Label(timestamp_frame, text="%（画面高）").pack(side=tk.LEFT, padx=(3, 0))
+        self._toggle_timelapse_timestamp_settings()
+
+        mean_frame = ttk.LabelFrame(main_frame, text="ノイズ低減（時間平均）", padding=10)
+        mean_frame.pack(fill=tk.X, pady=(0, 10))
+        ttk.Label(
+            mean_frame,
+            text="各採用フレームの前後何枚を平均するか選びます。値を大きくするとノイズは減りますが、動くものは薄まります。",
+            wraplength=450,
+        ).pack(anchor=tk.W)
+
+        mean_controls = ttk.Frame(mean_frame)
+        mean_controls.pack(fill=tk.X, pady=(6, 0))
+        ttk.Label(mean_controls, text="前後:").pack(side=tk.LEFT)
+        self.temporal_mean_scale = ttk.Scale(
+            mean_controls,
+            from_=0,
+            to=100,
+            variable=self.temporal_mean_radius_var,
+            command=self._on_temporal_mean_scale,
+        )
+        self.temporal_mean_scale.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(6, 8))
+        self.temporal_mean_spin = ttk.Spinbox(
+            mean_controls,
+            from_=0,
+            to=100,
+            increment=1,
+            textvariable=self.temporal_mean_radius_var,
+            width=4,
+            command=self._update_temporal_mean_summary,
+        )
+        self.temporal_mean_spin.pack(side=tk.LEFT)
+        ttk.Label(mean_controls, text="枚").pack(side=tk.LEFT, padx=(3, 0))
+
+        ttk.Label(mean_frame, textvariable=self.temporal_mean_summary_var).pack(anchor=tk.W, pady=(4, 0))
+        preset_frame = ttk.Frame(mean_frame)
+        preset_frame.pack(anchor=tk.W, pady=(6, 0))
+        ttk.Label(preset_frame, text="プリセット:").pack(side=tk.LEFT)
+        for label, radius in (("なし", 0), ("軽め", 5), ("標準", 15), ("強め", 50)):
+            ttk.Button(
+                preset_frame,
+                text=label,
+                command=lambda value=radius: self._set_temporal_mean_radius(value),
+            ).pack(side=tk.LEFT, padx=(5, 0))
+        self.temporal_mean_spin.bind("<FocusOut>", lambda _event: self._update_temporal_mean_summary())
+        self.temporal_mean_spin.bind("<Return>", lambda _event: self._update_temporal_mean_summary())
+        self._update_temporal_mean_summary()
         
         btn_frame = ttk.Frame(main_frame)
         btn_frame.pack(fill=tk.X)
         
         ttk.Button(btn_frame, text="作成開始", command=self.start_creation).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="キャンセル", command=self.destroy).pack(side=tk.LEFT, padx=5)
+
+    def _toggle_timelapse_timestamp_settings(self):
+        state = tk.NORMAL if self.timelapse_timestamp_enabled_var.get() else tk.DISABLED
+        self.timelapse_timestamp_position_box.config(state="readonly" if state == tk.NORMAL else tk.DISABLED)
+        self.timelapse_timestamp_size_spin.config(state=state)
+
+    def _on_temporal_mean_scale(self, value):
+        """Scale is continuous, so convert its value to a whole frame count."""
+        self._set_temporal_mean_radius(int(round(float(value))))
+
+    def _set_temporal_mean_radius(self, value):
+        radius = max(0, min(100, int(value)))
+        if self.temporal_mean_radius_var.get() != radius:
+            self.temporal_mean_radius_var.set(radius)
+        self._update_temporal_mean_summary()
+
+    def _update_temporal_mean_summary(self):
+        try:
+            radius = int(self.temporal_mean_radius_var.get())
+        except (TypeError, ValueError, tk.TclError):
+            radius = config.TIMELAPSE_TEMPORAL_MEAN_RADIUS_FRAMES
+        radius = max(0, min(100, radius))
+        if self.temporal_mean_radius_var.get() != radius:
+            self.temporal_mean_radius_var.set(radius)
+        if radius == 0:
+            summary = "単独フレームを使用します（平均しません）"
+        else:
+            summary = f"前後{radius}枚を含む、合計最大{radius * 2 + 1}枚の平均画像を使用します"
+        self.temporal_mean_summary_var.set(summary)
     
     def on_drop(self, event):
         """ドラッグ＆ドロップのイベントハンドラ"""
@@ -266,6 +383,20 @@ class TimelapseDragDropWindow(Toplevel):
         duration = self.duration_var.get()
         paths = list(self.dropped_paths)
         mask = self.timelapse_mask  # マスクを保存
+        try:
+            timestamp_size = float(self.timelapse_timestamp_size_var.get())
+        except (TypeError, ValueError):
+            timestamp_size = config.TIMELAPSE_TIMESTAMP_SIZE_PERCENT
+        timestamp_settings = {
+            "enabled": self.timelapse_timestamp_enabled_var.get(),
+            "position": self.timelapse_timestamp_position_var.get(),
+            "size_percent": timestamp_size,
+        }
+        try:
+            temporal_mean_radius = int(self.temporal_mean_radius_var.get())
+        except (TypeError, ValueError, tk.TclError):
+            temporal_mean_radius = config.TIMELAPSE_TEMPORAL_MEAN_RADIUS_FRAMES
+        temporal_mean_radius = max(0, min(100, temporal_mean_radius))
         
         # ウィンドウを閉じる
         self.destroy()
@@ -273,22 +404,26 @@ class TimelapseDragDropWindow(Toplevel):
         mask_status = "あり" if mask is not None else "なし"
         self.log_callback(f"タイムラプス作成を開始します... (長さ: {duration}秒, {len(paths)}個のアイテム, マスク: {mask_status})")
         
-        def run_task():
-            success = timelapse_creator.create_timelapse(
+        def create_task(progress_callback):
+            return timelapse_creator.create_timelapse(
                 paths,
                 output_path,
                 target_duration_seconds=duration,
-                progress_callback=self.log_callback,
-                mask=mask
+                progress_callback=progress_callback,
+                mask=mask,
+                timestamp_settings=timestamp_settings,
+                temporal_mean_radius_frames=temporal_mean_radius,
             )
-            if success:
-                messagebox.showinfo("完了", f"タイムラプス動画の作成が完了しました。\n保存先: {output_path}")
-                self.log_callback(f"タイムラプス動画の作成が完了しました: {output_path}")
-            else:
-                messagebox.showerror("エラー", "タイムラプス動画の作成に失敗しました。ログを確認してください。")
-                self.log_callback("タイムラプス動画の作成に失敗しました。")
-        
-        threading.Thread(target=run_task, daemon=True).start()
+
+        task_runner = getattr(self.parent, "_run_synthesis_task_async", None)
+        if not callable(task_runner):
+            messagebox.showerror("エラー", "タイムラプス作成機能を開始できませんでした。")
+            return
+        task_runner(
+            create_task,
+            output_path=output_path,
+            item_label="タイムラプス動画",
+        )
 
 
 class ProcessingOptionDialog(tk.Toplevel):

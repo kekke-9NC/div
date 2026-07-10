@@ -10,6 +10,7 @@ from tkinter import ttk, Canvas, messagebox
 from PIL import Image, ImageTk, ImageDraw, ImageFont
 from typing import List, Tuple, Optional, Callable, Dict
 import threading
+import queue
 import time
 import math
 import cv2
@@ -43,6 +44,9 @@ class DetectionPreviewWindow(tk.Toplevel):
         # key: filename, value: {'boxes': [(x1,y1,x2,y2)...], 'image_path': str, 'image_shape': (h, w)}
         self.results: Dict[str, dict] = {}
         self.photo_images = {}  # メモリ保持用
+        # Worker threads only put data here.  Tk widgets are always updated by
+        # _poll_ui_events on the main thread.
+        self._ui_events = queue.Queue()
 
         # 順序と進捗管理
         self.item_order: List[str] = []
@@ -52,10 +56,37 @@ class DetectionPreviewWindow(tk.Toplevel):
         
         # UIセットアップ
         self.setup_ui()
+        self.after(50, self._poll_ui_events)
         
         # モーダル設定（親ウィンドウ操作禁止ではないが、最前面に）
         self.transient(parent)
         self.protocol("WM_DELETE_WINDOW", self.on_close)
+
+    def _poll_ui_events(self):
+        """Apply background re-detection results on Tk's main thread."""
+        try:
+            while True:
+                event_type, *payload = self._ui_events.get_nowait()
+                if event_type == "reanalyze_result":
+                    filename, boxes = payload
+                    if filename in self.results:
+                        # Replace the previous result; do not append to it.
+                        # This is the source of truth passed to synthesis.
+                        self.results[filename]['boxes'] = list(boxes or [])
+                        self._rebuild_ui(self.item_order)
+                    self.config(cursor="")
+                elif event_type == "reanalyze_error":
+                    filename, error_message = payload
+                    self.config(cursor="")
+                    messagebox.showerror(
+                        "再検出エラー",
+                        f"{filename} の再検出に失敗しました。\n{error_message}",
+                        parent=self,
+                    )
+        except queue.Empty:
+            pass
+        if self.winfo_exists():
+            self.after(50, self._poll_ui_events)
         
     def setup_ui(self):
         """UI構築"""
@@ -463,29 +494,10 @@ class DetectionPreviewWindow(tk.Toplevel):
                     boxes = []
                 else:
                     mask, boxes = result
-                
-                # メインスレッドでUI更新
-                def update_ui():
-                    if not self.winfo_exists():
-                        return
-                    try:
-                        # データ更新
-                        self.results[filename]['boxes'] = boxes
-                        
-                        # UI再構築（順序を維持）
-                        self._rebuild_ui(self.item_order)
-                    finally:
-                        self.config(cursor="")
-                
-                self.after(0, update_ui)
-                
+                self._ui_events.put(("reanalyze_result", filename, list(boxes or [])))
+
             except Exception as e:
-                # エラー時もカーソルを戻す
-                def reset_cursor():
-                    if self.winfo_exists():
-                        self.config(cursor="")
-                self.after(0, reset_cursor)
-                print(f"再検出エラー: {e}")
+                self._ui_events.put(("reanalyze_error", filename, str(e)))
         
         # バックグラウンドスレッドで実行
         threading.Thread(target=run_detection, daemon=True).start()
