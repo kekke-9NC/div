@@ -1,6 +1,8 @@
 import unittest
 from unittest import mock
 
+import numpy as np
+
 import file_utils
 import utils
 
@@ -32,15 +34,19 @@ class NotificationSoundTests(unittest.TestCase):
         self.assertFalse(result)
 
     def test_rtsp_notification_setting_reaches_detection_pipeline(self):
+        correction = np.ones((4, 4), dtype=np.int16)
         with mock.patch.object(
             file_utils.video_processing, "create_line_video_clips", return_value=[]
         ) as create_clips:
             result = file_utils.process_video_file_periodic(
-                "recorded-rtsp.mp4", notify_on_detection=False
+                "recorded-rtsp.mp4",
+                notify_on_detection=False,
+                fixed_pattern_correction=correction,
             )
 
         self.assertTrue(result)
         self.assertFalse(create_clips.call_args.kwargs["notify_on_detection"])
+        self.assertIs(create_clips.call_args.kwargs["fixed_pattern_correction"], correction)
 
 
 if __name__ == "__main__":

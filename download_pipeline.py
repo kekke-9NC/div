@@ -25,6 +25,7 @@ def run_pipeline(
     summary_video_config: Optional[List[Dict[str, Any]]] = None,
     tmp_root: Optional[str] = None,
     status_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    fixed_pattern_correction: Optional[Any] = None,
 ):
     """Run a 2-stage pipeline: download workers and processing workers.
 
@@ -148,9 +149,22 @@ def run_pipeline(
                 # call the existing processing function
                 processors_busy[tid] = True
                 video_processing.create_line_video_clips(
-                    local_path, False, interval, duration, config.MIN_LINE_LENGTH, mask, None, progress_callback,
-                    meteor_save_path, not_meteor_save_path, (global_wcs_info is not None), global_wcs_info,
-                    plate_solve_mask, config.RTSP_BUFFER_DURATION, cancel_flag, save_options or {}, False, summary_video_config
+                    source=local_path,
+                    is_rtsp=False,
+                    interval=interval,
+                    duration=duration,
+                    min_length=config.MIN_LINE_LENGTH,
+                    mask=mask,
+                    progress_callback=progress_callback,
+                    meteor_save_path=meteor_save_path,
+                    not_meteor_save_path=not_meteor_save_path,
+                    use_plate_solve=(global_wcs_info is not None),
+                    global_wcs_info=global_wcs_info,
+                    plate_solve_mask=plate_solve_mask,
+                    cancel_flag=cancel_flag,
+                    save_options=save_options or {},
+                    summary_video_config=summary_video_config,
+                    fixed_pattern_correction=fixed_pattern_correction,
                 )
             except Exception as e:
                 try:

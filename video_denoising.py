@@ -52,24 +52,27 @@ def _temporal_reference(
     return _temporal_median(frames, index, radius)
 
 
-def _meteor_restore_mask(
+def transient_restore_mask(
     current: np.ndarray,
     temporal_median: np.ndarray,
     detected_line: Optional[Line],
     threshold: float,
     line_width: int,
+    protect_global_transients: bool = False,
 ) -> Optional[np.ndarray]:
     """Build a soft mask for bright temporal transients near the meteor line."""
-    if not detected_line:
+    if not detected_line and not protect_global_transients:
         return None
 
     height, width = current.shape[:2]
-    (x1, y1), (x2, y2) = detected_line
-    x1, x2 = int(np.clip(x1, 0, width - 1)), int(np.clip(x2, 0, width - 1))
-    y1, y2 = int(np.clip(y1, 0, height - 1)), int(np.clip(y2, 0, height - 1))
-
-    corridor = np.zeros((height, width), dtype=np.uint8)
-    cv2.line(corridor, (x1, y1), (x2, y2), 255, max(3, int(line_width)), cv2.LINE_AA)
+    if detected_line:
+        (x1, y1), (x2, y2) = detected_line
+        x1, x2 = int(np.clip(x1, 0, width - 1)), int(np.clip(x2, 0, width - 1))
+        y1, y2 = int(np.clip(y1, 0, height - 1)), int(np.clip(y2, 0, height - 1))
+        corridor = np.zeros((height, width), dtype=np.uint8)
+        cv2.line(corridor, (x1, y1), (x2, y2), 255, max(3, int(line_width)), cv2.LINE_AA)
+    else:
+        corridor = np.full((height, width), 255, dtype=np.uint8)
 
     current_gray = cv2.cvtColor(current, cv2.COLOR_BGR2GRAY).astype(np.float32)
     median_gray = cv2.cvtColor(temporal_median, cv2.COLOR_BGR2GRAY).astype(np.float32)
@@ -93,6 +96,7 @@ def denoise_frame(
     transient_threshold: float = 10.0,
     protect_line_width: int = 32,
     temporal_method: str = "median",
+    protect_global_transients: bool = False,
 ) -> np.ndarray:
     """Denoise one frame while protecting a detected meteor trajectory."""
     if not frames:
@@ -103,12 +107,13 @@ def denoise_frame(
     reference = _temporal_reference(frames, index, radius, temporal_method)
     denoised = cv2.addWeighted(current, original_weight, reference, 1.0 - original_weight, 0.0)
 
-    restore_mask = _meteor_restore_mask(
+    restore_mask = transient_restore_mask(
         current,
         reference,
         detected_line,
         float(transient_threshold),
         int(protect_line_width),
+        protect_global_transients=protect_global_transients,
     )
     if restore_mask is not None and np.any(restore_mask > 0):
         alpha = restore_mask[..., None]
@@ -128,6 +133,7 @@ def iter_denoised_frames(
     transient_threshold: float = 10.0,
     protect_line_width: int = 32,
     temporal_method: str = "median",
+    protect_global_transients: bool = False,
 ) -> Iterator[np.ndarray]:
     for index in range(len(frames)):
         yield denoise_frame(
@@ -139,6 +145,7 @@ def iter_denoised_frames(
             transient_threshold=transient_threshold,
             protect_line_width=protect_line_width,
             temporal_method=temporal_method,
+            protect_global_transients=protect_global_transients,
         )
 
 

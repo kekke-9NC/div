@@ -179,7 +179,7 @@ DEFAULT_SAVE_FULL_DIFF = False
 DEFAULT_SAVE_COMPOSITE = True
 DEFAULT_SAVE_DETECTION_INFO = True
 DEFAULT_SAVE_FULL_VIDEO = False  # フルサイズ動画（トリミングなし）
-DEFAULT_SAVE_DENOISED_FULL_VIDEO = True  # 閲覧用のノイズ低減フルサイズ動画
+DEFAULT_SAVE_DENOISED_FULL_VIDEO = False  # 旧個別出力。共通保存物補正へ移行。
 
 # --- 検出クリップの閲覧用ノイズ低減 ---
 # 5フレーム（前後2枚）の時間中央値を主体にし、検出線付近の明るい過渡成分を原画から戻す。

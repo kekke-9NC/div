@@ -6,7 +6,11 @@ import cv2
 import numpy as np
 
 
-def apply_fixed_pattern_correction(frame: np.ndarray, correction: np.ndarray | None) -> np.ndarray:
+def apply_fixed_pattern_correction(
+    frame: np.ndarray,
+    correction: np.ndarray | None,
+    strength: float = 1.0,
+) -> np.ndarray:
     """Apply a signed, zero-centred fixed-pattern correction to a BGR frame.
 
     New calibration files contain an ``int16`` correction.  Older files contain
@@ -20,9 +24,10 @@ def apply_fixed_pattern_correction(frame: np.ndarray, correction: np.ndarray | N
                                 interpolation=cv2.INTER_LINEAR)
     if correction.dtype == np.uint8:
         return cv2.subtract(frame, correction)
-    values = frame.astype(np.int16)
+    strength = max(0.0, float(strength))
+    values = frame.astype(np.float32)
     if correction.ndim == 2:
-        values -= correction[..., None].astype(np.int16)
+        values -= correction[..., None].astype(np.float32) * strength
     else:
-        values -= correction.astype(np.int16)
+        values -= correction.astype(np.float32) * strength
     return np.clip(values, 0, 255).astype(np.uint8)

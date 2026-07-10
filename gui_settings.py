@@ -50,7 +50,6 @@ class SettingsMixin:
         save_map = {
             'video': "動画クリップ (cutout.mp4)", 
             'full_video': "フルサイズ動画 (fullsize.mp4)", 
-            'denoised_full_video': "ノイズ低減フルサイズ動画 (full_denoised.mp4)",
             'cutout': "切り出し差分画像 (cutout_diff.jpg)", 
             'full': "全体差分画像 (full_diff.jpg)",
             'composite': "比較明合成画像 (composite.jpg)", 
@@ -162,6 +161,20 @@ class SettingsMixin:
                 self.btn_summary_settings.pack(side=tk.LEFT, padx=5)
                 var.trace_add("write", lambda *args: self.toggle_summary_settings_button())
                 self.toggle_summary_settings_button()
+
+        enhancement_frame = ttk.LabelFrame(lf_save, text="共通保存物補正")
+        enhancement_frame.pack(fill=tk.X, pady=(6, 2))
+        ttk.Checkbutton(
+            enhancement_frame,
+            text="適応固定パターン補正 → 21フレーム平均を全保存動画・画像へ適用",
+            variable=self.apply_rtsp_dark_var,
+            command=self.on_apply_rtsp_dark_changed,
+        ).pack(anchor=tk.W, padx=4, pady=2)
+        ttk.Label(
+            enhancement_frame,
+            text="RTSP・フォルダ・単体動画のすべてで同じ処理を使用します。原本動画は変更しません。",
+            style="Hint.TLabel",
+        ).pack(anchor=tk.W, padx=24, pady=(0, 3))
 
         lf_path = ttk.LabelFrame(scrollable_frame, text="保存先")
         lf_path.pack(fill=tk.X, pady=5)
@@ -1049,6 +1062,13 @@ class SettingsMixin:
             'lm_studio_vlm_api_key': "",
             'has_mask_image': self.mask_image is not None, 'has_plate_solve_mask_image': self.plate_solve_mask_image is not None,
             'summary_video_config': self.summary_video_config,
+            'video_concat_settings': {
+                'bitrate': self.video_concat_bitrate_var.get(),
+                'codec': self.video_concat_codec_var.get(),
+                'fps': self.video_concat_fps_var.get(),
+                'safe_mode': self.video_concat_safe_mode_var.get(),
+                'apply_enhancement': self.video_concat_enhancement_var.get(),
+            },
             'auto_time_updater_enabled': self.auto_time_updater_enabled_var.get(),
             'rtsp_preset': self.rtsp_preset_var.get(),
             'rtsp_fps': self.rtsp_fps_var.get(),
@@ -1166,6 +1186,13 @@ class SettingsMixin:
                 timestamp_settings.get('size_percent', config.FULL_VIDEO_TIMESTAMP_SIZE_PERCENT)
             ))
             self.toggle_full_video_timestamp_settings()
+
+            concat_settings = settings.get('video_concat_settings', {})
+            self.video_concat_bitrate_var.set(concat_settings.get('bitrate', 'Auto'))
+            self.video_concat_codec_var.set(concat_settings.get('codec', 'h264'))
+            self.video_concat_fps_var.set(concat_settings.get('fps', 'Auto'))
+            self.video_concat_safe_mode_var.set(bool(concat_settings.get('safe_mode', True)))
+            self.video_concat_enhancement_var.set(bool(concat_settings.get('apply_enhancement', False)))
 
             self.plate_solve_wcs_path_var.set(settings.get('plate_solve_wcs_path', ''))
             self.plate_solve_video_path_var.set(settings.get('plate_solve_video_path', ''))
