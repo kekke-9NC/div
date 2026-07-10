@@ -35,6 +35,19 @@ class TimelapseCreatorTests(unittest.TestCase):
         self.assertIn("eq(n\\,59)", graph)
         self.assertIn("eq(n\\,99)", graph)
 
+    def test_fast_filter_does_not_require_an_unused_reverse_tail(self):
+        indices = timelapse_creator.calculate_sample_indices(90000, 15)
+
+        graph = timelapse_creator._build_fast_filter_graph(
+            90000, indices, 50, (1920, 1080), None, None
+        )
+
+        self.assertIsNotNone(graph)
+        self.assertIn("tmix=frames=101", graph)
+        self.assertIn("lt(selected_n\\,900)", graph)
+        self.assertNotIn("split=2", graph)
+        self.assertNotIn("reverse", graph)
+
     def test_fast_filter_rejects_too_short_temporal_window(self):
         indices = timelapse_creator.calculate_sample_indices(80, 15)
 
