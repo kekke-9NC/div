@@ -179,6 +179,14 @@ class App(
         
         style.configure("TLabelframe", background=FRAME_BG, bordercolor=SELECT_BG, padding=10)
         style.configure("TLabelframe.Label", font=('Segoe UI', 11, 'bold'), background=FRAME_BG, foreground=FG_COLOR)
+        # Compact section styles used by the RTSP control panel.
+        style.configure("Section.TLabelframe", background="#2B3A52", bordercolor="#4A6A9B", padding=8)
+        style.configure("Section.TLabelframe.Label", font=('Segoe UI', 10, 'bold'), background="#2B3A52", foreground="#DCE8FA")
+        style.configure("Primary.TButton", background="#3578B8", foreground="white", borderwidth=0)
+        style.map("Primary.TButton", background=[('active', '#4B91D2'), ('disabled', '#526479')])
+        style.configure("Quiet.TButton", background="#3B506F", foreground="#EAEAEA", borderwidth=0)
+        style.map("Quiet.TButton", background=[('active', '#4A6A9B')])
+        style.configure("Hint.TLabel", background="#2B3A52", foreground="#8ED8FF", font=('Segoe UI', 9))
 
         style.configure("TEntry", fieldbackground="#3A4D6B", foreground=FG_COLOR, insertcolor=FG_COLOR, bordercolor=SELECT_BG)
         style.configure("TSpinbox", fieldbackground="#3A4D6B", foreground=FG_COLOR, insertcolor=FG_COLOR, bordercolor=SELECT_BG)

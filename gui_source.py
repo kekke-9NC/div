@@ -97,16 +97,18 @@ class SourceMixin:
         ttk.Button(btn_frame, text="選択項目を削除", command=self.remove_selected_folders).pack(side=tk.LEFT, padx=2)
         ttk.Button(btn_frame, text="すべて削除", command=self.remove_all_folders).pack(side=tk.LEFT, padx=2)
 
-        lf_rtsp = ttk.LabelFrame(scrollable_frame)
+        lf_rtsp = ttk.LabelFrame(scrollable_frame, text="RTSPストリーム")
         lf_rtsp.pack(fill=tk.X, expand=True, pady=5)
-        
-        # RTSPストリームのタイトル行にiボタンを追加
-        rtsp_title_frame = ttk.Frame(lf_rtsp)
-        rtsp_title_frame.pack(fill=tk.X, anchor=tk.W)
-        ttk.Label(rtsp_title_frame, text="RTSPストリーム", font=("", 9, "bold")).pack(side=tk.LEFT)
-        
-        rtsp_info_label = ttk.Label(rtsp_title_frame, text=" ⓘ ", font=("Arial", 9), foreground="#87CEEB", cursor="hand2")
-        rtsp_info_label.pack(side=tk.LEFT)
+
+        rtsp_intro = ttk.Frame(lf_rtsp)
+        rtsp_intro.pack(fill=tk.X, pady=(0, 6))
+        ttk.Label(
+            rtsp_intro,
+            text="カメラを追加して、録画・解析・固定パターン補正をこの場所で管理します。",
+            style="Hint.TLabel",
+        ).pack(side=tk.LEFT)
+        rtsp_info_label = ttk.Label(rtsp_intro, text="ⓘ", font=("Arial", 11), foreground="#87CEEB", cursor="hand2")
+        rtsp_info_label.pack(side=tk.LEFT, padx=(6, 0))
         
         rtsp_info_text = "外部GPUが無い場合はCPUの負荷が高くなり\n映像が乱れることがあります。"
         rtsp_info_label._tooltip = None
@@ -147,21 +149,20 @@ class SourceMixin:
         rtsp_info_label.bind("<Enter>", show_rtsp_tooltip)
         rtsp_info_label.bind("<Leave>", hide_rtsp_tooltip)
         
-        entry_frame = ttk.Frame(lf_rtsp)
-        entry_frame.pack(fill=tk.X)
-        ttk.Label(entry_frame, text="URL:").pack(side=tk.LEFT, padx=(0,5))
-        self.rtsp_url_entry = ttk.Entry(entry_frame, textvariable=self.rtsp_url_var)
-        self.rtsp_url_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        
-        ttk.Label(entry_frame, text="FPS:").pack(side=tk.LEFT, padx=(10, 5))
-        fps_spin = ttk.Spinbox(entry_frame, from_=1, to=120, increment=1, width=5, textvariable=self.rtsp_fps_var)
-        fps_spin.pack(side=tk.LEFT, padx=(0, 5))
-        
-        self.btn_add_rtsp = ttk.Button(entry_frame, text="追加", command=self.add_rtsp_url)
-        self.btn_add_rtsp.pack(side=tk.LEFT, padx=(5,0))
+        rtsp_connect = ttk.LabelFrame(lf_rtsp, text="接続を追加", style="Section.TLabelframe")
+        rtsp_connect.pack(fill=tk.X, pady=(0, 6))
+        rtsp_connect.columnconfigure(1, weight=1)
+        ttk.Label(rtsp_connect, text="RTSP URL").grid(row=0, column=0, sticky=tk.W, padx=(0, 7))
+        self.rtsp_url_entry = ttk.Entry(rtsp_connect, textvariable=self.rtsp_url_var)
+        self.rtsp_url_entry.grid(row=0, column=1, sticky=tk.EW)
+        ttk.Label(rtsp_connect, text="FPS").grid(row=0, column=2, sticky=tk.W, padx=(10, 5))
+        fps_spin = ttk.Spinbox(rtsp_connect, from_=1, to=120, increment=1, width=5, textvariable=self.rtsp_fps_var)
+        fps_spin.grid(row=0, column=3, sticky=tk.W)
+        self.btn_add_rtsp = ttk.Button(rtsp_connect, text="ストリームを追加", style="Primary.TButton", command=self.add_rtsp_url)
+        self.btn_add_rtsp.grid(row=0, column=4, sticky=tk.E, padx=(10, 0))
 
-        rtsp_notification_frame = ttk.Frame(lf_rtsp)
-        rtsp_notification_frame.pack(fill=tk.X, pady=(6, 0))
+        rtsp_notification_frame = ttk.Frame(rtsp_connect)
+        rtsp_notification_frame.grid(row=1, column=0, columnspan=5, sticky=tk.W, pady=(7, 0))
         ttk.Checkbutton(
             rtsp_notification_frame,
             text="流星検出時に通知音を鳴らす",
@@ -169,13 +170,15 @@ class SourceMixin:
         ).pack(side=tk.LEFT)
         ttk.Button(
             rtsp_notification_frame,
-            text="テスト再生",
+            text="通知を試す",
+            style="Quiet.TButton",
             command=utils.play_notification_sound,
         ).pack(side=tk.LEFT, padx=(8, 0))
         
-        # RTSP list (styled)
-        rtsp_list_container = ttk.Frame(lf_rtsp)
-        rtsp_list_container.pack(fill=tk.BOTH, expand=True, pady=5)
+        rtsp_list_section = ttk.LabelFrame(lf_rtsp, text="接続済みストリーム", style="Section.TLabelframe")
+        rtsp_list_section.pack(fill=tk.X, expand=True, pady=(0, 6))
+        rtsp_list_container = ttk.Frame(rtsp_list_section)
+        rtsp_list_container.pack(fill=tk.BOTH, expand=True)
         
         self.rtsp_list_canvas = tk.Canvas(rtsp_list_container, bg="#3A4D6B", highlightthickness=0, height=60)
         self.rtsp_list_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -205,35 +208,53 @@ class SourceMixin:
         self.rtsp_item_frames = []
         self.rtsp_selected_indices = set()
         
-        rtsp_btn_frame = ttk.Frame(lf_rtsp)
-        rtsp_btn_frame.pack(fill=tk.X, pady=(5,0))
-        ttk.Button(rtsp_btn_frame, text="選択項目を削除", command=self.remove_selected_rtsp).pack(side=tk.LEFT, padx=2)
-        ttk.Button(rtsp_btn_frame, text="すべて削除", command=self.remove_all_rtsp).pack(side=tk.LEFT, padx=2)
-        self.btn_rtsp_plate_solve = ttk.Button(rtsp_btn_frame, text="RTSPからプレートソルブ", command=self.start_rtsp_plate_solve)
-        self.btn_rtsp_plate_solve.pack(side=tk.LEFT, padx=(10, 2))
-        self.btn_rtsp_mask = ttk.Button(rtsp_btn_frame, text="RTSPからマスク作成", command=self.create_rtsp_mask)
-        self.btn_rtsp_mask.pack(side=tk.LEFT, padx=2)
-        self.btn_rtsp_dark_capture = ttk.Button(rtsp_btn_frame, text="固定パターンを撮る（30秒）", command=self.capture_rtsp_dark_frame)
-        self.btn_rtsp_dark_capture.pack(side=tk.LEFT, padx=(10, 2))
-        self.btn_rtsp_dark_video = ttk.Button(rtsp_btn_frame, text="保存動画から作成", command=self.load_rtsp_dark_video)
-        self.btn_rtsp_dark_video.pack(side=tk.LEFT, padx=2)
+        rtsp_list_actions = ttk.Frame(rtsp_list_section)
+        rtsp_list_actions.pack(fill=tk.X, pady=(6, 0))
+        ttk.Label(rtsp_list_actions, text="選択したストリーム:").pack(side=tk.LEFT)
+        ttk.Button(rtsp_list_actions, text="削除", style="Quiet.TButton", command=self.remove_selected_rtsp).pack(side=tk.LEFT, padx=(7, 4))
+        ttk.Button(rtsp_list_actions, text="すべて削除", style="Quiet.TButton", command=self.remove_all_rtsp).pack(side=tk.LEFT)
+
+        rtsp_tools = ttk.Frame(lf_rtsp)
+        rtsp_tools.pack(fill=tk.X, pady=(0, 6))
+        rtsp_tools.columnconfigure(0, weight=1)
+        rtsp_tools.columnconfigure(1, weight=1)
+
+        rtsp_analysis = ttk.LabelFrame(rtsp_tools, text="解析ツール", style="Section.TLabelframe")
+        rtsp_analysis.grid(row=0, column=0, sticky=tk.NSEW, padx=(0, 3))
+        ttk.Label(rtsp_analysis, text="カメラ映像から解析用の設定を作成します。", style="Hint.TLabel").pack(anchor=tk.W, pady=(0, 6))
+        analysis_buttons = ttk.Frame(rtsp_analysis)
+        analysis_buttons.pack(anchor=tk.W)
+        self.btn_rtsp_plate_solve = ttk.Button(analysis_buttons, text="プレートソルブ", command=self.start_rtsp_plate_solve)
+        self.btn_rtsp_plate_solve.pack(side=tk.LEFT, padx=(0, 5))
+        self.btn_rtsp_mask = ttk.Button(analysis_buttons, text="マスク作成", command=self.create_rtsp_mask)
+        self.btn_rtsp_mask.pack(side=tk.LEFT)
+
+        rtsp_pattern = ttk.LabelFrame(rtsp_tools, text="固定パターン補正", style="Section.TLabelframe")
+        rtsp_pattern.grid(row=0, column=1, sticky=tk.NSEW, padx=(3, 0))
+        ttk.Label(rtsp_pattern, text="30秒のダーク動画から補正マップを作成します。", style="Hint.TLabel").pack(anchor=tk.W, pady=(0, 6))
+        rtsp_pattern_buttons = ttk.Frame(rtsp_pattern)
+        rtsp_pattern_buttons.pack(anchor=tk.W)
+        self.btn_rtsp_dark_capture = ttk.Button(rtsp_pattern_buttons, text="撮影（30秒）", style="Primary.TButton", command=self.capture_rtsp_dark_frame)
+        self.btn_rtsp_dark_capture.pack(side=tk.LEFT, padx=(0, 5))
+        self.btn_rtsp_dark_video = ttk.Button(rtsp_pattern_buttons, text="保存動画から作成", command=self.load_rtsp_dark_video)
+        self.btn_rtsp_dark_video.pack(side=tk.LEFT, padx=(0, 8))
         self.chk_apply_rtsp_dark = ttk.Checkbutton(
-            rtsp_btn_frame,
-            text="固定パターン適用",
+            rtsp_pattern_buttons,
+            text="適用",
             variable=self.apply_rtsp_dark_var,
             command=self.on_apply_rtsp_dark_changed,
         )
-        self.chk_apply_rtsp_dark.pack(side=tk.LEFT, padx=2)
-        ttk.Label(rtsp_btn_frame, textvariable=self.rtsp_dark_status_var).pack(side=tk.LEFT, padx=(8, 0))
+        self.chk_apply_rtsp_dark.pack(side=tk.LEFT)
+        ttk.Label(rtsp_pattern, textvariable=self.rtsp_dark_status_var, style="Hint.TLabel", anchor=tk.W).pack(fill=tk.X, pady=(6, 0))
         self.load_rtsp_dark_frame()
         
-        rtsp_time_frame = ttk.Frame(lf_rtsp)
-        rtsp_time_frame.pack(fill=tk.X, pady=(8,0))
+        rtsp_time_frame = ttk.LabelFrame(lf_rtsp, text="録画スケジュール", style="Section.TLabelframe")
+        rtsp_time_frame.pack(fill=tk.X)
         
         rtsp_time_row1 = ttk.Frame(rtsp_time_frame)
         rtsp_time_row1.pack(fill=tk.X)
-        ttk.Checkbutton(rtsp_time_row1, text="録画時間制限を有効にする", variable=self.rtsp_time_limit_var, command=self.toggle_rtsp_time_limit_frame).pack(side=tk.LEFT, anchor=tk.W)
-        ttk.Button(rtsp_time_row1, text="自動で設定", command=self.fetch_current_location_rtsp).pack(side=tk.LEFT, padx=(8,0))
+        ttk.Checkbutton(rtsp_time_row1, text="時間帯を指定して録画する", variable=self.rtsp_time_limit_var, command=self.toggle_rtsp_time_limit_frame).pack(side=tk.LEFT, anchor=tk.W)
+        ttk.Button(rtsp_time_row1, text="日没・日出から設定", style="Quiet.TButton", command=self.fetch_current_location_rtsp).pack(side=tk.LEFT, padx=(10,0))
         
         self.rtsp_time_limit_detail_frame = ttk.Frame(rtsp_time_frame)
         
@@ -252,7 +273,7 @@ class SourceMixin:
         ttk.Spinbox(rtsp_end_frame, from_=0, to=59, width=3, textvariable=self.rtsp_end_min_var, format="%02.0f").pack(side=tk.LEFT)
         
         # 録画時間外でも解析は継続する旨の説明
-        ttk.Label(self.rtsp_time_limit_detail_frame, text="※録画終了後も、保存済み動画の解析は継続します", foreground="#87CEEB").pack(anchor=tk.W, pady=(2,0))
+        ttk.Label(self.rtsp_time_limit_detail_frame, text="録画時間外でも、すでに保存済みの動画の解析は継続します。", style="Hint.TLabel").pack(anchor=tk.W, pady=(4,0))
         
         self.toggle_rtsp_time_limit_frame()
         
