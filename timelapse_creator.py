@@ -1193,8 +1193,13 @@ def create_timelapse(
         if fast_result is False:
             _report_progress(
                 progress_callback,
-                "高速処理に失敗したため、互換処理へ自動的に切り替えます",
+                "高速処理に失敗したため作成を中止します。低速な互換処理へは"
+                "自動切り替えしません。直前のFFmpegエラーを確認してください。",
             )
+            loader.cleanup()
+            del first_frame
+            gc.collect()
+            return False
         else:
             _report_progress(
                 progress_callback,
