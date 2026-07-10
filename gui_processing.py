@@ -31,6 +31,7 @@ class ProcessingMixin:
                 'global_wcs_info': self.global_wcs_info if self.use_plate_solve_var.get() else None,
                 'plate_solve_mask': self.plate_solve_mask_image,
                 'rtsp_dark_frame': self.rtsp_dark_frame if self.apply_rtsp_dark_var.get() else None,
+                'rtsp_notification_sound': self.rtsp_notification_sound_var.get(),
                 'summary_config': [item.copy() for item in self.summary_video_config]
             }
             try:
@@ -131,6 +132,9 @@ class ProcessingMixin:
             if rtsp_time_limit:
                 log_msg += f", 録画時間制限: {rtsp_sh:02d}:{rtsp_sm:02d} - {rtsp_eh:02d}:{rtsp_em:02d}"
             self.append_log(log_msg)
+            self.append_log(
+                f"流星検出通知音: {'ON' if params['rtsp_notification_sound'] else 'OFF'}"
+            )
             if params['rtsp_dark_frame'] is not None:
                 self.append_log("RTSPダーク補正: ON")
             
@@ -141,7 +145,8 @@ class ProcessingMixin:
                 params['save_options'], params['interval_sec'], params['duration_sec'],
                 config.MIN_LINE_LENGTH, params['summary_config'],
                 rtsp_time_limit, rtsp_sh, rtsp_sm, rtsp_eh, rtsp_em,
-                params['max_workers'], self.handle_rtsp_live_preview_frame, params['rtsp_dark_frame']
+                params['max_workers'], self.handle_rtsp_live_preview_frame, params['rtsp_dark_frame'],
+                params['rtsp_notification_sound']
             )
             self.rtsp_thread = threading.Thread(target=file_utils.rtsp_save_and_process_thread_target, args=rtsp_args, daemon=True)
             self.rtsp_thread.start()

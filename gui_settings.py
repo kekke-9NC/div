@@ -1051,6 +1051,7 @@ class SettingsMixin:
             'auto_time_updater_enabled': self.auto_time_updater_enabled_var.get(),
             'rtsp_preset': self.rtsp_preset_var.get(),
             'rtsp_fps': self.rtsp_fps_var.get(),
+            'rtsp_notification_sound': self.rtsp_notification_sound_var.get(),
             'camera_control_base_url': self.camera_control_base_url_var.get(),
             'camera_control_ev_target': self.camera_control_ev_target_var.get(),
             # RTSP time limit settings
@@ -1121,6 +1122,7 @@ class SettingsMixin:
             self.rtsp_time_limit_var.set(settings.get('rtsp_time_limit_enabled', False))
             self.rtsp_start_hour_var.set(settings.get('rtsp_start_hour', '17')); self.rtsp_start_min_var.set(settings.get('rtsp_start_minute', '00'))
             self.rtsp_end_hour_var.set(settings.get('rtsp_end_hour', '07')); self.rtsp_end_min_var.set(settings.get('rtsp_end_minute', '00'))
+            self.rtsp_notification_sound_var.set(settings.get('rtsp_notification_sound', True))
             self.load_rtsp_dark_frame()
             self.apply_rtsp_dark_var.set(bool(settings.get('apply_rtsp_dark', False)) and self.rtsp_dark_frame is not None)
             self.toggle_rtsp_time_limit_frame()

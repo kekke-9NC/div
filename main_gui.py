@@ -267,6 +267,7 @@ class App(
         self.auto_updater.set_log_callback(self.append_log)
         self.rtsp_preset_var = tk.StringVar(value="cloudy")  # "clear" or "cloudy"
         self.rtsp_fps_var = tk.StringVar(value=str(config.RTSP_FPS))
+        self.rtsp_notification_sound_var = tk.BooleanVar(value=True)
         # RTSP time limit for recording (similar to periodic scan)
         self.rtsp_time_limit_var = tk.BooleanVar(value=False)
         self.rtsp_start_hour_var = tk.StringVar(value="17")
