@@ -50,6 +50,7 @@ class SettingsMixin:
         save_map = {
             'video': "動画クリップ (cutout.mp4)", 
             'full_video': "フルサイズ動画 (fullsize.mp4)", 
+            'denoised_full_video': "ノイズ低減フルサイズ動画 (full_denoised.mp4)",
             'cutout': "切り出し差分画像 (cutout_diff.jpg)", 
             'full': "全体差分画像 (full_diff.jpg)",
             'composite': "比較明合成画像 (composite.jpg)", 

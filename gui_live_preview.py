@@ -10,6 +10,15 @@ class LivePreviewMixin:
         self.live_preview_stop_event = None
         self.live_preview_thread = None
         self.live_preview_apply_dark_var = None
+        self.live_preview_last_frame_time = 0.0
+        self.live_preview_direct_started = False
+        # RTSP の読み取りスレッドから Tk を直接操作しない。最新の 1 枚だけを
+        # 保持し、メインスレッドのタイマーで描画することで UI のイベントキューが
+        # フレーム更新で埋まり、待機表示のままになることを防ぐ。
+        self.live_preview_frame_lock = threading.Lock()
+        self.live_preview_pending_frame = None
+        self.live_preview_render_after_id = None
+        self.live_preview_last_enqueue_time = 0.0
 
     def _is_rtsp_shared_preview_available(self):
         return bool(
@@ -40,6 +49,11 @@ class LivePreviewMixin:
             return
 
         self.live_preview_stop_event = threading.Event()
+        self.live_preview_last_frame_time = 0.0
+        self.live_preview_direct_started = False
+        self.live_preview_last_enqueue_time = 0.0
+        with self.live_preview_frame_lock:
+            self.live_preview_pending_frame = None
 
         win = Toplevel(self)
         win.title("RTSPライブプレビュー")
@@ -69,9 +83,13 @@ class LivePreviewMixin:
         ttk.Button(controls, text="閉じる", command=self.close_rtsp_live_preview).pack(side=tk.RIGHT)
 
         win.protocol("WM_DELETE_WINDOW", self.close_rtsp_live_preview)
+        self._schedule_live_preview_render()
 
         if self._is_rtsp_shared_preview_available():
             self._set_live_preview_status("録画中のRTSP映像を待機中...")
+            # 録画側の共有フレームが停止していても、プレビューが永久に
+            # 待機状態にならないよう、短時間後に独立接続へ切り替える。
+            self.after(3000, self._start_live_preview_direct_reader_if_needed)
         else:
             self._set_live_preview_status("RTSPに直接接続中...")
             self._start_live_preview_direct_reader()
@@ -79,20 +97,32 @@ class LivePreviewMixin:
     def close_rtsp_live_preview(self):
         if self.live_preview_stop_event:
             self.live_preview_stop_event.set()
+        if self.live_preview_render_after_id is not None:
+            try:
+                self.after_cancel(self.live_preview_render_after_id)
+            except Exception:
+                pass
+            self.live_preview_render_after_id = None
+        with self.live_preview_frame_lock:
+            self.live_preview_pending_frame = None
         win = self.live_preview_window
         self.live_preview_window = None
         self.live_preview_label = None
         self.live_preview_photo = None
         self.live_preview_thread = None
+        self.live_preview_direct_started = False
         if win and win.winfo_exists():
             win.destroy()
         self._update_live_preview_button_state()
 
     def _start_live_preview_direct_reader(self):
+        if self.live_preview_direct_started:
+            return
         rtsp_url = self.rtsp_urls[0] if self.rtsp_urls else ""
         if not rtsp_url:
             self._set_live_preview_status("RTSP URLがありません。")
             return
+        self.live_preview_direct_started = True
         stop_event = self.live_preview_stop_event
 
         def worker():
@@ -132,7 +162,19 @@ class LivePreviewMixin:
         self.live_preview_thread = threading.Thread(target=worker, daemon=True)
         self.live_preview_thread.start()
 
+    def _start_live_preview_direct_reader_if_needed(self):
+        """共有プレビューが届かない場合だけ、カメラへ直接接続する。"""
+        if self.live_preview_window is None or self.live_preview_stop_event is None:
+            return
+        if self.live_preview_stop_event.is_set() or self.live_preview_direct_started:
+            return
+        if self.live_preview_last_frame_time > 0:
+            return
+        self._set_live_preview_status("共有映像が届かないためRTSPに直接接続中...")
+        self._start_live_preview_direct_reader()
+
     def handle_rtsp_live_preview_frame(self, frame):
+        self.live_preview_last_frame_time = time.monotonic()
         camera_handler = getattr(self, "handle_camera_control_shared_frame", None)
         if camera_handler is not None:
             try:
@@ -144,18 +186,53 @@ class LivePreviewMixin:
             return
         if self.live_preview_stop_event.is_set():
             return
+        # 録画用のフレーム受信は最大 FPS で呼ばれる。ここで毎回 after() を積むと
+        # macOS の Tk イベントループが滞留し、画像表示まで到達しないことがある。
+        # 10 fps に間引き、未描画分は常に最新フレームへ置き換える。
+        now = time.monotonic()
+        if now - self.live_preview_last_enqueue_time < 0.1:
+            return
+        self.live_preview_last_enqueue_time = now
         try:
-            frame = self._apply_live_preview_dark(frame)
-            frame = self._apply_live_preview_masks(frame)
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            height, width = rgb.shape[:2]
-            max_w, max_h = 960, 540
-            scale = min(max_w / width, max_h / height, 1.0)
-            if scale < 1.0:
-                rgb = cv2.resize(rgb, (int(width * scale), int(height * scale)), interpolation=cv2.INTER_AREA)
-            self.after(0, self._show_live_preview_frame, rgb)
+            # OpenCV の capture が次フレームで内部バッファを再利用しても安全なように
+            # コピーしてから UI スレッドへ渡す。
+            with self.live_preview_frame_lock:
+                self.live_preview_pending_frame = frame.copy()
         except Exception as e:
-            print(f"ライブプレビューフレーム表示エラー: {e}")
+            print(f"ライブプレビューフレーム受信エラー: {e}")
+
+    def _schedule_live_preview_render(self):
+        if self.live_preview_window is None:
+            return
+        self.live_preview_render_after_id = self.after(33, self._render_live_preview_frame)
+
+    def _render_live_preview_frame(self):
+        """Tk のメインスレッドで最新フレームだけを画面へ反映する。"""
+        self.live_preview_render_after_id = None
+        if self.live_preview_window is None or self.live_preview_stop_event is None:
+            return
+        if self.live_preview_stop_event.is_set():
+            return
+
+        with self.live_preview_frame_lock:
+            frame = self.live_preview_pending_frame
+            self.live_preview_pending_frame = None
+
+        if frame is not None:
+            try:
+                frame = self._apply_live_preview_dark(frame)
+                frame = self._apply_live_preview_masks(frame)
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                height, width = rgb.shape[:2]
+                max_w, max_h = 960, 540
+                scale = min(max_w / width, max_h / height, 1.0)
+                if scale < 1.0:
+                    rgb = cv2.resize(rgb, (int(width * scale), int(height * scale)), interpolation=cv2.INTER_AREA)
+                self._show_live_preview_frame(rgb)
+            except Exception as e:
+                print(f"ライブプレビューフレーム表示エラー: {e}")
+
+        self._schedule_live_preview_render()
 
     def _on_live_preview_dark_changed(self):
         enabled = bool(self.live_preview_apply_dark_var and self.live_preview_apply_dark_var.get())

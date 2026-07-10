@@ -99,7 +99,7 @@ class AdvancedSettingsMixin:
             self.cfg_finer_window_sec_var.set("4.0")
             self.cfg_finer_comp_step_var.set("3")
             self.cfg_finer_min_length_var.set("15")
-            self.cfg_finer_padding_sec_var.set("0.5")
+            self.cfg_finer_padding_sec_var.set(str(config.FINER_DETECT_PADDING_SECONDS))
             self.cfg_finer_cutout_size_var.set("384")
             self.cfg_airplane_dur_thresh_var.set("7")
             self.cfg_airplane_frame_thresh_var.set("7")

@@ -77,16 +77,19 @@ class NavigationMixin:
     def navigate_to_plate_solve_select_video_button(self):
         self.notebook.select(self.tab_settings)
         if hasattr(self, "btn_select_plate_solve_video"):
-            self._flash_button(self.btn_select_plate_solve_video)
+            self._scroll_settings_to_widget(self.btn_select_plate_solve_video, top_margin=20)
+            self.after(160, lambda: self._flash_button(self.btn_select_plate_solve_video))
 
     def navigate_to_plate_solve_run_button(self):
         self.notebook.select(self.tab_settings)
         if hasattr(self, "btn_run_plate_solve"):
-            self._flash_button(self.btn_run_plate_solve)
+            self._scroll_settings_to_widget(self.btn_run_plate_solve, top_margin=20)
+            self.after(160, lambda: self._flash_button(self.btn_run_plate_solve))
 
     def navigate_to_api_key_entry(self):
         self.notebook.select(self.tab_settings)
         if hasattr(self, "api_key_entry"):
+            self._scroll_settings_to_widget(self.api_key_entry, top_margin=20)
             self._flash_entry(self.api_key_entry)
             try:
                 self.api_key_entry.focus_set()

@@ -3,6 +3,8 @@ import numpy as np
 from typing import Tuple, List, Dict, Any, Optional
 import subprocess
 import sys
+import os
+import shutil
 
 def create_summary_video(
     summary_video_config: List[Dict[str, Any]],
@@ -13,7 +15,8 @@ def create_summary_video(
     cutout_rect: Tuple[int, int, int, int],
     frame_rate: float,
     output_resolution: Tuple[int, int] = (1920, 1080),
-    full_video_path: Optional[str] = None
+    full_video_path: Optional[str] = None,
+    detected_line: Optional[Tuple[Tuple[int, int], Tuple[int, int]]] = None,
 ):
     """
     ユーザー設定に基づき、検出結果をまとめた概要動画を生成する。
@@ -29,14 +32,28 @@ def create_summary_video(
         frame_rate (float): 動画のフレームレート。
         output_resolution (Tuple[int, int]): 出力動画の解像度 (幅, 高さ)。
         full_video_path (Optional[str]): フルサイズ動画のパス（オプション）。
+        detected_line: 流星の検出線分。指定時は概要のフルサイズ映像に枠と矢印を重ねる。
     """
     print(f"概要動画の生成を開始: {output_video_path}")
     
     W, H = output_resolution
 
     # --- FFMPEG を使用した高速な動画書き出し設定 ---
+    ffmpeg_path = shutil.which('ffmpeg')
+    if not ffmpeg_path:
+        print("\n" + "="*50 + "\nエラー: `ffmpeg` が見つかりません。概要動画は作成されません。\n" + "="*50)
+        return False
+
+    # 前回失敗時の空ファイルを成功扱いしない。
+    try:
+        if os.path.exists(output_video_path):
+            os.remove(output_video_path)
+    except OSError as exc:
+        print(f"既存の概要動画を削除できません: {exc}")
+        return False
+
     command = [
-        'ffmpeg', '-y', '-f', 'rawvideo', '-vcodec', 'rawvideo',
+        ffmpeg_path, '-hide_banner', '-loglevel', 'error', '-y', '-f', 'rawvideo', '-vcodec', 'rawvideo',
         '-s', f'{W}x{H}', '-pix_fmt', 'bgr24', '-r', str(frame_rate),
         '-i', '-', '-an', '-c:v', 'libx264', '-preset', 'ultrafast',
         '-tune', 'zerolatency', '-pix_fmt', 'yuv420p', output_video_path
@@ -46,10 +63,10 @@ def create_summary_video(
         proc = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     except FileNotFoundError:
         print("\n" + "="*50 + "\nエラー: `ffmpeg` が見つかりません。\n" + "="*50)
-        return
+        return False
     except Exception as e:
         print(f"ffmpegの起動に失敗しました: {e}")
-        return
+        return False
 
     # --- ヘルパー関数 ---
     def _add_image_sequence(img_path, duration_sec, proc_handle):
@@ -106,7 +123,26 @@ def create_summary_video(
             if proc_handle.stdin:
                 proc_handle.stdin.write(frame.tobytes())
     
-    def _add_video_clip(video_path, proc_handle):
+    def _draw_detection_marker(frame):
+        """概要動画のフルサイズ映像で流星位置を常時見失わないようにする。"""
+        if not detected_line:
+            return frame
+        output = frame.copy()
+        height, width = output.shape[:2]
+        (x1, y1), (x2, y2) = detected_line
+        x1, x2 = int(np.clip(x1, 0, width - 1)), int(np.clip(x2, 0, width - 1))
+        y1, y2 = int(np.clip(y1, 0, height - 1)), int(np.clip(y2, 0, height - 1))
+        line_length = max(1.0, float(np.hypot(x2 - x1, y2 - y1)))
+        padding = int(max(36, min(120, line_length * 0.55)))
+        left, right = max(0, min(x1, x2) - padding), min(width - 1, max(x1, x2) + padding)
+        top, bottom = max(0, min(y1, y2) - padding), min(height - 1, max(y1, y2) + padding)
+        thickness = max(2, int(round(min(width, height) / 420)))
+        color = (0, 220, 255)  # BGR: 黄色
+        cv2.rectangle(output, (left, top), (right, bottom), color, thickness, cv2.LINE_AA)
+        cv2.arrowedLine(output, (x1, y1), (x2, y2), color, thickness + 1, cv2.LINE_AA, tipLength=0.22)
+        return output
+
+    def _add_video_clip(video_path, proc_handle, highlight_detection=False):
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
             print(f"警告: カットアウト動画を読み込めませんでした: {video_path}")
@@ -115,6 +151,8 @@ def create_summary_video(
         while True:
             ret, frame = cap.read()
             if not ret: break
+            if highlight_detection:
+                frame = _draw_detection_marker(frame)
             
             h, w = frame.shape[:2]
             scale = min(W / w, H / h)
@@ -129,6 +167,7 @@ def create_summary_video(
                 proc_handle.stdin.write(final_frame.tobytes())
         cap.release()
 
+    generation_error = None
     try:
         # --- 設定に基づいて動画シーケンスを動的に生成 ---
         step_counter = 1
@@ -143,7 +182,9 @@ def create_summary_video(
             print(f"  - ステップ{step_counter}/{total_steps}: '{name}' を追加中...")
 
             if name == "Composite Image":
-                _add_image_sequence(composite_image_path, duration, proc)
+                # 既存設定との互換性を保ちつつ、デフォルトの先頭画面も検出位置が
+                # 分かる注釈付き画像にする。
+                _add_image_sequence(annotated_image_path or composite_image_path, duration, proc)
             elif name == "Annotated Image":
                 _add_image_sequence(annotated_image_path, duration, proc)
             elif name == "Zoom Sequence":
@@ -152,27 +193,39 @@ def create_summary_video(
                 _add_video_clip(cutout_video_path, proc)
             elif name == "Full Size Video":
                 if full_video_path:
-                    _add_video_clip(full_video_path, proc)
+                    _add_video_clip(full_video_path, proc, highlight_detection=True)
                 else:
                     print("警告: フルサイズ動画が指定されていません。スキップします。")
             
             step_counter += 1
 
     except Exception as e:
+        generation_error = e
         print(f"概要動画の生成中にエラーが発生しました: {e}")
         import traceback
         traceback.print_exc()
     finally:
         if proc.stdin:
-            proc.stdin.close()
-        
-        stderr_output = proc.communicate()[1]
-        if proc.returncode != 0:
+            try:
+                proc.stdin.close()
+            except BrokenPipeError:
+                pass
+
+        stderr_output = proc.stderr.read() if proc.stderr else b""
+        proc.wait()
+        if generation_error is not None or proc.returncode != 0:
             print("="*50 + "\nFFMPEGがエラーを返しました:\n" + "="*50)
             try:
                 print(stderr_output.decode('utf-8', errors='ignore'))
             except Exception as decode_err:
                 print(f"エラーメッセージのデコードに失敗: {decode_err}")
             print("="*50)
+            try:
+                if os.path.exists(output_video_path):
+                    os.remove(output_video_path)
+            except OSError:
+                pass
+            return False
         else:
             print(f"概要動画の生成が完了しました: {output_video_path}")
+            return os.path.isfile(output_video_path) and os.path.getsize(output_video_path) > 0

@@ -20,6 +20,7 @@ import astrometry
 import tracking
 import utils
 import video_creation
+import video_denoising
 
 
 _FULL_VIDEO_TIMESTAMP_POSITIONS = {
@@ -134,6 +135,62 @@ def write_full_size_video(
     return True
 
 
+def write_denoised_full_size_video(
+    frames: List[np.ndarray],
+    output_path: str,
+    frame_rate: float,
+    clip_start_datetime: datetime,
+    save_options: Optional[Dict[str, Any]],
+    detected_line: Tuple[Tuple[int, int], Tuple[int, int]],
+) -> Optional[Dict[str, float]]:
+    """閲覧用ノイズ低減動画を書き出し、処理前後のノイズ推定値を返す。"""
+    if not frames:
+        return None
+    height, width = frames[0].shape[:2]
+    writer = cv2.VideoWriter(
+        output_path,
+        cv2.VideoWriter_fourcc(*config.VIDEO_FOURCC),
+        frame_rate,
+        (width, height),
+    )
+    if not writer.isOpened():
+        return None
+
+    original_meter = video_denoising.TemporalNoiseMeter()
+    denoised_meter = video_denoising.TemporalNoiseMeter()
+    for frame in frames:
+        original_meter.update(frame)
+
+    timestamp_settings = _get_full_video_timestamp_settings(save_options)
+    safe_frame_rate = frame_rate if frame_rate > 0 else config.DEFAULT_FPS
+    try:
+        denoised_frames = video_denoising.iter_denoised_frames(
+            frames,
+            detected_line=detected_line,
+            temporal_radius=config.DENOISE_TEMPORAL_RADIUS,
+            original_blend=config.DENOISE_ORIGINAL_BLEND,
+            transient_threshold=config.DENOISE_TRANSIENT_THRESHOLD,
+            protect_line_width=config.DENOISE_PROTECT_LINE_WIDTH,
+        )
+        for index, frame in enumerate(denoised_frames):
+            denoised_meter.update(frame)
+            timestamp = clip_start_datetime + timedelta(seconds=index / safe_frame_rate)
+            writer.write(add_full_video_timestamp(frame, timestamp, timestamp_settings))
+    except Exception as exc:
+        print(f"ノイズ低減フルサイズ動画の生成中にエラー: {exc}")
+        return None
+    finally:
+        writer.release()
+
+    before_sigma = original_meter.sigma
+    after_sigma = denoised_meter.sigma
+    return {
+        'before_sigma': before_sigma,
+        'after_sigma': after_sigma,
+        'reduction_percent': video_denoising.noise_reduction_percent(before_sigma, after_sigma),
+    }
+
+
 def get_rtsp_recording_start_datetime(
     source: str,
     total_frames: int,
@@ -162,6 +219,68 @@ def get_rtsp_recording_start_datetime(
     return None, "取得不可"
 
 
+def _point_to_segment_distance(
+    point: Tuple[float, float],
+    start: Tuple[float, float],
+    end: Tuple[float, float],
+) -> float:
+    """点から線分までの最短距離を返す。"""
+    px, py = point
+    sx, sy = start
+    ex, ey = end
+    dx, dy = ex - sx, ey - sy
+    length_sq = dx * dx + dy * dy
+    if length_sq <= 1e-6:
+        return float(np.hypot(px - sx, py - sy))
+    projection = max(0.0, min(1.0, ((px - sx) * dx + (py - sy) * dy) / length_sq))
+    return float(np.hypot(px - (sx + projection * dx), py - (sy + projection * dy)))
+
+
+def _finer_line_matches_candidate(
+    finer_line: Tuple[Tuple[int, int], Tuple[int, int]],
+    candidate_line: Tuple[Tuple[int, int], Tuple[int, int]],
+    cutout_rect: Tuple[int, int, int, int],
+) -> bool:
+    """詳細検出の線が粗検出した流星候補と同じ軌跡か判定する。
+
+    詳細検出はカットアウト内の線をすべて検出していたため、雲の縁やノイズでも
+    検出期間が広がっていた。位置と向きを粗検出線分に照合してから採用する。
+    """
+    (fx1, fy1), (fx2, fy2) = finer_line
+    offset_x, offset_y = cutout_rect[:2]
+    fine_start = (fx1 + offset_x, fy1 + offset_y)
+    fine_end = (fx2 + offset_x, fy2 + offset_y)
+    (cx1, cy1), (cx2, cy2) = candidate_line
+    candidate_start = (float(cx1), float(cy1))
+    candidate_end = (float(cx2), float(cy2))
+
+    candidate_angle = np.arctan2(cy2 - cy1, cx2 - cx1)
+    fine_angle = np.arctan2(fine_end[1] - fine_start[1], fine_end[0] - fine_start[0])
+    # 線分には向きがないため 180 度反転を同じ軌跡として扱う。
+    angle_difference = abs((fine_angle - candidate_angle + np.pi / 2) % np.pi - np.pi / 2)
+    if np.degrees(angle_difference) > config.FINER_LINE_MATCH_ANGLE_DEG:
+        return False
+
+    fine_center = ((fine_start[0] + fine_end[0]) / 2, (fine_start[1] + fine_end[1]) / 2)
+    distance = min(
+        _point_to_segment_distance(fine_start, candidate_start, candidate_end),
+        _point_to_segment_distance(fine_end, candidate_start, candidate_end),
+        _point_to_segment_distance(fine_center, candidate_start, candidate_end),
+    )
+    return distance <= config.FINER_LINE_MATCH_DISTANCE
+
+
+def _has_matching_finer_line(
+    lines: List[Tuple[Tuple[int, int], Tuple[int, int]]],
+    candidate_line: Tuple[Tuple[int, int], Tuple[int, int]],
+    cutout_rect: Tuple[int, int, int, int],
+) -> bool:
+    return any(
+        _finer_line_matches_candidate(line, candidate_line, cutout_rect)
+        for line in lines
+    )
+
+
 def _process_finer_detection_worker(
     frames_data: List[np.ndarray],
     cx: int,
@@ -169,6 +288,7 @@ def _process_finer_detection_worker(
     img_h: int,
     img_w: int,
     actual_start_frame_index: int,
+    candidate_line: Tuple[Tuple[int, int], Tuple[int, int]],
     composite_step: int,
     cut_size: int,
     border_margin: int,
@@ -234,7 +354,7 @@ def _process_finer_detection_worker(
     for i in range(1, len(composite_frames)):
         diff_img_cutout = cv2.absdiff(composite_frames[i], composite_frames[i - 1])
         lines = image_processing.detect_lines(diff_img_cutout, min_length=finer_min_length)
-        if lines:
+        if lines and _has_matching_finer_line(lines, candidate_line, cutout_rect):
             line_detected_indices.append(composite_frame_indices[i])
     
     return line_detected_indices, cutout_rect
@@ -272,6 +392,7 @@ def create_line_video_clips(
         'full': config.DEFAULT_SAVE_FULL_DIFF, 'composite': config.DEFAULT_SAVE_COMPOSITE,
         'info': config.DEFAULT_SAVE_DETECTION_INFO, 'summary': True,
         'full_video': config.DEFAULT_SAVE_FULL_VIDEO,
+        'denoised_full_video': config.DEFAULT_SAVE_DENOISED_FULL_VIDEO,
     }
     if save_options is None:
         save_options = default_save_options
@@ -518,6 +639,7 @@ def create_line_video_clips(
                                         img_h=img_h,
                                         img_w=img_w,
                                         actual_start_frame_index=actual_start_finer,
+                                        candidate_line=cand['line'],
                                         composite_step=max(1, int(frame_rate / 5)),  # FPSの1/5
                                         cut_size=config.FINER_CUTOUT_SIZE,  # 詳細検出用カットアウトサイズ
                                         border_margin=config.BORDER_SIZE,
@@ -685,6 +807,7 @@ def create_line_video_clips(
                                     f"_{detection_label}_{detection_counter}_prob{probability:.2f}"
                                 )
                                 saved_paths = {}
+                                denoise_metrics: Optional[Dict[str, float]] = None
                             
                                 if save_options.get('video', False):
                                     output_clip_path = os.path.join(save_dir, f"{base_filename}.mp4")
@@ -718,6 +841,32 @@ def create_line_video_clips(
                                         print(f"フルサイズ動画を保存しました: {full_video_path}")
                                     else:
                                         print(f"エラー: フルサイズ動画の書き込み開始に失敗 ({full_video_path})")
+
+                                if save_options.get('denoised_full_video', False) and final_frames_for_clip:
+                                    denoised_full_video_path = os.path.join(save_dir, f"{base_filename}_full_denoised.mp4")
+                                    clip_start_frame = actual_start_final if is_rtsp else adjusted_start_frame
+                                    clip_start_datetime = base_datetime + timedelta(
+                                        seconds=clip_start_frame / frame_rate
+                                    )
+                                    denoise_metrics = write_denoised_full_size_video(
+                                        final_frames_for_clip,
+                                        denoised_full_video_path,
+                                        frame_rate,
+                                        clip_start_datetime,
+                                        save_options,
+                                        ((x1, y1), (x2, y2)),
+                                    )
+                                    if denoise_metrics is not None:
+                                        saved_paths['denoised_full_video'] = denoised_full_video_path
+                                        print(
+                                            "ノイズ低減フルサイズ動画を保存しました: "
+                                            f"{denoised_full_video_path} "
+                                            f"(推定ノイズ {denoise_metrics['before_sigma']:.2f} -> "
+                                            f"{denoise_metrics['after_sigma']:.2f}, "
+                                            f"{denoise_metrics['reduction_percent']:.1f}%低減)"
+                                        )
+                                    else:
+                                        print(f"エラー: ノイズ低減動画の書き込みに失敗 ({denoised_full_video_path})")
                             
                                 if save_options.get('cutout', False):
                                     cutout_diff_path = os.path.join(save_dir, f"{base_filename}_cutout_diff.jpg")
@@ -747,7 +896,8 @@ def create_line_video_clips(
                                             annotated_path = astrometry.annotate_image_with_wcs(
                                                 image_path=composite_path, wcs_info=wcs_data_for_annotation,
                                                 line_centers=[(cx, cy)], detection_datetime=detection_datetime,
-                                                timestamp=display_timestamp, cancel_flag=cancel_flag
+                                                timestamp=display_timestamp, cancel_flag=cancel_flag,
+                                                detected_line=((x1, y1), (x2, y2)),
                                             )
                                             if annotated_path:
                                                 saved_paths['annotated'] = annotated_path
@@ -778,6 +928,10 @@ def create_line_video_clips(
                                             f.write(f"Frame Range (Clip): {adjusted_start_frame} - {adjusted_end_frame}\n")
                                             f.write(f"Meteor Probability: {probability:.6f}\n")
                                             f.write(f"Detected Line Center (px): ({cx:.2f}, {cy:.2f})\n")
+                                            if denoise_metrics is not None:
+                                                f.write(f"Denoise Noise Sigma Before: {denoise_metrics['before_sigma']:.4f}\n")
+                                                f.write(f"Denoise Noise Sigma After: {denoise_metrics['after_sigma']:.4f}\n")
+                                                f.write(f"Denoise Noise Reduction (%): {denoise_metrics['reduction_percent']:.2f}\n")
                                             f.write(f"RA Start (deg): {ra_start_str}\nDec Start (deg): {dec_start_str}\n")
                                             f.write(f"RA End (deg): {ra_end_str}\nDec End (deg): {dec_end_str}\n")
                                             for key, path in saved_paths.items(): f.write(f"Saved {key.capitalize()} Path: {path}\n")
@@ -792,7 +946,7 @@ def create_line_video_clips(
                                         summary_video_path = os.path.join(save_dir, f"{base_filename}_summary.mp4")
                                         try:
                                             orig_h, orig_w = final_frames_for_clip[0].shape[:2]
-                                            video_creation.create_summary_video(
+                                            summary_created = video_creation.create_summary_video(
                                                 summary_video_config=summary_video_config,
                                                 composite_image_path=saved_paths['composite'],
                                                 annotated_image_path=saved_paths['annotated'],
@@ -801,10 +955,17 @@ def create_line_video_clips(
                                                 cutout_rect=cutout_rect,
                                                 frame_rate=frame_rate,
                                                 output_resolution=(orig_w, orig_h),
-                                                full_video_path=saved_paths.get('full_video')
+                                                full_video_path=(
+                                                    saved_paths.get('denoised_full_video')
+                                                    or saved_paths.get('full_video')
+                                                ),
+                                                detected_line=((x1, y1), (x2, y2)),
                                             )
-                                            saved_paths['summary'] = summary_video_path
-                                            print(f"概要動画を保存しました: {summary_video_path}")
+                                            if summary_created:
+                                                saved_paths['summary'] = summary_video_path
+                                                print(f"概要動画を保存しました: {summary_video_path}")
+                                            else:
+                                                print("警告: 概要動画を作成できなかったため、保存結果には追加しません。")
                                         except Exception as e_summary:
                                             print(f"エラー: 概要動画の生成に失敗しました: {e_summary}")
                                             import traceback; traceback.print_exc()
@@ -951,6 +1112,7 @@ def create_line_video_clips(
                             img_h=img_h,
                             img_w=img_w,
                             actual_start_frame_index=actual_start_frame_index_finer,
+                            candidate_line=((x1, y1), (x2, y2)),
                             composite_step=max(1, int(frame_rate / 5)),  # FPSの1/5
                             cut_size=config.FINER_CUTOUT_SIZE,  # 詳細検出用カットアウトサイズ
                             border_margin=config.BORDER_SIZE,
@@ -1015,7 +1177,11 @@ def create_line_video_clips(
                             lines_finer = image_processing.detect_lines(
                                 diff_img_finer_cutout, min_length=finer_min_length, cancel_flag=cancel_flag
                             )
-                            if lines_finer:
+                            if lines_finer and _has_matching_finer_line(
+                                lines_finer,
+                                ((x1, y1), (x2, y2)),
+                                (x_start_cut_finer, y_start_cut_finer, x_end_cut_finer, y_end_cut_finer),
+                            ):
                                 line_detected_indices.append(composite_frame_indices[i])
                                 print(f"  -> finer差分 (フレーム {composite_frame_indices[i]} 付近) カットアウト領域で線検出")
 
@@ -1153,6 +1319,7 @@ def create_line_video_clips(
                         f"_{detection_label}_{detection_counter}_prob{probability:.2f}"
                     )
                     saved_paths = {}
+                    denoise_metrics: Optional[Dict[str, float]] = None
 
                     if save_options.get('video', False):
                         output_clip_path = os.path.join(save_dir, f"{base_filename}.mp4")
@@ -1187,6 +1354,32 @@ def create_line_video_clips(
                         else:
                             print(f"エラー: フルサイズ動画の書き込み開始に失敗 ({full_video_path})")
 
+                    if save_options.get('denoised_full_video', False) and final_frames_for_clip:
+                        denoised_full_video_path = os.path.join(save_dir, f"{base_filename}_full_denoised.mp4")
+                        clip_start_frame = actual_start_final if is_rtsp else adjusted_start_frame
+                        clip_start_datetime = base_datetime + timedelta(
+                            seconds=clip_start_frame / frame_rate
+                        )
+                        denoise_metrics = write_denoised_full_size_video(
+                            final_frames_for_clip,
+                            denoised_full_video_path,
+                            frame_rate,
+                            clip_start_datetime,
+                            save_options,
+                            ((x1, y1), (x2, y2)),
+                        )
+                        if denoise_metrics is not None:
+                            saved_paths['denoised_full_video'] = denoised_full_video_path
+                            print(
+                                "ノイズ低減フルサイズ動画を保存しました: "
+                                f"{denoised_full_video_path} "
+                                f"(推定ノイズ {denoise_metrics['before_sigma']:.2f} -> "
+                                f"{denoise_metrics['after_sigma']:.2f}, "
+                                f"{denoise_metrics['reduction_percent']:.1f}%低減)"
+                            )
+                        else:
+                            print(f"エラー: ノイズ低減動画の書き込みに失敗 ({denoised_full_video_path})")
+
                     if save_options.get('cutout', False):
                         cutout_diff_path = os.path.join(save_dir, f"{base_filename}_cutout_diff.jpg")
                         if cv2.imwrite(cutout_diff_path, diff_cutout):
@@ -1215,7 +1408,8 @@ def create_line_video_clips(
                                 annotated_path = astrometry.annotate_image_with_wcs(
                                     image_path=composite_path, wcs_info=wcs_data_for_annotation,
                                     line_centers=[(cx, cy)], detection_datetime=detection_datetime,
-                                    timestamp=display_timestamp, cancel_flag=cancel_flag
+                                    timestamp=display_timestamp, cancel_flag=cancel_flag,
+                                    detected_line=((x1, y1), (x2, y2)),
                                 )
                                 if annotated_path:
                                     saved_paths['annotated'] = annotated_path
@@ -1246,6 +1440,10 @@ def create_line_video_clips(
                                 f.write(f"Frame Range (Clip): {adjusted_start_frame} - {adjusted_end_frame}\n")
                                 f.write(f"Meteor Probability: {probability:.6f}\n")
                                 f.write(f"Detected Line Center (px): ({cx:.2f}, {cy:.2f})\n")
+                                if denoise_metrics is not None:
+                                    f.write(f"Denoise Noise Sigma Before: {denoise_metrics['before_sigma']:.4f}\n")
+                                    f.write(f"Denoise Noise Sigma After: {denoise_metrics['after_sigma']:.4f}\n")
+                                    f.write(f"Denoise Noise Reduction (%): {denoise_metrics['reduction_percent']:.2f}\n")
                                 f.write(f"RA Start (deg): {ra_start_str}\nDec Start (deg): {dec_start_str}\n")
                                 f.write(f"RA End (deg): {ra_end_str}\nDec End (deg): {dec_end_str}\n")
                                 for key, path in saved_paths.items(): f.write(f"Saved {key.capitalize()} Path: {path}\n")
@@ -1260,7 +1458,7 @@ def create_line_video_clips(
                             summary_video_path = os.path.join(save_dir, f"{base_filename}_summary.mp4")
                             try:
                                 orig_h, orig_w = final_frames_for_clip[0].shape[:2]
-                                video_creation.create_summary_video(
+                                summary_created = video_creation.create_summary_video(
                                     summary_video_config=summary_video_config,
                                     composite_image_path=saved_paths['composite'],
                                     annotated_image_path=saved_paths['annotated'],
@@ -1269,10 +1467,17 @@ def create_line_video_clips(
                                     cutout_rect=cutout_rect,
                                     frame_rate=frame_rate,
                                     output_resolution=(orig_w, orig_h),
-                                    full_video_path=saved_paths.get('full_video')
+                                    full_video_path=(
+                                        saved_paths.get('denoised_full_video')
+                                        or saved_paths.get('full_video')
+                                    ),
+                                    detected_line=((x1, y1), (x2, y2)),
                                 )
-                                saved_paths['summary'] = summary_video_path
-                                print(f"概要動画を保存しました: {summary_video_path}")
+                                if summary_created:
+                                    saved_paths['summary'] = summary_video_path
+                                    print(f"概要動画を保存しました: {summary_video_path}")
+                                else:
+                                    print("警告: 概要動画を作成できなかったため、保存結果には追加しません。")
                             except Exception as e_summary:
                                 print(f"エラー: 概要動画の生成に失敗しました: {e_summary}")
                                 import traceback; traceback.print_exc()
