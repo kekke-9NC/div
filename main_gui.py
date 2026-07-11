@@ -244,6 +244,12 @@ class App(
         self.apply_mask_var = tk.BooleanVar(value=False)
         self.meteor_save_path_var = tk.StringVar(value=config.DEFAULT_METEOR_SAVE_PATH)
         self.not_meteor_save_path_var = tk.StringVar(value=config.DEFAULT_NOT_METEOR_SAVE_PATH)
+        self.ml_training_export_enabled_var = tk.BooleanVar(
+            value=config.DEFAULT_ML_TRAINING_EXPORT_ENABLED
+        )
+        self.ml_training_data_root_var = tk.StringVar(
+            value=config.DEFAULT_ML_TRAINING_DATA_ROOT
+        )
         self.selected_model_path_var = tk.StringVar(value=config.MODEL_PATH)
         self.model_meta_info_var = tk.StringVar(value="")
         self.custom_model_paths = []

@@ -187,6 +187,35 @@ class SettingsMixin:
         ttk.Entry(path_frame2, textvariable=self.not_meteor_save_path_var, state='readonly').pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Button(path_frame2, text="選択", command=lambda: self.select_save_path(self.not_meteor_save_path_var)).pack(side=tk.LEFT, padx=(5,0))
 
+        ml_frame = ttk.LabelFrame(scrollable_frame, text="機械学習向けデータセット")
+        ml_frame.pack(fill=tk.X, pady=5)
+        ttk.Checkbutton(
+            ml_frame,
+            text="検出イベントを学習用フォルダへ追加する",
+            variable=self.ml_training_export_enabled_var,
+        ).pack(anchor=tk.W, padx=4, pady=(3, 1))
+        ttk.Label(
+            ml_frame,
+            text="通常差分・モノクロ動画・時間画像・時刻マップを、予測クラス別の未確認フォルダへ保存します。",
+            style="Hint.TLabel",
+        ).pack(anchor=tk.W, padx=24, pady=(0, 4))
+        ml_path_frame = ttk.Frame(ml_frame)
+        ml_path_frame.pack(fill=tk.X, padx=4, pady=2)
+        ttk.Label(ml_path_frame, text="保存先:", width=10).pack(side=tk.LEFT)
+        ttk.Entry(
+            ml_path_frame, textvariable=self.ml_training_data_root_var, state="readonly"
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(
+            ml_path_frame,
+            text="選択",
+            command=lambda: self.select_save_path(self.ml_training_data_root_var),
+        ).pack(side=tk.LEFT, padx=(5, 0))
+        ttk.Button(
+            ml_frame,
+            text="未確認データを目視レビュー...",
+            command=self.open_ml_training_review,
+        ).pack(anchor=tk.W, padx=4, pady=(4, 5))
+
         lf_astro = ttk.LabelFrame(scrollable_frame, text="プレートソルブ & マスク")
         lf_astro.pack(fill=tk.X, pady=5)
         
@@ -1035,6 +1064,14 @@ class SettingsMixin:
         ttk.Radiobutton(p_frame4, text="雲が少ないとき", variable=self.rtsp_preset_var, value="clear").pack(side=tk.LEFT, padx=5)
         ttk.Radiobutton(p_frame4, text="雲が多いとき（推奨）", variable=self.rtsp_preset_var, value="cloudy").pack(side=tk.LEFT, padx=5)
 
+    def open_ml_training_review(self):
+        root_dir = self.ml_training_data_root_var.get().strip()
+        if not root_dir:
+            messagebox.showerror("設定エラー", "機械学習向けデータの保存先を指定してください。")
+            return
+        os.makedirs(root_dir, exist_ok=True)
+        ml_review.open_review_window(self, root_dir)
+
     def save_settings(self):
         settings = {
             'periodic_scan_enabled': self.periodic_scan_var.get(), 'periodic_scan_directory': self.periodic_dir_var.get(),
@@ -1054,6 +1091,8 @@ class SettingsMixin:
             'mask_path_or_status': self.mask_path_var.get(), 'concurrency': self.concurrency_var.get(),
             'interval': self.interval_var.get(), 'duration': self.duration_var.get(),
             'meteor_save_path': self.meteor_save_path_var.get(), 'not_meteor_save_path': self.not_meteor_save_path_var.get(),
+            'ml_training_export_enabled': self.ml_training_export_enabled_var.get(),
+            'ml_training_data_root': self.ml_training_data_root_var.get(),
             'selected_model_path': self.selected_model_path_var.get(),
             'custom_model_paths': list(self.custom_model_paths),
             'ai_vlm_backend': self.ai_vlm_backend_var.get(),
@@ -1227,6 +1266,12 @@ class SettingsMixin:
             )
             self.meteor_save_path_var.set(meteor_save_path)
             self.not_meteor_save_path_var.set(not_meteor_save_path)
+            self.ml_training_export_enabled_var.set(
+                settings.get('ml_training_export_enabled', config.DEFAULT_ML_TRAINING_EXPORT_ENABLED)
+            )
+            self.ml_training_data_root_var.set(
+                settings.get('ml_training_data_root', config.DEFAULT_ML_TRAINING_DATA_ROOT)
+            )
             self.custom_model_paths = [str(p) for p in settings.get('custom_model_paths', []) if isinstance(p, str)]
             saved_model_path = settings.get('selected_model_path', config.MODEL_PATH)
             self.selected_model_path_var.set(
