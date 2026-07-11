@@ -185,6 +185,13 @@ DEFAULT_SAVE_DENOISED_FULL_VIDEO = False  # 旧個別出力。共通保存物補
 DEFAULT_ML_TRAINING_EXPORT_ENABLED = False
 DEFAULT_ML_TRAINING_DATA_ROOT = os.path.join(EXE_DIR, "ml_training_data")
 
+# --- 過去動画フォルダの自動前処理 ---
+DEFAULT_AUTO_VIDEO_MASK_ENABLED = True
+AUTO_VIDEO_MASK_CACHE_DIR = os.path.join(EXE_DIR, "auto_video_masks")
+DEFAULT_DATE_FOLDER_TWILIGHT_FILTER_ENABLED = True
+DEFAULT_OBSERVATION_LATITUDE = 35.0
+DEFAULT_OBSERVATION_LONGITUDE = 135.0
+
 # --- 検出クリップの閲覧用ノイズ低減 ---
 # 5フレーム（前後2枚）の時間中央値を主体にし、検出線付近の明るい過渡成分を原画から戻す。
 DENOISE_TEMPORAL_RADIUS = 2

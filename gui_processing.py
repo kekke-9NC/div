@@ -44,6 +44,8 @@ class ProcessingMixin:
                 'full_video_timestamp_size_percent': timestamp_size_percent,
                 'ml_training_export_enabled': self.ml_training_export_enabled_var.get(),
                 'ml_training_data_root': self.ml_training_data_root_var.get().strip(),
+                'auto_video_mask_enabled': self.auto_video_mask_enabled_var.get(),
+                'auto_video_mask_cache_dir': config.AUTO_VIDEO_MASK_CACHE_DIR,
             })
             if params['save_options']['ml_training_export_enabled']:
                 if not params['save_options']['ml_training_data_root']:
@@ -162,10 +164,29 @@ class ProcessingMixin:
         elif selected_source == "folder":
             sources_to_process = []
             self.append_log(f"{len(self.folder_paths)}個の項目を処理します...")
+            try:
+                observation_lat = float(self.observation_latitude_var.get())
+                observation_lon = float(self.observation_longitude_var.get())
+            except ValueError:
+                messagebox.showerror("設定エラー", "観測地点の緯度・経度を数値で入力してください。")
+                self.cancel_processing(restore_button_state=True)
+                return
             for path_item in self.folder_paths:
                 p = Path(path_item)
                 if p.is_dir():
                     found = sorted([p for p in p.rglob('*') if p.suffix.lower() in config.PERIODIC_VIDEO_EXTENSIONS])
+                    if self.date_folder_twilight_filter_enabled_var.get():
+                        filtered, filter_info = observation_time_filter.filter_date_root_videos(
+                            p, found, observation_lat, observation_lon
+                        )
+                        if filter_info.get('applied'):
+                            dawn = filter_info['astro_dawn'].strftime('%H:%M')
+                            dusk = filter_info['astro_dusk'].strftime('%H:%M')
+                            self.append_log(
+                                f"{p.name}: 天文薄明フィルタ {dawn}以前 / {dusk}以後 "
+                                f"({len(found)}本 → {len(filtered)}本)"
+                            )
+                            found = filtered
                     sources_to_process.extend([{'path': str(fp), 'is_rtsp': False} for fp in found])
                 elif p.is_file() and p.suffix.lower() in config.PERIODIC_VIDEO_EXTENSIONS:
                     sources_to_process.append({'path': str(p), 'is_rtsp': False})
