@@ -671,51 +671,69 @@ def create_line_video_clips(
                             img_h, img_w = diff_img.shape[:2]
                         
                             # ProcessPoolExecutorで並列処理
-                            num_workers = config.RTSP_PARALLEL_WORKERS or cpu_count()
+                            num_workers = int(
+                                save_options.get(
+                                    'finer_detection_workers',
+                                    config.RTSP_PARALLEL_WORKERS or max(1, cpu_count() // 2),
+                                )
+                            )
+                            num_workers = max(1, min(num_workers, len(valid_candidates)))
                             print(f"並列処理開始: {num_workers}ワーカーで{len(valid_candidates)}件を処理中...")
                         
                             # 並列処理で確認された候補を収集
                             confirmed_candidates_parallel = []
                         
-                            with ProcessPoolExecutor(max_workers=num_workers) as executor:
-                                futures = {}
+                            def collect_finer_result(cand, line_detected_indices, cutout_rect_finer):
+                                if line_detected_indices:
+                                    print(f"\n--- 詳細検出確認 中心: ({cand['cx']}, {cand['cy']}) ---")
+                                    confirmed_candidates_parallel.append({
+                                        'cand': cand,
+                                        'line_detected_indices': line_detected_indices,
+                                        'cutout_rect_finer': cutout_rect_finer,
+                                    })
+                                else:
+                                    print(f"候補 ({cand['cx']}, {cand['cy']}): 詳細検出では流星は見つかりませんでした。")
+
+                            worker_kwargs = {
+                                'frames_data': frames_for_finer_detect,
+                                'img_h': img_h,
+                                'img_w': img_w,
+                                'actual_start_frame_index': actual_start_finer,
+                                'composite_step': max(1, int(frame_rate / 5)),
+                                'cut_size': config.FINER_CUTOUT_SIZE,
+                                'border_margin': config.BORDER_SIZE,
+                                'finer_min_length': config.FINER_DETECT_MIN_LENGTH,
+                            }
+                            if num_workers == 1:
                                 for cand in valid_candidates:
-                                    future = executor.submit(
-                                        _process_finer_detection_worker,
-                                        frames_data=frames_for_finer_detect,
-                                        cx=cand['cx'],
-                                        cy=cand['cy'],
-                                        img_h=img_h,
-                                        img_w=img_w,
-                                        actual_start_frame_index=actual_start_finer,
-                                        candidate_line=cand['line'],
-                                        composite_step=max(1, int(frame_rate / 5)),  # FPSの1/5
-                                        cut_size=config.FINER_CUTOUT_SIZE,  # 詳細検出用カットアウトサイズ
-                                        border_margin=config.BORDER_SIZE,
-                                        finer_min_length=config.FINER_DETECT_MIN_LENGTH
-                                    )
-                                    futures[future] = cand
-                            
-                                # 結果を収集
-                                for future in as_completed(futures):
                                     if cancel_flag is not None and cancel_flag.is_set():
                                         break
-                                    cand = futures[future]
                                     try:
-                                        line_detected_indices, cutout_rect_finer = future.result()
-                                    
-                                        if line_detected_indices:
-                                            print(f"\n--- 詳細検出確認 (並列処理) 中心: ({cand['cx']}, {cand['cy']}) ---")
-                                            # 確認された候補を収集（後で保存処理を行う）
-                                            confirmed_candidates_parallel.append({
-                                                'cand': cand,
-                                                'line_detected_indices': line_detected_indices,
-                                                'cutout_rect_finer': cutout_rect_finer
-                                            })
-                                        else:
-                                            print(f"候補 ({cand['cx']}, {cand['cy']}): 詳細検出では流星は見つかりませんでした。")
+                                        result = _process_finer_detection_worker(
+                                            cx=cand['cx'], cy=cand['cy'], candidate_line=cand['line'],
+                                            **worker_kwargs,
+                                        )
+                                        collect_finer_result(cand, *result)
                                     except Exception as e:
-                                        print(f"並列処理中にエラー ({cand['cx']}, {cand['cy']}): {e}")
+                                        print(f"詳細処理中にエラー ({cand['cx']}, {cand['cy']}): {e}")
+                            else:
+                                with ProcessPoolExecutor(max_workers=num_workers) as executor:
+                                    futures = {
+                                        executor.submit(
+                                            _process_finer_detection_worker,
+                                            cx=cand['cx'], cy=cand['cy'], candidate_line=cand['line'],
+                                            **worker_kwargs,
+                                        ): cand
+                                        for cand in valid_candidates
+                                    }
+                                    for future in as_completed(futures):
+                                        if cancel_flag is not None and cancel_flag.is_set():
+                                            break
+                                        cand = futures[future]
+                                        try:
+                                            collect_finer_result(cand, *future.result())
+                                        except Exception as e:
+                                            print(f"並列処理中にエラー ({cand['cx']}, {cand['cy']}): {e}")
                         
                             print(f"並列処理完了: {len(confirmed_candidates_parallel)}件の検出を確認")
                         

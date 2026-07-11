@@ -9,6 +9,61 @@ import video_processing
 import config
 
 
+def compute_worker_plan(requested_workers: int, logical_cpus: Optional[int] = None) -> Dict[str, int]:
+    """Allocate one CPU budget across videos, OpenCV, and nested finer detection."""
+    cpus = max(1, int(logical_cpus or os.cpu_count() or 1))
+    reserved_for_ui = 2 if cpus >= 8 else 1 if cpus >= 3 else 0
+    usable = max(1, cpus - reserved_for_ui)
+    video_workers = max(1, min(int(requested_workers or 1), usable, 6))
+    per_video_budget = max(1, usable // video_workers)
+    return {
+        "logical_cpus": cpus,
+        "reserved_for_ui": reserved_for_ui,
+        "usable_cpus": usable,
+        "video_workers": video_workers,
+        "download_workers": min(2, video_workers),
+        "opencv_threads": max(1, min(3, per_video_budget)),
+        # Avoid multiplying full-frame serialization across every video worker.
+        "finer_workers": (
+            max(1, min(2, per_video_budget)) if video_workers == 1 else 1
+        ),
+    }
+
+
+class _ProgressLimiter:
+    """Keep high-volume archive messages from starving Tk's event loop."""
+    def __init__(self, callback, total: int, min_interval: float = 0.20):
+        self.callback = callback
+        self.total = total
+        self.min_interval = min_interval
+        self.lock = threading.Lock()
+        self.last_progress_time = 0.0
+        self.last_progress = 0
+
+    def message(self, payload):
+        message, value = payload
+        if isinstance(message, str):
+            if message.startswith('"') and " の処理を開始" in message:
+                return
+            if message.startswith("処理終了:"):
+                return
+            if message.startswith("完了:") and "検出: 0件" in message:
+                return
+            if message.startswith("ダウンロード完了:"):
+                return
+        self.callback(payload)
+
+    def progress(self, processed: int):
+        now = time.monotonic()
+        with self.lock:
+            if processed < self.total and now - self.last_progress_time < self.min_interval:
+                self.last_progress = processed
+                return
+            self.last_progress_time = now
+            self.last_progress = processed
+        self.callback((None, (processed, self.total)))
+
+
 def run_pipeline(
     sources: List[Dict[str, Any]],
     max_workers: int,
@@ -36,13 +91,33 @@ def run_pipeline(
     if not sources:
         return
 
+    worker_plan = compute_worker_plan(max_workers)
+    max_workers = worker_plan["video_workers"]
+    download_worker_count = worker_plan["download_workers"]
+    save_options = dict(save_options or {})
+    save_options["finer_detection_workers"] = worker_plan["finer_workers"]
+    try:
+        # OpenCV otherwise creates a full CPU pool inside every video worker.
+        import cv2
+        cv2.setNumThreads(worker_plan["opencv_threads"])
+    except Exception:
+        pass
+    progress = _ProgressLimiter(progress_callback, len(sources))
+    progress_callback((
+        "並列処理構成: "
+        f"動画={max_workers}, 詳細検出/動画={worker_plan['finer_workers']}, "
+        f"OpenCV/動画={worker_plan['opencv_threads']}, UI予約={worker_plan['reserved_for_ui']}コア",
+        None,
+    ))
+
     # simple shared index for downloaders
     src_lock = threading.Lock()
     src_index = {'i': 0}
+    downloaders_done = threading.Event()
+    pipeline_done = threading.Event()
 
-    # Allow a larger buffer so downloaders can queue more items without
-    # overwhelming processors; user requested max_workers * 20.
-    task_q: queue.Queue = queue.Queue(maxsize=max_workers * 20)
+    # Keep only a small rolling window; thousands of queued jobs add no throughput.
+    task_q: queue.Queue = queue.Queue(maxsize=max_workers * 3)
 
     # track processor busy state so the UI can show which slots are active
     processors_busy = [False] * max_workers
@@ -94,7 +169,7 @@ def run_pipeline(
                             pass
                         break
                     try:
-                        progress_callback((f"ダウンロード完了: {os.path.basename(path)}", None))
+                        progress.message((f"ダウンロード完了: {os.path.basename(path)}", None))
                     except Exception:
                         pass
                     last_exc = None
@@ -102,7 +177,7 @@ def run_pipeline(
                 except network_copy.CancelledCopy:
                     # cancel requested during copy; log and exit this downloader
                     try:
-                        progress_callback((f"ダウンロードをキャンセル: {path}", None))
+                        progress.message((f"ダウンロードをキャンセル: {path}", None))
                     except Exception:
                         pass
                     return
@@ -110,7 +185,7 @@ def run_pipeline(
                     last_exc = e
                     attempt += 1
                     try:
-                        progress_callback((f"ダウンロード失敗 (試行 {attempt}/{retry_count}): {path} ({e})", None))
+                        progress.message((f"ダウンロード失敗 (試行 {attempt}/{retry_count}): {path} ({e})", None))
                     except Exception:
                         pass
                     if attempt < retry_count:
@@ -119,7 +194,7 @@ def run_pipeline(
             if last_exc is not None:
                 # final failure after retries
                 try:
-                    progress_callback((f"ダウンロード失敗: {path} ({last_exc})", None))
+                    progress.message((f"ダウンロード失敗: {path} ({last_exc})", None))
                 except Exception:
                     pass
         # downloader exits
@@ -130,9 +205,7 @@ def run_pipeline(
                 item = task_q.get(timeout=1.0)
             except queue.Empty:
                 # check if all downloaders are done and queue is empty
-                with src_lock:
-                    done = src_index['i'] >= len(sources)
-                if done and task_q.empty():
+                if downloaders_done.is_set() and task_q.empty():
                     break
                 else:
                     continue
@@ -155,7 +228,7 @@ def run_pipeline(
                     duration=duration,
                     min_length=config.MIN_LINE_LENGTH,
                     mask=mask,
-                    progress_callback=progress_callback,
+                    progress_callback=progress.message,
                     meteor_save_path=meteor_save_path,
                     not_meteor_save_path=not_meteor_save_path,
                     use_plate_solve=(global_wcs_info is not None),
@@ -168,7 +241,7 @@ def run_pipeline(
                 )
             except Exception as e:
                 try:
-                    progress_callback((f"処理エラー ({local_path}): {e}", None))
+                    progress.message((f"処理エラー ({local_path}): {e}", None))
                 except Exception:
                     pass
             finally:
@@ -183,7 +256,7 @@ def run_pipeline(
                         total = len(sources)
                     # send a progress update: (None, (processed, total))
                     try:
-                        progress_callback((None, (processed, total)))
+                        progress.progress(processed)
                     except Exception:
                         pass
                 except Exception:
@@ -198,7 +271,7 @@ def run_pipeline(
     # optional status updater thread
     def status_updater_fn():
         # keep reporting until everything is done or cancel
-        while not cancel_flag.is_set():
+        while not cancel_flag.is_set() and not pipeline_done.is_set():
             try:
                 qsz = task_q.qsize()
                 with src_lock:
@@ -220,7 +293,7 @@ def run_pipeline(
         status_thread.start()
 
     # start downloaders and processors
-    downloaders = [threading.Thread(target=downloader_thread_fn, args=(i,), daemon=True) for i in range(max_workers)]
+    downloaders = [threading.Thread(target=downloader_thread_fn, args=(i,), daemon=True) for i in range(download_worker_count)]
     processors = [threading.Thread(target=processor_thread_fn, args=(i,), daemon=True) for i in range(max_workers)]
 
     for t in processors:
@@ -231,6 +304,7 @@ def run_pipeline(
     # wait for downloaders to finish
     for t in downloaders:
         t.join()
+    downloaders_done.set()
 
     # wait for queue to be processed
     task_q.join()
@@ -239,9 +313,11 @@ def run_pipeline(
     for t in processors:
         t.join()
 
+    pipeline_done.set()
+
     # stop status thread
     if status_thread:
         try:
-            status_thread.join(timeout=0.1)
+            status_thread.join(timeout=1.0)
         except Exception:
             pass
