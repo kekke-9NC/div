@@ -204,6 +204,19 @@ def _brightness_composite_and_diff(frames: List[np.ndarray]) -> Tuple[np.ndarray
     return maximum, cv2.absdiff(maximum, minimum)
 
 
+def _extract_diff_cutout(
+    diff_image: np.ndarray,
+    cutout_rect: Tuple[int, int, int, int],
+    cut_size: int,
+) -> np.ndarray:
+    """Extract a consistently sized classifier or saved-image diff cutout."""
+    x_start, y_start, x_end, y_end = cutout_rect
+    cutout = diff_image[y_start:y_end, x_start:x_end]
+    if cutout.shape[0] != cut_size or cutout.shape[1] != cut_size:
+        cutout = cv2.resize(cutout, (cut_size, cut_size))
+    return cutout
+
+
 def get_rtsp_recording_start_datetime(
     source: str,
     total_frames: int,
@@ -764,6 +777,11 @@ def create_line_video_clips(
                                             masked_frames_final.append(frame)
                                     final_frames_for_clip = masked_frames_final
 
+                                # Keep the detector's original one-second difference image for
+                                # inference.  The classifier was trained on this representation;
+                                # the enhanced difference below is strictly for saved artifacts.
+                                classification_diff_img = diff_img
+                                saved_diff_img = diff_img
                                 enhancement_result: Optional[video_enhancement.EnhancementResult] = None
                                 if fixed_pattern_correction is not None:
                                     enhancement_result = video_enhancement.enhance_frames(
@@ -772,7 +790,7 @@ def create_line_video_clips(
                                         detected_line=((x1, y1), (x2, y2)),
                                     )
                                     final_frames_for_clip = enhancement_result.frames
-                                    brightness_composite, diff_img = _brightness_composite_and_diff(final_frames_for_clip)
+                                    brightness_composite, saved_diff_img = _brightness_composite_and_diff(final_frames_for_clip)
                                     print(
                                         "保存物補正: 固定パターン "
                                         f"{enhancement_result.correction_strength:.3f}倍 + 21フレーム平均 "
@@ -808,14 +826,15 @@ def create_line_video_clips(
                                 cutout_rect = (int(x_start_cut), int(y_start_cut), int(x_start_cut + cut_size), int(y_start_cut + cut_size))
                                 x_start_cut, y_start_cut, x_end_cut, y_end_cut = cutout_rect
                             
-                                diff_cutout = diff_img[y_start_cut:y_end_cut, x_start_cut:x_end_cut]
-                                if diff_cutout.shape[0] != cut_size or diff_cutout.shape[1] != cut_size:
-                                    diff_cutout = cv2.resize(diff_cutout, (cut_size, cut_size))
+                                diff_cutout = _extract_diff_cutout(saved_diff_img, cutout_rect, cut_size)
+                                classification_diff_cutout = _extract_diff_cutout(
+                                    classification_diff_img, cutout_rect, cut_size
+                                )
                             
                                 temp_dir = config.TEMP_CLIP_DIR
                                 os.makedirs(temp_dir, exist_ok=True)
                                 temp_diff_image_path = os.path.join(temp_dir, f"temp_diff_{datetime.now().strftime('%Y%m%d%H%M%S%f')}.jpg")
-                                cv2.imwrite(temp_diff_image_path, diff_cutout)
+                                cv2.imwrite(temp_diff_image_path, classification_diff_cutout)
                                 probability = model.predict_meteor_probability(temp_diff_image_path)
                                 try: os.remove(temp_diff_image_path)
                                 except OSError as e: print(f"警告: 一時差分ファイルの削除に失敗: {e}")
@@ -911,7 +930,7 @@ def create_line_video_clips(
                             
                                 if save_options.get('full', False):
                                     full_diff_path = os.path.join(save_dir, f"{base_filename}_full_diff.jpg")
-                                    if cv2.imwrite(full_diff_path, diff_img):
+                                    if cv2.imwrite(full_diff_path, saved_diff_img):
                                         saved_paths['full'] = full_diff_path
                                         print(f"全体差分画像を保存しました: {full_diff_path}")
                                     else:
@@ -1300,6 +1319,10 @@ def create_line_video_clips(
                                 masked_frames_final.append(frame)
                         final_frames_for_clip = masked_frames_final
 
+                    # Classification must continue to use the raw detector difference image.
+                    # Fixed-pattern correction and temporal averaging affect saved media only.
+                    classification_diff_img = diff_img
+                    saved_diff_img = diff_img
                     enhancement_result: Optional[video_enhancement.EnhancementResult] = None
                     if fixed_pattern_correction is not None:
                         enhancement_result = video_enhancement.enhance_frames(
@@ -1308,7 +1331,7 @@ def create_line_video_clips(
                             detected_line=((x1, y1), (x2, y2)),
                         )
                         final_frames_for_clip = enhancement_result.frames
-                        brightness_composite, diff_img = _brightness_composite_and_diff(final_frames_for_clip)
+                        brightness_composite, saved_diff_img = _brightness_composite_and_diff(final_frames_for_clip)
                         print(
                             "保存物補正: 固定パターン "
                             f"{enhancement_result.correction_strength:.3f}倍 + 21フレーム平均 "
@@ -1345,14 +1368,15 @@ def create_line_video_clips(
                     cutout_rect = (int(x_start_cut), int(y_start_cut), int(x_start_cut + cut_size), int(y_start_cut + cut_size))
                     x_start_cut, y_start_cut, x_end_cut, y_end_cut = cutout_rect
 
-                    diff_cutout = diff_img[y_start_cut:y_end_cut, x_start_cut:x_end_cut]
-                    if diff_cutout.shape[0] != cut_size or diff_cutout.shape[1] != cut_size:
-                        diff_cutout = cv2.resize(diff_cutout, (cut_size, cut_size))
+                    diff_cutout = _extract_diff_cutout(saved_diff_img, cutout_rect, cut_size)
+                    classification_diff_cutout = _extract_diff_cutout(
+                        classification_diff_img, cutout_rect, cut_size
+                    )
 
                     temp_dir = config.TEMP_CLIP_DIR
                     os.makedirs(temp_dir, exist_ok=True)
                     temp_diff_image_path = os.path.join(temp_dir, f"temp_diff_{datetime.now().strftime('%Y%m%d%H%M%S%f')}.jpg")
-                    cv2.imwrite(temp_diff_image_path, diff_cutout)
+                    cv2.imwrite(temp_diff_image_path, classification_diff_cutout)
                     probability = model.predict_meteor_probability(temp_diff_image_path)
                     try: os.remove(temp_diff_image_path)
                     except OSError as e: print(f"警告: 一時差分ファイルの削除に失敗: {e}")
@@ -1448,7 +1472,7 @@ def create_line_video_clips(
 
                     if save_options.get('full', False):
                         full_diff_path = os.path.join(save_dir, f"{base_filename}_full_diff.jpg")
-                        if cv2.imwrite(full_diff_path, diff_img):
+                        if cv2.imwrite(full_diff_path, saved_diff_img):
                             saved_paths['full'] = full_diff_path
                             print(f"全体差分画像を保存しました: {full_diff_path}")
                         else:
