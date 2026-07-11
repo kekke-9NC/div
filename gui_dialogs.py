@@ -30,7 +30,7 @@ class TimelapseDragDropWindow(Toplevel):
         
         self.title("タイムラプス作成")
         self.geometry("500x870")
-        self.resizable(False, False)
+        self.resizable(True, True)
         
         self.setup_ui()
         
