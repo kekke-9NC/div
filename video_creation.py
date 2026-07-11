@@ -32,7 +32,7 @@ def create_summary_video(
         frame_rate (float): 動画のフレームレート。
         output_resolution (Tuple[int, int]): 出力動画の解像度 (幅, 高さ)。
         full_video_path (Optional[str]): フルサイズ動画のパス（オプション）。
-        detected_line: 流星の検出線分。指定時は概要のフルサイズ映像に枠と矢印を重ねる。
+        detected_line: 流星の検出線分。指定時は概要のフルサイズ映像に黄色い枠を重ねる。
     """
     print(f"概要動画の生成を開始: {output_video_path}")
     
@@ -124,7 +124,7 @@ def create_summary_video(
                 proc_handle.stdin.write(frame.tobytes())
     
     def _draw_detection_marker(frame):
-        """概要動画のフルサイズ映像で流星位置を常時見失わないようにする。"""
+        """概要動画のフルサイズ映像で流星位置を黄色い枠で示す。"""
         if not detected_line:
             return frame
         output = frame.copy()
@@ -139,7 +139,6 @@ def create_summary_video(
         thickness = max(2, int(round(min(width, height) / 420)))
         color = (0, 220, 255)  # BGR: 黄色
         cv2.rectangle(output, (left, top), (right, bottom), color, thickness, cv2.LINE_AA)
-        cv2.arrowedLine(output, (x1, y1), (x2, y2), color, thickness + 1, cv2.LINE_AA, tipLength=0.22)
         return output
 
     def _add_video_clip(video_path, proc_handle, highlight_detection=False):

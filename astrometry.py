@@ -551,7 +551,7 @@ def _draw_meteor_marker(
     image: np.ndarray,
     detected_line: Tuple[Tuple[int, int], Tuple[int, int]],
 ) -> np.ndarray:
-    """流星の軌跡を枠と矢印で強調した画像を返す。
+    """流星の検出範囲を黄色い枠だけで強調した画像を返す。
 
     WCS の有無にかかわらず、概要動画で一目で検出箇所を確認できるようにする。
     ``image`` は RGB/RGBA のどちらでも扱い、元の型・スケールを維持する。
@@ -575,21 +575,6 @@ def _draw_meteor_marker(
     marker_color = (255, 220, 0)  # RGB: 視認性の高い黄色
 
     cv2.rectangle(canvas, (left, top), (right, bottom), marker_color, thickness, cv2.LINE_AA)
-    cv2.arrowedLine(canvas, (x1, y1), (x2, y2), marker_color, thickness + 1, cv2.LINE_AA, tipLength=0.22)
-    label = "METEOR"
-    font_scale = max(0.55, min(width, height) / 1500)
-    text_thickness = max(1, thickness // 2)
-    (text_width, text_height), baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, text_thickness)
-    label_x = min(max(0, left), max(0, width - text_width - 12))
-    label_y = max(text_height + 10, top - 8)
-    cv2.rectangle(
-        canvas,
-        (max(0, label_x - 5), max(0, label_y - text_height - 6)),
-        (min(width - 1, label_x + text_width + 5), min(height - 1, label_y + baseline + 5)),
-        (0, 0, 0),
-        -1,
-    )
-    cv2.putText(canvas, label, (label_x, label_y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, marker_color, text_thickness, cv2.LINE_AA)
     return canvas.astype(np.float32) / 255.0 if normalized else canvas
 
 def annotate_image_with_wcs(
@@ -599,12 +584,15 @@ def annotate_image_with_wcs(
     detection_datetime: Optional[datetime] = None,
     timestamp: Optional[str] = None,
     cancel_flag: Optional[threading.Event] = None,
-    flip_vertically: bool = True,
+    flip_vertically: bool = False,
     detected_line: Optional[Tuple[Tuple[int, int], Tuple[int, int]]] = None,
 ) -> Optional[str]:
     """
     WCS情報を使用して画像に注釈を描画し、保存する。
     地球の自転を考慮して、流星の「座標」を補正する。
+
+    出力画像は、検出・保存時の画面向きを既定で維持する。過去のWCS表示との
+    互換が必要な場合だけ ``flip_vertically=True`` を明示的に指定する。
     """
     # WCS情報がない場合はPILでタイムスタンプのみ描画
     if not wcs_info or 'wcs_file' not in wcs_info or not os.path.exists(wcs_info['wcs_file']):
