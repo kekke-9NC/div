@@ -42,7 +42,13 @@ class ProcessingMixin:
                 'full_video_timestamp_enabled': self.full_video_timestamp_enabled_var.get(),
                 'full_video_timestamp_position': self.full_video_timestamp_position_var.get(),
                 'full_video_timestamp_size_percent': timestamp_size_percent,
+                'ml_training_export_enabled': self.ml_training_export_enabled_var.get(),
+                'ml_training_data_root': self.ml_training_data_root_var.get().strip(),
             })
+            if params['save_options']['ml_training_export_enabled']:
+                if not params['save_options']['ml_training_data_root']:
+                    raise ValueError("機械学習向けデータの保存先が空です。")
+                os.makedirs(params['save_options']['ml_training_data_root'], exist_ok=True)
             
             if self.rtsp_preset_var.get() == "clear":
                 preset = config.RTSP_PRESET_CLEAR_SKY

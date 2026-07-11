@@ -22,6 +22,7 @@ import utils
 import video_creation
 import video_denoising
 import video_enhancement
+import ml_training_data
 
 
 _FULL_VIDEO_TIMESTAMP_POSITIONS = {
@@ -782,6 +783,7 @@ def create_line_video_clips(
                                 # the enhanced difference below is strictly for saved artifacts.
                                 classification_diff_img = diff_img
                                 saved_diff_img = diff_img
+                                ml_source_frames = final_frames_for_clip
                                 enhancement_result: Optional[video_enhancement.EnhancementResult] = None
                                 if fixed_pattern_correction is not None:
                                     enhancement_result = video_enhancement.enhance_frames(
@@ -856,6 +858,28 @@ def create_line_video_clips(
                                 )
                                 saved_paths = {}
                                 denoise_metrics: Optional[Dict[str, float]] = None
+
+                                if save_options.get('ml_training_export_enabled', False):
+                                    try:
+                                        ml_event_dir = ml_training_data.export_training_event(
+                                            root_dir=save_options.get('ml_training_data_root', config.DEFAULT_ML_TRAINING_DATA_ROOT),
+                                            predicted_label=detection_label,
+                                            probability=probability,
+                                            event_id=base_filename,
+                                            source=source,
+                                            detection_time=detection_datetime,
+                                            frames=ml_source_frames,
+                                            classification_diff=classification_diff_img,
+                                            cutout_rect=cutout_rect,
+                                            cutout_size=cut_size,
+                                            frame_rate=frame_rate,
+                                            detected_line=((x1, y1), (x2, y2)),
+                                            frame_range=(adjusted_start_frame, adjusted_end_frame),
+                                        )
+                                        saved_paths['ml_training_event'] = ml_event_dir
+                                        print(f"機械学習向けイベントを保存しました: {ml_event_dir}")
+                                    except Exception as e_ml:
+                                        print(f"機械学習向けイベントの保存に失敗: {e_ml}")
                             
                                 if save_options.get('video', False):
                                     output_clip_path = os.path.join(save_dir, f"{base_filename}.mp4")
@@ -1323,6 +1347,7 @@ def create_line_video_clips(
                     # Fixed-pattern correction and temporal averaging affect saved media only.
                     classification_diff_img = diff_img
                     saved_diff_img = diff_img
+                    ml_source_frames = final_frames_for_clip
                     enhancement_result: Optional[video_enhancement.EnhancementResult] = None
                     if fixed_pattern_correction is not None:
                         enhancement_result = video_enhancement.enhance_frames(
@@ -1398,6 +1423,28 @@ def create_line_video_clips(
                     )
                     saved_paths = {}
                     denoise_metrics: Optional[Dict[str, float]] = None
+
+                    if save_options.get('ml_training_export_enabled', False):
+                        try:
+                            ml_event_dir = ml_training_data.export_training_event(
+                                root_dir=save_options.get('ml_training_data_root', config.DEFAULT_ML_TRAINING_DATA_ROOT),
+                                predicted_label=detection_label,
+                                probability=probability,
+                                event_id=base_filename,
+                                source=source,
+                                detection_time=detection_datetime,
+                                frames=ml_source_frames,
+                                classification_diff=classification_diff_img,
+                                cutout_rect=cutout_rect,
+                                cutout_size=cut_size,
+                                frame_rate=frame_rate,
+                                detected_line=((x1, y1), (x2, y2)),
+                                frame_range=(adjusted_start_frame, adjusted_end_frame),
+                            )
+                            saved_paths['ml_training_event'] = ml_event_dir
+                            print(f"機械学習向けイベントを保存しました: {ml_event_dir}")
+                        except Exception as e_ml:
+                            print(f"機械学習向けイベントの保存に失敗: {e_ml}")
 
                     if save_options.get('video', False):
                         output_clip_path = os.path.join(save_dir, f"{base_filename}.mp4")

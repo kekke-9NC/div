@@ -181,6 +181,10 @@ DEFAULT_SAVE_DETECTION_INFO = True
 DEFAULT_SAVE_FULL_VIDEO = False  # フルサイズ動画（トリミングなし）
 DEFAULT_SAVE_DENOISED_FULL_VIDEO = False  # 旧個別出力。共通保存物補正へ移行。
 
+# --- 機械学習向けイベントデータセット ---
+DEFAULT_ML_TRAINING_EXPORT_ENABLED = False
+DEFAULT_ML_TRAINING_DATA_ROOT = os.path.join(EXE_DIR, "ml_training_data")
+
 # --- 検出クリップの閲覧用ノイズ低減 ---
 # 5フレーム（前後2枚）の時間中央値を主体にし、検出線付近の明るい過渡成分を原画から戻す。
 DENOISE_TEMPORAL_RADIUS = 2
