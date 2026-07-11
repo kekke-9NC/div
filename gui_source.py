@@ -521,57 +521,19 @@ atomcam2で利用する場合は、GitHubで公開されている
 
     def drop(self, event):
         paths = self.splitlist(event.data)
-        
-        items_to_add = [] # (fps_str, path_str, internal_path)
-        
-        def get_fps_str(video_path):
-            """Get FPS string for a video file."""
-            fps_str = "??"
-            try:
-                cap = cv2.VideoCapture(video_path)
-                if cap.isOpened():
-                    fps = cap.get(cv2.CAP_PROP_FPS)
-                    fps_str = f"{fps:.2f}"
-                    cap.release()
-                else:
-                    fps_str = "Error"
-            except Exception:
-                fps_str = "Error"
-            return fps_str
-        
+        items_to_add = []  # (fps_str, display_path, internal_path)
+        existing = {os.path.abspath(path) for path in self.folder_paths}
         for path in paths:
+            normalized = os.path.abspath(path)
+            if normalized in existing:
+                continue
             if os.path.isdir(path):
-                # Scan folder for video files
-                video_files = sorted([
-                    str(p) for p in Path(path).rglob('*') 
-                    if p.suffix.lower() in config.PERIODIC_VIDEO_EXTENSIONS
-                ])
-                
-                if not video_files:
-                    continue
-                
-                # Get FPS for all videos in this folder
-                fps_values = []
-                for video_path in video_files:
-                    fps_values.append(get_fps_str(video_path))
-                
-                # Check if all FPS values are the same
-                unique_fps = set(fps_values)
-                if len(unique_fps) == 1 and path not in self.folder_paths:
-                    # All same FPS - group as folder
-                    fps_str = fps_values[0]
-                    path_str = f"{path} ({len(video_files)} files)"
-                    items_to_add.append((fps_str, path_str, path))
-                else:
-                    # Mixed FPS - add individual files
-                    for video_path, fps_str in zip(video_files, fps_values):
-                        if video_path not in self.folder_paths:
-                            items_to_add.append((fps_str, video_path, video_path))
-                            
+                # Do not recursively scan or open thousands of videos in the Tk event handler.
+                # Discovery and twilight filtering happen after Start is pressed, in a worker.
+                items_to_add.append(("自動", f"{path} (開始時に走査)", path))
             elif os.path.isfile(path) and Path(path).suffix.lower() in config.PERIODIC_VIDEO_EXTENSIONS:
-                if path not in self.folder_paths:
-                    fps_str = get_fps_str(path)
-                    items_to_add.append((fps_str, path, path))
+                items_to_add.append(("自動", path, path))
+            existing.add(normalized)
 
         if items_to_add:
             for fps_str, path_str, internal_path in items_to_add:
@@ -579,6 +541,7 @@ atomcam2で利用する場合は、GitHubで公開されている
                     self.folder_paths.append(internal_path)
                     self._add_folder_item(fps_str, path_str)
             self.update_start_button_state()
+            self.append_log(f"{len(items_to_add)}件を登録しました。動画の走査は開始後にバックグラウンドで行います。")
         else:
             messagebox.showwarning("情報", "有効なフォルダまたは動画ファイルがドロップされませんでした。")
 
@@ -593,7 +556,8 @@ atomcam2で利用する場合は、GitHubで公開されている
         badge_canvas.pack(side=tk.LEFT, padx=(4, 6), pady=2)
         
         self._draw_rounded_rect(badge_canvas, 2, 2, 68, 20, 8, fill="#4A90D9", outline="")
-        badge_canvas.create_text(35, 11, text=f"{fps_str} fps", fill="white", font=("Segoe UI", 8, "bold"))
+        badge_text = "開始時取得" if fps_str == "自動" else f"{fps_str} fps"
+        badge_canvas.create_text(35, 11, text=badge_text, fill="white", font=("Segoe UI", 8, "bold"))
         
         # Path label
         path_label = tk.Label(item_frame, text=path_str, bg="#3A4D6B", fg="#EAEAEA", 

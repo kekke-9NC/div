@@ -162,7 +162,6 @@ class ProcessingMixin:
             self._update_live_preview_button_state()
 
         elif selected_source == "folder":
-            sources_to_process = []
             self.append_log(f"{len(self.folder_paths)}個の項目を処理します...")
             try:
                 observation_lat = float(self.observation_latitude_var.get())
@@ -171,43 +170,15 @@ class ProcessingMixin:
                 messagebox.showerror("設定エラー", "観測地点の緯度・経度を数値で入力してください。")
                 self.cancel_processing(restore_button_state=True)
                 return
-            for path_item in self.folder_paths:
-                p = Path(path_item)
-                if p.is_dir():
-                    found = sorted([p for p in p.rglob('*') if p.suffix.lower() in config.PERIODIC_VIDEO_EXTENSIONS])
-                    if self.date_folder_twilight_filter_enabled_var.get():
-                        filtered, filter_info = observation_time_filter.filter_date_root_videos(
-                            p, found, observation_lat, observation_lon
-                        )
-                        if filter_info.get('applied'):
-                            dawn = filter_info['astro_dawn'].strftime('%H:%M')
-                            dusk = filter_info['astro_dusk'].strftime('%H:%M')
-                            self.append_log(
-                                f"{p.name}: 天文薄明フィルタ {dawn}以前 / {dusk}以後 "
-                                f"({len(found)}本 → {len(filtered)}本)"
-                            )
-                            found = filtered
-                    sources_to_process.extend([{'path': str(fp), 'is_rtsp': False} for fp in found])
-                elif p.is_file() and p.suffix.lower() in config.PERIODIC_VIDEO_EXTENSIONS:
-                    sources_to_process.append({'path': str(p), 'is_rtsp': False})
-            
-            if not sources_to_process:
-                messagebox.showwarning("情報", "選択されたフォルダに動画ファイルが見つかりませんでした。")
-                self.cancel_processing(restore_button_state=True)
-                return
-
-            total_videos = len(sources_to_process)
-            self.append_log(f"合計 {total_videos} 個の動画ファイルを処理します。")
-            self.progress['maximum'] = total_videos
-            self.progress_queue.put((f"処理開始 ({total_videos} ファイル)", (0, total_videos)))
-
+            selected_paths = list(self.folder_paths)
+            twilight_enabled = self.date_folder_twilight_filter_enabled_var.get()
             worker_args = (
-                self.progress_queue, sources_to_process, params['max_workers'], params['interval_sec'], 
-                params['duration_sec'], params['mask'], params['global_wcs_info'], params['plate_solve_mask'],
-                params['meteor_save_path'], params['not_meteor_save_path'], self.cancel_flag,
-                params['save_options'], params['summary_config'], params['fixed_pattern_correction']
+                self.progress_queue, selected_paths, params, twilight_enabled,
+                observation_lat, observation_lon, self.cancel_flag,
             )
-            self.worker_thread = threading.Thread(target=worker_main_loop, args=worker_args, daemon=True)
+            self.worker_thread = threading.Thread(
+                target=prepare_folder_sources_and_run, args=worker_args, daemon=True
+            )
             self.worker_thread.start()
         else:
             messagebox.showerror("エラー", "処理対象がありません。")
@@ -314,7 +285,10 @@ class ProcessingMixin:
                         "すべての処理が完了しました" in message or
                         "監視を終了しました" in message or
                         "統合処理終了" in message or
-                        "処理はキャンセルされました" in message
+                        "処理はキャンセルされました" in message or
+                        "動画の走査をキャンセルしました" in message or
+                        "処理対象の動画が見つかりませんでした" in message or
+                        "動画フォルダの走査中にエラー" in message
                     )
                     if is_complete:
                         self.update_start_button_state()
@@ -330,6 +304,45 @@ class ProcessingMixin:
 
         self.after(100, self.update_progress)
 
+
+
+def prepare_folder_sources_and_run(
+    progress_queue: queue.Queue,
+    selected_paths: List[str],
+    params: Dict[str, Any],
+    twilight_enabled: bool,
+    observation_lat: float,
+    observation_lon: float,
+    cancel_flag: threading.Event,
+):
+    """Discover large archives without blocking Tk, then start the existing pipeline."""
+    try:
+        sources = folder_source_discovery.discover_sources(
+            selected_paths,
+            config.PERIODIC_VIDEO_EXTENSIONS,
+            twilight_filter_enabled=twilight_enabled,
+            latitude=observation_lat,
+            longitude=observation_lon,
+            progress_callback=lambda message: progress_queue.put((message, None)),
+            cancel_flag=cancel_flag,
+        )
+        if cancel_flag.is_set():
+            progress_queue.put(("動画の走査をキャンセルしました。", None))
+            return
+        if not sources:
+            progress_queue.put(("選択されたフォルダに処理対象の動画が見つかりませんでした。", None))
+            return
+        total = len(sources)
+        progress_queue.put((f"走査完了: {total}本の動画を処理します。", (0, total)))
+        worker_main_loop(
+            progress_queue, sources, params['max_workers'], params['interval_sec'],
+            params['duration_sec'], params['mask'], params['global_wcs_info'],
+            params['plate_solve_mask'], params['meteor_save_path'], params['not_meteor_save_path'],
+            cancel_flag, params['save_options'], params['summary_config'],
+            params['fixed_pattern_correction'],
+        )
+    except Exception as exc:
+        progress_queue.put((f"動画フォルダの走査中にエラー: {exc}", None))
 
 
 def worker_main_loop(
