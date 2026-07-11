@@ -220,7 +220,9 @@ class ProcessingMixin:
             self.elapsed_label.config(text=f"経過: {elapsed_str}")
 
         try:
-            while True:
+            # Never drain an unbounded backlog in one Tk callback. Yield back to Tk so
+            # buttons, redraws, and window movement remain responsive.
+            for _ in range(120):
                 message, value = self.progress_queue.get_nowait()
                 if isinstance(value, tuple) and len(value) == 2:
                     current, total = value
