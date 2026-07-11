@@ -14,12 +14,14 @@
 
 import os
 import gc
+import importlib
+import re
 import cv2
 import numpy as np
 import bisect
 from pathlib import Path
 from datetime import datetime, timedelta
-from typing import List, Optional, Callable, Tuple, Dict
+from typing import List, Optional, Callable, Sequence, Tuple, Dict
 import subprocess
 import glob
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -84,8 +86,132 @@ def _normalize_timestamp_settings(timestamp_settings: Optional[Dict]) -> Dict:
     }
 
 
+def _normalize_annotation_settings(annotation_settings: Optional[Dict]) -> Dict:
+    """Normalize the optional, entirely local star-annotation settings."""
+    settings = annotation_settings or {}
+    calibration_path = settings.get(
+        "calibration_path",
+        getattr(config, "TIMELAPSE_ANNOTATION_CALIBRATION_PATH", None),
+    )
+    if calibration_path:
+        calibration_path = os.path.abspath(os.path.expanduser(str(calibration_path)))
+    else:
+        calibration_path = None
+    return {
+        "enabled": bool(
+            settings.get(
+                "enabled",
+                getattr(config, "TIMELAPSE_LOCAL_ANNOTATION_ENABLED", False),
+            )
+        ),
+        "calibration_path": calibration_path,
+    }
+
+
+def _load_local_annotation_callable() -> Callable:
+    """Load the wide-angle annotator only when the user requests it.
+
+    Keeping this import lazy means ordinary timelapse creation does not pay the
+    astrometry startup cost and can still run in minimal installations.
+    """
+    try:
+        module = importlib.import_module("local_wideangle_astrometry")
+    except (ImportError, OSError) as exc:
+        raise RuntimeError(
+            "ローカル広角星空注釈モジュール local_wideangle_astrometry を"
+            "読み込めません。注釈機能を含む構成でアプリを起動してください。"
+            f" 詳細: {exc}"
+        ) from exc
+
+    for name in ("annotate_frame", "annotate_frame_local"):
+        annotator = getattr(module, name, None)
+        if callable(annotator):
+            return annotator
+    raise RuntimeError(
+        "local_wideangle_astrometry に annotate_frame または"
+        " annotate_frame_local がありません。"
+    )
+
+
+def _prepare_local_annotation_calibration(
+    video_paths: Sequence[str],
+    annotation_settings: Dict,
+    progress_callback: Optional[Callable],
+) -> None:
+    """Resolve or create one calibration before the first annotated frame."""
+    calibration_path = annotation_settings.get("calibration_path")
+    if calibration_path:
+        if not os.path.exists(calibration_path):
+            raise RuntimeError(f"較正ファイルがありません: {calibration_path}")
+        return
+    if not video_paths:
+        raise RuntimeError(
+            "画像のみの入力で自動較正はできません。"
+            "較正JSON/WCSを選択するか、同じ夜の動画を含めてください。"
+        )
+    module = importlib.import_module("local_wideangle_astrometry")
+    prepare = getattr(module, "get_or_create_night_calibration", None)
+    if not callable(prepare):
+        raise RuntimeError("ローカル広角較正の自動作成機能がありません。")
+
+    def report(message):
+        _report_progress(progress_callback, str(message))
+
+    annotation_settings["calibration_path"] = prepare(
+        video_paths[0], progress_callback=report
+    )
+
+
+def _apply_local_annotation(
+    annotator: Callable,
+    frame: np.ndarray,
+    frame_datetime: datetime,
+    annotation_settings: Dict,
+) -> np.ndarray:
+    """Apply a local annotation callable and enforce the encoder frame shape."""
+    original_height, original_width = frame.shape[:2]
+    result = annotator(
+        frame,
+        frame_datetime,
+        calibration_path=annotation_settings.get("calibration_path"),
+    )
+    # Solvers may return ``(annotated_frame, calibration_info)`` so callers can
+    # persist newly discovered calibration.  Timelapse output needs only frame 0.
+    if isinstance(result, tuple):
+        result = result[0] if result else None
+    elif isinstance(result, dict):
+        result = result.get("frame")
+    if not isinstance(result, np.ndarray) or result.size == 0:
+        raise RuntimeError("ローカル注釈器から有効な画像が返されませんでした。")
+    if result.ndim == 2:
+        result = cv2.cvtColor(result, cv2.COLOR_GRAY2BGR)
+    elif result.ndim == 3 and result.shape[2] == 4:
+        result = cv2.cvtColor(result, cv2.COLOR_BGRA2BGR)
+    elif result.ndim != 3 or result.shape[2] != 3:
+        raise RuntimeError("ローカル注釈器の出力画像形式が不正です。")
+    if result.shape[:2] != (original_height, original_width):
+        result = cv2.resize(result, (original_width, original_height), interpolation=cv2.INTER_AREA)
+    if result.dtype != np.uint8:
+        result = np.clip(result, 0, 255).astype(np.uint8)
+    return np.ascontiguousarray(result)
+
+
 def _source_created_datetime(path: str) -> datetime:
-    """Use the source file's creation time, with mtime as a portable fallback."""
+    """Prefer the recorder's YYYYMMDD/HH/MM path, then filesystem time."""
+    source = Path(path)
+    parts = source.parts
+    for index, part in enumerate(parts):
+        if not re.fullmatch(r"(?:19|20)\d{6}", part):
+            continue
+        hour = parts[index + 1][:2] if index + 1 < len(parts) else "00"
+        minute = source.stem[:2] if source.stem[:2].isdigit() else "00"
+        if hour.isdigit():
+            try:
+                return datetime.strptime(
+                    f"{part}_{int(hour):02d}_{int(minute):02d}", "%Y%m%d_%H_%M"
+                )
+            except ValueError:
+                pass
     stat = os.stat(path)
     return datetime.fromtimestamp(getattr(stat, "st_birthtime", stat.st_mtime))
 
@@ -202,6 +328,22 @@ def _format_bytes(value: int) -> str:
             return f"{number:.1f}{unit}"
         number /= 1024
     return f"{number:.1f}TB"
+
+
+def _open_video_capture(path: str, decoder_threads: int = 2) -> cv2.VideoCapture:
+    thread_property = getattr(cv2, "CAP_PROP_N_THREADS", None)
+    if thread_property is not None:
+        try:
+            capture = cv2.VideoCapture(
+                path, cv2.CAP_FFMPEG,
+                [int(thread_property), max(1, int(decoder_threads))],
+            )
+            if capture.isOpened():
+                return capture
+            capture.release()
+        except (cv2.error, TypeError, ValueError):
+            pass
+    return cv2.VideoCapture(path)
 
 
 def _is_unfinished_video(path: str) -> bool:
@@ -321,7 +463,7 @@ def get_files_from_path(path: str) -> Tuple[List[str], List[str]]:
 
 def get_video_frame_count(video_path: str) -> int:
     """動画のフレーム数を取得する。"""
-    cap = cv2.VideoCapture(video_path)
+    cap = _open_video_capture(video_path)
     if not cap.isOpened():
         return 0
     frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -436,7 +578,7 @@ class FrameLoader:
             with self._lock:
                 cap = self._video_caps.get(path)
                 if cap is None or not cap.isOpened():
-                    cap = cv2.VideoCapture(path)
+                    cap = _open_video_capture(path)
                     self._video_caps[path] = cap
                     self._video_positions[path] = -1
                 if cap.isOpened():
@@ -483,7 +625,7 @@ class FrameLoader:
                     decoded[read_start] = frame
                 continue
 
-            cap = cv2.VideoCapture(path)
+            cap = _open_video_capture(path)
             if not cap.isOpened():
                 continue
             local_start = read_start - source_start
@@ -517,7 +659,7 @@ class FrameLoader:
         if Path(path).suffix.lower() in VIDEO_EXTENSIONS:
             fps = self._video_fps.get(path)
             if fps is None:
-                cap = cv2.VideoCapture(path)
+                cap = _open_video_capture(path)
                 fps = cap.get(cv2.CAP_PROP_FPS) if cap.isOpened() else 0.0
                 cap.release()
                 fps = fps if 0.1 <= fps <= 240.0 else OUTPUT_FPS
@@ -624,7 +766,7 @@ class TemporalMeanFrameCache:
         if not self.full_preload_enabled:
             return False
 
-        worker_count = min(max(1, os.cpu_count() or 1), self.total_frames)
+        worker_count = min(4, max(1, os.cpu_count() or 1), self.total_frames)
         chunk_size = max(1, (self.total_frames + worker_count - 1) // worker_count)
         ranges = [
             (start, min(self.total_frames - 1, start + chunk_size - 1))
@@ -1081,6 +1223,7 @@ def create_timelapse(
     mask: Optional[np.ndarray] = None,
     timestamp_settings: Optional[Dict] = None,
     temporal_mean_radius_frames: Optional[int] = None,
+    annotation_settings: Optional[Dict] = None,
 ) -> bool:
     """
     タイムラプス動画を作成する（並列処理版）。
@@ -1094,6 +1237,18 @@ def create_timelapse(
     メモリ使用量は最大1GBに制限。
     """
     timestamp_settings = _normalize_timestamp_settings(timestamp_settings)
+    annotation_settings = _normalize_annotation_settings(annotation_settings)
+    local_annotator = None
+    if annotation_settings["enabled"]:
+        try:
+            local_annotator = _load_local_annotation_callable()
+        except RuntimeError as exc:
+            _report_progress(progress_callback, f"エラー: {exc}")
+            return False
+        _report_progress(
+            progress_callback,
+            "ローカル広角補正による星空注釈を有効にしました（外部APIは使用しません）",
+        )
     try:
         temporal_mean_radius = int(
             config.TIMELAPSE_TEMPORAL_MEAN_RADIUS_FRAMES
@@ -1154,6 +1309,15 @@ def create_timelapse(
             f"未完成または読み取り不能な動画 {skipped_video_count}本を除外しました",
         )
     all_videos = valid_video_paths
+
+    if local_annotator is not None:
+        try:
+            _prepare_local_annotation_calibration(
+                all_videos, annotation_settings, progress_callback
+            )
+        except Exception as exc:
+            _report_progress(progress_callback, f"エラー: ローカル広角較正に失敗しました: {exc}")
+            return False
     
     if total_frames == 0:
         if progress_callback:
@@ -1200,7 +1364,7 @@ def create_timelapse(
     # Keep decode, temporal averaging, sampling, masking, timestamp overlay and
     # encode in one FFmpeg graph so all CPU cores and the native GPU encoder can
     # work concurrently without copying full frames through Python.
-    if all_videos and not all_images:
+    if all_videos and not all_images and local_annotator is None:
         fast_result = _create_video_timelapse_fast(
             all_videos,
             output_path,
@@ -1233,6 +1397,11 @@ def create_timelapse(
                 progress_callback,
                 "入力動画の形式が一致しないため、互換処理を使用します",
             )
+    elif all_videos and not all_images and local_annotator is not None:
+        _report_progress(
+            progress_callback,
+            "ローカル星空注釈を各フレームへ描画するため、Python注釈処理を使用します",
+        )
 
     if progress_callback:
         progress_callback(
@@ -1240,7 +1409,10 @@ def create_timelapse(
         )
     available_memory = get_available_memory_bytes()
     memory_budget = (
-        int(available_memory * TEMPORAL_MEAN_AVAILABLE_MEMORY_FRACTION)
+        min(
+            MAX_MEMORY_BYTES,
+            int(available_memory * TEMPORAL_MEAN_AVAILABLE_MEMORY_FRACTION),
+        )
         if available_memory is not None else None
     )
     temporal_mean_cache = TemporalMeanFrameCache(
@@ -1254,8 +1426,7 @@ def create_timelapse(
             )
         elif temporal_mean_cache.enabled:
             progress_callback(
-                f"時間平均キャッシュ: 現在の空きメモリ {_format_bytes(available_memory)} の"
-                f"{int(TEMPORAL_MEAN_AVAILABLE_MEMORY_FRACTION * 100)}%まで使用可能 "
+                f"時間平均キャッシュ: 上限 {_format_bytes(memory_budget)} "
                 f"(必要量: 約{_format_bytes(temporal_mean_cache.required_bytes)})"
             )
         else:
@@ -1291,10 +1462,25 @@ def create_timelapse(
     if resized_mask is not None:
         first_frame = cv2.bitwise_and(first_frame, first_frame, mask=resized_mask)
 
+    first_timestamp = loader.timestamp_for_index(sample_indices[first_valid_idx])
+    if local_annotator is not None:
+        try:
+            first_frame = _apply_local_annotation(
+                local_annotator,
+                first_frame,
+                first_timestamp,
+                annotation_settings,
+            )
+        except Exception as exc:
+            _report_progress(progress_callback, f"エラー: ローカル星空注釈に失敗しました: {exc}")
+            temporal_mean_cache.clear()
+            loader.cleanup()
+            return False
+
     if timestamp_settings["enabled"]:
         first_frame = _draw_timestamp(
             first_frame,
-            loader.timestamp_for_index(sample_indices[first_valid_idx]),
+            first_timestamp,
             timestamp_settings,
         )
     
@@ -1360,10 +1546,18 @@ def create_timelapse(
             elif proc.stdin:
                 if resized_mask is not None:
                     frame = cv2.bitwise_and(frame, frame, mask=resized_mask)
+                frame_timestamp = loader.timestamp_for_index(global_idx)
+                if local_annotator is not None:
+                    frame = _apply_local_annotation(
+                        local_annotator,
+                        frame,
+                        frame_timestamp,
+                        annotation_settings,
+                    )
                 if timestamp_settings["enabled"]:
                     frame = _draw_timestamp(
                         frame,
-                        loader.timestamp_for_index(global_idx),
+                        frame_timestamp,
                         timestamp_settings,
                     )
                 proc.stdin.write(frame.tobytes())

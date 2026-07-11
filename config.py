@@ -86,9 +86,13 @@ ASTROMETRY_TIMEOUT = 120   # Astrometry.netのソルブ結果待ちタイムア�
 ASTROMETRY_INTERVAL = 10   # Astrometry.netのソルブ結果確認間隔（秒）
 ASTROMETRY_RATE_LIMIT_WAIT = 20 # Astrometry.net APIのレートリミットのための待機時間（秒）
 
-# --- Local Plate Solve (WSL solve-field) 関連 ---
-LOCAL_SOLVER_ENABLED = IS_WINDOWS     # Windows/WSL以外ではAstrometry.net APIを既定にする
+# --- Local Plate Solve 関連 ---
+# macOSはPython版Astrometry.net + Tycho-2インデックを使い、APIへ送信しない。
+# Windowsでは従来のWSL solve-fieldも継続して利用できる。
+LOCAL_SOLVER_ENABLED = True
 LOCAL_SOLVER_INDEX_DIR = "/usr/share/astrometry/data"  # WSL内のインデックスファイルパス
+TIMELAPSE_LOCAL_ANNOTATION_ENABLED = False
+TIMELAPSE_ANNOTATION_CALIBRATION_PATH = ""
 
 # --- 天体カタログ関連 ---
 VIZIER_STAR_MAG_LIMIT = 3 # Vizierから取得して画像に表示する星の最大等級 (floatでも可)

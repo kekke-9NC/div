@@ -11,6 +11,7 @@ class DownloadPipelineScalingTests(unittest.TestCase):
         self.assertEqual(plan["reserved_for_ui"], 2)
         self.assertLessEqual(plan["video_workers"], 6)
         self.assertEqual(plan["finer_workers"], 1)
+        self.assertEqual(plan["decoder_threads"], 2)
         self.assertLessEqual(
             plan["video_workers"] * plan["opencv_threads"] + plan["reserved_for_ui"],
             18,
@@ -20,6 +21,7 @@ class DownloadPipelineScalingTests(unittest.TestCase):
         plan = download_pipeline.compute_worker_plan(1, logical_cpus=18)
         self.assertEqual(plan["video_workers"], 1)
         self.assertEqual(plan["finer_workers"], 2)
+        self.assertEqual(plan["decoder_threads"], 4)
 
     def test_progress_limiter_suppresses_per_file_noise(self):
         received = []
@@ -39,6 +41,17 @@ class DownloadPipelineScalingTests(unittest.TestCase):
         limiter.message(("検出 1: meteor", None))
         limiter.message(("処理エラー (clip.mp4): broken", None))
         self.assertEqual(len(received), 2)
+
+    def test_non_meteor_noise_is_summarized(self):
+        received = []
+        limiter = download_pipeline._ProgressLimiter(received.append, total=100)
+        for index in range(100):
+            limiter.message((f"検出 {index}: not_meteor (Prob: 0.01)", None))
+            limiter.message((("  -> Not Meteor: Probability 0.01"), None))
+            limiter.message((("  -> Video: clip.mp4"), None))
+        limiter.finish()
+
+        self.assertEqual(received, [("非流星候補: 100件（個別ログは省略）", None)])
 
     def test_large_fast_pipeline_processes_every_source(self):
         sources = [{"path": f"clip-{index}.mp4"} for index in range(1_000)]
@@ -63,3 +76,36 @@ class DownloadPipelineScalingTests(unittest.TestCase):
         self.assertEqual(len(set(processed)), len(sources))
         # One worker-plan message plus a heavily throttled progress stream.
         self.assertLess(len(received), 25)
+
+    def test_cancel_drains_queued_items_without_hanging(self):
+        sources = [{"path": f"clip-{index}.mp4"} for index in range(100)]
+        cancel = threading.Event()
+        started = threading.Event()
+
+        def process_one(**_kwargs):
+            started.set()
+            cancel.set()
+
+        with mock.patch.object(
+            download_pipeline.network_copy, "ensure_local_copy",
+            side_effect=lambda path, **_kwargs: (path, None),
+        ), mock.patch.object(
+            download_pipeline.video_processing, "create_line_video_clips",
+            side_effect=process_one,
+        ), mock.patch.object(
+            download_pipeline.network_copy, "cleanup_tempdir",
+        ):
+            runner = threading.Thread(
+                target=download_pipeline.run_pipeline,
+                kwargs=dict(
+                    sources=sources, max_workers=4, interval=1.0, duration=1.0,
+                    mask=None, global_wcs_info=None, plate_solve_mask=None,
+                    meteor_save_path="meteor", not_meteor_save_path="not_meteor",
+                    cancel_flag=cancel, progress_callback=lambda _item: None,
+                ),
+            )
+            runner.start()
+            self.assertTrue(started.wait(timeout=2.0))
+            runner.join(timeout=5.0)
+
+        self.assertFalse(runner.is_alive(), "cancel left queue.join() blocked")

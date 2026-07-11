@@ -105,14 +105,18 @@ class StatusPanel(ttk.Frame):
                 messagebox.showerror("エラー", f"ログの保存に失敗しました:\n{e}")
 
     def get_status_callback(self) -> Callable[[Dict[str, Any]], None]:
-        """Return a thread-safe callback that the pipeline can call.
-        The pipeline may call this from worker threads; the callback schedules
-        an update on the GUI thread using `app.after`.
+        """Return a callback which never enters Tcl from a worker thread.
+
+        ``tkinter.after`` is itself a Tcl command.  Calling it from a Python
+        worker is therefore not a safe way to marshal work on every Tcl/Tk
+        build (in particular, this can corrupt Tk's pending-command state on
+        macOS under sustained load).  The app already owns a thread-safe
+        progress queue which the Tk thread polls, so status updates use that
+        same bridge.
         """
         def cb(status: Dict[str, Any]):
             try:
-                # marshal to main thread
-                self.app.after(0, self.update_status, status)
+                self.progress_queue.put((None, {"pipeline_status": dict(status)}))
             except Exception:
                 # if something goes wrong, ignore — it's only informational
                 pass

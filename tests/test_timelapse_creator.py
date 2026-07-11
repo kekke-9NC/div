@@ -1,6 +1,8 @@
 import unittest
 from unittest import mock
 import tempfile
+from datetime import datetime
+from types import SimpleNamespace
 from pathlib import Path
 
 import timelapse_creator
@@ -137,6 +139,114 @@ class TimelapseCreatorTests(unittest.TestCase):
 
         self.assertTrue(result)
         self.assertEqual(fast_path.call_args.args[0], ["complete.mp4"])
+
+    def test_local_annotation_loader_accepts_fallback_name(self):
+        expected = mock.Mock()
+        module = SimpleNamespace(annotate_frame_local=expected)
+
+        with mock.patch.object(
+            timelapse_creator.importlib, "import_module", return_value=module
+        ) as import_module:
+            result = timelapse_creator._load_local_annotation_callable()
+
+        self.assertIs(result, expected)
+        import_module.assert_called_once_with("local_wideangle_astrometry")
+
+    def test_local_annotation_loader_has_clear_missing_module_error(self):
+        with mock.patch.object(
+            timelapse_creator.importlib,
+            "import_module",
+            side_effect=ModuleNotFoundError("missing"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "local_wideangle_astrometry"):
+                timelapse_creator._load_local_annotation_callable()
+
+    def test_local_annotation_accepts_tuple_and_preserves_encoder_shape(self):
+        source = timelapse_creator.np.zeros((12, 20, 3), dtype=timelapse_creator.np.uint8)
+        annotated = timelapse_creator.np.full((6, 10), 123, dtype=timelapse_creator.np.uint8)
+        annotator = mock.Mock(return_value=(annotated, {"calibrated": True}))
+        frame_time = datetime(2026, 7, 10, 1, 2, 3)
+
+        result = timelapse_creator._apply_local_annotation(
+            annotator,
+            source,
+            frame_time,
+            {"calibration_path": "/tmp/night-calibration.json"},
+        )
+
+        self.assertEqual(result.shape, source.shape)
+        self.assertEqual(result.dtype, timelapse_creator.np.uint8)
+        annotator.assert_called_once_with(
+            source,
+            frame_time,
+            calibration_path="/tmp/night-calibration.json",
+        )
+
+    def test_annotation_enabled_bypasses_fast_ffmpeg_and_annotates_each_frame(self):
+        frame = timelapse_creator.np.zeros((16, 16, 3), dtype=timelapse_creator.np.uint8)
+        frame_time = datetime(2026, 7, 10, 1, 0, 0)
+        loader = mock.MagicMock()
+        loader.load_frame.return_value = frame.copy()
+        loader.timestamp_for_index.return_value = frame_time
+
+        mean_cache = mock.MagicMock()
+        mean_cache.full_preload_enabled = False
+        mean_cache.enabled = True
+        mean_cache._retain_all_frames = False
+        mean_cache.mean_for_index.side_effect = [frame.copy(), frame.copy()]
+
+        stdin = mock.MagicMock()
+        stdin.closed = False
+        proc = mock.MagicMock(stdin=stdin)
+        proc.poll.return_value = 0
+        annotator = mock.Mock(side_effect=lambda image, _time, calibration_path=None: image + 1)
+
+        with (
+            mock.patch.object(
+                timelapse_creator, "get_files_from_path", return_value=([], ["input.mp4"])
+            ),
+            mock.patch.object(
+                timelapse_creator,
+                "count_total_frames",
+                return_value=(2, [("input.mp4", 0, 2)]),
+            ),
+            mock.patch.object(
+                timelapse_creator, "calculate_sample_indices", return_value=[0, 1]
+            ),
+            mock.patch.object(timelapse_creator, "FrameLoader", return_value=loader),
+            mock.patch.object(
+                timelapse_creator, "TemporalMeanFrameCache", return_value=mean_cache
+            ),
+            mock.patch.object(
+                timelapse_creator, "_load_local_annotation_callable", return_value=annotator
+            ),
+            mock.patch.object(
+                timelapse_creator, "_prepare_local_annotation_calibration"
+            ) as prepare_calibration,
+            mock.patch.object(
+                timelapse_creator, "_create_video_timelapse_fast"
+            ) as fast_path,
+            mock.patch.object(
+                timelapse_creator, "_select_h264_encoder", return_value=("test", [], "test")
+            ),
+            mock.patch.object(timelapse_creator.subprocess, "Popen", return_value=proc),
+            mock.patch.object(
+                timelapse_creator, "_finish_ffmpeg_process", return_value=(0, b"")
+            ),
+        ):
+            result = timelapse_creator.create_timelapse(
+                ["input.mp4"],
+                "output.mp4",
+                timestamp_settings={"enabled": False},
+                temporal_mean_radius_frames=0,
+                annotation_settings={"enabled": True},
+            )
+
+        self.assertTrue(result)
+        fast_path.assert_not_called()
+        prepare_calibration.assert_called_once()
+        self.assertEqual(annotator.call_count, 2)
+        self.assertEqual(stdin.write.call_count, 2)
 
 
 if __name__ == "__main__":

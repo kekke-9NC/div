@@ -1,4 +1,6 @@
 import os
+import multiprocessing
+import threading
 from typing import Dict, Optional
 
 import torch
@@ -8,6 +10,28 @@ from torchvision import transforms
 
 import config
 import model_catalog
+
+
+def _configure_torch_threads() -> None:
+    """Keep PyTorch's CPU helper pool inside the app-wide CPU budget."""
+    try:
+        requested = int(os.environ.get("METEOR_NATIVE_THREADS", "4"))
+    except ValueError:
+        requested = 4
+    requested = max(1, min(requested, os.cpu_count() or 1))
+    try:
+        torch.set_num_threads(requested)
+    except (RuntimeError, ValueError):
+        pass
+    try:
+        # Inter-op parallelism is unnecessary for this single-network inference
+        # path and can only be set before parallel work begins.
+        torch.set_num_interop_threads(1)
+    except (RuntimeError, ValueError):
+        pass
+
+
+_configure_torch_threads()
 
 
 class ResidualBlock(nn.Module):
@@ -93,6 +117,7 @@ print(f"Using device: {device}")
 model: Optional[ComplexCNN] = None
 transform = None
 _model_ready = False
+_model_lock = threading.RLock()
 _active_model_info: Dict = {
     "model_path": "",
     "mean": list(model_catalog.DEFAULT_MEAN),
@@ -129,7 +154,7 @@ def _load_state_dict(model_path: str):
         return torch.load(model_path, map_location=device)
 
 
-def reload_model(model_path: Optional[str] = None, metadata: Optional[Dict] = None):
+def _reload_model_unlocked(model_path: Optional[str] = None, metadata: Optional[Dict] = None):
     global model, transform, _model_ready, _active_model_info
 
     target_path = model_path or config.MODEL_PATH
@@ -174,49 +199,63 @@ def reload_model(model_path: Optional[str] = None, metadata: Optional[Dict] = No
         return False, str(e)
 
 
+def reload_model(model_path: Optional[str] = None, metadata: Optional[Dict] = None):
+    """Atomically replace the classifier while inference is quiescent."""
+    with _model_lock:
+        return _reload_model_unlocked(model_path=model_path, metadata=metadata)
+
+
 def get_active_model_info() -> Dict:
     return dict(_active_model_info)
 
 
 def predict_meteor_probability(image_path: str) -> float:
     global model, transform
-    if not _model_ready or model is None or transform is None:
-        print("Warning: prediction requested before model is ready.")
-        return 0.0
+    # MPS command submission and the mutable global model are deliberately
+    # serialized.  Archive workers still decode and detect in parallel; only
+    # the short classifier step enters this critical section.
+    with _model_lock:
+        if not _model_ready or model is None or transform is None:
+            print("Warning: prediction requested before model is ready.")
+            return 0.0
 
-    try:
-        pil_image = Image.open(image_path).convert("RGB")
-        tta_transforms = [
-            lambda x: x,
-            lambda x: x.transpose(Image.FLIP_LEFT_RIGHT),
-            lambda x: x.transpose(Image.FLIP_TOP_BOTTOM),
-        ]
-        all_probabilities = []
-        with torch.no_grad():
-            for tta_transform in tta_transforms:
-                transformed_image = tta_transform(pil_image)
-                image_tensor = transform(transformed_image)
-                image_tensor = image_tensor.unsqueeze(0).to(device)
-                outputs = model(image_tensor)
-                probabilities = torch.softmax(outputs, dim=1)
-                all_probabilities.append(probabilities)
-
-            avg_probabilities = torch.stack(all_probabilities).mean(dim=0).squeeze(0)
+        try:
+            with Image.open(image_path) as source_image:
+                pil_image = source_image.convert("RGB")
+            transpose = getattr(Image, "Transpose", Image)
+            variants = [
+                pil_image,
+                pil_image.transpose(transpose.FLIP_LEFT_RIGHT),
+                pil_image.transpose(transpose.FLIP_TOP_BOTTOM),
+            ]
+            # Submit one batch instead of three independent MPS command graphs.
+            image_batch = torch.stack([transform(image) for image in variants]).to(device)
+            with torch.inference_mode():
+                avg_probabilities = torch.softmax(model(image_batch), dim=1).mean(dim=0)
             meteor_idx = int(_active_model_info.get("meteor_class_index", 0))
             if meteor_idx < 0 or meteor_idx >= avg_probabilities.numel():
                 meteor_idx = 0
             return float(avg_probabilities[meteor_idx].item())
-    except FileNotFoundError:
-        print(f"Error: image not found: {image_path}")
-        return 0.0
-    except Exception as e:
-        print(f"Prediction error ({image_path}): {e}")
-        return 0.0
+        except FileNotFoundError:
+            print(f"Error: image not found: {image_path}")
+            return 0.0
+        except Exception as e:
+            print(f"Prediction error ({image_path}): {e}")
+            return 0.0
 
 
-_ok, _msg = reload_model(config.MODEL_PATH)
-if not _ok:
-    print(f"Warning: failed to load initial model '{config.MODEL_PATH}': {_msg}")
+def _should_eager_load() -> bool:
+    """Only the owner process may initialize an accelerator-backed model."""
+    try:
+        return multiprocessing.current_process().name == "MainProcess"
+    except Exception:
+        return True
+
+
+if _should_eager_load():
+    _ok, _msg = reload_model(config.MODEL_PATH)
+    if not _ok:
+        print(f"Warning: failed to load initial model '{config.MODEL_PATH}': {_msg}")
 
 
 if __name__ == "__main__":

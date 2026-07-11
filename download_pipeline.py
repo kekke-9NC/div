@@ -23,6 +23,11 @@ def compute_worker_plan(requested_workers: int, logical_cpus: Optional[int] = No
         "video_workers": video_workers,
         "download_workers": min(2, video_workers),
         "opencv_threads": max(1, min(3, per_video_budget)),
+        # OpenCV/FFmpeg otherwise opens 16 H.264 decoder threads *and* a
+        # similarly-sized helper pool for every VideoCapture on this Mac.
+        # Two decoder threads per concurrently processed 1080p video retained
+        # throughput in measurements while avoiding ~100 native threads.
+        "decoder_threads": 2 if video_workers > 1 else max(2, min(4, per_video_budget)),
         # Avoid multiplying full-frame serialization across every video worker.
         "finer_workers": (
             max(1, min(2, per_video_budget)) if video_workers == 1 else 1
@@ -39,6 +44,7 @@ class _ProgressLimiter:
         self.lock = threading.Lock()
         self.last_progress_time = 0.0
         self.last_progress = 0
+        self.not_meteor_count = 0
 
     def message(self, payload):
         message, value = payload
@@ -51,7 +57,21 @@ class _ProgressLimiter:
                 return
             if message.startswith("ダウンロード完了:"):
                 return
+            if message.startswith("検出 ") and ": not_meteor " in message:
+                with self.lock:
+                    self.not_meteor_count += 1
+                return
+            if message.lstrip().startswith("-> Not Meteor:"):
+                return
+            if message.lstrip().startswith("-> ") and "Summary:" not in message:
+                return
         self.callback(payload)
+
+    def finish(self):
+        with self.lock:
+            count = self.not_meteor_count
+        if count:
+            self.callback((f"非流星候補: {count}件（個別ログは省略）", None))
 
     def progress(self, processed: int):
         now = time.monotonic()
@@ -96,6 +116,7 @@ def run_pipeline(
     download_worker_count = worker_plan["download_workers"]
     save_options = dict(save_options or {})
     save_options["finer_detection_workers"] = worker_plan["finer_workers"]
+    save_options["video_decoder_threads"] = worker_plan["decoder_threads"]
     try:
         # OpenCV otherwise creates a full CPU pool inside every video worker.
         import cv2
@@ -106,7 +127,8 @@ def run_pipeline(
     progress_callback((
         "並列処理構成: "
         f"動画={max_workers}, 詳細検出/動画={worker_plan['finer_workers']}, "
-        f"OpenCV/動画={worker_plan['opencv_threads']}, UI予約={worker_plan['reserved_for_ui']}コア",
+        f"OpenCV={worker_plan['opencv_threads']}, デコーダ/動画={worker_plan['decoder_threads']}, "
+        f"UI予約={worker_plan['reserved_for_ui']}コア",
         None,
     ))
 
@@ -200,7 +222,9 @@ def run_pipeline(
         # downloader exits
 
     def processor_thread_fn(tid: int):
-        while not cancel_flag.is_set():
+        while True:
+            if cancel_flag.is_set() and downloaders_done.is_set() and task_q.empty():
+                break
             try:
                 item = task_q.get(timeout=1.0)
             except queue.Empty:
@@ -219,6 +243,11 @@ def run_pipeline(
             src = item.get('source')
 
             try:
+                if cancel_flag.is_set():
+                    # Still acknowledge every queued item.  Exiting here used
+                    # to leave unfinished_tasks non-zero and task_q.join()
+                    # could hang forever during cancellation.
+                    continue
                 # call the existing processing function
                 processors_busy[tid] = True
                 video_processing.create_line_video_clips(
@@ -293,8 +322,14 @@ def run_pipeline(
         status_thread.start()
 
     # start downloaders and processors
-    downloaders = [threading.Thread(target=downloader_thread_fn, args=(i,), daemon=True) for i in range(download_worker_count)]
-    processors = [threading.Thread(target=processor_thread_fn, args=(i,), daemon=True) for i in range(max_workers)]
+    downloaders = [
+        threading.Thread(target=downloader_thread_fn, args=(i,), name=f"video-download-{i}")
+        for i in range(download_worker_count)
+    ]
+    processors = [
+        threading.Thread(target=processor_thread_fn, args=(i,), name=f"video-process-{i}")
+        for i in range(max_workers)
+    ]
 
     for t in processors:
         t.start()
@@ -314,6 +349,7 @@ def run_pipeline(
         t.join()
 
     pipeline_done.set()
+    progress.finish()
 
     # stop status thread
     if status_thread:

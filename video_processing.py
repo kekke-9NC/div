@@ -10,7 +10,7 @@ from typing import List, Tuple, Optional, Callable, Dict, Any
 from astropy.io import fits
 from astropy.wcs import WCS
 from collections import deque
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from multiprocessing import cpu_count
 
 import config
@@ -24,6 +24,37 @@ import video_denoising
 import video_enhancement
 import ml_training_data
 import automatic_video_mask
+
+
+def _open_video_capture(source: str, decoder_threads: int = 2) -> cv2.VideoCapture:
+    """Open a capture without letting FFmpeg create a CPU-sized pool.
+
+    OpenCV's macOS FFmpeg backend defaults to 16 codec threads for each H.264
+    capture on the current machine, plus another helper pool after the first
+    read.  Several videos in parallel therefore created around one hundred
+    native threads.  ``CAP_PROP_N_THREADS`` is an *open-only* property, so it
+    must be supplied to the constructor rather than set afterwards.
+    """
+    try:
+        thread_count = max(1, min(8, int(decoder_threads)))
+    except (TypeError, ValueError):
+        thread_count = 2
+
+    thread_property = getattr(cv2, "CAP_PROP_N_THREADS", None)
+    ffmpeg_backend = getattr(cv2, "CAP_FFMPEG", None)
+    if thread_property is not None and ffmpeg_backend is not None:
+        try:
+            capture = cv2.VideoCapture(
+                source,
+                ffmpeg_backend,
+                [thread_property, thread_count],
+            )
+            if capture.isOpened():
+                return capture
+            capture.release()
+        except (cv2.error, TypeError, ValueError):
+            pass
+    return cv2.VideoCapture(source)
 
 
 _FULL_VIDEO_TIMESTAMP_POSITIONS = {
@@ -206,6 +237,24 @@ def _brightness_composite_and_diff(frames: List[np.ndarray]) -> Tuple[np.ndarray
     return maximum, cv2.absdiff(maximum, minimum)
 
 
+def _max_composite_cutout(
+    frames: List[np.ndarray],
+    cutout_rect: Tuple[int, int, int, int],
+) -> np.ndarray:
+    """Build a temporal maximum only for the required detail crop."""
+    if not frames:
+        raise ValueError("frames must not be empty")
+    x_start, y_start, x_end, y_end = cutout_rect
+    maximum = frames[0][y_start:y_end, x_start:x_end].copy()
+    for frame in frames[1:]:
+        cv2.max(
+            maximum,
+            frame[y_start:y_end, x_start:x_end],
+            dst=maximum,
+        )
+    return maximum
+
+
 def _extract_diff_cutout(
     diff_image: np.ndarray,
     cutout_rect: Tuple[int, int, int, int],
@@ -371,8 +420,10 @@ def _process_finer_detection_worker(
     composite_frame_indices = []
     
     for i in range(0, len(frames_data) - (composite_step - 1), composite_step):
-        composite = np.max(np.array(frames_data[i : i + composite_step]), axis=0).astype(np.uint8)
-        composite_cutout = composite[y_start_cut:y_end_cut, x_start_cut:x_end_cut]
+        composite_cutout = _max_composite_cutout(
+            frames_data[i : i + composite_step],
+            cutout_rect,
+        )
         composite_frames.append(composite_cutout)
         composite_frame_indices.append(actual_start_frame_index + i + (composite_step // 2))
     
@@ -430,6 +481,11 @@ def create_line_video_clips(
         current_save_options.update(save_options)
         save_options = current_save_options
 
+    try:
+        decoder_threads = max(1, min(8, int(save_options.get('video_decoder_threads', 2))))
+    except (TypeError, ValueError):
+        decoder_threads = 2
+
     if not is_rtsp and save_options.get('auto_video_mask_enabled', False):
         try:
             automatic_mask, preview_path, mask_stats = automatic_video_mask.create_auto_mask(
@@ -457,7 +513,7 @@ def create_line_video_clips(
         if progress_callback:
             progress_callback((message, None))
 
-    cap = cv2.VideoCapture(source)
+    cap = _open_video_capture(source, decoder_threads)
     if not cap.isOpened():
         message = f"動画/ストリームを開けませんでした: {source}"
         print(f"エラー: {message}")
@@ -628,7 +684,7 @@ def create_line_video_clips(
                         else:
                             # 動画ファイルから取得
                             if not cap.isOpened():
-                                cap = cv2.VideoCapture(source)
+                                cap = _open_video_capture(source, decoder_threads)
                                 if not cap.isOpened():
                                     print(f"エラー: 動画を再オープンできませんでした: {source}")
                                     continue
@@ -670,7 +726,11 @@ def create_line_video_clips(
                         
                             img_h, img_w = diff_img.shape[:2]
                         
-                            # ProcessPoolExecutorで並列処理
+                            # Frames are already resident in this process.  A process
+                            # pool copied them and, under spawn, imported model.py in
+                            # every child (creating an additional MPS model each time).
+                            # OpenCV/NumPy release the GIL for the heavy work, so a
+                            # small shared-memory thread pool is both faster and safer.
                             num_workers = int(
                                 save_options.get(
                                     'finer_detection_workers',
@@ -717,7 +777,10 @@ def create_line_video_clips(
                                     except Exception as e:
                                         print(f"詳細処理中にエラー ({cand['cx']}, {cand['cy']}): {e}")
                             else:
-                                with ProcessPoolExecutor(max_workers=num_workers) as executor:
+                                with ThreadPoolExecutor(
+                                    max_workers=num_workers,
+                                    thread_name_prefix="finer-detect",
+                                ) as executor:
                                     futures = {
                                         executor.submit(
                                             _process_finer_detection_worker,
@@ -780,7 +843,7 @@ def create_line_video_clips(
                                     print(f"RTSPバッファから最終クリップフレームを取得: {actual_start_final} - {actual_end_final}, {len(final_frames_for_clip)} フレーム")
                                 else:
                                     if not cap.isOpened():
-                                        cap = cv2.VideoCapture(source)
+                                        cap = _open_video_capture(source, decoder_threads)
                                         if not cap.isOpened():
                                             continue
                                 
@@ -1178,7 +1241,7 @@ def create_line_video_clips(
                     else:
                         if not cap.isOpened():
                             print("動画キャプチャが閉じています。再オープンします。")
-                            cap = cv2.VideoCapture(source)
+                            cap = _open_video_capture(source, decoder_threads)
                             if not cap.isOpened():
                                 print(f"エラー: 動画を再オープンできませんでした: {source}")
                                 continue
@@ -1281,9 +1344,15 @@ def create_line_video_clips(
                         step = max(1, int(frame_rate / 5))  # FPSの1/5
                         print(f"詳細検出: 比較明合成ステップ = {step}フレーム (FPS={frame_rate:.1f})")
                         for i in range(0, len(frames_for_finer_detect) - (step - 1), step):
-                            composite = np.max(np.array(frames_for_finer_detect[i : i + step]), axis=0).astype(np.uint8)
-                            # カットアウト領域のみ保持
-                            composite_cutout = composite[y_start_cut_finer:y_end_cut_finer, x_start_cut_finer:x_end_cut_finer]
+                            composite_cutout = _max_composite_cutout(
+                                frames_for_finer_detect[i : i + step],
+                                (
+                                    x_start_cut_finer,
+                                    y_start_cut_finer,
+                                    x_end_cut_finer,
+                                    y_end_cut_finer,
+                                ),
+                            )
                             composite_frames.append(composite_cutout)
                             composite_frame_indices.append(actual_start_frame_index_finer + i + (step // 2))
 
@@ -1345,7 +1414,7 @@ def create_line_video_clips(
                     else:
                         if not cap.isOpened():
                             print("動画キャプチャが閉じています。再オープンします。")
-                            cap = cv2.VideoCapture(source)
+                            cap = _open_video_capture(source, decoder_threads)
                             if not cap.isOpened(): continue
                             last_read_frame_index_by_diff = -1
 

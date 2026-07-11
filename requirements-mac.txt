@@ -2,12 +2,14 @@ numpy
 opencv-python
 pillow
 astropy
+astrometry==4.3.0
 tkinterdnd2
 customtkinter
 openai
 torch
 torchvision
 matplotlib
+contourpy>=1.3
 scikit-learn
 requests
 transformers
