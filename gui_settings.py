@@ -216,6 +216,37 @@ class SettingsMixin:
             command=self.open_ml_training_review,
         ).pack(anchor=tk.W, padx=4, pady=(4, 5))
 
+        archive_frame = ttk.LabelFrame(scrollable_frame, text="過去動画フォルダの自動処理")
+        archive_frame.pack(fill=tk.X, pady=5)
+        ttk.Checkbutton(
+            archive_frame,
+            text="動画ごとに空領域を判定して自動マスクを適用する",
+            variable=self.auto_video_mask_enabled_var,
+        ).pack(anchor=tk.W, padx=4, pady=(3, 1))
+        ttk.Checkbutton(
+            archive_frame,
+            text="YYYYMMDDフォルダ直下は天文薄明中の動画だけ処理する",
+            variable=self.date_folder_twilight_filter_enabled_var,
+        ).pack(anchor=tk.W, padx=4, pady=1)
+        location_row = ttk.Frame(archive_frame)
+        location_row.pack(fill=tk.X, padx=24, pady=(3, 4))
+        ttk.Label(location_row, text="観測地点 緯度:").pack(side=tk.LEFT)
+        ttk.Entry(location_row, textvariable=self.observation_latitude_var, width=10).pack(
+            side=tk.LEFT, padx=(3, 10)
+        )
+        ttk.Label(location_row, text="経度:").pack(side=tk.LEFT)
+        ttk.Entry(location_row, textvariable=self.observation_longitude_var, width=10).pack(
+            side=tk.LEFT, padx=(3, 0)
+        )
+        ttk.Button(
+            location_row, text="現在地取得", command=self.fetch_archive_observation_location
+        ).pack(side=tk.LEFT, padx=(10, 0))
+        ttk.Label(
+            archive_frame,
+            text="日付フォルダでは天文薄明終了後と天文薄明開始前を採用します。時刻を解析できない動画は除外しません。",
+            style="Hint.TLabel",
+        ).pack(anchor=tk.W, padx=24, pady=(0, 4))
+
         lf_astro = ttk.LabelFrame(scrollable_frame, text="プレートソルブ & マスク")
         lf_astro.pack(fill=tk.X, pady=5)
         
@@ -1072,6 +1103,19 @@ class SettingsMixin:
         os.makedirs(root_dir, exist_ok=True)
         ml_review.open_review_window(self, root_dir)
 
+    def fetch_archive_observation_location(self):
+        def worker():
+            try:
+                lat, lon = location_utils.get_current_location()
+                self.after(0, lambda: self.observation_latitude_var.set(f"{lat:.6f}"))
+                self.after(0, lambda: self.observation_longitude_var.set(f"{lon:.6f}"))
+                self.after(0, lambda: self.append_log(
+                    f"過去動画の観測地点を取得: 緯度={lat:.6f}, 経度={lon:.6f}"
+                ))
+            except Exception as exc:
+                self.after(0, lambda: messagebox.showerror("現在地取得エラー", str(exc)))
+        threading.Thread(target=worker, daemon=True).start()
+
     def save_settings(self):
         settings = {
             'periodic_scan_enabled': self.periodic_scan_var.get(), 'periodic_scan_directory': self.periodic_dir_var.get(),
@@ -1093,6 +1137,10 @@ class SettingsMixin:
             'meteor_save_path': self.meteor_save_path_var.get(), 'not_meteor_save_path': self.not_meteor_save_path_var.get(),
             'ml_training_export_enabled': self.ml_training_export_enabled_var.get(),
             'ml_training_data_root': self.ml_training_data_root_var.get(),
+            'auto_video_mask_enabled': self.auto_video_mask_enabled_var.get(),
+            'date_folder_twilight_filter_enabled': self.date_folder_twilight_filter_enabled_var.get(),
+            'observation_latitude': self.observation_latitude_var.get(),
+            'observation_longitude': self.observation_longitude_var.get(),
             'selected_model_path': self.selected_model_path_var.get(),
             'custom_model_paths': list(self.custom_model_paths),
             'ai_vlm_backend': self.ai_vlm_backend_var.get(),
@@ -1271,6 +1319,21 @@ class SettingsMixin:
             )
             self.ml_training_data_root_var.set(
                 settings.get('ml_training_data_root', config.DEFAULT_ML_TRAINING_DATA_ROOT)
+            )
+            self.auto_video_mask_enabled_var.set(
+                settings.get('auto_video_mask_enabled', config.DEFAULT_AUTO_VIDEO_MASK_ENABLED)
+            )
+            self.date_folder_twilight_filter_enabled_var.set(
+                settings.get(
+                    'date_folder_twilight_filter_enabled',
+                    config.DEFAULT_DATE_FOLDER_TWILIGHT_FILTER_ENABLED,
+                )
+            )
+            self.observation_latitude_var.set(
+                str(settings.get('observation_latitude', config.DEFAULT_OBSERVATION_LATITUDE))
+            )
+            self.observation_longitude_var.set(
+                str(settings.get('observation_longitude', config.DEFAULT_OBSERVATION_LONGITUDE))
             )
             self.custom_model_paths = [str(p) for p in settings.get('custom_model_paths', []) if isinstance(p, str)]
             saved_model_path = settings.get('selected_model_path', config.MODEL_PATH)

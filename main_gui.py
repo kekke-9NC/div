@@ -250,6 +250,18 @@ class App(
         self.ml_training_data_root_var = tk.StringVar(
             value=config.DEFAULT_ML_TRAINING_DATA_ROOT
         )
+        self.auto_video_mask_enabled_var = tk.BooleanVar(
+            value=config.DEFAULT_AUTO_VIDEO_MASK_ENABLED
+        )
+        self.date_folder_twilight_filter_enabled_var = tk.BooleanVar(
+            value=config.DEFAULT_DATE_FOLDER_TWILIGHT_FILTER_ENABLED
+        )
+        self.observation_latitude_var = tk.StringVar(
+            value=str(config.DEFAULT_OBSERVATION_LATITUDE)
+        )
+        self.observation_longitude_var = tk.StringVar(
+            value=str(config.DEFAULT_OBSERVATION_LONGITUDE)
+        )
         self.selected_model_path_var = tk.StringVar(value=config.MODEL_PATH)
         self.model_meta_info_var = tk.StringVar(value="")
         self.custom_model_paths = []

@@ -23,6 +23,7 @@ import video_creation
 import video_denoising
 import video_enhancement
 import ml_training_data
+import automatic_video_mask
 
 
 _FULL_VIDEO_TIMESTAMP_POSITIONS = {
@@ -428,6 +429,26 @@ def create_line_video_clips(
         current_save_options = default_save_options.copy()
         current_save_options.update(save_options)
         save_options = current_save_options
+
+    if not is_rtsp and save_options.get('auto_video_mask_enabled', False):
+        try:
+            automatic_mask, preview_path, mask_stats = automatic_video_mask.create_auto_mask(
+                source,
+                save_options.get('auto_video_mask_cache_dir', config.AUTO_VIDEO_MASK_CACHE_DIR),
+            )
+            mask = automatic_video_mask.combine_masks(mask, automatic_mask)
+            message = (
+                f"自動マスク適用: 空領域 {mask_stats.get('sky_fraction', 0.0) * 100:.1f}% "
+                f"(プレビュー: {preview_path})"
+            )
+            print(message)
+            if progress_callback:
+                progress_callback((message, None))
+        except Exception as auto_mask_error:
+            message = f"自動マスク生成に失敗したため既存マスクで続行します: {auto_mask_error}"
+            print(f"警告: {message}")
+            if progress_callback:
+                progress_callback((message, None))
 
     effective_use_plate_solve = use_plate_solve and global_wcs_info is not None
     if use_plate_solve and not effective_use_plate_solve:
