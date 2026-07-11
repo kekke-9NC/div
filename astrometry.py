@@ -135,7 +135,20 @@ def plate_solve_image_local(
     scale_lower: Optional[float] = None,
     scale_upper: Optional[float] = None
 ) -> Optional[Dict]:
-    """WSL solve-fieldを使用したローカルPlate Solve"""
+    """Use the platform-local solver without uploading the image."""
+    if platform.system() != "Windows":
+        try:
+            import local_wideangle_astrometry
+
+            return local_wideangle_astrometry.solve_image_local(
+                image_path,
+                source_path=plate_solve_video_path or image_path,
+            )
+        except Exception as exc:
+            print(f"ローカル広角Plate Solveエラー: {exc}")
+            return None
+
+    # Windows keeps the existing WSL solve-field implementation.
     
     if cancel_flag and cancel_flag.is_set():
         return None
@@ -324,10 +337,23 @@ def plate_solve_image( image_path: str, mask: Optional[np.ndarray] = None, plate
     
     # ローカルソルバーの使用判定
     if use_local is None:
-        use_local = getattr(config, 'LOCAL_SOLVER_ENABLED', False) and check_wsl_solver_available()
+        if platform.system() == "Windows":
+            use_local = (
+                getattr(config, 'LOCAL_SOLVER_ENABLED', False)
+                and check_wsl_solver_available()
+            )
+        else:
+            try:
+                import local_wideangle_astrometry
+                use_local = (
+                    getattr(config, 'LOCAL_SOLVER_ENABLED', False)
+                    and local_wideangle_astrometry.is_available()
+                )
+            except Exception:
+                use_local = False
     
     if use_local:
-        print("ローカルソルバー (WSL solve-field) を使用します")
+        print("ローカルソルバー（外部API不使用）を使用します")
         return plate_solve_image_local(
             image_path, mask, plate_solve_video_path, cancel_flag, scale_lower, scale_upper
         )

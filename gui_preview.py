@@ -48,19 +48,31 @@ class PreviewMixin:
 
     def append_log(self, message: str):
         if threading.current_thread() is not threading.main_thread():
-            self.after(0, lambda m=message: self.append_log(m))
+            # ``after`` is a Tcl command too; invoking it from worker threads
+            # can crash Tk on macOS.  update_progress polls this queue on the
+            # main thread and calls append_log from there.
+            try:
+                self.progress_queue.put((str(message), None))
+            except Exception:
+                pass
             return
         if not self.log_text.winfo_exists():
             return
         self.log_text.config(state='normal')
-        try:
-            view_top, view_bottom = self.log_text.yview()
-        except Exception:
-            view_top, view_bottom = (1.0, 1.0)
-        follow_tail = view_bottom >= 0.995
 
         timestamp = datetime.now().strftime("%H:%M:%S")
         self.log_text.insert(tk.END, f"[{timestamp}] {message}\n")
+        self._log_line_count = getattr(self, "_log_line_count", 0) + 1
+        if self._log_line_count > 5000:
+            # A Text widget which grows for a multi-night archive eventually
+            # consumes substantial Tk-side memory.  Remove a block at once so
+            # pruning is infrequent and does not churn the display tree.
+            try:
+                self.log_text.delete("1.0", "501.0")
+                self._log_line_count -= 500
+                self._summary_log_line_map.clear()
+            except Exception:
+                pass
         summary_ref = self._extract_summary_video_ref(message)
         if summary_ref:
             resolved_path = self._resolve_summary_video_path(summary_ref)
@@ -72,13 +84,10 @@ class PreviewMixin:
                     "resolved_path": resolved_path,
                 }
 
-        if follow_tail:
-            self.log_text.see(tk.END)
-        else:
-            try:
-                self.log_text.yview_moveto(view_top)
-            except Exception:
-                pass
+        # The crash reports pointed at Text.yview/GetYView while the display
+        # tree was being updated.  Archive logs are a live tail, so keep the
+        # implementation simple and avoid querying yview for every line.
+        self.log_text.see(tk.END)
         self.log_text.config(state='disabled')
 
     def _init_summary_log_hover_preview(self):

@@ -34,6 +34,20 @@ class ProcessingMixin:
                 'rtsp_notification_sound': self.rtsp_notification_sound_var.get(),
                 'summary_config': [item.copy() for item in self.summary_video_config]
             }
+            local_wideangle_requested = bool(
+                self.use_plate_solve_var.get()
+                and self.plate_solve_mode_var.get() == "local"
+            )
+            if local_wideangle_requested and not str(
+                (params['global_wcs_info'] or {}).get('job_id', '')
+            ).startswith('local-wideangle'):
+                # Do not silently reuse an old API/TAN calibration that lacks
+                # this camera's measured wide-angle SIP distortion.
+                params['global_wcs_info'] = None
+            params['auto_local_wideangle_calibration'] = bool(
+                local_wideangle_requested
+                and not params['global_wcs_info']
+            )
             try:
                 timestamp_size_percent = float(self.full_video_timestamp_size_var.get())
             except ValueError:
@@ -224,6 +238,23 @@ class ProcessingMixin:
             # buttons, redraws, and window movement remain responsive.
             for _ in range(120):
                 message, value = self.progress_queue.get_nowait()
+                if isinstance(value, dict) and "pipeline_status" in value:
+                    # This queue is the only worker -> Tk bridge.  Do not let
+                    # background workers call ``after`` directly.
+                    try:
+                        self.status_panel.update_status(value["pipeline_status"])
+                    except Exception:
+                        pass
+                    continue
+                if isinstance(value, dict) and "plate_solve_ui" in value:
+                    # Plate solving is intentionally performed off the Tk
+                    # thread.  All widget/messagebox work returns through this
+                    # main-thread queue to avoid macOS Tcl SIGBUS crashes.
+                    try:
+                        self._handle_plate_solve_ui(value["plate_solve_ui"])
+                    except Exception:
+                        pass
+                    continue
                 if isinstance(value, tuple) and len(value) == 2:
                     current, total = value
                     if total > 0:
@@ -336,6 +367,38 @@ def prepare_folder_sources_and_run(
             return
         total = len(sources)
         progress_queue.put((f"走査完了: {total}本の動画を処理します。", (0, total)))
+        if params.get('auto_local_wideangle_calibration'):
+            import local_wideangle_astrometry
+
+            progress_queue.put((
+                "注釈用の当晩ローカル広角較正を自動作成します...", None
+            ))
+            candidate_indices = sorted({0, len(sources) // 2, len(sources) - 1})
+            calibration_error = None
+            for candidate_index in candidate_indices:
+                if cancel_flag.is_set():
+                    return
+                candidate = str(sources[candidate_index]['path'])
+                try:
+                    params['global_wcs_info'] = local_wideangle_astrometry.solve_video_local(
+                        candidate,
+                        progress_callback=lambda message: progress_queue.put((str(message), None)),
+                    )
+                    progress_queue.put((None, {"plate_solve_ui": {
+                        "action": "result",
+                        "result": params['global_wcs_info'],
+                        "status_text": "プレートソルブ: 自動ローカル較正成功",
+                    }}))
+                    calibration_error = None
+                    break
+                except Exception as exc:
+                    calibration_error = exc
+                    progress_queue.put((f"較正候補を変更します: {exc}", None))
+            if params.get('global_wcs_info') is None:
+                progress_queue.put((
+                    f"自動広角較正は作成できませんでした。"
+                    f"検出は注釈なしで続行します: {calibration_error}", None
+                ))
         worker_main_loop(
             progress_queue, sources, params['max_workers'], params['interval_sec'],
             params['duration_sec'], params['mask'], params['global_wcs_info'],

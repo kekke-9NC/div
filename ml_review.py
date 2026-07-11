@@ -19,11 +19,12 @@ class TrainingDataReviewWindow(tk.Toplevel):
         super().__init__(parent)
         self.root_dir = str(Path(root_dir).expanduser())
         self.title("機械学習データ目視レビュー")
-        self.geometry("1120x820")
-        self.minsize(820, 620)
+        self.geometry("1320x760")
+        self.minsize(1000, 650)
         self.events: List[Path] = []
         self.index = 0
         self.undo_stack: List[Dict[str, Any]] = ml_training_data.undoable_reviews(root_dir)
+        self.skip_stack: List[Dict[str, Any]] = ml_training_data.undoable_skips(root_dir)
         self.cap: Optional[cv2.VideoCapture] = None
         self.video_after_id = None
         self.video_frame_index = 0
@@ -31,12 +32,16 @@ class TrainingDataReviewWindow(tk.Toplevel):
         self.status_var = tk.StringVar()
         self.detail_var = tk.StringVar()
         self.undo_count_var = tk.IntVar(value=1)
+        self.skip_count_var = tk.IntVar(value=10)
+        self.undo_skip_count_var = tk.IntVar(value=1)
+        self.skip_status_var = tk.StringVar()
         self._build_ui()
         self.protocol("WM_DELETE_WINDOW", self._close)
         self.bind("<Left>", lambda _e: self._previous())
         self.bind("<Right>", lambda _e: self._next())
         self.bind("<Key-m>", lambda _e: self._classify("meteor"))
         self.bind("<Key-n>", lambda _e: self._classify("not_meteor"))
+        self.bind("<Key-s>", lambda _e: self._skip_current())
         self.bind("<BackSpace>", lambda _e: self._undo())
         self.refresh()
 
@@ -44,41 +49,65 @@ class TrainingDataReviewWindow(tk.Toplevel):
         toolbar = ttk.Frame(self, padding=8)
         toolbar.pack(fill=tk.X)
         ttk.Label(toolbar, textvariable=self.status_var).pack(side=tk.LEFT)
+        ttk.Label(toolbar, textvariable=self.skip_status_var).pack(side=tk.LEFT, padx=(18, 0))
         ttk.Button(toolbar, text="再読み込み", command=self.refresh).pack(side=tk.RIGHT)
+
+        ttk.Label(
+            self, textvariable=self.detail_var, padding=(10, 0, 10, 6), justify=tk.LEFT
+        ).pack(fill=tk.X)
 
         preview = ttk.Frame(self, padding=(8, 0))
         preview.pack(fill=tk.BOTH, expand=True)
-        self.diff_label = ttk.Label(preview, anchor=tk.CENTER)
-        self.diff_label.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
-        self.temporal_label = ttk.Label(preview, anchor=tk.CENTER)
-        self.temporal_label.grid(row=0, column=1, sticky="nsew", padx=4, pady=4)
-        self.video_label = ttk.Label(preview, anchor=tk.CENTER)
-        self.video_label.grid(row=1, column=0, columnspan=2, sticky="nsew", padx=4, pady=4)
-        preview.columnconfigure(0, weight=1)
-        preview.columnconfigure(1, weight=1)
+        diff_box = ttk.LabelFrame(preview, text="通常差分")
+        diff_box.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+        temporal_box = ttk.LabelFrame(preview, text="時間の向き（赤→緑→青）")
+        temporal_box.grid(row=0, column=1, sticky="nsew", padx=4, pady=4)
+        video_box = ttk.LabelFrame(preview, text="モノクロ切り出し動画")
+        video_box.grid(row=0, column=2, sticky="nsew", padx=4, pady=4)
+        self.diff_label = ttk.Label(diff_box, anchor=tk.CENTER)
+        self.diff_label.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+        self.temporal_label = ttk.Label(temporal_box, anchor=tk.CENTER)
+        self.temporal_label.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+        self.video_label = ttk.Label(video_box, anchor=tk.CENTER)
+        self.video_label.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+        for column in range(3):
+            preview.columnconfigure(column, weight=1, uniform="preview")
         preview.rowconfigure(0, weight=1)
-        preview.rowconfigure(1, weight=1)
 
-        ttk.Label(self, textvariable=self.detail_var, padding=8, justify=tk.LEFT).pack(fill=tk.X)
-
-        controls = ttk.Frame(self, padding=10)
+        controls = ttk.Frame(self, padding=(10, 6, 10, 4))
         controls.pack(fill=tk.X)
-        ttk.Button(controls, text="← 前の未確認", command=self._previous).pack(side=tk.LEFT)
-        ttk.Button(controls, text="次の未確認 →", command=self._next).pack(side=tk.LEFT, padx=5)
+        navigation = ttk.Frame(controls)
+        navigation.pack(fill=tk.X, pady=(0, 5))
+        ttk.Button(navigation, text="← 前の未確認", command=self._previous).pack(side=tk.LEFT)
+        ttk.Button(navigation, text="次の未確認 →", command=self._next).pack(side=tk.LEFT, padx=5)
         ttk.Button(
-            controls, text="流星として確定  [M]", command=lambda: self._classify("meteor")
+            navigation, text="流星として確定  [M]", command=lambda: self._classify("meteor")
         ).pack(side=tk.LEFT, padx=(25, 5), expand=True, fill=tk.X)
         ttk.Button(
-            controls, text="非流星として確定  [N]", command=lambda: self._classify("not_meteor")
+            navigation, text="非流星として確定  [N]", command=lambda: self._classify("not_meteor")
         ).pack(side=tk.LEFT, padx=5, expand=True, fill=tk.X)
-        ttk.Label(controls, text="戻す件数:").pack(side=tk.LEFT, padx=(20, 3))
-        ttk.Spinbox(controls, from_=1, to=100, width=4, textvariable=self.undo_count_var).pack(side=tk.LEFT)
-        ttk.Button(controls, text="判定を戻す [Backspace]", command=self._undo).pack(side=tk.LEFT, padx=5)
+
+        skip_controls = ttk.LabelFrame(controls, text="今は学習に使わない（次回から非表示・後で復元可）", padding=5)
+        skip_controls.pack(fill=tk.X)
+        ttk.Button(skip_controls, text="この1件をスキップ [S]", command=self._skip_current).pack(side=tk.LEFT)
+        ttk.Label(skip_controls, text="ここから").pack(side=tk.LEFT, padx=(12, 3))
+        ttk.Spinbox(skip_controls, from_=1, to=10000, width=6, textvariable=self.skip_count_var).pack(side=tk.LEFT)
+        ttk.Button(skip_controls, text="件をスキップ", command=self._skip_from_here).pack(side=tk.LEFT, padx=(3, 8))
+        ttk.Button(skip_controls, text="この日の未確認を全てスキップ", command=self._skip_same_day).pack(side=tk.LEFT)
+        ttk.Label(skip_controls, text="復元:").pack(side=tk.LEFT, padx=(18, 3))
+        ttk.Spinbox(skip_controls, from_=1, to=10000, width=5, textvariable=self.undo_skip_count_var).pack(side=tk.LEFT)
+        ttk.Button(skip_controls, text="スキップを戻す", command=self._undo_skip).pack(side=tk.LEFT, padx=(3, 0))
+
+        undo_controls = ttk.Frame(controls)
+        undo_controls.pack(fill=tk.X, pady=(5, 0))
+        ttk.Label(undo_controls, text="確定判定を戻す件数:").pack(side=tk.LEFT)
+        ttk.Spinbox(undo_controls, from_=1, to=100, width=4, textvariable=self.undo_count_var).pack(side=tk.LEFT)
+        ttk.Button(undo_controls, text="判定を戻す [Backspace]", command=self._undo).pack(side=tk.LEFT, padx=5)
 
         ttk.Label(
             self,
-            text="左: 通常差分　右: 前半=赤・中盤=緑・後半=青の時間画像　下: モノクロ動画",
-            padding=(10, 0, 10, 8),
+            text="M/N: 確定　S: 1件スキップ　←/→: 移動　Backspace: 確定判定を戻す",
+            padding=(10, 0, 10, 6),
         ).pack(fill=tk.X)
 
     def refresh(self) -> None:
@@ -93,6 +122,8 @@ class TrainingDataReviewWindow(tk.Toplevel):
                 self.index = min(self.index, max(0, len(self.events) - 1))
         else:
             self.index = min(self.index, max(0, len(self.events) - 1))
+        self.skip_stack = ml_training_data.undoable_skips(self.root_dir)
+        self.skip_status_var.set(f"スキップ中: {len(self.skip_stack)}件")
         self._show_current()
 
     @property
@@ -101,7 +132,7 @@ class TrainingDataReviewWindow(tk.Toplevel):
             return None
         return self.events[self.index]
 
-    def _fit_photo(self, path: Path, max_size=(480, 270)) -> Optional[ImageTk.PhotoImage]:
+    def _fit_photo(self, path: Path, max_size=(400, 420)) -> Optional[ImageTk.PhotoImage]:
         try:
             image = Image.open(path).convert("RGB")
             image.thumbnail(max_size, Image.Resampling.LANCZOS)
@@ -136,7 +167,17 @@ class TrainingDataReviewWindow(tk.Toplevel):
         self._photo_refs = [p for p in (diff, temporal) if p is not None]
         self.diff_label.configure(image=diff or "", text="通常差分" if diff is None else "")
         self.temporal_label.configure(image=temporal or "", text="時間画像" if temporal is None else "")
-        self.cap = cv2.VideoCapture(str(event / "clip.mp4"))
+        thread_property = getattr(cv2, "CAP_PROP_N_THREADS", None)
+        if thread_property is not None:
+            try:
+                self.cap = cv2.VideoCapture(
+                    str(event / "clip.mp4"), cv2.CAP_FFMPEG,
+                    [int(thread_property), 1],
+                )
+            except (cv2.error, TypeError, ValueError):
+                self.cap = cv2.VideoCapture(str(event / "clip.mp4"))
+        else:
+            self.cap = cv2.VideoCapture(str(event / "clip.mp4"))
         self.video_frame_index = 0
         self._play_next_frame()
 
@@ -152,7 +193,7 @@ class TrainingDataReviewWindow(tk.Toplevel):
             return
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         image = Image.fromarray(rgb)
-        image.thumbnail((720, 300), Image.Resampling.LANCZOS)
+        image.thumbnail((420, 420), Image.Resampling.LANCZOS)
         photo = ImageTk.PhotoImage(image)
         self._video_photo = photo
         self.video_label.configure(image=photo, text="")
@@ -194,6 +235,77 @@ class TrainingDataReviewWindow(tk.Toplevel):
         except Exception as exc:
             messagebox.showerror("レビュー保存エラー", str(exc), parent=self)
             self.refresh()
+
+    def _skip_events(self, events: List[Path], reason: str) -> None:
+        if not events:
+            return
+        self._stop_video()
+        skipped = 0
+        for event in events:
+            try:
+                record = ml_training_data.skip_event(event, self.root_dir, reason)
+                self.skip_stack.append(record)
+                skipped += 1
+            except Exception as exc:
+                messagebox.showerror("スキップ保存エラー", str(exc), parent=self)
+                break
+        self.events = [event for event in self.events if event.exists()]
+        self.index = min(self.index, max(0, len(self.events) - 1))
+        self.skip_status_var.set(f"スキップ中: {len(self.skip_stack)}件（今回 {skipped}件）")
+        self._show_current()
+
+    def _skip_current(self) -> None:
+        event = self.current_event
+        if event is not None:
+            self._skip_events([event], "single")
+
+    def _skip_from_here(self) -> None:
+        if not self.events:
+            return
+        try:
+            count = max(1, int(self.skip_count_var.get()))
+        except (TypeError, ValueError, tk.TclError):
+            count = 1
+        selected = self.events[self.index:self.index + count]
+        self._skip_events(selected, f"from_here:{len(selected)}")
+
+    def _skip_same_day(self) -> None:
+        event = self.current_event
+        if event is None:
+            return
+        target_date = ml_training_data.detection_date(event)
+        if not target_date:
+            messagebox.showwarning("日付不明", "この検出の日付を読み取れません。", parent=self)
+            return
+        selected = [item for item in self.events if ml_training_data.detection_date(item) == target_date]
+        if not selected:
+            return
+        if not messagebox.askyesno(
+            "同一日をスキップ",
+            f"{target_date} の未確認 {len(selected)}件をスキップしますか？\n"
+            "後から「スキップを戻す」で復元できます。",
+            parent=self,
+        ):
+            return
+        self._skip_events(selected, f"same_date:{target_date}")
+
+    def _undo_skip(self) -> None:
+        try:
+            count = max(1, int(self.undo_skip_count_var.get()))
+        except (TypeError, ValueError, tk.TclError):
+            count = 1
+        restored = 0
+        while restored < count and self.skip_stack:
+            record = self.skip_stack.pop()
+            try:
+                if ml_training_data.undo_skip(record, self.root_dir) is not None:
+                    restored += 1
+            except Exception as exc:
+                messagebox.showerror("スキップを戻せません", str(exc), parent=self)
+                break
+        if restored == 0:
+            messagebox.showinfo("スキップを戻す", "戻せるスキップはありません。", parent=self)
+        self.refresh()
 
     def _undo(self) -> None:
         try:

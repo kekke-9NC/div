@@ -220,6 +220,87 @@ def review_event(event_dir: Path, root_dir: str, reviewed_label: str) -> Dict[st
     return record
 
 
+def detection_date(event_dir: Path) -> Optional[str]:
+    """Return the local capture date (YYYY-MM-DD) recorded for an event."""
+    try:
+        value = str(load_metadata(event_dir).get("detection_time", "")).strip()
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+    if not value:
+        return None
+    try:
+        # ``fromisoformat`` accepts both naive timestamps and explicit offsets.
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).date().isoformat()
+    except ValueError:
+        # Older exports occasionally contain a sortable date prefix only.
+        compact = value[:10]
+        return compact if len(compact) == 10 else None
+
+
+def skip_event(event_dir: Path, root_dir: str, reason: str = "single") -> Dict[str, Any]:
+    """Hide a pending event persistently without assigning a training label.
+
+    Skipped samples are moved out of ``pending`` so reopening the reviewer does
+    not show them again.  They remain intact under ``skipped`` and every move is
+    appended to the persistent review log, making the action reversible.
+    """
+    event_dir = Path(event_dir).expanduser().resolve()
+    root = Path(root_dir).expanduser().resolve()
+    metadata = load_metadata(event_dir)
+    predicted = str(metadata.get("predicted_label", event_dir.parent.name))
+    predicted = "meteor" if predicted == "meteor" else "not_meteor"
+    destination_parent = root / "skipped" / predicted
+    destination_parent.mkdir(parents=True, exist_ok=True)
+    destination = destination_parent / event_dir.name
+    if destination.exists():
+        destination = destination_parent / f"{event_dir.name}_{uuid.uuid4().hex[:8]}"
+
+    timestamp = _utc_now()
+    metadata.update({
+        "review_status": "skipped",
+        "skipped_at": timestamp,
+        "skip_reason": str(reason or "single"),
+    })
+    with (event_dir / "metadata.json").open("w", encoding="utf-8") as handle:
+        json.dump(metadata, handle, ensure_ascii=False, indent=2)
+    shutil.move(str(event_dir), str(destination))
+    record = {
+        "action": "skip",
+        "timestamp": timestamp,
+        "event_id": destination.name,
+        "predicted_label": predicted,
+        "detection_date": detection_date(destination),
+        "reason": str(reason or "single"),
+        "from": str(event_dir),
+        "to": str(destination),
+    }
+    _append_jsonl(root / "review_log.jsonl", record)
+    return record
+
+
+def undo_skip(record: Dict[str, Any], root_dir: str) -> Optional[Path]:
+    """Restore one still-skipped event to its original pending directory."""
+    source = Path(record.get("to", ""))
+    destination = Path(record.get("from", ""))
+    if not source.exists() or destination.exists():
+        return None
+    metadata = load_metadata(source)
+    metadata["review_status"] = "pending"
+    for key in ("skipped_at", "skip_reason"):
+        metadata.pop(key, None)
+    with (source / "metadata.json").open("w", encoding="utf-8") as handle:
+        json.dump(metadata, handle, ensure_ascii=False, indent=2)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(source), str(destination))
+    _append_jsonl(Path(root_dir).expanduser() / "review_log.jsonl", {
+        "action": "undo_skip", "timestamp": _utc_now(),
+        "event_id": destination.name,
+        "reverts_skip_timestamp": record.get("timestamp"),
+        "from": str(source), "to": str(destination),
+    })
+    return destination
+
+
 def undo_review(record: Dict[str, Any], root_dir: str) -> Optional[Path]:
     source = Path(record.get("to", ""))
     destination = Path(record.get("from", ""))
@@ -258,6 +339,32 @@ def undoable_reviews(root_dir: str) -> List[Dict[str, Any]]:
                     active.append(record)
                 elif record.get("action") == "undo":
                     reverted = record.get("reverts_review_timestamp")
+                    for index in range(len(active) - 1, -1, -1):
+                        if active[index].get("timestamp") == reverted:
+                            active.pop(index)
+                            break
+    except OSError:
+        return []
+    return [record for record in active if Path(record.get("to", "")).exists()]
+
+
+def undoable_skips(root_dir: str) -> List[Dict[str, Any]]:
+    """Return active skip records, including skips made in earlier sessions."""
+    log_path = Path(root_dir).expanduser() / "review_log.jsonl"
+    if not log_path.exists():
+        return []
+    active: List[Dict[str, Any]] = []
+    try:
+        with log_path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    record = json.loads(line)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if record.get("action") == "skip":
+                    active.append(record)
+                elif record.get("action") == "undo_skip":
+                    reverted = record.get("reverts_skip_timestamp")
                     for index in range(len(active) - 1, -1, -1):
                         if active[index].get("timestamp") == reverted:
                             active.pop(index)

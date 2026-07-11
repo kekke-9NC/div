@@ -21,9 +21,15 @@ class TimelapseDragDropWindow(Toplevel):
             value=config.TIMELAPSE_TEMPORAL_MEAN_RADIUS_FRAMES
         )
         self.temporal_mean_summary_var = tk.StringVar()
+        self.timelapse_annotation_enabled_var = tk.BooleanVar(
+            value=getattr(config, "TIMELAPSE_LOCAL_ANNOTATION_ENABLED", False)
+        )
+        self.timelapse_annotation_calibration_var = tk.StringVar(
+            value=getattr(config, "TIMELAPSE_ANNOTATION_CALIBRATION_PATH", "") or ""
+        )
         
         self.title("タイムラプス作成")
-        self.geometry("500x780")
+        self.geometry("500x870")
         self.resizable(False, False)
         
         self.setup_ui()
@@ -130,6 +136,41 @@ class TimelapseDragDropWindow(Toplevel):
         ttk.Label(timestamp_frame, text="%（画面高）").pack(side=tk.LEFT, padx=(3, 0))
         self._toggle_timelapse_timestamp_settings()
 
+        annotation_frame = ttk.LabelFrame(
+            main_frame,
+            text="ローカル広角星空注釈",
+            padding=10,
+        )
+        annotation_frame.pack(fill=tk.X, pady=(0, 10))
+        ttk.Checkbutton(
+            annotation_frame,
+            text="歪み補正した天球グリッドを描画（外部API不使用）",
+            variable=self.timelapse_annotation_enabled_var,
+            command=self._toggle_timelapse_annotation_settings,
+        ).pack(anchor=tk.W)
+        ttk.Label(
+            annotation_frame,
+            text="当晩の広角歪み・向きを自動較正します。初回は通常より時間がかかります。",
+            foreground="gray",
+        ).pack(anchor=tk.W, pady=(2, 4))
+        calibration_row = ttk.Frame(annotation_frame)
+        calibration_row.pack(fill=tk.X)
+        ttk.Label(calibration_row, text="較正ファイル（任意）:").pack(side=tk.LEFT)
+        self.timelapse_annotation_calibration_entry = ttk.Entry(
+            calibration_row,
+            textvariable=self.timelapse_annotation_calibration_var,
+        )
+        self.timelapse_annotation_calibration_entry.pack(
+            side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5)
+        )
+        self.timelapse_annotation_calibration_button = ttk.Button(
+            calibration_row,
+            text="選択",
+            command=self._choose_timelapse_annotation_calibration,
+        )
+        self.timelapse_annotation_calibration_button.pack(side=tk.LEFT)
+        self._toggle_timelapse_annotation_settings()
+
         mean_frame = ttk.LabelFrame(main_frame, text="ノイズ低減（時間平均）", padding=10)
         mean_frame.pack(fill=tk.X, pady=(0, 10))
         ttk.Label(
@@ -185,6 +226,22 @@ class TimelapseDragDropWindow(Toplevel):
         state = tk.NORMAL if self.timelapse_timestamp_enabled_var.get() else tk.DISABLED
         self.timelapse_timestamp_position_box.config(state="readonly" if state == tk.NORMAL else tk.DISABLED)
         self.timelapse_timestamp_size_spin.config(state=state)
+
+    def _toggle_timelapse_annotation_settings(self):
+        state = tk.NORMAL if self.timelapse_annotation_enabled_var.get() else tk.DISABLED
+        self.timelapse_annotation_calibration_entry.config(state=state)
+        self.timelapse_annotation_calibration_button.config(state=state)
+
+    def _choose_timelapse_annotation_calibration(self):
+        path = filedialog.askopenfilename(
+            title="広角星空較正ファイルを選択",
+            filetypes=[
+                ("Calibration", "*.json *.wcs *.fits *.fit"),
+                ("All Files", "*"),
+            ],
+        )
+        if path:
+            self.timelapse_annotation_calibration_var.set(path)
 
     def _on_temporal_mean_scale(self, value):
         """Scale is continuous, so convert its value to a whole frame count."""
@@ -392,6 +449,10 @@ class TimelapseDragDropWindow(Toplevel):
             "position": self.timelapse_timestamp_position_var.get(),
             "size_percent": timestamp_size,
         }
+        annotation_settings = {
+            "enabled": self.timelapse_annotation_enabled_var.get(),
+            "calibration_path": self.timelapse_annotation_calibration_var.get().strip() or None,
+        }
         try:
             temporal_mean_radius = int(self.temporal_mean_radius_var.get())
         except (TypeError, ValueError, tk.TclError):
@@ -402,7 +463,11 @@ class TimelapseDragDropWindow(Toplevel):
         self.destroy()
         
         mask_status = "あり" if mask is not None else "なし"
-        self.log_callback(f"タイムラプス作成を開始します... (長さ: {duration}秒, {len(paths)}個のアイテム, マスク: {mask_status})")
+        annotation_status = "あり（ローカル）" if annotation_settings["enabled"] else "なし"
+        self.log_callback(
+            f"タイムラプス作成を開始します... (長さ: {duration}秒, "
+            f"{len(paths)}個のアイテム, マスク: {mask_status}, 星空注釈: {annotation_status})"
+        )
         
         def create_task(progress_callback):
             return timelapse_creator.create_timelapse(
@@ -413,6 +478,7 @@ class TimelapseDragDropWindow(Toplevel):
                 mask=mask,
                 timestamp_settings=timestamp_settings,
                 temporal_mean_radius_frames=temporal_mean_radius,
+                annotation_settings=annotation_settings,
             )
 
         task_runner = getattr(self.parent, "_run_synthesis_task_async", None)

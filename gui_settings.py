@@ -342,7 +342,7 @@ class SettingsMixin:
         # Plate solve mode selection (local vs API)
         ps_mode_frame = ttk.Frame(lf_astro); ps_mode_frame.pack(fill=tk.X, pady=2)
         ttk.Label(ps_mode_frame, text="ソルバー:").pack(side=tk.LEFT, padx=(0,5))
-        ttk.Radiobutton(ps_mode_frame, text="ローカル (coming soon)", variable=self.plate_solve_mode_var, value="local", state="disabled").pack(side=tk.LEFT, padx=5)
+        ttk.Radiobutton(ps_mode_frame, text="ローカル広角 SIP5 (推奨・API不使用)", variable=self.plate_solve_mode_var, value="local").pack(side=tk.LEFT, padx=5)
         ttk.Radiobutton(ps_mode_frame, text="API (Astrometry.net)", variable=self.plate_solve_mode_var, value="api").pack(side=tk.LEFT, padx=5)
 
         # Astrometry.net API key input
@@ -1284,11 +1284,10 @@ class SettingsMixin:
             self.plate_solve_wcs_path_var.set(settings.get('plate_solve_wcs_path', ''))
             self.plate_solve_video_path_var.set(settings.get('plate_solve_video_path', ''))
             self.use_plate_solve_var.set(settings.get('use_plate_solve', True))
-            saved_plate_solve_mode = settings.get('plate_solve_mode', 'api')
+            # Annotation now defaults to the on-device wide-angle solver even
+            # for settings files created by older API-only app versions.
             self.plate_solve_mode_var.set(
-                'local'
-                if saved_plate_solve_mode == 'local' and getattr(config, "LOCAL_SOLVER_ENABLED", False)
-                else 'api'
+                'local' if getattr(config, "LOCAL_SOLVER_ENABLED", False) else 'api'
             )
             
             if settings.get('global_wcs_info'):

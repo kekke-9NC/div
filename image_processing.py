@@ -9,6 +9,27 @@ import threading
 from typing import Optional, Tuple, List, Deque, Generator, Union
 import os
 
+
+def _temporal_min_max(frames) -> Tuple[np.ndarray, np.ndarray]:
+    """Compute extrema without stacking an entire full-HD time window.
+
+    ``np.array(frames)`` temporarily duplicates every buffered frame.  Four
+    archive workers at 1080p/25 fps could allocate hundreds of megabytes at
+    the same instant.  OpenCV's in-place extrema keep only two accumulator
+    frames regardless of window length.
+    """
+    iterator = iter(frames)
+    try:
+        first = next(iterator)
+    except StopIteration as exc:
+        raise ValueError("frames must not be empty") from exc
+    maximum = first.copy()
+    minimum = first.copy()
+    for frame in iterator:
+        cv2.max(maximum, frame, dst=maximum)
+        cv2.min(minimum, frame, dst=minimum)
+    return maximum, minimum
+
 def detect_lines(
     img: np.ndarray,
     min_length: int = config.MIN_LINE_LENGTH,
@@ -173,8 +194,7 @@ def create_diff_images(
             should_process = False
 
         if should_process and len(frames_for_diff) > 0:
-            brightness_composite_image = np.max(np.array(list(frames_for_diff)), axis=0).astype(np.uint8)
-            min_val_image = np.min(np.array(list(frames_for_diff)), axis=0).astype(np.uint8)
+            brightness_composite_image, min_val_image = _temporal_min_max(frames_for_diff)
             diff_image = cv2.absdiff(brightness_composite_image, min_val_image)
 
             end_idx = frame_index

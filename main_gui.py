@@ -302,7 +302,7 @@ class App(
         self.rtsp_end_min_var = tk.StringVar(value="00")
         self.apply_rtsp_dark_var = tk.BooleanVar(value=False)
         self.rtsp_dark_status_var = tk.StringVar(value="ダーク: 未撮影")
-        self.plate_solve_mode_var = tk.StringVar(value="api")
+        self.plate_solve_mode_var = tk.StringVar(value="local")
         self.astrometry_api_key_var = tk.StringVar(value="")
         self.video_concat_files = []
         self.video_concat_bitrate_var = tk.StringVar(value="Auto")
