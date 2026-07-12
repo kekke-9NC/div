@@ -15,6 +15,74 @@ from astropy.wcs import WCS
 
 
 class TimelapseCreatorTests(unittest.TestCase):
+    def test_discovers_all_meteor_full_clips_in_sampled_time_range(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            expected = []
+            for stamp, center in (("20260710_010030000", "(100.00, 200.00)"),
+                                  ("20260710_010130000", "(300.00, 400.00)")):
+                clip = root / f"{stamp}_meteor_1_prob0.90_full.mp4"
+                clip.write_bytes(b"video")
+                info = root / f"{stamp}_meteor_1_prob0.90_info.txt"
+                info.write_text(
+                    f"Detected Line Center (px): {center}\n"
+                    f"Saved Full_video Path: {clip}\n",
+                    encoding="utf-8",
+                )
+                expected.append(os.path.abspath(str(clip)))
+            outside = root / "20260710_020000000_meteor_1_prob0.90_info.txt"
+            outside.write_text("Detected Line Center (px): (1, 2)\n", encoding="utf-8")
+            loader = mock.Mock()
+            loader.timestamp_for_index.side_effect = [
+                datetime(2026, 7, 10, 1, 0),
+                datetime(2026, 7, 10, 1, 1),
+                datetime(2026, 7, 10, 1, 2),
+            ]
+            with mock.patch.object(timelapse_creator, "get_video_frame_count", return_value=75):
+                events = timelapse_creator._discover_meteor_insertions(
+                    directory, [0, 10, 20], loader
+                )
+
+        self.assertEqual([event["clip_path"] for event in events], expected)
+        self.assertEqual([event["output_frame"] for event in events], [1, 2])
+        self.assertEqual(events[0]["center"], (100.0, 200.0))
+
+    def test_meteor_insert_filter_uses_half_transparent_yellow_boxes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory, "timelapse.mp4")
+            output.write_bytes(b"base")
+            clips = []
+            for index in range(2):
+                clip = Path(directory, f"meteor-{index}.mp4")
+                clip.write_bytes(b"clip")
+                clips.append(str(clip))
+            events = [
+                {"clip_path": clips[0], "output_frame": 60, "center": (100.0, 200.0)},
+                {"clip_path": clips[1], "output_frame": 120, "center": (300.0, 400.0)},
+            ]
+
+            def run(command, **_kwargs):
+                Path(command[-1]).write_bytes(b"inserted")
+                return SimpleNamespace(returncode=0, stderr=b"")
+
+            with (
+                mock.patch.object(timelapse_creator.subprocess, "run", side_effect=run) as runner,
+                mock.patch.object(
+                    timelapse_creator, "_select_h264_encoder",
+                    return_value=("libx264", ["-c:v", "libx264"], "CPU"),
+                ),
+            ):
+                result = timelapse_creator._insert_meteor_clips(
+                    str(output), events, (1920, 1080), 180
+                )
+
+        self.assertTrue(result)
+        command = runner.call_args.args[0]
+        graph = command[command.index("-filter_complex") + 1]
+        self.assertEqual(command.count("-i"), 3)
+        self.assertEqual(graph.count("color=yellow@0.5"), 2)
+        self.assertIn("concat=n=5:v=1:a=0", graph)
+
     def test_ffprobe_rejects_video_with_h264_packet_errors(self):
         with tempfile.TemporaryDirectory() as directory:
             video = Path(directory, "broken.mp4")
@@ -289,6 +357,16 @@ class TimelapseCreatorTests(unittest.TestCase):
                 timelapse_creator, "_prepare_local_annotation_calibration"
             ) as prepare_calibration,
             mock.patch.object(
+                timelapse_creator, "_discover_meteor_insertions",
+                return_value=[{
+                    "clip_path": "meteor_full.mp4", "output_frame": 1,
+                    "center": (8.0, 8.0), "detection_time": frame_time,
+                }],
+            ),
+            mock.patch.object(
+                timelapse_creator, "_insert_meteor_clips", return_value=True
+            ) as insert_meteors,
+            mock.patch.object(
                 timelapse_creator, "_create_video_timelapse_fast"
             ) as fast_path,
             mock.patch.object(timelapse_creator, "_run_annotate_pipeline") as annotation_pipeline,
@@ -308,6 +386,7 @@ class TimelapseCreatorTests(unittest.TestCase):
                 timestamp_settings={"enabled": False},
                 temporal_mean_radius_frames=0,
                 annotation_settings={"enabled": True},
+                meteor_insert_settings={"enabled": True, "meteor_folder": "/tmp/meteor"},
             )
 
         self.assertTrue(result)
@@ -315,6 +394,7 @@ class TimelapseCreatorTests(unittest.TestCase):
         prepare_calibration.assert_called_once()
         self.assertEqual(annotator.call_count, 1)
         annotation_pipeline.assert_called_once()
+        insert_meteors.assert_called_once()
         self.assertEqual(stdin.write.call_count, 1)
         ffmpeg_command = ffmpeg_popen.call_args.args[0]
         self.assertIn("-nostats", ffmpeg_command)

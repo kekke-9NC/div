@@ -1153,6 +1153,162 @@ def _videos_are_concat_compatible(
     return bool(expected)
 
 
+def _meteor_datetime_from_name(path: str) -> Optional[datetime]:
+    match = re.match(r"((?:19|20)\d{6})_(\d{6})(\d{3})", Path(path).name)
+    if not match:
+        return None
+    try:
+        return datetime.strptime(
+            f"{match.group(1)}{match.group(2)}{match.group(3)}",
+            "%Y%m%d%H%M%S%f",
+        )
+    except ValueError:
+        return None
+
+
+def _discover_meteor_insertions(
+    meteor_folder: Optional[str],
+    sample_indices: Sequence[int],
+    loader: FrameLoader,
+) -> List[Dict]:
+    """Find full-size detected clips within the sampled observation period."""
+    if not meteor_folder or not os.path.isdir(meteor_folder) or not sample_indices:
+        return []
+    sample_times = [loader.timestamp_for_index(index) for index in sample_indices]
+    if not sample_times:
+        return []
+    start_time, end_time = min(sample_times), max(sample_times)
+    chronological = all(
+        sample_times[index] <= sample_times[index + 1]
+        for index in range(len(sample_times) - 1)
+    )
+    events: List[Dict] = []
+    seen_clips = set()
+    for info_path in sorted(Path(meteor_folder).glob("*_info.txt")):
+        detection_time = _meteor_datetime_from_name(str(info_path))
+        if detection_time is None or detection_time < start_time or detection_time > end_time:
+            continue
+        try:
+            text = info_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        saved_match = re.search(r"^Saved Full_video Path:\s*(.+)$", text, re.MULTILINE)
+        candidates = []
+        if saved_match:
+            candidates.append(saved_match.group(1).strip())
+        stem = info_path.name[:-len("_info.txt")]
+        candidates.append(str(info_path.with_name(f"{stem}_full.mp4")))
+        clip_path = next((os.path.abspath(path) for path in candidates if os.path.isfile(path)), None)
+        if (
+            clip_path is None or clip_path in seen_clips
+            or get_video_frame_count(clip_path) <= 0
+        ):
+            continue
+        center_match = re.search(
+            r"^Detected Line Center \(px\):\s*\(([+-]?[\d.]+),\s*([+-]?[\d.]+)\)",
+            text, re.MULTILINE,
+        )
+        if not center_match:
+            continue
+        if chronological:
+            sample_position = bisect.bisect_left(sample_times, detection_time)
+        else:
+            sample_position = min(
+                range(len(sample_times)),
+                key=lambda index: abs((sample_times[index] - detection_time).total_seconds()),
+            )
+        sample_position = max(0, min(len(sample_times), sample_position))
+        events.append({
+            "clip_path": clip_path,
+            "detection_time": detection_time,
+            "output_frame": sample_position,
+            "center": (float(center_match.group(1)), float(center_match.group(2))),
+        })
+        seen_clips.add(clip_path)
+    return sorted(events, key=lambda event: (event["output_frame"], event["detection_time"]))
+
+
+def _insert_meteor_clips(
+    output_path: str,
+    events: Sequence[Dict],
+    target_size: Tuple[int, int],
+    base_frame_count: int,
+    progress_callback: Optional[Callable[[str], None]] = None,
+) -> bool:
+    """Insert marked full-size meteor clips into an already rendered timelapse."""
+    if not events:
+        return True
+    width, height = target_size
+    total_seconds = base_frame_count / OUTPUT_FPS
+    command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", output_path]
+    for event in events:
+        command.extend(["-i", event["clip_path"]])
+
+    graph = []
+    concat_labels = []
+    cursor = 0.0
+    for event_index, event in enumerate(events):
+        position = max(cursor, min(total_seconds, event["output_frame"] / OUTPUT_FPS))
+        if position > cursor + 1e-6:
+            label = f"base{event_index}"
+            graph.append(
+                f"[0:v]trim=start={cursor:.6f}:end={position:.6f},"
+                f"setpts=PTS-STARTPTS,format=yuv420p[{label}]"
+            )
+            concat_labels.append(f"[{label}]")
+        center_x, center_y = event["center"]
+        padding = max(48, round(min(width, height) * 0.075))
+        left = max(0, round(center_x - padding))
+        top = max(0, round(center_y - padding))
+        box_width = max(2, min(width - left, padding * 2))
+        box_height = max(2, min(height - top, padding * 2))
+        marker_thickness = max(3, round(min(width, height) / 270))
+        meteor_label = f"meteor{event_index}"
+        graph.append(
+            f"[{event_index + 1}:v]drawbox=x={left}:y={top}:w={box_width}:h={box_height}:"
+            f"color=yellow@0.5:t={marker_thickness},"
+            f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black,fps={OUTPUT_FPS},"
+            f"setsar=1,setpts=PTS-STARTPTS,format=yuv420p[{meteor_label}]"
+        )
+        concat_labels.append(f"[{meteor_label}]")
+        cursor = position
+    if cursor < total_seconds - 1e-6:
+        graph.append(
+            f"[0:v]trim=start={cursor:.6f}:end={total_seconds:.6f},"
+            "setpts=PTS-STARTPTS,format=yuv420p[base_tail]"
+        )
+        concat_labels.append("[base_tail]")
+    graph.append(f"{''.join(concat_labels)}concat=n={len(concat_labels)}:v=1:a=0[outv]")
+
+    temporary_path = str(
+        Path(output_path).with_name(f".{Path(output_path).stem}.meteor-insert-{os.getpid()}.mp4")
+    )
+    _encoder_name, encoder_args, _encoder_label = _select_h264_encoder()
+    command.extend([
+        "-filter_complex", ";".join(graph), "-map", "[outv]", "-an",
+        *encoder_args, "-pix_fmt", "yuv420p", temporary_path,
+    ])
+    _report_progress(progress_callback, f"流星検出動画 {len(events)}本を時刻位置へ挿入中...")
+    try:
+        result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=1800)
+        if result.returncode != 0 or not os.path.isfile(temporary_path):
+            error = (result.stderr or b"").decode("utf-8", errors="replace")[-1000:]
+            _report_progress(progress_callback, f"エラー: 流星動画の挿入に失敗しました: {error}")
+            return False
+        os.replace(temporary_path, output_path)
+        return True
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        _report_progress(progress_callback, f"エラー: 流星動画の挿入に失敗しました: {exc}")
+        return False
+    finally:
+        try:
+            if os.path.exists(temporary_path):
+                os.remove(temporary_path)
+        except OSError:
+            pass
+
+
 def _ffconcat_escape(path: str) -> str:
     """Quote an absolute path for an ffconcat list file."""
     return os.path.abspath(path).replace("'", "'\\''")
@@ -1488,6 +1644,7 @@ def create_timelapse(
     timestamp_settings: Optional[Dict] = None,
     temporal_mean_radius_frames: Optional[int] = None,
     annotation_settings: Optional[Dict] = None,
+    meteor_insert_settings: Optional[Dict] = None,
 ) -> bool:
     """
     タイムラプス動画を作成する（並列処理版）。
@@ -1502,6 +1659,11 @@ def create_timelapse(
     """
     timestamp_settings = _normalize_timestamp_settings(timestamp_settings)
     annotation_settings = _normalize_annotation_settings(annotation_settings)
+    meteor_insert_settings = meteor_insert_settings or {}
+    insert_meteors = bool(meteor_insert_settings.get("enabled", False))
+    meteor_folder = meteor_insert_settings.get(
+        "meteor_folder", getattr(config, "DEFAULT_METEOR_SAVE_PATH", None)
+    )
     local_annotator = None
     if annotation_settings["enabled"]:
         try:
@@ -1594,6 +1756,7 @@ def create_timelapse(
 
     # ステップ3: 最初の有効なフレームを取得して解像度を確認
     loader = FrameLoader(sources)
+    meteor_events: List[Dict] = []
     first_frame = None
     first_valid_idx = 0
 
@@ -1614,6 +1777,21 @@ def create_timelapse(
 
     base_height, base_width = first_frame.shape[:2]
     target_size = (base_width, base_height)
+
+    if insert_meteors:
+        meteor_events = _discover_meteor_insertions(
+            meteor_folder, sample_indices[first_valid_idx:], loader
+        )
+        if meteor_events:
+            _report_progress(
+                progress_callback,
+                f"対象時間帯の流星検出動画を {len(meteor_events)}本見つけました",
+            )
+        else:
+            _report_progress(
+                progress_callback,
+                "対象時間帯に挿入可能な流星検出動画はありませんでした",
+            )
 
     if local_annotator is not None:
         try:
@@ -1651,6 +1829,10 @@ def create_timelapse(
             loader.cleanup()
             del first_frame
             gc.collect()
+            if meteor_events and not _insert_meteor_clips(
+                output_path, meteor_events, target_size, len(sample_indices), progress_callback
+            ):
+                return False
             return True
         if fast_result is False:
             _report_progress(
@@ -1896,6 +2078,11 @@ def create_timelapse(
         temporal_mean_cache.clear()
         loader.cleanup()
         gc.collect()
+
+    if meteor_events and not _insert_meteor_clips(
+        output_path, meteor_events, target_size, len(sample_indices), progress_callback
+    ):
+        return False
 
     _report_progress(
         progress_callback,

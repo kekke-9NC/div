@@ -33,6 +33,7 @@ class TimelapseDragDropWindow(Toplevel):
         self.timelapse_detected_stars_var = tk.BooleanVar(value=False)
         self.timelapse_annotation_reference_sample_var = tk.IntVar(value=0)
         self.timelapse_annotation_reference_selected_var = tk.BooleanVar(value=False)
+        self.timelapse_insert_meteors_var = tk.BooleanVar(value=False)
         
         self.title("タイムラプス作成")
         self.geometry("500x870")
@@ -219,6 +220,19 @@ class TimelapseDragDropWindow(Toplevel):
         )
         self.timelapse_annotation_reference_label.pack(side=tk.LEFT, padx=(8, 0))
         self._toggle_timelapse_annotation_settings()
+
+        meteor_frame = ttk.LabelFrame(main_frame, text="流星検出動画", padding=10)
+        meteor_frame.pack(fill=tk.X, pady=(0, 10))
+        ttk.Checkbutton(
+            meteor_frame,
+            text="同じ時間帯に検出された流星動画を時刻位置へ挿入",
+            variable=self.timelapse_insert_meteors_var,
+        ).pack(anchor=tk.W)
+        ttk.Label(
+            meteor_frame,
+            text="流星保存フォルダのフルサイズ動画を使用し、検出位置を半透明の黄色枠で表示します。",
+            foreground="gray", wraplength=450,
+        ).pack(anchor=tk.W, pady=(2, 0))
 
         mean_frame = ttk.LabelFrame(main_frame, text="ノイズ低減（時間平均）", padding=10)
         mean_frame.pack(fill=tk.X, pady=(0, 10))
@@ -764,6 +778,15 @@ class TimelapseDragDropWindow(Toplevel):
             "reference_sample_index": self.timelapse_annotation_reference_sample_var.get(),
             "reference_selected": self.timelapse_annotation_reference_selected_var.get(),
         }
+        meteor_path_var = getattr(self.parent, "meteor_save_path_var", None)
+        meteor_folder = (
+            meteor_path_var.get() if meteor_path_var is not None
+            else config.DEFAULT_METEOR_SAVE_PATH
+        )
+        meteor_insert_settings = {
+            "enabled": self.timelapse_insert_meteors_var.get(),
+            "meteor_folder": meteor_folder,
+        }
         try:
             temporal_mean_radius = int(self.temporal_mean_radius_var.get())
         except (TypeError, ValueError, tk.TclError):
@@ -790,6 +813,7 @@ class TimelapseDragDropWindow(Toplevel):
                 timestamp_settings=timestamp_settings,
                 temporal_mean_radius_frames=temporal_mean_radius,
                 annotation_settings=annotation_settings,
+                meteor_insert_settings=meteor_insert_settings,
             )
 
         task_runner = getattr(self.parent, "_run_synthesis_task_async", None)
