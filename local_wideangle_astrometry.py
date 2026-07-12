@@ -209,7 +209,8 @@ def _extract_stars(
     temporal_samples: Optional[np.ndarray] = None,
     maximum_stars: int = 180,
     exclude_lower_region: bool = True,
-) -> Tuple[List[List[float]], np.ndarray, np.ndarray]:
+    build_diagnostic: bool = True,
+) -> Tuple[List[List[float]], Optional[np.ndarray], np.ndarray]:
     work = average.astype(np.float32)
     if temporal_samples is not None and len(temporal_samples) >= 3:
         fixed = np.median(temporal_samples, axis=0).astype(np.float32)
@@ -246,13 +247,15 @@ def _extract_stars(
     # SIP fit learn the edge curvature rather than treating it as noise.
     selected = central[:180] + outer[: max(0, maximum_stars - min(180, len(central)))]
     stars = [position for _flux, position in selected[:maximum_stars]]
-    diagnostic = np.clip((zscore - 2.0) * 35.0, 0, 255).astype(np.uint8)
-    if exclude_lower_region:
-        diagnostic[int(height * 0.84):, :] = 0
-    diagnostic_bgr = cv2.cvtColor(diagnostic, cv2.COLOR_GRAY2BGR)
-    for index, (x, y) in enumerate(stars):
-        color = (0, 255, 0) if index < min(180, len(central)) else (0, 180, 255)
-        cv2.circle(diagnostic_bgr, (round(x), round(y)), 4, color, 1, cv2.LINE_AA)
+    diagnostic_bgr = None
+    if build_diagnostic:
+        diagnostic = np.clip((zscore - 2.0) * 35.0, 0, 255).astype(np.uint8)
+        if exclude_lower_region:
+            diagnostic[int(height * 0.84):, :] = 0
+        diagnostic_bgr = cv2.cvtColor(diagnostic, cv2.COLOR_GRAY2BGR)
+        for index, (x, y) in enumerate(stars):
+            color = (0, 255, 0) if index < min(180, len(central)) else (0, 180, 255)
+            cv2.circle(diagnostic_bgr, (round(x), round(y)), 4, color, 1, cv2.LINE_AA)
     reference = np.clip(work, 0, 255).astype(np.uint8)
     return stars, diagnostic_bgr, reference
 
@@ -1029,7 +1032,8 @@ def annotate_frame(
     if draw_detected_stars:
         detection_gray = cv2.cvtColor(output, cv2.COLOR_BGR2GRAY)
         detected_stars, _diagnostic, _reference = _extract_stars(
-            detection_gray, maximum_stars=400, exclude_lower_region=False
+            detection_gray, maximum_stars=400, exclude_lower_region=False,
+            build_diagnostic=False,
         )
     grid_color = (90, 210, 255)
     grid = None
