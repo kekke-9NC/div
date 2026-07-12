@@ -229,7 +229,9 @@ class TimelapseCreatorTests(unittest.TestCase):
             mock.patch.object(
                 timelapse_creator, "_select_h264_encoder", return_value=("test", [], "test")
             ),
-            mock.patch.object(timelapse_creator.subprocess, "Popen", return_value=proc),
+            mock.patch.object(
+                timelapse_creator.subprocess, "Popen", return_value=proc
+            ) as ffmpeg_popen,
             mock.patch.object(
                 timelapse_creator, "_finish_ffmpeg_process", return_value=(0, b"")
             ),
@@ -247,6 +249,12 @@ class TimelapseCreatorTests(unittest.TestCase):
         prepare_calibration.assert_called_once()
         self.assertEqual(annotator.call_count, 2)
         self.assertEqual(stdin.write.call_count, 2)
+        ffmpeg_command = ffmpeg_popen.call_args.args[0]
+        self.assertIn("-nostats", ffmpeg_command)
+        self.assertIsNot(
+            ffmpeg_popen.call_args.kwargs["stderr"],
+            timelapse_creator.subprocess.PIPE,
+        )
 
 
 if __name__ == "__main__":
