@@ -37,6 +37,32 @@ class RuntimeStabilityTests(unittest.TestCase):
 
         self.assertIsNone(variable._tk)
 
+    def test_tk_variable_destructor_never_calls_tcl_from_worker_thread(self):
+        calls = []
+
+        class ThreadBoundTk:
+            def call(self, *_args):
+                calls.append(threading.current_thread())
+                raise AssertionError("worker thread called Tcl")
+
+            def getboolean(self, _value):
+                raise AssertionError("worker thread called Tcl")
+
+        variable = object.__new__(tkinter_safety.tk.Variable)
+        variable._tk = ThreadBoundTk()
+        variable._name = "PY_VAR_worker"
+        variable._tclCommands = None
+        worker = threading.Thread(
+            target=tkinter_safety._safe_variable_delete, args=(variable,)
+        )
+
+        worker.start()
+        worker.join(timeout=2)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(calls, [])
+        self.assertIsNone(variable._tk)
+
     def test_streaming_temporal_extrema_match_stacked_result(self):
         rng = np.random.default_rng(7)
         frames = [

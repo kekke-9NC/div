@@ -1,6 +1,7 @@
 """Small lifecycle guards for Tkinter interpreter shutdown."""
 
 import tkinter as tk
+import threading
 
 
 _original_variable_delete = getattr(
@@ -18,6 +19,15 @@ def _safe_variable_delete(variable):
     is no live Tcl resource left to release, so detaching the dead interpreter
     is the correct cleanup.
     """
+    # Tk is strictly owned by the GUI thread.  A dialog can become collectible
+    # while a video worker happens to trigger cyclic GC; calling even
+    # ``info exists`` from that worker can crash macOS in Tcl with SIGBUS before
+    # Python has an exception to catch.  Tcl will reclaim the variable with its
+    # interpreter, so detach without making any Tcl call off the main thread.
+    if threading.current_thread() is not threading.main_thread():
+        variable._tk = None
+        variable._tclCommands = None
+        return
     try:
         _original_variable_delete(variable)
     except (tk.TclError, RuntimeError, TypeError):
