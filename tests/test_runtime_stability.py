@@ -14,9 +14,29 @@ import model
 import image_processing
 import status_panel
 import video_processing
+import tkinter_safety
 
 
 class RuntimeStabilityTests(unittest.TestCase):
+    def test_tk_variable_destructor_ignores_dead_interpreter_boolean(self):
+        class DeadTk:
+            def call(self, *_args):
+                return None
+
+            def getboolean(self, value):
+                raise tkinter_safety.tk.TclError(
+                    f"expected boolean value but got {value!r}"
+                )
+
+        variable = object.__new__(tkinter_safety.tk.Variable)
+        variable._tk = DeadTk()
+        variable._name = "PY_VAR_dead"
+        variable._tclCommands = None
+
+        tkinter_safety._safe_variable_delete(variable)
+
+        self.assertIsNone(variable._tk)
+
     def test_streaming_temporal_extrema_match_stacked_result(self):
         rng = np.random.default_rng(7)
         frames = [

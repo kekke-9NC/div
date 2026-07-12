@@ -14,6 +14,7 @@ import importlib.util
 import cv2
 import numpy as np
 import tkinter as tk
+import tkinter_safety  # installs the CPython 3.11 Tcl-shutdown lifecycle guard
 import tkinter.font as tkfont
 from tkinter import ttk, filedialog, messagebox, Toplevel, Canvas, PanedWindow
 from tkinter.scrolledtext import ScrolledText

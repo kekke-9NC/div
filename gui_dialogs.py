@@ -328,9 +328,13 @@ class TimelapseDragDropWindow(Toplevel):
         window.title("プレートソルブ注釈の表示設定")
         window.transient(self)
         window.grab_set()
-        grid_var = tk.BooleanVar(value=self.timelapse_grid_var.get())
-        constellation_var = tk.BooleanVar(value=self.timelapse_constellations_var.get())
-        detected_var = tk.BooleanVar(value=self.timelapse_detected_stars_var.get())
+        grid_var = tk.BooleanVar(master=window, value=self.timelapse_grid_var.get())
+        constellation_var = tk.BooleanVar(
+            master=window, value=self.timelapse_constellations_var.get()
+        )
+        detected_var = tk.BooleanVar(
+            master=window, value=self.timelapse_detected_stars_var.get()
+        )
         ttk.Label(
             window,
             text="タイムラプスへ重ねる表示を自由に選択してください。",
@@ -412,7 +416,7 @@ class TimelapseDragDropWindow(Toplevel):
         window.title("プレートソルブの基準フレーム（タイムラプス採用フレーム）")
         window.transient(self)
         window.grab_set()
-        position_var = tk.IntVar(value=min(
+        position_var = tk.IntVar(master=window, value=min(
             max(0, self.timelapse_annotation_reference_sample_var.get()), len(sample_indices) - 1
         ))
         ttk.Label(
