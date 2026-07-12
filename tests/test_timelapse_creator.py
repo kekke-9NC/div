@@ -7,6 +7,7 @@ from datetime import datetime
 from types import SimpleNamespace
 from pathlib import Path
 import json
+import os
 
 import timelapse_creator
 from astropy.io import fits
@@ -14,6 +15,36 @@ from astropy.wcs import WCS
 
 
 class TimelapseCreatorTests(unittest.TestCase):
+    def test_ffprobe_rejects_video_with_h264_packet_errors(self):
+        with tempfile.TemporaryDirectory() as directory:
+            video = Path(directory, "broken.mp4")
+            video.write_bytes(b"broken")
+            probe = SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps({"streams": [{"nb_frames": "1500"}]}),
+                stderr="[h264] Invalid NAL unit size",
+            )
+            with mock.patch.object(timelapse_creator.subprocess, "run", return_value=probe):
+                count = timelapse_creator.get_video_frame_count(str(video))
+        self.assertEqual(count, 0)
+        self.assertIn(
+            "Invalid NAL",
+            timelapse_creator._video_probe_errors[os.path.abspath(str(video))],
+        )
+
+    def test_ffprobe_frame_count_is_used_for_valid_video(self):
+        with tempfile.TemporaryDirectory() as directory:
+            video = Path(directory, "valid.mp4")
+            video.write_bytes(b"video")
+            probe = SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps({"streams": [{"nb_frames": "1500"}]}),
+                stderr="",
+            )
+            with mock.patch.object(timelapse_creator.subprocess, "run", return_value=probe):
+                count = timelapse_creator.get_video_frame_count(str(video))
+        self.assertEqual(count, 1500)
+
     def test_folder_scan_excludes_recorder_temp_video(self):
         with tempfile.TemporaryDirectory() as directory:
             complete = Path(directory, "09.mp4")

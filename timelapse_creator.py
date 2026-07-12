@@ -31,6 +31,7 @@ import config
 import sys
 import tempfile
 import time
+import json
 
 
 _TIMESTAMP_POSITIONS = {
@@ -258,6 +259,7 @@ def _annotate_and_overlay(
 
 
 _annotation_worker_state: Dict = {}
+_annotation_thread_limit = None
 
 
 def _annotation_worker_init(
@@ -266,13 +268,21 @@ def _annotation_worker_init(
     timestamp_settings: Dict,
 ) -> None:
     """Initialise one spawned worker without copying settings per frame."""
-    global _annotation_worker_state
+    global _annotation_worker_state, _annotation_thread_limit
     # Twenty annotation processes must not each create a second OpenCV worker
     # pool.  The process count itself supplies the requested CPU parallelism.
     try:
         cv2.setNumThreads(1)
     except cv2.error:
         pass
+    # NumPy/OpenCV native pools multiplied by the process count previously
+    # produced dozens of runnable threads per worker.  Keep one native thread
+    # in each process so processes, rather than nested BLAS pools, own the CPU.
+    try:
+        from threadpoolctl import threadpool_limits
+        _annotation_thread_limit = threadpool_limits(limits=1)
+    except (ImportError, RuntimeError):
+        _annotation_thread_limit = None
     _annotation_worker_state = {
         "annotator": _load_local_annotation_callable(),
         "annotation_settings": annotation_settings,
@@ -294,15 +304,16 @@ def _annotation_worker(frame: np.ndarray, frame_timestamp: datetime) -> np.ndarr
 
 
 def _annotation_worker_count() -> int:
-    """Use a stable multi-process budget for the GUI-hosted annotator."""
+    """Use all practical cores without repeating the former 20-worker crash."""
     try:
-        configured = int(os.environ.get("METEOR_NATIVE_THREADS", "4"))
+        configured = int(os.environ.get("TIMELAPSE_ANNOTATION_PROCESSES", "8"))
     except ValueError:
-        configured = 4
-    # Each worker imports Astropy/OpenCV and receives full-resolution frames.
-    # More than four spawned workers can exhaust native GUI resources on macOS
-    # before CPU becomes the limiting factor, causing Tcl/Tk to segfault.
-    return min(4, max(1, configured), max(1, os.cpu_count() or 1))
+        configured = 8
+    cpu_limit = max(1, os.cpu_count() or 1)
+    available = get_available_memory_bytes()
+    # Astropy, WCS grids and one 1080p frame need roughly 300 MB per worker.
+    memory_limit = max(1, int(available // (320 * 1024 * 1024))) if available else 4
+    return min(8, max(1, configured), cpu_limit, memory_limit)
 
 
 def _run_annotate_pipeline(
@@ -557,6 +568,8 @@ def _is_unfinished_video(path: str) -> bool:
 # NVENC利用可能フラグ（キャッシュ）
 _nvenc_available: Optional[bool] = None
 _ffmpeg_encoder_names: Optional[set] = None
+_video_probe_cache: Dict[Tuple[str, int, int], Tuple[int, str]] = {}
+_video_probe_errors: Dict[str, str] = {}
 
 
 def _get_ffmpeg_encoder_names() -> set:
@@ -665,7 +678,48 @@ def get_files_from_path(path: str) -> Tuple[List[str], List[str]]:
 
 
 def get_video_frame_count(video_path: str) -> int:
-    """動画のフレーム数を取得する。"""
+    """Return a trustworthy frame count, rejecting damaged H.264 containers."""
+    try:
+        stat = os.stat(video_path)
+        cache_key = (os.path.abspath(video_path), stat.st_size, stat.st_mtime_ns)
+    except OSError:
+        return 0
+    cached = _video_probe_cache.get(cache_key)
+    if cached is not None:
+        return cached[0]
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "error", "-select_streams", "v:0",
+                "-show_entries", "stream=nb_frames,duration,r_frame_rate",
+                "-of", "json", video_path,
+            ],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            timeout=20, check=False,
+        )
+        errors = result.stderr.strip()
+        payload = json.loads(result.stdout or "{}")
+        streams = payload.get("streams") or []
+        if result.returncode == 0 and not errors and streams:
+            stream = streams[0]
+            raw_count = stream.get("nb_frames")
+            frame_count = int(raw_count) if str(raw_count).isdigit() else 0
+            if frame_count <= 0:
+                numerator, denominator = str(stream.get("r_frame_rate", "0/1")).split("/", 1)
+                fps = float(numerator) / max(float(denominator), 1.0)
+                frame_count = int(round(float(stream.get("duration", 0)) * fps))
+            if frame_count > 0:
+                _video_probe_cache[cache_key] = (frame_count, "")
+                return frame_count
+        reason = errors.splitlines()[0] if errors else "有効な映像ストリーム情報がありません"
+        _video_probe_cache[cache_key] = (0, reason)
+        _video_probe_errors[os.path.abspath(video_path)] = reason
+        return 0
+    except (FileNotFoundError, subprocess.TimeoutExpired, ValueError, TypeError, json.JSONDecodeError):
+        pass
+
+    # Minimal-runtime fallback. Full app bundles contain ffprobe, so damaged
+    # NAL units normally never reach this less strict path.
     cap = _open_video_capture(video_path)
     if not cap.isOpened():
         return 0
@@ -695,6 +749,11 @@ def count_total_frames(
         if frame_count > 0:
             sources.append((video_path, total_frames, frame_count))
             total_frames += frame_count
+        elif progress_callback:
+            reason = _video_probe_errors.get(os.path.abspath(video_path), "動画を読み取れません")
+            progress_callback(
+                f"警告: 破損または不完全な動画を除外します: {video_path} ({reason})"
+            )
 
     return total_frames, sources
 
