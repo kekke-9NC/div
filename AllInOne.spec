@@ -31,6 +31,8 @@ data_files += include([
     "*.json",
     "*.npz",
     "*.npy",
+    "assets/**/*.json",
+    "THIRD_PARTY_NOTICES.md",
 ])
 # Models
 data_files += include([

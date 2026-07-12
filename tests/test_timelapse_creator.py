@@ -1,11 +1,16 @@
 import unittest
 from unittest import mock
 import tempfile
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from types import SimpleNamespace
 from pathlib import Path
+import json
 
 import timelapse_creator
+from astropy.io import fits
+from astropy.wcs import WCS
 
 
 class TimelapseCreatorTests(unittest.TestCase):
@@ -226,6 +231,7 @@ class TimelapseCreatorTests(unittest.TestCase):
             mock.patch.object(
                 timelapse_creator, "_create_video_timelapse_fast"
             ) as fast_path,
+            mock.patch.object(timelapse_creator, "_run_annotate_pipeline") as annotation_pipeline,
             mock.patch.object(
                 timelapse_creator, "_select_h264_encoder", return_value=("test", [], "test")
             ),
@@ -247,14 +253,138 @@ class TimelapseCreatorTests(unittest.TestCase):
         self.assertTrue(result)
         fast_path.assert_not_called()
         prepare_calibration.assert_called_once()
-        self.assertEqual(annotator.call_count, 2)
-        self.assertEqual(stdin.write.call_count, 2)
+        self.assertEqual(annotator.call_count, 1)
+        annotation_pipeline.assert_called_once()
+        self.assertEqual(stdin.write.call_count, 1)
         ffmpeg_command = ffmpeg_popen.call_args.args[0]
         self.assertIn("-nostats", ffmpeg_command)
         self.assertIsNot(
             ffmpeg_popen.call_args.kwargs["stderr"],
             timelapse_creator.subprocess.PIPE,
         )
+
+    def test_annotate_pipeline_writes_completed_frames_in_sample_order(self):
+        indices = [10, 20, 30, 40, 50]
+        frames = [
+            timelapse_creator.np.full((4, 4, 3), value, dtype=timelapse_creator.np.uint8)
+            for value in range(1, len(indices) + 1)
+        ]
+        cache = mock.MagicMock()
+        cache.mean_for_index.side_effect = frames
+        loader = mock.MagicMock()
+        loader.timestamp_for_index.side_effect = [datetime(2026, 7, 10, 1, 0, i) for i in range(5)]
+        stdin = mock.MagicMock()
+
+        def annotate(frame, _timestamp):
+            # Ensure later jobs finish first; output must nevertheless remain ordered.
+            if int(frame[0, 0, 0]) == 1:
+                time.sleep(0.03)
+            return frame + 10
+
+        class ThreadedPool:
+            def __init__(self, max_workers, initializer=None, initargs=()):
+                self.executor = ThreadPoolExecutor(max_workers=max_workers)
+                self.initializer = initializer
+                self.initargs = initargs
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                self.executor.shutdown(wait=True)
+
+            def submit(self, function, *args):
+                return self.executor.submit(function, *args)
+
+        with (
+            mock.patch.object(timelapse_creator, "ProcessPoolExecutor", ThreadedPool),
+            mock.patch.object(timelapse_creator, "_annotation_worker", side_effect=annotate),
+        ):
+            timelapse_creator._run_annotate_pipeline(
+                indices,
+                total_output=6,
+                temporal_mean_cache=cache,
+                loader=loader,
+                annotation_settings={"calibration_path": "/tmp/calibration.json"},
+                resized_mask=None,
+                timestamp_settings={"enabled": False},
+                ffmpeg_stdin=stdin,
+                progress_callback=None,
+            )
+
+        self.assertEqual(cache.mean_for_index.call_args_list, [mock.call(index) for index in indices])
+        self.assertEqual(
+            [timelapse_creator.np.frombuffer(call.args[0], dtype=timelapse_creator.np.uint8)[0]
+             for call in stdin.write.call_args_list],
+            [11, 12, 13, 14, 15],
+        )
+
+    def test_annotate_pipeline_uses_real_process_workers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            wcs = WCS(naxis=2)
+            wcs.wcs.crpix = [8, 8]
+            wcs.wcs.cdelt = [-0.1, 0.1]
+            wcs.wcs.crval = [230.0, 52.0]
+            wcs.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+            wcs_path = root / "wideangle.wcs"
+            header = wcs.to_header(relax=True)
+            header["IMAGEW"] = 16
+            header["IMAGEH"] = 16
+            header["DATE-OBS"] = "2026-07-10T01:00:00"
+            fits.PrimaryHDU(header=header).writeto(wcs_path)
+            calibration = root / "calibration.json"
+            calibration.write_text(json.dumps({
+                "wcs_path": str(wcs_path), "reference_datetime": "2026-07-10T01:00:00",
+                "width": 16, "height": 16, "center_ra_deg": 230.0,
+            }), encoding="utf-8")
+            cache = mock.MagicMock()
+            cache.mean_for_index.side_effect = [
+                timelapse_creator.np.zeros((16, 16, 3), dtype=timelapse_creator.np.uint8),
+                timelapse_creator.np.zeros((16, 16, 3), dtype=timelapse_creator.np.uint8),
+            ]
+            loader = mock.MagicMock()
+            loader.timestamp_for_index.side_effect = [
+                datetime(2026, 7, 10, 1, 0, 0), datetime(2026, 7, 10, 1, 0, 1),
+            ]
+            stdin = mock.MagicMock()
+            timelapse_creator._run_annotate_pipeline(
+                [0, 1], 3, cache, loader,
+                {"calibration_path": str(calibration), "draw_constellations": False},
+                None, {"enabled": False}, stdin, None,
+            )
+        self.assertEqual(stdin.write.call_count, 2)
+
+    def test_selected_sample_calibration_uses_centered_temporal_mean(self):
+        frame = timelapse_creator.np.zeros((12, 20, 3), dtype=timelapse_creator.np.uint8)
+        loader = mock.MagicMock()
+        loader._get_source_for_index.return_value = ("input.mp4", 0, 100)
+        loader.load_temporal_mean_frame.return_value = frame
+        timestamp = datetime(2026, 7, 10, 1, 2, 3)
+        loader.timestamp_for_index.return_value = timestamp
+        solve = mock.Mock(return_value={"calibration_path": "/tmp/selected.json"})
+        module = SimpleNamespace(solve_reference_frame_local=solve)
+        settings = {
+            "calibration_path": None,
+            "reference_selected": True,
+            "reference_sample_index": 42,
+        }
+
+        with mock.patch.object(timelapse_creator.importlib, "import_module", return_value=module):
+            timelapse_creator._prepare_local_annotation_calibration(
+                ["input.mp4"], settings, None,
+                loader=loader, target_size=(20, 12), temporal_mean_radius=50,
+            )
+
+        loader.load_temporal_mean_frame.assert_called_once_with(42, (20, 12), radius=50)
+        solve.assert_called_once_with(
+            frame,
+            source_identity="input.mp4",
+            observation_datetime=timestamp,
+            reference_frame_index=42,
+            progress_callback=mock.ANY,
+        )
+        self.assertEqual(settings["calibration_path"], "/tmp/selected.json")
 
 
 if __name__ == "__main__":

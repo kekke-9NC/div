@@ -1,4 +1,5 @@
 from gui_common import *
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 class TimelapseDragDropWindow(Toplevel):
@@ -27,6 +28,9 @@ class TimelapseDragDropWindow(Toplevel):
         self.timelapse_annotation_calibration_var = tk.StringVar(
             value=getattr(config, "TIMELAPSE_ANNOTATION_CALIBRATION_PATH", "") or ""
         )
+        self.timelapse_constellations_var = tk.BooleanVar(value=False)
+        self.timelapse_annotation_reference_sample_var = tk.IntVar(value=0)
+        self.timelapse_annotation_reference_selected_var = tk.BooleanVar(value=False)
         
         self.title("タイムラプス作成")
         self.geometry("500x870")
@@ -38,8 +42,29 @@ class TimelapseDragDropWindow(Toplevel):
         self.grab_set()
     
     def setup_ui(self):
+        # Keep every control reachable on smaller displays.  The contents are
+        # embedded in a canvas rather than making individual sections scroll.
+        scroll_host = ttk.Frame(self)
+        scroll_host.pack(fill=tk.BOTH, expand=True)
+        self.timelapse_scroll_canvas = tk.Canvas(
+            scroll_host, highlightthickness=0, borderwidth=0
+        )
+        scrollbar = ttk.Scrollbar(
+            scroll_host, orient=tk.VERTICAL,
+            command=self.timelapse_scroll_canvas.yview,
+        )
+        self.timelapse_scroll_canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.timelapse_scroll_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         main_frame = ttk.Frame(self, padding=15)
-        main_frame.pack(fill=tk.BOTH, expand=True)
+        self._timelapse_scroll_window = self.timelapse_scroll_canvas.create_window(
+            (0, 0), window=main_frame, anchor=tk.NW
+        )
+        main_frame.bind("<Configure>", self._update_timelapse_scroll_region)
+        self.timelapse_scroll_canvas.bind("<Configure>", self._resize_timelapse_scroll_content)
+        self.bind("<MouseWheel>", self._scroll_timelapse_window, add="+")
+        self.bind("<Button-4>", self._scroll_timelapse_window, add="+")
+        self.bind("<Button-5>", self._scroll_timelapse_window, add="+")
         
         drop_frame = ttk.LabelFrame(main_frame, text="ファイル / フォルダ", padding=10)
         drop_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
@@ -153,6 +178,12 @@ class TimelapseDragDropWindow(Toplevel):
             text="当晩の広角歪み・向きを自動較正します。初回は通常より時間がかかります。",
             foreground="gray",
         ).pack(anchor=tk.W, pady=(2, 4))
+        self.timelapse_constellations_check = ttk.Checkbutton(
+            annotation_frame,
+            text="星座線を描画（名称なし）",
+            variable=self.timelapse_constellations_var,
+        )
+        self.timelapse_constellations_check.pack(anchor=tk.W, pady=(0, 4))
         calibration_row = ttk.Frame(annotation_frame)
         calibration_row.pack(fill=tk.X)
         ttk.Label(calibration_row, text="較正ファイル（任意）:").pack(side=tk.LEFT)
@@ -169,6 +200,18 @@ class TimelapseDragDropWindow(Toplevel):
             command=self._choose_timelapse_annotation_calibration,
         )
         self.timelapse_annotation_calibration_button.pack(side=tk.LEFT)
+        reference_row = ttk.Frame(annotation_frame)
+        reference_row.pack(fill=tk.X, pady=(5, 0))
+        self.timelapse_annotation_reference_button = ttk.Button(
+            reference_row,
+            text="基準フレームを選択",
+            command=self._choose_timelapse_annotation_reference_frame,
+        )
+        self.timelapse_annotation_reference_button.pack(side=tk.LEFT)
+        self.timelapse_annotation_reference_label = ttk.Label(
+            reference_row, text="自動（先頭動画）", foreground="gray"
+        )
+        self.timelapse_annotation_reference_label.pack(side=tk.LEFT, padx=(8, 0))
         self._toggle_timelapse_annotation_settings()
 
         mean_frame = ttk.LabelFrame(main_frame, text="ノイズ低減（時間平均）", padding=10)
@@ -222,6 +265,31 @@ class TimelapseDragDropWindow(Toplevel):
         ttk.Button(btn_frame, text="作成開始", command=self.start_creation).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="キャンセル", command=self.destroy).pack(side=tk.LEFT, padx=5)
 
+    def _update_timelapse_scroll_region(self, _event=None):
+        self.timelapse_scroll_canvas.configure(
+            scrollregion=self.timelapse_scroll_canvas.bbox("all")
+        )
+
+    def _resize_timelapse_scroll_content(self, event):
+        self.timelapse_scroll_canvas.itemconfigure(
+            self._timelapse_scroll_window, width=event.width
+        )
+
+    def _scroll_timelapse_window(self, event):
+        # macOS emits MouseWheel delta; X11 uses Button-4/5.  Do not scroll
+        # when the dialog content fits entirely in the current viewport.
+        region = self.timelapse_scroll_canvas.bbox("all")
+        if not region or region[3] <= self.timelapse_scroll_canvas.winfo_height():
+            return
+        if getattr(event, "num", None) == 4:
+            amount = -1
+        elif getattr(event, "num", None) == 5:
+            amount = 1
+        else:
+            delta = getattr(event, "delta", 0)
+            amount = -max(1, int(abs(delta) / 120)) if delta > 0 else max(1, int(abs(delta) / 120))
+        self.timelapse_scroll_canvas.yview_scroll(amount, "units")
+
     def _toggle_timelapse_timestamp_settings(self):
         state = tk.NORMAL if self.timelapse_timestamp_enabled_var.get() else tk.DISABLED
         self.timelapse_timestamp_position_box.config(state="readonly" if state == tk.NORMAL else tk.DISABLED)
@@ -231,6 +299,11 @@ class TimelapseDragDropWindow(Toplevel):
         state = tk.NORMAL if self.timelapse_annotation_enabled_var.get() else tk.DISABLED
         self.timelapse_annotation_calibration_entry.config(state=state)
         self.timelapse_annotation_calibration_button.config(state=state)
+        self.timelapse_constellations_check.config(state=state)
+        reference_state = state
+        if state == tk.NORMAL and not self.dropped_paths:
+            reference_state = tk.DISABLED
+        self.timelapse_annotation_reference_button.config(state=reference_state)
 
     def _choose_timelapse_annotation_calibration(self):
         path = filedialog.askopenfilename(
@@ -242,6 +315,175 @@ class TimelapseDragDropWindow(Toplevel):
         )
         if path:
             self.timelapse_annotation_calibration_var.set(path)
+
+    def _timelapse_reference_samples(self):
+        """Return the exact global frames that will be emitted by the timelapse."""
+        images = []
+        videos = []
+        for path in self.dropped_paths:
+            discovered_images, discovered_videos = timelapse_creator.get_files_from_path(path)
+            images.extend(discovered_images)
+            videos.extend(discovered_videos)
+        images, videos = sorted(set(images)), sorted(set(videos))
+        total, sources = timelapse_creator.count_total_frames(images, videos)
+        if total <= 0:
+            return None
+        samples = timelapse_creator.calculate_sample_indices(total, self.duration_var.get())
+        loader = timelapse_creator.FrameLoader(sources)
+        target_size = None
+        for global_index in samples:
+            frame = loader.load_frame(global_index, (0, 0))
+            if frame is not None:
+                target_size = (frame.shape[1], frame.shape[0])
+                break
+        if target_size is None:
+            loader.cleanup()
+            return None
+        sources = list(loader.sources)
+        loader.cleanup()
+        return sources, samples, target_size
+
+    def _choose_timelapse_annotation_reference_frame(self):
+        reference_data = self._timelapse_reference_samples()
+        if reference_data is None:
+            messagebox.showinfo(
+                "基準フレーム", "タイムラプスに使えるフレームがありません。入力を確認してください。"
+            )
+            return
+        sources, sample_indices, target_size = reference_data
+        window = Toplevel(self)
+        window.title("プレートソルブの基準フレーム（タイムラプス採用フレーム）")
+        window.transient(self)
+        window.grab_set()
+        position_var = tk.IntVar(value=min(
+            max(0, self.timelapse_annotation_reference_sample_var.get()), len(sample_indices) - 1
+        ))
+        ttk.Label(
+            window,
+            text="タイムラプス出力に実際に採用されるフレームを選びます。\n"
+                 "プレビューは元フレームです。プレートソルブ時だけ前後を時間平均します。",
+        ).pack(anchor=tk.W, padx=12, pady=(12, 2))
+        preview = ttk.Label(window, text="プレビューを読み込み中…")
+        preview.pack(padx=12, pady=10)
+        info = ttk.Label(window, foreground="gray")
+        info.pack(anchor=tk.W, padx=12)
+        scale = ttk.Scale(window, from_=0, to=max(0, len(sample_indices) - 1), variable=position_var)
+        scale.pack(fill=tk.X, padx=12, pady=(4, 10))
+        image_ref = {"image": None}
+        radius = max(0, min(100, int(self.temporal_mean_radius_var.get())))
+        preview_frames = {}
+        preview_metadata = {}
+        preview_events = queue.Queue()
+        stop_preview = threading.Event()
+        scale.state(["disabled"])
+
+        def show_frame(*_args):
+            position = max(0, min(len(sample_indices) - 1, int(position_var.get())))
+            global_index = sample_indices[position]
+            frame = preview_frames.get(position)
+            if frame is None:
+                preview.config(text="時間平均プレビューを準備中…")
+                return
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            image = Image.fromarray(rgb)
+            image.thumbnail((640, 360))
+            image_ref["image"] = ImageTk.PhotoImage(image)
+            preview.config(image=image_ref["image"], text="")
+            timestamp, source_name = preview_metadata.get(
+                position, (datetime.now(), "不明")
+            )
+            capture_text = timestamp.strftime("%Y/%m/%d %H:%M:%S.%f")[:-3]
+            info.config(
+                text=f"採用フレーム {position + 1}/{len(sample_indices)}  "
+                     f"プレビュー: 元フレーム（較正時は前後{radius}枚を平均）\n"
+                     f"{source_name}  {capture_text}"
+            )
+
+        scale.configure(command=lambda _value: show_frame())
+
+        def build_previews():
+            try:
+                worker_count = min(4, max(1, os.cpu_count() or 1), len(sample_indices))
+
+                def load_preview(position, global_index):
+                    # Each worker owns its decoder, so OpenCV can decode several
+                    # sampled source frames concurrently without its capture lock.
+                    if stop_preview.is_set():
+                        return position, None, None
+                    preview_loader = timelapse_creator.FrameLoader(sources)
+                    try:
+                        frame = preview_loader.load_frame(global_index, target_size)
+                        if frame is None:
+                            return position, None, None
+                        thumbnail = cv2.resize(frame, (480, 270), interpolation=cv2.INTER_AREA)
+                        source = preview_loader._get_source_for_index(global_index)
+                        return position, thumbnail, (
+                            preview_loader.timestamp_for_index(global_index),
+                            Path(source[0]).name if source else "不明",
+                        )
+                    finally:
+                        preview_loader.cleanup()
+
+                completed = 0
+                with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                    futures = [
+                        executor.submit(load_preview, position, global_index)
+                        for position, global_index in enumerate(sample_indices)
+                    ]
+                    for future in as_completed(futures):
+                        if stop_preview.is_set():
+                            break
+                        position, thumbnail, metadata = future.result()
+                        if thumbnail is not None:
+                            preview_frames[position] = thumbnail
+                            preview_metadata[position] = metadata
+                        completed += 1
+                        if completed % 8 == 0 or completed == len(sample_indices):
+                            preview_events.put(("progress", completed))
+                preview_events.put(("done", None))
+            except Exception as exc:
+                preview_events.put(("error", str(exc)))
+
+        def poll_preview_events():
+            if not window.winfo_exists():
+                return
+            try:
+                while True:
+                    kind, value = preview_events.get_nowait()
+                    if kind == "progress":
+                        info.config(text=f"時間平均プレビューを準備中: {value}/{len(sample_indices)}")
+                    elif kind == "done":
+                        scale.state(["!disabled"])
+                        show_frame()
+                    elif kind == "error":
+                        preview.config(text=f"プレビュー作成に失敗しました: {value}")
+            except queue.Empty:
+                pass
+            if not stop_preview.is_set():
+                window.after(50, poll_preview_events)
+
+        threading.Thread(target=build_previews, daemon=True).start()
+        window.after(50, poll_preview_events)
+
+        def confirm():
+            position = max(0, min(len(sample_indices) - 1, int(position_var.get())))
+            global_index = sample_indices[position]
+            self.timelapse_annotation_reference_sample_var.set(global_index)
+            self.timelapse_annotation_reference_selected_var.set(True)
+            self.timelapse_annotation_reference_label.config(
+                text=f"採用フレーム {position + 1}/{len(sample_indices)} を選択"
+            )
+            close_window()
+
+        def close_window():
+            stop_preview.set()
+            window.destroy()
+
+        controls = ttk.Frame(window)
+        controls.pack(pady=(0, 12))
+        ttk.Button(controls, text="このフレームを使う", command=confirm).pack(side=tk.LEFT, padx=4)
+        ttk.Button(controls, text="キャンセル", command=close_window).pack(side=tk.LEFT, padx=4)
+        window.protocol("WM_DELETE_WINDOW", close_window)
 
     def _on_temporal_mean_scale(self, value):
         """Scale is continuous, so convert its value to a whole frame count."""
@@ -282,6 +524,7 @@ class TimelapseDragDropWindow(Toplevel):
                 self.listbox.insert(tk.END, os.path.basename(path))
         
         self.update_drop_label()
+        self._toggle_timelapse_annotation_settings()
     
     def update_drop_label(self):
         """ドロップラベルのテキストを更新"""
@@ -295,6 +538,7 @@ class TimelapseDragDropWindow(Toplevel):
         self.dropped_paths.clear()
         self.listbox.delete(0, tk.END)
         self.update_drop_label()
+        self._toggle_timelapse_annotation_settings()
     
     def create_timelapse_mask(self):
         """タイムラプス用マスクを作成"""
@@ -452,6 +696,9 @@ class TimelapseDragDropWindow(Toplevel):
         annotation_settings = {
             "enabled": self.timelapse_annotation_enabled_var.get(),
             "calibration_path": self.timelapse_annotation_calibration_var.get().strip() or None,
+            "draw_constellations": self.timelapse_constellations_var.get(),
+            "reference_sample_index": self.timelapse_annotation_reference_sample_var.get(),
+            "reference_selected": self.timelapse_annotation_reference_selected_var.get(),
         }
         try:
             temporal_mean_radius = int(self.temporal_mean_radius_var.get())

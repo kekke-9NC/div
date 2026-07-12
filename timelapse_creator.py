@@ -9,7 +9,7 @@
 2. 必要なフレーム数に基づいて等間隔でサンプリングするインデックスを計算
 3. 並列処理でフレームを読み込み、ffmpegで動画を出力
 
-メモリ制限: 最大1GB
+メモリ使用量: OSが報告する空きメモリの80%を上限
 """
 
 import os
@@ -21,10 +21,11 @@ import numpy as np
 import bisect
 from pathlib import Path
 from datetime import datetime, timedelta
+from collections import OrderedDict
 from typing import List, Optional, Callable, Sequence, Tuple, Dict
 import subprocess
 import glob
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 import threading
 import config
 import sys
@@ -97,6 +98,10 @@ def _normalize_annotation_settings(annotation_settings: Optional[Dict]) -> Dict:
         calibration_path = os.path.abspath(os.path.expanduser(str(calibration_path)))
     else:
         calibration_path = None
+    try:
+        reference_sample_index = max(0, int(settings.get("reference_sample_index", 0)))
+    except (TypeError, ValueError):
+        reference_sample_index = 0
     return {
         "enabled": bool(
             settings.get(
@@ -105,6 +110,9 @@ def _normalize_annotation_settings(annotation_settings: Optional[Dict]) -> Dict:
             )
         ),
         "calibration_path": calibration_path,
+        "draw_constellations": bool(settings.get("draw_constellations", False)),
+        "reference_sample_index": reference_sample_index,
+        "reference_selected": bool(settings.get("reference_selected", False)),
     }
 
 
@@ -137,12 +145,38 @@ def _prepare_local_annotation_calibration(
     video_paths: Sequence[str],
     annotation_settings: Dict,
     progress_callback: Optional[Callable],
+    loader: Optional["FrameLoader"] = None,
+    target_size: Optional[Tuple[int, int]] = None,
+    temporal_mean_radius: int = 0,
 ) -> None:
     """Resolve or create one calibration before the first annotated frame."""
     calibration_path = annotation_settings.get("calibration_path")
     if calibration_path:
         if not os.path.exists(calibration_path):
             raise RuntimeError(f"較正ファイルがありません: {calibration_path}")
+        return
+    if loader is not None and target_size is not None and annotation_settings.get("reference_selected"):
+        reference_index = annotation_settings.get("reference_sample_index", 0)
+        source = loader._get_source_for_index(reference_index)
+        if source is None:
+            raise RuntimeError("選択した基準フレームが入力範囲外です。選び直してください。")
+        reference_frame = loader.load_temporal_mean_frame(
+            reference_index, target_size, radius=temporal_mean_radius
+        )
+        if reference_frame is None:
+            raise RuntimeError("選択した基準フレームの時間平均を作成できませんでした。")
+        module = importlib.import_module("local_wideangle_astrometry")
+        solve_frame = getattr(module, "solve_reference_frame_local", None)
+        if not callable(solve_frame):
+            raise RuntimeError("選択したタイムラプスフレームによるローカル広角較正に対応していません。")
+        result = solve_frame(
+            reference_frame,
+            source_identity=source[0],
+            observation_datetime=loader.timestamp_for_index(reference_index),
+            reference_frame_index=reference_index,
+            progress_callback=lambda message: _report_progress(progress_callback, str(message)),
+        )
+        annotation_settings["calibration_path"] = result["calibration_path"]
         return
     if not video_paths:
         raise RuntimeError(
@@ -170,11 +204,10 @@ def _apply_local_annotation(
 ) -> np.ndarray:
     """Apply a local annotation callable and enforce the encoder frame shape."""
     original_height, original_width = frame.shape[:2]
-    result = annotator(
-        frame,
-        frame_datetime,
-        calibration_path=annotation_settings.get("calibration_path"),
-    )
+    arguments = {"calibration_path": annotation_settings.get("calibration_path")}
+    if annotation_settings.get("draw_constellations"):
+        arguments["draw_constellations"] = True
+    result = annotator(frame, frame_datetime, **arguments)
     # Solvers may return ``(annotated_frame, calibration_info)`` so callers can
     # persist newly discovered calibration.  Timelapse output needs only frame 0.
     if isinstance(result, tuple):
@@ -194,6 +227,158 @@ def _apply_local_annotation(
     if result.dtype != np.uint8:
         result = np.clip(result, 0, 255).astype(np.uint8)
     return np.ascontiguousarray(result)
+
+
+
+def _annotate_and_overlay(
+    frame: np.ndarray,
+    frame_timestamp: datetime,
+    annotator: Callable,
+    annotation_settings: Dict,
+    mask: Optional[np.ndarray],
+    timestamp_settings: Dict,
+) -> np.ndarray:
+    """Apply mask, annotation, and timestamp overlay for one frame (worker task)."""
+    if frame is None:
+        return None
+    if mask is not None:
+        frame = cv2.bitwise_and(frame, frame, mask=mask)
+    frame = _apply_local_annotation(
+        annotator, frame, frame_timestamp, annotation_settings,
+    )
+    if timestamp_settings["enabled"]:
+        frame = _draw_timestamp(frame, frame_timestamp, timestamp_settings)
+    return frame
+
+
+_annotation_worker_state: Dict = {}
+
+
+def _annotation_worker_init(
+    annotation_settings: Dict,
+    resized_mask: Optional[np.ndarray],
+    timestamp_settings: Dict,
+) -> None:
+    """Initialise one spawned worker without copying settings per frame."""
+    global _annotation_worker_state
+    # Twenty annotation processes must not each create a second OpenCV worker
+    # pool.  The process count itself supplies the requested CPU parallelism.
+    try:
+        cv2.setNumThreads(1)
+    except cv2.error:
+        pass
+    _annotation_worker_state = {
+        "annotator": _load_local_annotation_callable(),
+        "annotation_settings": annotation_settings,
+        "mask": resized_mask,
+        "timestamp_settings": timestamp_settings,
+    }
+
+
+def _annotation_worker(frame: np.ndarray, frame_timestamp: datetime) -> np.ndarray:
+    """Process-pool task; kept module-level so macOS spawn can pickle it."""
+    return _annotate_and_overlay(
+        frame,
+        frame_timestamp,
+        _annotation_worker_state["annotator"],
+        _annotation_worker_state["annotation_settings"],
+        _annotation_worker_state["mask"],
+        _annotation_worker_state["timestamp_settings"],
+    )
+
+
+def _annotation_worker_count() -> int:
+    """Use a stable multi-process budget for the GUI-hosted annotator."""
+    try:
+        configured = int(os.environ.get("METEOR_NATIVE_THREADS", "4"))
+    except ValueError:
+        configured = 4
+    # Each worker imports Astropy/OpenCV and receives full-resolution frames.
+    # More than four spawned workers can exhaust native GUI resources on macOS
+    # before CPU becomes the limiting factor, causing Tcl/Tk to segfault.
+    return min(4, max(1, configured), max(1, os.cpu_count() or 1))
+
+
+def _run_annotate_pipeline(
+    remaining_indices: List[int],
+    total_output: int,
+    temporal_mean_cache: "TemporalMeanFrameCache",
+    loader: "FrameLoader",
+    annotation_settings: Dict,
+    resized_mask: Optional[np.ndarray],
+    timestamp_settings: Dict,
+    ffmpeg_stdin,
+    progress_callback: Optional[Callable],
+) -> None:
+    """Overlap sequential temporal means with bounded parallel annotation.
+
+    ``TemporalMeanFrameCache`` is deliberately consumed only by this calling
+    thread: its rolling sum is order-dependent.  Completed annotation tasks
+    are drained from the head of the ordered queue, so the raw-video stream
+    always retains the sampled frame order even if workers complete out of
+    order.  A small multiple of the worker count stays queued so producing a
+    temporal mean does not leave the CPU annotation processes idle.
+    """
+    if not remaining_indices:
+        return
+
+    worker_count = _annotation_worker_count()
+    # Three batches keep CPU workers busy without retaining hundreds of
+    # full-resolution frames or destabilising the macOS GUI process.
+    max_in_flight = min(worker_count * 3, len(remaining_indices))
+    pending: "OrderedDict[int, object]" = OrderedDict()
+    processed = 1  # The caller has already written the first frame.
+    processing_started = time.monotonic()
+    last_progress_emit = 0.0
+
+    def drain_oldest() -> None:
+        nonlocal processed, last_progress_emit
+        global_index, future = pending.popitem(last=False)
+        # Propagate annotation errors to create_timelapse rather than silently
+        # producing a shortened video that looks successful.
+        frame = future.result()
+        if ffmpeg_stdin is not None:
+            ffmpeg_stdin.write(frame.tobytes())
+        processed += 1
+        if processed % 120 == 0:
+            gc.collect()
+        now = time.monotonic()
+        if progress_callback and (
+            now - last_progress_emit >= 0.25 or processed == total_output
+        ):
+            last_progress_emit = now
+            elapsed = now - processing_started
+            fraction = processed / max(1, total_output)
+            eta = elapsed * (total_output - processed) / max(1, processed - 1)
+            _report_progress(
+                progress_callback,
+                f"処理中: {processed}/{total_output} フレーム "
+                f"({fraction * 100:.1f}%) / ETA: {_format_eta(eta)}",
+                fraction,
+                eta,
+            )
+
+    with ProcessPoolExecutor(
+        max_workers=worker_count,
+        initializer=_annotation_worker_init,
+        initargs=(annotation_settings, resized_mask, timestamp_settings),
+    ) as executor:
+        for global_index in remaining_indices:
+            # Keep temporal means sequential for the rolling cache, while the
+            # workers process prior means concurrently.
+            mean_frame = temporal_mean_cache.mean_for_index(global_index)
+            if mean_frame is None:
+                raise RuntimeError(
+                    f"時間平均を作成できませんでした: フレーム {global_index}"
+                )
+            pending[global_index] = executor.submit(
+                _annotation_worker, mean_frame, loader.timestamp_for_index(global_index)
+            )
+            if len(pending) >= max_in_flight:
+                drain_oldest()
+        while pending:
+            drain_oldest()
+
 
 
 def _source_created_datetime(path: str) -> datetime:
@@ -293,9 +478,6 @@ VIDEO_EXTENSIONS = {'.mp4', '.avi', '.mov', '.mkv', '.wmv', '.m4v'}
 
 # 出力動画のFPS
 OUTPUT_FPS = 60
-
-# メモリ制限: 1GB (絶対に守る)
-MAX_MEMORY_BYTES = 1 * 1024 * 1024 * 1024  # 1GB
 
 # タイムラプスの各採用フレームは、この前後範囲の時間平均画像に置き換える。
 TEMPORAL_MEAN_RADIUS_FRAMES = 50
@@ -432,9 +614,9 @@ def is_nvenc_available() -> bool:
     global _nvenc_available
     if _nvenc_available is not None:
         return _nvenc_available
-    
+
     _nvenc_available = "h264_nvenc" in _get_ffmpeg_encoder_names()
-    
+
     return _nvenc_available
 
 
@@ -444,7 +626,7 @@ def get_files_from_path(path: str) -> Tuple[List[str], List[str]]:
     """
     images = []
     videos = []
-    
+
     if os.path.isfile(path):
         ext = Path(path).suffix.lower()
         if ext in IMAGE_EXTENSIONS:
@@ -457,7 +639,7 @@ def get_files_from_path(path: str) -> Tuple[List[str], List[str]]:
             images.extend(glob.glob(pattern, recursive=False))
             pattern_upper = os.path.join(path, f'*{ext.upper()}')
             images.extend(glob.glob(pattern_upper, recursive=False))
-        
+
         for ext in VIDEO_EXTENSIONS:
             pattern = os.path.join(path, f'*{ext}')
             videos.extend(
@@ -469,10 +651,10 @@ def get_files_from_path(path: str) -> Tuple[List[str], List[str]]:
                 item for item in glob.glob(pattern_upper, recursive=False)
                 if not _is_unfinished_video(item)
             )
-    
+
     images = sorted(list(set(images)))
     videos = sorted(list(set(videos)))
-    
+
     return images, videos
 
 
@@ -494,33 +676,33 @@ def count_total_frames(
     """総フレーム数をカウントし、各ソースの情報を返す。"""
     sources = []
     total_frames = 0
-    
+
     for img_path in all_images:
         sources.append((img_path, total_frames, 1))
         total_frames += 1
-    
+
     for i, video_path in enumerate(all_videos):
         if progress_callback and i % 10 == 0:
             progress_callback(f"動画情報を取得中: {i + 1}/{len(all_videos)}")
-        
+
         frame_count = get_video_frame_count(video_path)
         if frame_count > 0:
             sources.append((video_path, total_frames, frame_count))
             total_frames += frame_count
-    
+
     return total_frames, sources
 
 
 def calculate_sample_indices(total_frames: int, target_duration_seconds: int) -> List[int]:
     """サンプリングするフレームのインデックスを計算する。"""
     target_frame_count = target_duration_seconds * OUTPUT_FPS
-    
+
     if total_frames <= target_frame_count:
         return list(range(total_frames))
-    
+
     step = total_frames / target_frame_count
     indices = [int(i * step) for i in range(target_frame_count)]
-    
+
     return indices
 
 
@@ -530,26 +712,28 @@ def calculate_batch_size(frame_width: int, frame_height: int) -> int:
     1フレームのメモリ = width * height * 3 (BGR)
     """
     frame_size_bytes = frame_width * frame_height * 3
-    
+
     # 安全マージンを取って、使用可能メモリの70%を使用
-    available_memory = MAX_MEMORY_BYTES * 0.7
-    
+    available_memory = (
+        get_available_memory_bytes() or (1 * 1024 * 1024 * 1024)
+    ) * 0.7
+
     # オーバーヘッド用に追加マージン（FFMPEGバッファ等）
     overhead_memory = 200 * 1024 * 1024  # 200MB
     usable_memory = available_memory - overhead_memory
-    
+
     # バッチサイズを計算（最低1、最大でもCPUコア数×4）
     max_batch = max(1, int(usable_memory / frame_size_bytes))
     cpu_limit = min(os.cpu_count() or 4, 8) * 4  # 最大32
-    
+
     batch_size = min(max_batch, cpu_limit)
-    
+
     return max(1, batch_size)
 
 
 class FrameLoader:
     """並列フレーム読み込み用クラス"""
-    
+
     def __init__(self, sources: List[Tuple[str, int, int]]):
         self.sources = sources
         self._video_caps: Dict[str, cv2.VideoCapture] = {}
@@ -557,34 +741,34 @@ class FrameLoader:
         self._video_fps: Dict[str, float] = {}
         self._source_times: Dict[str, datetime] = {}
         self._lock = threading.Lock()
-    
+
     def _get_source_for_index(self, global_index: int) -> Optional[Tuple[str, int, int]]:
         """グローバルインデックスに対応するソースを探す"""
         for path, start_idx, frame_count in self.sources:
             if start_idx <= global_index < start_idx + frame_count:
                 return (path, start_idx, frame_count)
         return None
-    
+
     def load_frame(self, global_index: int, target_size: Tuple[int, int]) -> Optional[np.ndarray]:
         """
         指定したグローバルインデックスのフレームを読み込む。
-        
+
         Args:
             global_index: グローバルフレームインデックス
             target_size: (width, height) リサイズ先サイズ
-            
+
         Returns:
             フレーム画像（BGRフォーマット）
         """
         source = self._get_source_for_index(global_index)
         if source is None:
             return None
-        
+
         path, start_idx, frame_count = source
         local_index = global_index - start_idx
-        
+
         frame = None
-        
+
         if Path(path).suffix.lower() in IMAGE_EXTENSIONS:
             frame = cv2.imread(path)
         else:
@@ -604,11 +788,11 @@ class FrameLoader:
                         self._video_positions[path] = local_index
                     else:
                         frame = None
-        
+
         if frame is not None and target_size[0] > 0 and target_size[1] > 0:
             if frame.shape[1] != target_size[0] or frame.shape[0] != target_size[1]:
                 frame = cv2.resize(frame, target_size)
-        
+
         return frame
 
     def load_frame_range(
@@ -1242,13 +1426,13 @@ def create_timelapse(
 ) -> bool:
     """
     タイムラプス動画を作成する（並列処理版）。
-    
+
     処理手順:
     1. 総フレーム数を事前計算
     2. 必要なフレームのインデックスを等間隔で計算
     3. バッチ単位で並列にフレームを読み込み
     4. FFMPEGに順番に書き込み
-    
+
     メモリ使用量は最大1GBに制限。
     """
     timestamp_settings = _normalize_timestamp_settings(timestamp_settings)
@@ -1279,34 +1463,34 @@ def create_timelapse(
         if progress_callback:
             progress_callback("入力パスが指定されていません。")
         return False
-    
+
     if progress_callback:
         progress_callback(f"ファイルをスキャン中... ({len(input_paths)}個のパス)")
-    
+
     # 全ての入力パスからファイルを収集
     all_images = []
     all_videos = []
-    
+
     for path in input_paths:
         images, videos = get_files_from_path(path)
         all_images.extend(images)
         all_videos.extend(videos)
-    
+
     all_images = sorted(list(set(all_images)))
     all_videos = sorted(list(set(all_videos)))
-    
+
     if progress_callback:
         progress_callback(f"検出: 画像 {len(all_images)}枚, 動画 {len(all_videos)}本")
-    
+
     if not all_images and not all_videos:
         if progress_callback:
             progress_callback("処理対象のファイルが見つかりませんでした。")
         return False
-    
+
     # ステップ1: 総フレーム数を計算
     if progress_callback:
         progress_callback("総フレーム数を計算中...")
-    
+
     total_frames, sources = count_total_frames(all_images, all_videos, progress_callback)
 
     # A file can disappear, remain headerless, or be replaced between folder
@@ -1325,38 +1509,29 @@ def create_timelapse(
         )
     all_videos = valid_video_paths
 
-    if local_annotator is not None:
-        try:
-            _prepare_local_annotation_calibration(
-                all_videos, annotation_settings, progress_callback
-            )
-        except Exception as exc:
-            _report_progress(progress_callback, f"エラー: ローカル広角較正に失敗しました: {exc}")
-            return False
-    
     if total_frames == 0:
         if progress_callback:
             progress_callback("フレームが見つかりませんでした。")
         return False
-    
+
     if progress_callback:
         progress_callback(f"総フレーム数: {total_frames}")
-    
+
     # ステップ2: サンプリングインデックスを計算
     target_frame_count = target_duration_seconds * OUTPUT_FPS
     sample_indices = calculate_sample_indices(total_frames, target_duration_seconds)
-    
+
     if progress_callback:
         progress_callback(f"サンプリング: {len(sample_indices)}フレーム ({OUTPUT_FPS}fps × {target_duration_seconds}秒)")
         if total_frames > target_frame_count:
             interval = total_frames / len(sample_indices)
             progress_callback(f"サンプリング間隔: {interval:.2f}フレームごとに1フレーム抽出")
-    
+
     # ステップ3: 最初の有効なフレームを取得して解像度を確認
     loader = FrameLoader(sources)
     first_frame = None
     first_valid_idx = 0
-    
+
     # 最初の有効なフレームを探す（破損ファイルをスキップ）
     for try_idx, global_idx in enumerate(sample_indices[:min(len(sample_indices), 100)]):
         first_frame = loader.load_frame(global_idx, (0, 0))  # リサイズなし
@@ -1365,15 +1540,30 @@ def create_timelapse(
             if progress_callback and try_idx > 0:
                 progress_callback(f"有効なフレームを発見: インデックス {global_idx} (試行 {try_idx + 1}回目)")
             break
-    
+
     if first_frame is None:
         if progress_callback:
             progress_callback("有効なフレームを取得できませんでした。入力ファイルが破損している可能性があります。")
         loader.cleanup()
         return False
-    
+
     base_height, base_width = first_frame.shape[:2]
     target_size = (base_width, base_height)
+
+    if local_annotator is not None:
+        try:
+            _prepare_local_annotation_calibration(
+                all_videos,
+                annotation_settings,
+                progress_callback,
+                loader=loader,
+                target_size=target_size,
+                temporal_mean_radius=temporal_mean_radius,
+            )
+        except Exception as exc:
+            _report_progress(progress_callback, f"エラー: ローカル広角較正に失敗しました: {exc}")
+            loader.cleanup()
+            return False
 
     # Common recording-folder workloads contain only matching video segments.
     # Keep decode, temporal averaging, sampling, masking, timestamp overlay and
@@ -1424,10 +1614,7 @@ def create_timelapse(
         )
     available_memory = get_available_memory_bytes()
     memory_budget = (
-        min(
-            MAX_MEMORY_BYTES,
-            int(available_memory * TEMPORAL_MEAN_AVAILABLE_MEMORY_FRACTION),
-        )
+        int(available_memory * TEMPORAL_MEAN_AVAILABLE_MEMORY_FRACTION)
         if available_memory is not None else None
     )
     temporal_mean_cache = TemporalMeanFrameCache(
@@ -1462,7 +1649,7 @@ def create_timelapse(
             progress_callback("警告: 最初の時間平均を作成できないため、元フレームを使用します")
     else:
         first_frame = mean_first_frame
-    
+
     # マスクをリサイズ（必要な場合）
     resized_mask = None
     if mask is not None:
@@ -1472,7 +1659,7 @@ def create_timelapse(
             resized_mask = mask
         if progress_callback:
             progress_callback("マスクを適用します")
-    
+
     # 最初のフレームにマスクを適用
     if resized_mask is not None:
         first_frame = cv2.bitwise_and(first_frame, first_frame, mask=resized_mask)
@@ -1480,11 +1667,13 @@ def create_timelapse(
     first_timestamp = loader.timestamp_for_index(sample_indices[first_valid_idx])
     if local_annotator is not None:
         try:
-            first_frame = _apply_local_annotation(
-                local_annotator,
+            first_frame = _annotate_and_overlay(
                 first_frame,
                 first_timestamp,
+                local_annotator,
                 annotation_settings,
+                resized_mask,
+                timestamp_settings,
             )
         except Exception as exc:
             _report_progress(progress_callback, f"エラー: ローカル星空注釈に失敗しました: {exc}")
@@ -1492,21 +1681,21 @@ def create_timelapse(
             loader.cleanup()
             return False
 
-    if timestamp_settings["enabled"]:
+    if timestamp_settings["enabled"] and local_annotator is None:
         first_frame = _draw_timestamp(
             first_frame,
             first_timestamp,
             timestamp_settings,
         )
-    
+
     # 有効なフレーム以降のサンプルインデックスを使用
     sample_indices = sample_indices[first_valid_idx:]
-    
+
     if progress_callback:
         progress_callback(f"出力設定: {base_width}x{base_height}, {OUTPUT_FPS}fps")
         mode = "全フレーム先読み＋スライド平均" if temporal_mean_cache._retain_all_frames else "ローリングキャッシュ＋スライド平均"
         progress_callback(f"時間平均: 前後{temporal_mean_radius}フレーム、方式: {mode}")
-    
+
     # FFMPEGを起動（macOSではVideoToolbox、NVIDIA環境ではNVENCを優先）
     _encoder_name, encoder_args, encoder_label = _select_h264_encoder()
     if progress_callback:
@@ -1518,7 +1707,7 @@ def create_timelapse(
         "-r", str(OUTPUT_FPS), "-i", "-", "-an", *encoder_args,
         "-pix_fmt", "yuv420p", output_path,
     ]
-    
+
     stderr_file = tempfile.TemporaryFile(mode="w+b")
     try:
         proc = subprocess.Popen(
@@ -1546,65 +1735,74 @@ def create_timelapse(
         temporal_mean_cache.clear()
         loader.cleanup()
         return False
-    
+
     try:
         # 最初のフレームを書き込み
         if proc.stdin:
             proc.stdin.write(first_frame.tobytes())
         del first_frame
         gc.collect()
-        
-        # 各採用フレームを時間平均に置き換える。複数の101フレーム
-        # ウィンドウを並列実行するとメモリが急増するため、ここは順番に処理する。
+
+        # 各採用フレームを時間平均に置き換える。
+        # annotateありの場合は並列パイプラインに、それ以外は従来通り逐次処理。
         remaining_indices = sample_indices[1:]
         total_output = len(sample_indices)
-        processed = 1
-        processing_started = time.monotonic()
-        last_progress_emit = 0.0
 
-        for global_idx in remaining_indices:
-            frame = temporal_mean_cache.mean_for_index(global_idx)
-            if frame is None:
-                if progress_callback:
-                    progress_callback(f"警告: 時間平均を作成できませんでした: フレーム {global_idx}")
-            elif proc.stdin:
-                if resized_mask is not None:
-                    frame = cv2.bitwise_and(frame, frame, mask=resized_mask)
-                frame_timestamp = loader.timestamp_for_index(global_idx)
-                if local_annotator is not None:
-                    frame = _apply_local_annotation(
-                        local_annotator,
-                        frame,
-                        frame_timestamp,
-                        annotation_settings,
+        if local_annotator is not None:
+            _report_progress(
+                progress_callback,
+                f"星空注釈を {_annotation_worker_count()} CPUプロセスで並列描画します（先読みキュー: {_annotation_worker_count() * 3}フレーム）",
+            )
+            _run_annotate_pipeline(
+                remaining_indices,
+                total_output,
+                temporal_mean_cache,
+                loader,
+                annotation_settings,
+                resized_mask,
+                timestamp_settings,
+                proc.stdin,
+                progress_callback,
+            )
+        else:
+            processed = 1
+            processing_started = time.monotonic()
+            last_progress_emit = 0.0
+            for global_idx in remaining_indices:
+                frame = temporal_mean_cache.mean_for_index(global_idx)
+                if frame is None:
+                    if progress_callback:
+                        progress_callback(f"警告: 時間平均を作成できませんでした: フレーム {global_idx}")
+                elif proc.stdin:
+                    if resized_mask is not None:
+                        frame = cv2.bitwise_and(frame, frame, mask=resized_mask)
+                    frame_timestamp = loader.timestamp_for_index(global_idx)
+                    if timestamp_settings["enabled"]:
+                        frame = _draw_timestamp(
+                            frame,
+                            frame_timestamp,
+                            timestamp_settings,
+                        )
+                    proc.stdin.write(frame.tobytes())
+                processed += 1
+                if processed % 120 == 0:
+                    gc.collect()
+                now = time.monotonic()
+                if progress_callback and (
+                    now - last_progress_emit >= 0.25 or processed == total_output
+                ):
+                    last_progress_emit = now
+                    elapsed = now - processing_started
+                    fraction = processed / max(1, total_output)
+                    eta = elapsed * (total_output - processed) / max(1, processed - 1)
+                    _report_progress(
+                        progress_callback,
+                        f"処理中: {processed}/{total_output} フレーム "
+                        f"({fraction * 100:.1f}%) / ETA: {_format_eta(eta)}",
+                        fraction,
+                        eta,
                     )
-                if timestamp_settings["enabled"]:
-                    frame = _draw_timestamp(
-                        frame,
-                        frame_timestamp,
-                        timestamp_settings,
-                    )
-                proc.stdin.write(frame.tobytes())
-            processed += 1
-            if processed % 120 == 0:
-                gc.collect()
 
-            now = time.monotonic()
-            if progress_callback and (
-                now - last_progress_emit >= 0.25 or processed == total_output
-            ):
-                last_progress_emit = now
-                elapsed = now - processing_started
-                fraction = processed / max(1, total_output)
-                eta = elapsed * (total_output - processed) / max(1, processed - 1)
-                _report_progress(
-                    progress_callback,
-                    f"処理中: {processed}/{total_output} フレーム "
-                    f"({fraction * 100:.1f}%) / ETA: {_format_eta(eta)}",
-                    fraction,
-                    eta,
-                )
-        
         return_code, stderr_output = _finish_ffmpeg_process(proc)
 
         if return_code != 0:
@@ -1616,7 +1814,7 @@ def create_timelapse(
                 except:
                     pass
             return False
-        
+
     except Exception as e:
         if progress_callback:
             progress_callback(f"エラー: フレーム処理中に問題が発生しました: {e}")
@@ -1633,27 +1831,27 @@ def create_timelapse(
         temporal_mean_cache.clear()
         loader.cleanup()
         gc.collect()
-    
+
     _report_progress(
         progress_callback,
         f"タイムラプス動画を保存しました: {output_path}",
         1.0,
         0.0,
     )
-    
+
     return True
 
 
 def get_default_output_path() -> str:
     """デフォルトの出力パスを取得する（ダウンロードフォルダ + 日時）。"""
     downloads_path = os.path.join(os.path.expanduser("~"), "Downloads")
-    
+
     if not os.path.exists(downloads_path):
         downloads_path = os.path.join(os.path.expanduser("~"), "Desktop")
-    
+
     now = datetime.now()
     date = now.strftime("%Y%m%d")
     time = now.strftime("%H%M%S")
     filename = f"{date}_timelapse_{time}.mp4"
-    
+
     return os.path.join(downloads_path, filename)
