@@ -1234,20 +1234,45 @@ def _insert_meteor_clips(
     target_size: Tuple[int, int],
     base_frame_count: int,
     progress_callback: Optional[Callable[[str], None]] = None,
+    annotation_settings: Optional[Dict] = None,
 ) -> bool:
     """Insert marked full-size meteor clips into an already rendered timelapse."""
     if not events:
         return True
     width, height = target_size
+    prepared_events = [dict(event) for event in events]
+    annotated_temporary_paths: List[str] = []
+    if annotation_settings and annotation_settings.get("enabled"):
+        for event_index, event in enumerate(prepared_events):
+            _report_progress(
+                progress_callback,
+                f"挿入流星動画を星空注釈中: {event_index + 1}/{len(prepared_events)}",
+            )
+            annotated_path = _create_annotated_meteor_clip(
+                event, target_size, annotation_settings
+            )
+            if annotated_path is None:
+                for path in annotated_temporary_paths:
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
+                _report_progress(
+                    progress_callback,
+                    f"エラー: 流星動画へ星空注釈を適用できませんでした: {event['clip_path']}",
+                )
+                return False
+            event["clip_path"] = annotated_path
+            annotated_temporary_paths.append(annotated_path)
     total_seconds = base_frame_count / OUTPUT_FPS
     command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", output_path]
-    for event in events:
+    for event in prepared_events:
         command.extend(["-i", event["clip_path"]])
 
     graph = []
     concat_labels = []
     cursor = 0.0
-    for event_index, event in enumerate(events):
+    for event_index, event in enumerate(prepared_events):
         position = max(cursor, min(total_seconds, event["output_frame"] / OUTPUT_FPS))
         if position > cursor + 1e-6:
             label = f"base{event_index}"
@@ -1289,7 +1314,7 @@ def _insert_meteor_clips(
         "-filter_complex", ";".join(graph), "-map", "[outv]", "-an",
         *encoder_args, "-pix_fmt", "yuv420p", temporary_path,
     ])
-    _report_progress(progress_callback, f"流星検出動画 {len(events)}本を時刻位置へ挿入中...")
+    _report_progress(progress_callback, f"流星検出動画 {len(prepared_events)}本を時刻位置へ挿入中...")
     try:
         result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=1800)
         if result.returncode != 0 or not os.path.isfile(temporary_path):
@@ -1307,6 +1332,101 @@ def _insert_meteor_clips(
                 os.remove(temporary_path)
         except OSError:
             pass
+        for path in annotated_temporary_paths:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+
+def _create_annotated_meteor_clip(
+    event: Dict,
+    target_size: Tuple[int, int],
+    annotation_settings: Dict,
+) -> Optional[str]:
+    """Apply the timelapse's celestial overlays to one inserted full clip."""
+    capture = _open_video_capture(event["clip_path"], decoder_threads=2)
+    if not capture.isOpened():
+        return None
+    fps = float(capture.get(cv2.CAP_PROP_FPS))
+    fps = fps if 0.1 <= fps <= 240 else 25.0
+    frame_count = max(1, int(capture.get(cv2.CAP_PROP_FRAME_COUNT)))
+    width, height = target_size
+    temporary_path = str(
+        Path(event["clip_path"]).with_name(
+            f".{Path(event['clip_path']).stem}.timelapse-annotated-{os.getpid()}-{time.time_ns()}.mp4"
+        )
+    )
+    command = [
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+        "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{width}x{height}",
+        "-r", f"{fps:.6f}", "-i", "-", "-an", "-c:v", "libx264",
+        "-preset", "ultrafast", "-crf", "15", "-pix_fmt", "yuv420p",
+        temporary_path,
+    ]
+    process = None
+    stderr_file = tempfile.TemporaryFile(mode="w+b")
+    try:
+        process = subprocess.Popen(
+            command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=stderr_file
+        )
+        if process.stdin is None:
+            return None
+        worker_count = _annotation_worker_count()
+        max_pending = max(1, worker_count * 2)
+        pending: "OrderedDict[int, object]" = OrderedDict()
+        frame_index = 0
+        detection_time = event["detection_time"]
+        clip_start = detection_time - timedelta(seconds=(frame_count - 1) / (2 * fps))
+
+        def drain_oldest():
+            _index, future = pending.popitem(last=False)
+            process.stdin.write(future.result().tobytes())
+
+        with ProcessPoolExecutor(
+            max_workers=worker_count,
+            initializer=_annotation_worker_init,
+            initargs=(annotation_settings, None, {"enabled": False}),
+        ) as executor:
+            while True:
+                ok, frame = capture.read()
+                if not ok or frame is None:
+                    break
+                if frame.shape[1] != width or frame.shape[0] != height:
+                    frame = cv2.resize(frame, target_size, interpolation=cv2.INTER_AREA)
+                timestamp = clip_start + timedelta(seconds=frame_index / fps)
+                pending[frame_index] = executor.submit(_annotation_worker, frame, timestamp)
+                frame_index += 1
+                if len(pending) >= max_pending:
+                    drain_oldest()
+            while pending:
+                drain_oldest()
+        if frame_index == 0:
+            return None
+        return_code, _stderr = _finish_ffmpeg_process(process)
+        process = None
+        if return_code != 0 or not os.path.isfile(temporary_path):
+            return None
+        return temporary_path
+    except Exception:
+        return None
+    finally:
+        capture.release()
+        if process is not None:
+            if process.stdin is not None and not process.stdin.closed:
+                try:
+                    process.stdin.close()
+                except (OSError, ValueError):
+                    pass
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+        stderr_file.close()
+        if process is not None or not os.path.isfile(temporary_path):
+            try:
+                os.remove(temporary_path)
+            except OSError:
+                pass
 
 
 def _ffconcat_escape(path: str) -> str:
@@ -1830,7 +1950,8 @@ def create_timelapse(
             del first_frame
             gc.collect()
             if meteor_events and not _insert_meteor_clips(
-                output_path, meteor_events, target_size, len(sample_indices), progress_callback
+                output_path, meteor_events, target_size, len(sample_indices), progress_callback,
+                annotation_settings=annotation_settings,
             ):
                 return False
             return True
@@ -2080,7 +2201,8 @@ def create_timelapse(
         gc.collect()
 
     if meteor_events and not _insert_meteor_clips(
-        output_path, meteor_events, target_size, len(sample_indices), progress_callback
+        output_path, meteor_events, target_size, len(sample_indices), progress_callback,
+        annotation_settings=annotation_settings,
     ):
         return False
 
