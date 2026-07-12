@@ -81,6 +81,100 @@ class LocalWideangleAstrometryTests(unittest.TestCase):
             self.assertEqual(output.shape, frame.shape)
             self.assertGreater(np.count_nonzero(output), 300)
 
+    def test_annotation_can_draw_constellation_lines(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            wcs_path = root / "calibration.wcs"
+            header = _tan_wcs(320, 180).to_header(relax=True)
+            header["IMAGEW"] = 320
+            header["IMAGEH"] = 180
+            header["DATE-OBS"] = "2026-07-10T01:00:00"
+            fits.PrimaryHDU(header=header).writeto(wcs_path)
+            metadata_path = root / "calibration.json"
+            metadata_path.write_text(json.dumps({
+                "wcs_path": str(wcs_path),
+                "reference_datetime": "2026-07-10T01:00:00",
+                "width": 320, "height": 180, "center_ra_deg": 230.0,
+                "sip_support_hull": [[5, 5], [315, 5], [315, 175], [5, 175]],
+            }), encoding="utf-8")
+            frame = np.zeros((180, 320, 3), dtype=np.uint8)
+            lines = (np.asarray([[229.0, 52.0], [231.0, 52.0]]),)
+            with mock.patch.object(local_astro, "_constellation_lines", lines):
+                grid_only = local_astro.annotate_frame(
+                    frame, datetime(2026, 7, 10, 1, 0), str(metadata_path)
+                )
+                with_lines = local_astro.annotate_frame(
+                    frame, datetime(2026, 7, 10, 1, 0), str(metadata_path),
+                    draw_constellations=True,
+                )
+            self.assertGreater(np.count_nonzero(with_lines), np.count_nonzero(grid_only))
+
+    def test_selected_video_frame_uses_distinct_cache_key_and_timestamp(self):
+        class Capture:
+            def isOpened(self): return True
+            def set(self, *_args): pass
+            def read(self): return True, np.zeros((20, 30, 3), dtype=np.uint8)
+            def get(self, prop): return 20.0 if prop == cv2.CAP_PROP_FPS else 0
+            def release(self): pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = str(Path(directory) / "20260710" / "01" / "clip.mp4")
+            with mock.patch.object(local_astro, "_open_video", return_value=Capture()), \
+                 mock.patch.object(local_astro, "_solve_samples", return_value={"calibration_path": "x"}) as solve:
+                result = local_astro.solve_video_frame_local(source, 40, cache_root=directory)
+        self.assertEqual(result["calibration_path"], "x")
+        self.assertEqual(solve.call_args.kwargs["reference_key"].split("_")[1], "40")
+        self.assertEqual(solve.call_args.kwargs["reference_frame_index"], 40)
+
+    def test_solver_normalizes_bgr_selected_frame_before_star_extraction(self):
+        frame = np.zeros((20, 30, 3), dtype=np.uint8)
+
+        def extract(average, _samples, maximum_stars):
+            self.assertEqual(average.ndim, 2)
+            return [[1.0, 1.0]] * 20, average, average
+
+        with tempfile.TemporaryDirectory() as directory:
+            with (
+                mock.patch.object(local_astro, "_extract_stars", side_effect=extract),
+                mock.patch.object(local_astro, "_solve_stars", return_value={"catalog_stars": []}),
+                mock.patch.object(local_astro, "_refine_sip_wcs", return_value={"sip_refined": True}),
+                mock.patch.object(local_astro, "_persist_calibration", return_value={}),
+            ):
+                local_astro._solve_samples(
+                    frame, None, str(Path(directory) / "input.mp4"),
+                    datetime(2026, 7, 10, 1, 0), directory, None,
+                )
+
+    def test_constellation_projection_skips_points_rounded_outside_frame(self):
+        class BorderWCS:
+            def world_to_pixel_values(self, ra, _dec):
+                return np.asarray([100.0, 110.0]), np.asarray([1079.6, 1079.7])
+
+        output = np.zeros((1080, 1920, 3), dtype=np.uint8)
+        support = np.full((1080, 1920), 255, dtype=np.uint8)
+        with mock.patch.object(
+            local_astro, "_constellation_lines",
+            (np.asarray([[10.0, 20.0], [11.0, 20.0]]),),
+        ):
+            local_astro._draw_constellation_lines(output, BorderWCS(), 0.0, support)
+        self.assertEqual(np.count_nonzero(output), 0)
+
+    def test_constellation_projection_refines_inaccurate_inverse_sip_estimate(self):
+        class ForwardOnlyWCS:
+            def world_to_pixel_values(self, ra, dec):
+                # Deliberately emulate a 30px inaccurate inverse SIP estimate.
+                return np.asarray(ra) + 130.0, np.asarray(dec)
+
+            def pixel_to_world_values(self, x, y):
+                return np.asarray(x) - 100.0, np.asarray(y)
+
+        x, y, valid = local_astro._project_sky_with_forward_wcs(
+            ForwardOnlyWCS(), np.asarray([10.0, 11.0]), np.asarray([20.0, 20.0])
+        )
+        np.testing.assert_allclose(x, [110.0, 111.0], atol=0.05)
+        np.testing.assert_allclose(y, [20.0, 20.0], atol=0.05)
+        self.assertTrue(valid.all())
+
     def test_catalog_bootstrap_fits_real_sip_coefficients(self):
         width, height = 640, 360
         base = _tan_wcs(width, height)

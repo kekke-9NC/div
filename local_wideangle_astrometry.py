@@ -9,7 +9,7 @@ lens-distortion model.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 import hashlib
 from importlib import metadata as importlib_metadata
 import json
@@ -32,12 +32,15 @@ from astropy.wcs import WCS
 from astropy.wcs.utils import fit_wcs_from_points
 
 
-ALGORITHM_VERSION = "local-wideangle-sip-v1"
+# v2 uses a match-count-aware SIP order.  The previous fixed high-order fit
+# could overfit sparse matches and bend constellation lines near the rim.
+ALGORITHM_VERSION = "local-wideangle-sip-v2"
 SIDEREAL_DAY_SECONDS = 86164.0905
 _DATE_DIR = re.compile(r"^(?:19|20)\d{6}$")
 _cache_lock = threading.RLock()
 _loaded_calibrations: Dict[str, Tuple[float, Dict[str, Any], WCS]] = {}
 _forward_grid_cache: Dict[Tuple[int, int, int], Dict[str, Any]] = {}
+_constellation_lines: Optional[Tuple[np.ndarray, ...]] = None
 
 
 class CalibrationNotFoundError(RuntimeError):
@@ -132,19 +135,26 @@ def _night_identity(path: str, width: int, height: int) -> Tuple[str, str]:
     return date, digest
 
 
-def _calibration_paths(source_path: str, width: int, height: int, cache_root: Optional[str] = None):
+def _calibration_paths(
+    source_path: str,
+    width: int,
+    height: int,
+    cache_root: Optional[str] = None,
+    reference_key: Optional[str] = None,
+):
     root = Path(cache_root).expanduser().resolve() if cache_root else _default_cache_root()
     date, camera = _night_identity(source_path, width, height)
     night = root / "calibrations" / camera / date
     night.mkdir(parents=True, exist_ok=True)
+    suffix = f"_{reference_key}" if reference_key else ""
     return {
         "root": root,
         "night": night,
-        "metadata": night / "calibration.json",
-        "wcs": night / "wideangle_sip.wcs",
-        "diagnostic": night / "star_extraction.jpg",
-        "reference": night / "reference_average.jpg",
-        "validation": night / "calibration_validation.jpg",
+        "metadata": night / f"calibration{suffix}.json",
+        "wcs": night / f"wideangle_sip{suffix}.wcs",
+        "diagnostic": night / f"star_extraction{suffix}.jpg",
+        "reference": night / f"reference{suffix}.jpg",
+        "validation": night / f"calibration_validation{suffix}.jpg",
         "index_cache": root / "indexes",
     }
 
@@ -315,6 +325,7 @@ def _persist_calibration(
     paths: Dict[str, Path],
     solve_result: Dict[str, Any],
     star_count: int,
+    reference_frame_index: Optional[int] = None,
 ) -> Dict[str, Any]:
     payload = {
         "algorithm_version": ALGORITHM_VERSION,
@@ -337,6 +348,8 @@ def _persist_calibration(
             "sip_support_hull", "validation_path",
         ) if key in solve_result},
     }
+    if reference_frame_index is not None:
+        payload["reference_frame_index"] = int(reference_frame_index)
     temporary = paths["metadata"].with_suffix(".json.tmp")
     temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(temporary, paths["metadata"])
@@ -431,7 +444,16 @@ def _refine_sip_wcs(
 
     if len(catalog_array) < 18:
         return {"sip_refined": False, "sip_reason": "too few verified wide-field pairs"}
-    sip_degree = 5 if len(catalog_array) >= 26 else 4
+    # A SIP5 model has enough freedom to fit sparse/noisy matches perfectly in
+    # the centre while diverging at the image rim.  Use higher orders only
+    # when the verified matches support them across the field.
+    match_count = len(catalog_array)
+    if match_count >= 80:
+        sip_degree = 5
+    elif match_count >= 45:
+        sip_degree = 4
+    else:
+        sip_degree = 3
     current = fit_wcs_from_points(
         (observed[observed_array, 0] + 1.0, observed[observed_array, 1] + 1.0),
         sky[catalog_array], projection=current, sip_degree=sip_degree,
@@ -465,7 +487,7 @@ def _refine_sip_wcs(
             )
         cv2.putText(
             validation,
-            f"green=observed magenta=SIP5 predicted  median={np.median(residuals):.2f}px p95={np.percentile(residuals, 95):.2f}px",
+            f"green=observed magenta=SIP{sip_degree} predicted  median={np.median(residuals):.2f}px p95={np.percentile(residuals, 95):.2f}px",
             (18, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2, cv2.LINE_AA,
         )
         cv2.imwrite(str(paths["validation"]), validation, [cv2.IMWRITE_JPEG_QUALITY, 95])
@@ -492,9 +514,22 @@ def _solve_samples(
     date_obs: datetime,
     cache_root: Optional[str],
     progress_callback: Optional[Callable],
+    reference_key: Optional[str] = None,
+    reference_frame_index: Optional[int] = None,
 ) -> Dict[str, Any]:
+    # All star-extraction operations require one channel.  The selected-frame
+    # path supplies a BGR temporal-mean frame while the legacy paths already
+    # use grayscale, so normalize both here.
+    if average.ndim == 3:
+        average = cv2.cvtColor(average, cv2.COLOR_BGR2GRAY)
+    if average.ndim != 2:
+        raise ValueError("較正用画像はグレースケールまたはBGR画像である必要があります")
+    if samples is not None and samples.ndim == 4:
+        samples = np.stack(
+            [cv2.cvtColor(item, cv2.COLOR_BGR2GRAY) for item in samples]
+        )
     height, width = average.shape[:2]
-    paths = _calibration_paths(source_path, width, height, cache_root)
+    paths = _calibration_paths(source_path, width, height, cache_root, reference_key)
     stars, diagnostic, reference = _extract_stars(
         average, samples, maximum_stars=180
     )
@@ -513,7 +548,7 @@ def _solve_samples(
         )
     solved.update(sip_stats)
     payload = _persist_calibration(
-        source_path, date_obs, width, height, paths, solved, len(stars)
+        source_path, date_obs, width, height, paths, solved, len(stars), reference_frame_index
     )
     _emit(
         progress_callback,
@@ -561,6 +596,85 @@ def solve_video_local(
     average, samples = _video_sample_stack(video_path)
     return _solve_samples(
         average, samples, video_path, _capture_datetime(video_path), cache_root, progress_callback
+    )
+
+
+def solve_video_frame_local(
+    video_path: str,
+    frame_index: int,
+    *,
+    cache_root: Optional[str] = None,
+    force: bool = False,
+    progress_callback: Optional[Callable] = None,
+) -> Dict[str, Any]:
+    """Create or reuse a calibration from one user-selected video frame."""
+    frame_index = max(0, int(frame_index))
+    cap = _open_video(video_path)
+    if not cap.isOpened():
+        raise IOError(f"動画を開けません: {video_path}")
+    try:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+        ok, frame = cap.read()
+        fps = float(cap.get(cv2.CAP_PROP_FPS))
+    finally:
+        cap.release()
+    if not ok or frame is None:
+        raise IOError(f"基準フレームを読めません: {video_path} #{frame_index}")
+    height, width = frame.shape[:2]
+    source_digest = hashlib.sha256(
+        str(Path(video_path).expanduser().resolve()).encode("utf-8")
+    ).hexdigest()[:8]
+    reference_key = f"frame_{frame_index}_{source_digest}"
+    paths = _calibration_paths(video_path, width, height, cache_root, reference_key)
+    if not force and paths["metadata"].exists() and paths["wcs"].exists():
+        payload = json.loads(paths["metadata"].read_text(encoding="utf-8"))
+        if payload.get("algorithm_version") == ALGORITHM_VERSION:
+            return {"calibration_path": str(paths["metadata"]), **payload}
+    timestamp = _capture_datetime(video_path)
+    if 0.1 <= fps <= 240.0:
+        timestamp += timedelta(seconds=frame_index / fps)
+    return _solve_samples(
+        frame,
+        None,
+        video_path,
+        timestamp,
+        cache_root,
+        progress_callback,
+        reference_key=reference_key,
+        reference_frame_index=frame_index,
+    )
+
+
+def solve_reference_frame_local(
+    frame: np.ndarray,
+    *,
+    source_identity: str,
+    observation_datetime: datetime,
+    reference_frame_index: int,
+    cache_root: Optional[str] = None,
+    force: bool = False,
+    progress_callback: Optional[Callable] = None,
+) -> Dict[str, Any]:
+    """Solve one already-averaged frame selected from timelapse output."""
+    height, width = frame.shape[:2]
+    source_digest = hashlib.sha256(
+        str(Path(source_identity).expanduser().resolve()).encode("utf-8")
+    ).hexdigest()[:8]
+    reference_key = f"sample_{int(reference_frame_index)}_{source_digest}"
+    paths = _calibration_paths(source_identity, width, height, cache_root, reference_key)
+    if not force and paths["metadata"].exists() and paths["wcs"].exists():
+        payload = json.loads(paths["metadata"].read_text(encoding="utf-8"))
+        if payload.get("algorithm_version") == ALGORITHM_VERSION:
+            return {"calibration_path": str(paths["metadata"]), **payload}
+    return _solve_samples(
+        frame,
+        None,
+        source_identity,
+        observation_datetime,
+        cache_root,
+        progress_callback,
+        reference_key=reference_key,
+        reference_frame_index=reference_frame_index,
     )
 
 
@@ -751,10 +865,146 @@ def _draw_contour_lines(
             )
 
 
+def _load_constellation_lines() -> Tuple[np.ndarray, ...]:
+    """Load vendored J2000 constellation stick figures once per process."""
+    global _constellation_lines
+    with _cache_lock:
+        if _constellation_lines is not None:
+            return _constellation_lines
+        asset = Path(__file__).with_name("assets") / "constellations.lines.json"
+        try:
+            payload = json.loads(asset.read_text(encoding="utf-8"))
+            lines = []
+            for feature in payload.get("features", []):
+                geometry = feature.get("geometry", {})
+                for line in geometry.get("coordinates", []):
+                    points = np.asarray(line, dtype=float)
+                    if points.ndim == 2 and points.shape[0] >= 2 and points.shape[1] >= 2:
+                        lines.append(points[:, :2])
+            _constellation_lines = tuple(lines)
+        except (OSError, ValueError, TypeError):
+            # Missing optional display data must never prevent grid annotation.
+            _constellation_lines = ()
+        return _constellation_lines
+
+
+def _project_sky_with_forward_wcs(
+    wcs: WCS,
+    ra: np.ndarray,
+    dec: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Invert pixel->sky numerically, including forward-only SIP distortion.
+
+    The local SIP fit intentionally stores the reliable forward distortion
+    model.  ``WCS.world_to_pixel_values`` can use an approximate inverse SIP
+    solution and visibly displace constellation endpoints in a wide-angle
+    image.  It remains a useful starting estimate; Newton refinement below
+    evaluates only the calibrated forward transform.
+    """
+    ra = np.asarray(ra, dtype=float)
+    dec = np.asarray(dec, dtype=float)
+    try:
+        x, y = wcs.world_to_pixel_values(ra, dec)
+    except Exception:
+        return np.zeros_like(ra), np.zeros_like(dec), np.zeros_like(ra, dtype=bool)
+    x, y = np.asarray(x, dtype=float), np.asarray(y, dtype=float)
+    valid = np.isfinite(x) & np.isfinite(y)
+    step = 0.5
+    for _ in range(8):
+        active = np.flatnonzero(valid)
+        if not len(active):
+            break
+        try:
+            current_ra, current_dec = wcs.pixel_to_world_values(x[active], y[active])
+            x_ra, x_dec = wcs.pixel_to_world_values(x[active] + step, y[active])
+            y_ra, y_dec = wcs.pixel_to_world_values(x[active], y[active] + step)
+        except Exception:
+            valid[active] = False
+            continue
+        scale = np.cos(np.deg2rad(dec[active]))
+        # Work in locally tangent RA/Dec coordinates to avoid the RA=0 wrap.
+        error_ra = ((np.asarray(current_ra) - ra[active] + 180.0) % 360.0 - 180.0) * scale
+        error_dec = np.asarray(current_dec) - dec[active]
+        j00 = ((np.asarray(x_ra) - np.asarray(current_ra) + 180.0) % 360.0 - 180.0) * scale / step
+        j01 = ((np.asarray(y_ra) - np.asarray(current_ra) + 180.0) % 360.0 - 180.0) * scale / step
+        j10 = (np.asarray(x_dec) - np.asarray(current_dec)) / step
+        j11 = (np.asarray(y_dec) - np.asarray(current_dec)) / step
+        determinant = j00 * j11 - j01 * j10
+        usable = np.isfinite(determinant) & (np.abs(determinant) > 1e-10)
+        failed = active[~usable]
+        valid[failed] = False
+        active = active[usable]
+        if not len(active):
+            continue
+        dx = (j11[usable] * error_ra[usable] - j01[usable] * error_dec[usable]) / determinant[usable]
+        dy = (-j10[usable] * error_ra[usable] + j00[usable] * error_dec[usable]) / determinant[usable]
+        # Limit a pathological initial estimate rather than jumping across the
+        # full image and converging to a different branch of the distortion.
+        x[active] -= np.clip(dx, -80.0, 80.0)
+        y[active] -= np.clip(dy, -80.0, 80.0)
+        if len(dx) and float(np.max(np.maximum(np.abs(dx), np.abs(dy)))) < 0.02:
+            break
+    return x, y, valid & np.isfinite(x) & np.isfinite(y)
+
+
+def _draw_constellation_lines(
+    output: np.ndarray,
+    wcs: WCS,
+    delta_ra: float,
+    support_mask: np.ndarray,
+) -> None:
+    """Project visible constellation line segments into the current frame."""
+    height, width = output.shape[:2]
+    color = (255, 175, 80)
+    lines = _load_constellation_lines()
+    if not lines:
+        return
+    # Project all constellation vertices together.  A SIP forward evaluation
+    # is expensive, while one vectorized Newton solve covers every line.
+    lengths = [len(line) for line in lines]
+    coordinates = np.concatenate(lines, axis=0)
+    ra = (coordinates[:, 0] - delta_ra) % 360.0
+    x, y, usable = _project_sky_with_forward_wcs(wcs, ra, coordinates[:, 1])
+    points = np.column_stack((x, y))
+    rounded = np.rint(points).astype(np.int32, copy=False)
+    usable &= (points[:, 0] >= 0) & (points[:, 0] < width)
+    usable &= (points[:, 1] >= 0) & (points[:, 1] < height)
+    # A coordinate such as y=1079.6 is mathematically inside a 1080px frame,
+    # but rounds to 1080 and must not index the support mask.
+    usable &= (rounded[:, 0] >= 0) & (rounded[:, 0] < width)
+    usable &= (rounded[:, 1] >= 0) & (rounded[:, 1] < height)
+    in_support = np.zeros(len(rounded), dtype=bool)
+    valid_indices = np.flatnonzero(usable)
+    if len(valid_indices):
+        in_support[valid_indices] = (
+            support_mask[rounded[valid_indices, 1], rounded[valid_indices, 0]] > 0
+        )
+    usable &= in_support
+    offset = 0
+    for length in lengths:
+        line_points = rounded[offset:offset + length]
+        line_usable = usable[offset:offset + length]
+        offset += length
+        start = 0
+        while start < len(line_points):
+            while start < len(line_points) and not line_usable[start]:
+                start += 1
+            end = start
+            while end < len(line_points) and line_usable[end]:
+                end += 1
+            if end - start >= 2:
+                cv2.polylines(
+                    output, [line_points[start:end].reshape(-1, 1, 2)],
+                    False, color, 1, cv2.LINE_AA,
+                )
+            start = end + 1
+
+
 def annotate_frame(
     frame_bgr: np.ndarray,
     frame_datetime: datetime,
     calibration_path: Optional[str] = None,
+    draw_constellations: bool = False,
 ) -> np.ndarray:
     """Draw a distortion-aware, sidereal-time-corrected celestial grid."""
     metadata, wcs = _load_calibration(calibration_path)
@@ -789,6 +1039,8 @@ def annotate_frame(
                 grid_layer, grid["dec_contours"].lines(float(dec_value)), grid_color,
                 label=f"Dec {dec_value:+d}°",
             )
+    if draw_constellations:
+        _draw_constellation_lines(grid_layer, wcs, delta_ra, grid["support_mask"])
     support = grid["support_mask"] > 0
     output[support] = grid_layer[support]
     status = f"LOCAL SIP5  {target:%Y-%m-%d %H:%M:%S}"

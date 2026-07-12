@@ -24,6 +24,7 @@ PAYLOAD_FILES = [
     "image_processing.py",
     "lighten_blend_image.py",
     "lighten_blend_video.py",
+    "local_wideangle_astrometry.py",
     "location_utils.py",
     "long_exposure_map.py",
     "meteor_angle_analysis.py",
@@ -63,6 +64,8 @@ add_data(root / "bootstrap_requirements.txt", ".")
 for rel in PAYLOAD_FILES:
     rel_path = Path(rel)
     add_data(root / rel_path, str(Path("payload") / rel_path.parent))
+add_data(root / "assets" / "constellations.lines.json", "payload/assets")
+add_data(root / "THIRD_PARTY_NOTICES.md", "payload")
 
 
 a = Analysis(
