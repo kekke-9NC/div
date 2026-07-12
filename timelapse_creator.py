@@ -266,8 +266,23 @@ def _finish_ffmpeg_process(proc: subprocess.Popen) -> Tuple[int, bytes]:
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait()
+    # The portable raw-video path writes frames while FFmpeg writes its status
+    # to stderr.  Leaving stderr as an unread PIPE eventually fills its small
+    # OS buffer (typically after a few minutes) and deadlocks both processes:
+    # FFmpeg waits to report progress and Python waits to write the next frame.
+    # It is redirected to a temporary file below, so retrieve only its tail
+    # once the child has exited.  Keep the PIPE fallback for older callers and
+    # tests which construct a process directly.
+    stderr_file = getattr(proc, "_timelapse_stderr_file", None)
     try:
-        stderr_output = proc.stderr.read() if proc.stderr is not None else b""
+        if stderr_file is not None:
+            stderr_file.seek(0, os.SEEK_END)
+            size = stderr_file.tell()
+            stderr_file.seek(max(0, size - 128 * 1024))
+            stderr_output = stderr_file.read()
+            stderr_file.close()
+        else:
+            stderr_output = proc.stderr.read() if proc.stderr is not None else b""
     except (OSError, ValueError):
         stderr_output = b""
     return proc.returncode if proc.returncode is not None else -1, stderr_output or b""
@@ -1497,26 +1512,35 @@ def create_timelapse(
     if progress_callback:
         progress_callback(f"エンコード: {encoder_label}")
     command = [
-        "ffmpeg", "-y", "-f", "rawvideo", "-vcodec", "rawvideo",
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostats", "-y",
+        "-f", "rawvideo", "-vcodec", "rawvideo",
         "-s", f"{base_width}x{base_height}", "-pix_fmt", "bgr24",
         "-r", str(OUTPUT_FPS), "-i", "-", "-an", *encoder_args,
         "-pix_fmt", "yuv420p", output_path,
     ]
     
+    stderr_file = tempfile.TemporaryFile(mode="w+b")
     try:
         proc = subprocess.Popen(
             command,
             stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE
+            # Do not use PIPE here: this process may run for many minutes
+            # while Python is busy producing annotated frames.
+            stderr=stderr_file,
         )
+        # ``Popen`` has no general-purpose metadata slot in its type hints,
+        # but instances are mutable and this keeps cleanup centralized.
+        proc._timelapse_stderr_file = stderr_file
     except FileNotFoundError:
+        stderr_file.close()
         if progress_callback:
             progress_callback("エラー: ffmpegが見つかりません。ffmpegをインストールしてください。")
         temporal_mean_cache.clear()
         loader.cleanup()
         return False
     except Exception as e:
+        stderr_file.close()
         if progress_callback:
             progress_callback(f"エラー: ffmpegの起動に失敗しました: {e}")
         temporal_mean_cache.clear()
@@ -1602,6 +1626,10 @@ def create_timelapse(
         # これを行わないと子プロセスが残り、次回の作成時に不安定になる。
         if (proc.stdin is not None and not proc.stdin.closed) or proc.poll() is None:
             _finish_ffmpeg_process(proc)
+        # Also close it here when _finish_ffmpeg_process is replaced by a
+        # caller/test hook.  (The normal implementation closes it itself.)
+        if not stderr_file.closed:
+            stderr_file.close()
         temporal_mean_cache.clear()
         loader.cleanup()
         gc.collect()
