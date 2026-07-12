@@ -83,6 +83,59 @@ class TimelapseCreatorTests(unittest.TestCase):
         self.assertEqual(graph.count("color=yellow@0.5"), 2)
         self.assertIn("concat=n=5:v=1:a=0", graph)
 
+    def test_inserted_meteor_clip_is_annotated_when_timelapse_annotation_is_enabled(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            wcs = WCS(naxis=2)
+            wcs.wcs.crpix = [160, 90]
+            wcs.wcs.cdelt = [-0.1, 0.1]
+            wcs.wcs.crval = [230.0, 52.0]
+            wcs.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+            wcs_path = root / "wideangle.wcs"
+            header = wcs.to_header(relax=True)
+            header["IMAGEW"] = 320
+            header["IMAGEH"] = 180
+            fits.PrimaryHDU(header=header).writeto(wcs_path)
+            calibration = root / "calibration.json"
+            calibration.write_text(json.dumps({
+                "wcs_path": str(wcs_path),
+                "reference_datetime": "2026-07-10T01:00:00",
+                "width": 320, "height": 180, "center_ra_deg": 230.0,
+            }), encoding="utf-8")
+            clip = root / "meteor_full.mp4"
+            writer = timelapse_creator.cv2.VideoWriter(
+                str(clip), timelapse_creator.cv2.VideoWriter_fourcc(*"mp4v"), 5.0, (320, 180)
+            )
+            self.assertTrue(writer.isOpened())
+            for value in (10, 20, 30):
+                writer.write(timelapse_creator.np.full(
+                    (180, 320, 3), value, dtype=timelapse_creator.np.uint8
+                ))
+            writer.release()
+
+            result = timelapse_creator._create_annotated_meteor_clip(
+                {
+                    "clip_path": str(clip),
+                    "detection_time": datetime(2026, 7, 10, 1, 0, 1),
+                },
+                (320, 180),
+                {
+                    "enabled": True, "calibration_path": str(calibration),
+                    "draw_grid": False, "draw_constellations": False,
+                    "draw_detected_stars": False,
+                },
+            )
+            try:
+                self.assertIsNotNone(result)
+                capture = timelapse_creator.cv2.VideoCapture(result)
+                ok, frame = capture.read()
+                capture.release()
+                self.assertTrue(ok)
+                self.assertGreater(int(frame.max()), 100)
+            finally:
+                if result and os.path.exists(result):
+                    os.remove(result)
+
     def test_ffprobe_rejects_video_with_h264_packet_errors(self):
         with tempfile.TemporaryDirectory() as directory:
             video = Path(directory, "broken.mp4")
@@ -395,6 +448,9 @@ class TimelapseCreatorTests(unittest.TestCase):
         self.assertEqual(annotator.call_count, 1)
         annotation_pipeline.assert_called_once()
         insert_meteors.assert_called_once()
+        self.assertTrue(
+            insert_meteors.call_args.kwargs["annotation_settings"]["enabled"]
+        )
         self.assertEqual(stdin.write.call_count, 1)
         ffmpeg_command = ffmpeg_popen.call_args.args[0]
         self.assertIn("-nostats", ffmpeg_command)
