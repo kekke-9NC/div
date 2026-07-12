@@ -187,6 +187,35 @@ class TimelapseCreatorTests(unittest.TestCase):
             calibration_path="/tmp/night-calibration.json",
         )
 
+    def test_local_annotation_passes_independent_overlay_options(self):
+        source = timelapse_creator.np.zeros((12, 20, 3), dtype=timelapse_creator.np.uint8)
+        annotator = mock.Mock(return_value=source.copy())
+        frame_time = datetime(2026, 7, 10, 1, 2, 3)
+
+        timelapse_creator._apply_local_annotation(
+            annotator, source, frame_time,
+            {
+                "calibration_path": "/tmp/calibration.json",
+                "draw_grid": False,
+                "draw_constellations": True,
+                "draw_detected_stars": True,
+            },
+        )
+
+        annotator.assert_called_once_with(
+            source, frame_time,
+            calibration_path="/tmp/calibration.json",
+            draw_grid=False,
+            draw_constellations=True,
+            draw_detected_stars=True,
+        )
+
+    def test_annotation_settings_default_to_grid_without_other_overlays(self):
+        settings = timelapse_creator._normalize_annotation_settings({"enabled": True})
+        self.assertTrue(settings["draw_grid"])
+        self.assertFalse(settings["draw_constellations"])
+        self.assertFalse(settings["draw_detected_stars"])
+
     def test_annotation_enabled_bypasses_fast_ffmpeg_and_annotates_each_frame(self):
         frame = timelapse_creator.np.zeros((16, 16, 3), dtype=timelapse_creator.np.uint8)
         frame_time = datetime(2026, 7, 10, 1, 0, 0)

@@ -109,6 +109,52 @@ class LocalWideangleAstrometryTests(unittest.TestCase):
                 )
             self.assertGreater(np.count_nonzero(with_lines), np.count_nonzero(grid_only))
 
+    def test_detected_star_mode_draws_hollow_markers_from_frame_pixels(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            wcs_path = root / "calibration.wcs"
+            header = _tan_wcs(320, 180).to_header(relax=True)
+            header["IMAGEW"] = 320
+            header["IMAGEH"] = 180
+            fits.PrimaryHDU(header=header).writeto(wcs_path)
+            metadata_path = root / "calibration.json"
+            metadata_path.write_text(json.dumps({
+                "wcs_path": str(wcs_path),
+                "reference_datetime": "2026-07-10T01:00:00",
+                "width": 320, "height": 180, "center_ra_deg": 230.0,
+            }), encoding="utf-8")
+            frame = np.zeros((180, 320, 3), dtype=np.uint8)
+            for x, y in ((80, 50), (120, 70), (180, 90), (240, 110)):
+                frame[y, x] = 255
+            with mock.patch.object(local_astro, "_forward_grid_model") as grid_model:
+                output = local_astro.annotate_frame(
+                    frame, datetime(2026, 7, 10, 1, 0), str(metadata_path),
+                    draw_grid=False, draw_detected_stars=True,
+                )
+            grid_model.assert_not_called()
+            # The source star remains visible at the empty center while the
+            # green circumference is added around it.
+            np.testing.assert_array_equal(output[50, 80], frame[50, 80])
+            self.assertGreater(int(output[50, 84, 1]), int(frame[50, 84, 1]))
+
+    def test_grid_can_be_disabled_independently(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            wcs_path = root / "calibration.wcs"
+            fits.PrimaryHDU(header=_tan_wcs(320, 180).to_header(relax=True)).writeto(wcs_path)
+            metadata_path = root / "calibration.json"
+            metadata_path.write_text(json.dumps({
+                "wcs_path": str(wcs_path),
+                "reference_datetime": "2026-07-10T01:00:00",
+                "width": 320, "height": 180,
+            }), encoding="utf-8")
+            with mock.patch.object(local_astro, "_forward_grid_model") as grid_model:
+                local_astro.annotate_frame(
+                    np.zeros((180, 320, 3), dtype=np.uint8),
+                    datetime(2026, 7, 10, 1, 0), str(metadata_path), draw_grid=False,
+                )
+            grid_model.assert_not_called()
+
     def test_selected_video_frame_uses_distinct_cache_key_and_timestamp(self):
         class Capture:
             def isOpened(self): return True
