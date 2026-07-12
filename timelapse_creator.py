@@ -110,7 +110,9 @@ def _normalize_annotation_settings(annotation_settings: Optional[Dict]) -> Dict:
             )
         ),
         "calibration_path": calibration_path,
+        "draw_grid": bool(settings.get("draw_grid", True)),
         "draw_constellations": bool(settings.get("draw_constellations", False)),
+        "draw_detected_stars": bool(settings.get("draw_detected_stars", False)),
         "reference_sample_index": reference_sample_index,
         "reference_selected": bool(settings.get("reference_selected", False)),
     }
@@ -205,8 +207,12 @@ def _apply_local_annotation(
     """Apply a local annotation callable and enforce the encoder frame shape."""
     original_height, original_width = frame.shape[:2]
     arguments = {"calibration_path": annotation_settings.get("calibration_path")}
+    if not annotation_settings.get("draw_grid", True):
+        arguments["draw_grid"] = False
     if annotation_settings.get("draw_constellations"):
         arguments["draw_constellations"] = True
+    if annotation_settings.get("draw_detected_stars"):
+        arguments["draw_detected_stars"] = True
     result = annotator(frame, frame_datetime, **arguments)
     # Solvers may return ``(annotated_frame, calibration_info)`` so callers can
     # persist newly discovered calibration.  Timelapse output needs only frame 0.

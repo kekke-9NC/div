@@ -208,6 +208,7 @@ def _extract_stars(
     average: np.ndarray,
     temporal_samples: Optional[np.ndarray] = None,
     maximum_stars: int = 180,
+    exclude_lower_region: bool = True,
 ) -> Tuple[List[List[float]], np.ndarray, np.ndarray]:
     work = average.astype(np.float32)
     if temporal_samples is not None and len(temporal_samples) >= 3:
@@ -219,7 +220,8 @@ def _extract_stars(
     zscore = (highpass - median) / (1.4826 * mad)
     height, width = average.shape[:2]
     binary = (zscore > 5.0).astype(np.uint8)
-    binary[int(height * 0.84):, :] = 0
+    if exclude_lower_region:
+        binary[int(height * 0.84):, :] = 0
     binary[:, :5] = 0
     binary[:, max(0, width - 5):] = 0
     count, labels, stats, centroids = cv2.connectedComponentsWithStats(binary, 8)
@@ -245,7 +247,8 @@ def _extract_stars(
     selected = central[:180] + outer[: max(0, maximum_stars - min(180, len(central)))]
     stars = [position for _flux, position in selected[:maximum_stars]]
     diagnostic = np.clip((zscore - 2.0) * 35.0, 0, 255).astype(np.uint8)
-    diagnostic[int(height * 0.84):, :] = 0
+    if exclude_lower_region:
+        diagnostic[int(height * 0.84):, :] = 0
     diagnostic_bgr = cv2.cvtColor(diagnostic, cv2.COLOR_GRAY2BGR)
     for index, (x, y) in enumerate(stars):
         color = (0, 255, 0) if index < min(180, len(central)) else (0, 180, 255)
@@ -1005,8 +1008,10 @@ def annotate_frame(
     frame_datetime: datetime,
     calibration_path: Optional[str] = None,
     draw_constellations: bool = False,
+    draw_grid: bool = True,
+    draw_detected_stars: bool = False,
 ) -> np.ndarray:
-    """Draw a distortion-aware, sidereal-time-corrected celestial grid."""
+    """Draw selected local, distortion-aware celestial annotations."""
     metadata, wcs = _load_calibration(calibration_path)
     output = np.ascontiguousarray(frame_bgr.copy())
     if output.ndim == 2:
@@ -1020,29 +1025,49 @@ def annotate_frame(
     elif reference.tzinfo is None and target.tzinfo is not None:
         target = target.replace(tzinfo=None)
     delta_ra = ((target - reference).total_seconds() / SIDEREAL_DAY_SECONDS) * 360.0
-    grid_color = (90, 210, 255)
-    grid = _forward_grid_model(wcs, metadata, width, height)
-    grid_layer = output.copy()
-    for ra_value in range(0, 360, 15):
-        reference_level = (ra_value - delta_ra) % 360.0
-        reference_level = grid["center_ra"] + (
-            (reference_level - grid["center_ra"] + 180.0) % 360.0 - 180.0
+    detected_stars: List[List[float]] = []
+    if draw_detected_stars:
+        detection_gray = cv2.cvtColor(output, cv2.COLOR_BGR2GRAY)
+        detected_stars, _diagnostic, _reference = _extract_stars(
+            detection_gray, maximum_stars=400, exclude_lower_region=False
         )
-        if grid["ra_min"] <= reference_level <= grid["ra_max"]:
-            _draw_contour_lines(
-                grid_layer, grid["ra_contours"].lines(reference_level), grid_color,
-                label=f"RA {ra_value // 15:02d}h",
+    grid_color = (90, 210, 255)
+    grid = None
+    grid_layer = output.copy()
+    if draw_grid or draw_constellations:
+        grid = _forward_grid_model(wcs, metadata, width, height)
+    if draw_grid and grid is not None:
+        for ra_value in range(0, 360, 15):
+            reference_level = (ra_value - delta_ra) % 360.0
+            reference_level = grid["center_ra"] + (
+                (reference_level - grid["center_ra"] + 180.0) % 360.0 - 180.0
             )
-    for dec_value in range(-80, 81, 10):
-        if grid["dec_min"] <= dec_value <= grid["dec_max"]:
-            _draw_contour_lines(
-                grid_layer, grid["dec_contours"].lines(float(dec_value)), grid_color,
-                label=f"Dec {dec_value:+d}°",
-            )
-    if draw_constellations:
+            if grid["ra_min"] <= reference_level <= grid["ra_max"]:
+                _draw_contour_lines(
+                    grid_layer, grid["ra_contours"].lines(reference_level), grid_color,
+                    label=f"RA {ra_value // 15:02d}h",
+                )
+        for dec_value in range(-80, 81, 10):
+            if grid["dec_min"] <= dec_value <= grid["dec_max"]:
+                _draw_contour_lines(
+                    grid_layer, grid["dec_contours"].lines(float(dec_value)), grid_color,
+                    label=f"Dec {dec_value:+d}°",
+                )
+    if draw_constellations and grid is not None:
         _draw_constellation_lines(grid_layer, wcs, delta_ra, grid["support_mask"])
-    support = grid["support_mask"] > 0
-    output[support] = grid_layer[support]
+    if grid is not None:
+        support = grid["support_mask"] > 0
+        output[support] = grid_layer[support]
+    if draw_detected_stars:
+        marker_radius = max(4, round(min(width, height) * 0.0045))
+        marker_thickness = max(1, round(marker_radius / 3))
+        for x, y in detected_stars:
+            center = (int(round(x)), int(round(y)))
+            if 0 <= center[0] < width and 0 <= center[1] < height:
+                cv2.circle(
+                    output, center, marker_radius, (80, 255, 120),
+                    marker_thickness, cv2.LINE_AA,
+                )
     status = f"LOCAL SIP5  {target:%Y-%m-%d %H:%M:%S}"
     cv2.rectangle(output, (8, 8), (8 + max(270, len(status) * 9), 34), (0, 0, 0), -1)
     cv2.putText(output, status, (14, 27), cv2.FONT_HERSHEY_SIMPLEX,

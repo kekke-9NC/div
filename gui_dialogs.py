@@ -29,6 +29,8 @@ class TimelapseDragDropWindow(Toplevel):
             value=getattr(config, "TIMELAPSE_ANNOTATION_CALIBRATION_PATH", "") or ""
         )
         self.timelapse_constellations_var = tk.BooleanVar(value=False)
+        self.timelapse_grid_var = tk.BooleanVar(value=True)
+        self.timelapse_detected_stars_var = tk.BooleanVar(value=False)
         self.timelapse_annotation_reference_sample_var = tk.IntVar(value=0)
         self.timelapse_annotation_reference_selected_var = tk.BooleanVar(value=False)
         
@@ -169,7 +171,7 @@ class TimelapseDragDropWindow(Toplevel):
         annotation_frame.pack(fill=tk.X, pady=(0, 10))
         ttk.Checkbutton(
             annotation_frame,
-            text="歪み補正した天球グリッドを描画（外部API不使用）",
+            text="ローカル星空注釈を有効化（外部API不使用）",
             variable=self.timelapse_annotation_enabled_var,
             command=self._toggle_timelapse_annotation_settings,
         ).pack(anchor=tk.W)
@@ -178,12 +180,16 @@ class TimelapseDragDropWindow(Toplevel):
             text="当晩の広角歪み・向きを自動較正します。初回は通常より時間がかかります。",
             foreground="gray",
         ).pack(anchor=tk.W, pady=(2, 4))
-        self.timelapse_constellations_check = ttk.Checkbutton(
-            annotation_frame,
-            text="星座線を描画（名称なし）",
-            variable=self.timelapse_constellations_var,
+        overlay_row = ttk.Frame(annotation_frame)
+        overlay_row.pack(fill=tk.X, pady=(0, 4))
+        self.timelapse_annotation_overlay_button = ttk.Button(
+            overlay_row, text="表示内容を設定…",
+            command=self._choose_timelapse_annotation_overlays,
         )
-        self.timelapse_constellations_check.pack(anchor=tk.W, pady=(0, 4))
+        self.timelapse_annotation_overlay_button.pack(side=tk.LEFT)
+        self.timelapse_annotation_overlay_label = ttk.Label(overlay_row, foreground="gray")
+        self.timelapse_annotation_overlay_label.pack(side=tk.LEFT, padx=(8, 0))
+        self._update_timelapse_annotation_overlay_summary()
         calibration_row = ttk.Frame(annotation_frame)
         calibration_row.pack(fill=tk.X)
         ttk.Label(calibration_row, text="較正ファイル（任意）:").pack(side=tk.LEFT)
@@ -299,11 +305,62 @@ class TimelapseDragDropWindow(Toplevel):
         state = tk.NORMAL if self.timelapse_annotation_enabled_var.get() else tk.DISABLED
         self.timelapse_annotation_calibration_entry.config(state=state)
         self.timelapse_annotation_calibration_button.config(state=state)
-        self.timelapse_constellations_check.config(state=state)
+        self.timelapse_annotation_overlay_button.config(state=state)
         reference_state = state
         if state == tk.NORMAL and not self.dropped_paths:
             reference_state = tk.DISABLED
         self.timelapse_annotation_reference_button.config(state=reference_state)
+
+    def _update_timelapse_annotation_overlay_summary(self):
+        selected = []
+        if self.timelapse_grid_var.get():
+            selected.append("グリッド")
+        if self.timelapse_constellations_var.get():
+            selected.append("星座線")
+        if self.timelapse_detected_stars_var.get():
+            selected.append("検出星")
+        self.timelapse_annotation_overlay_label.config(
+            text="・".join(selected) if selected else "表示なし"
+        )
+
+    def _choose_timelapse_annotation_overlays(self):
+        window = Toplevel(self)
+        window.title("プレートソルブ注釈の表示設定")
+        window.transient(self)
+        window.grab_set()
+        grid_var = tk.BooleanVar(value=self.timelapse_grid_var.get())
+        constellation_var = tk.BooleanVar(value=self.timelapse_constellations_var.get())
+        detected_var = tk.BooleanVar(value=self.timelapse_detected_stars_var.get())
+        ttk.Label(
+            window,
+            text="タイムラプスへ重ねる表示を自由に選択してください。",
+        ).pack(anchor=tk.W, padx=16, pady=(16, 8))
+        ttk.Checkbutton(window, text="天球グリッドを表示", variable=grid_var).pack(
+            anchor=tk.W, padx=16, pady=3
+        )
+        ttk.Checkbutton(
+            window, text="星座線を表示（名称なし）", variable=constellation_var
+        ).pack(anchor=tk.W, padx=16, pady=3)
+        ttk.Checkbutton(
+            window, text="実画像で検出した星を中空円で表示", variable=detected_var
+        ).pack(anchor=tk.W, padx=16, pady=3)
+        ttk.Label(
+            window,
+            text="検出星は星表ではなく、各出力フレーム上で実際に検出できた点だけです。",
+            foreground="gray", wraplength=440,
+        ).pack(anchor=tk.W, padx=16, pady=(5, 10))
+
+        def apply_settings():
+            self.timelapse_grid_var.set(grid_var.get())
+            self.timelapse_constellations_var.set(constellation_var.get())
+            self.timelapse_detected_stars_var.set(detected_var.get())
+            self._update_timelapse_annotation_overlay_summary()
+            window.destroy()
+
+        controls = ttk.Frame(window)
+        controls.pack(pady=(0, 14))
+        ttk.Button(controls, text="適用", command=apply_settings).pack(side=tk.LEFT, padx=4)
+        ttk.Button(controls, text="キャンセル", command=window.destroy).pack(side=tk.LEFT, padx=4)
 
     def _choose_timelapse_annotation_calibration(self):
         path = filedialog.askopenfilename(
@@ -474,6 +531,7 @@ class TimelapseDragDropWindow(Toplevel):
                 text=f"採用フレーム {position + 1}/{len(sample_indices)} を選択"
             )
             close_window()
+            self.after(10, self._choose_timelapse_annotation_overlays)
 
         def close_window():
             stop_preview.set()
@@ -696,7 +754,9 @@ class TimelapseDragDropWindow(Toplevel):
         annotation_settings = {
             "enabled": self.timelapse_annotation_enabled_var.get(),
             "calibration_path": self.timelapse_annotation_calibration_var.get().strip() or None,
+            "draw_grid": self.timelapse_grid_var.get(),
             "draw_constellations": self.timelapse_constellations_var.get(),
+            "draw_detected_stars": self.timelapse_detected_stars_var.get(),
             "reference_sample_index": self.timelapse_annotation_reference_sample_var.get(),
             "reference_selected": self.timelapse_annotation_reference_selected_var.get(),
         }
