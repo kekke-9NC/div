@@ -5,6 +5,31 @@ from unittest import mock
 import download_pipeline
 
 
+class ProgressLimiterTests(unittest.TestCase):
+    def test_start_and_zero_detection_completion_are_visible(self):
+        messages = []
+        limiter = download_pipeline._ProgressLimiter(messages.append, 10)
+
+        limiter.message(('"video.mp4" の処理を開始...', None))
+        limiter.message(("完了: video.mp4 検出: 0件", None))
+
+        self.assertEqual(len(messages), 2)
+
+    def test_heartbeat_is_rate_limited(self):
+        messages = []
+        limiter = download_pipeline._ProgressLimiter(messages.append, 100)
+
+        with mock.patch.object(
+            download_pipeline.time, "monotonic", side_effect=[10.0, 11.0, 21.0]
+        ):
+            limiter.heartbeat(0, 4, 8, 88)
+            limiter.heartbeat(0, 4, 8, 88)
+            limiter.heartbeat(4, 4, 8, 84)
+
+        self.assertEqual(len(messages), 2)
+        self.assertIn("完了 4/100", messages[-1][0])
+
+
 class DownloadPipelineScalingTests(unittest.TestCase):
     def test_worker_plan_reserves_two_ui_cores(self):
         plan = download_pipeline.compute_worker_plan(20, logical_cpus=18)
