@@ -44,17 +44,12 @@ class _ProgressLimiter:
         self.lock = threading.Lock()
         self.last_progress_time = 0.0
         self.last_progress = 0
+        self.last_heartbeat_time = 0.0
         self.not_meteor_count = 0
 
     def message(self, payload):
         message, value = payload
         if isinstance(message, str):
-            if message.startswith('"') and " の処理を開始" in message:
-                return
-            if message.startswith("処理終了:"):
-                return
-            if message.startswith("完了:") and "検出: 0件" in message:
-                return
             if message.startswith("ダウンロード完了:"):
                 return
             if message.startswith("検出 ") and ": not_meteor " in message:
@@ -66,6 +61,19 @@ class _ProgressLimiter:
             if message.lstrip().startswith("-> ") and "Summary:" not in message:
                 return
         self.callback(payload)
+
+    def heartbeat(self, processed: int, active: int, queued: int, pending: int):
+        """Emit a low-frequency proof-of-life while long videos are scanning."""
+        now = time.monotonic()
+        with self.lock:
+            if now - self.last_heartbeat_time < 10.0:
+                return
+            self.last_heartbeat_time = now
+        self.callback((
+            f"処理状況: 完了 {processed}/{self.total}, "
+            f"動画処理中 {active}, 読込待ち {queued}, 未準備 {pending}",
+            None,
+        ))
 
     def finish(self):
         with self.lock:
@@ -305,8 +313,12 @@ def run_pipeline(
                 qsz = task_q.qsize()
                 with src_lock:
                     pending = max(0, len(sources) - src_index['i'])
+                    processed = int(src_index.get('processed', 0))
                 # copy busy list
                 busy_copy = list(processors_busy)
+                progress.heartbeat(
+                    processed, sum(1 for busy in busy_copy if busy), qsz, pending
+                )
                 if status_callback:
                     try:
                         status_callback({'download_queue_size': qsz, 'pending_sources': pending, 'processors_busy': busy_copy})
