@@ -18,7 +18,7 @@ import platform
 import textwrap
 
 from astropy.io import fits
-from astropy.wcs import WCS
+from astropy.wcs import WCS, Sip
 from astropy.coordinates import SkyCoord, Angle
 from astropy import units as u
 from astropy.units import hourangle, deg
@@ -570,6 +570,26 @@ def _create_flipped_wcs(original_wcs: WCS, image_shape: Tuple[int, int]) -> WCS:
         flipped_wcs.wcs.pc[1, 1] *= -1
     else:
         raise ValueError("WCSにCDまたはPCマトリックスがありません。")
+    if original_wcs.sip is not None:
+        def flip_coefficients(coefficients, invert_y_output=False):
+            if coefficients is None:
+                return None
+            transformed = np.array(coefficients, dtype=float, copy=True)
+            for y_power in range(transformed.shape[1]):
+                sign = -1.0 if y_power % 2 else 1.0
+                if invert_y_output:
+                    sign *= -1.0
+                transformed[:, y_power] *= sign
+            return transformed
+
+        sip = original_wcs.sip
+        flipped_wcs.sip = Sip(
+            flip_coefficients(sip.a),
+            flip_coefficients(sip.b, invert_y_output=True),
+            flip_coefficients(sip.ap),
+            flip_coefficients(sip.bp, invert_y_output=True),
+            flipped_wcs.wcs.crpix,
+        )
     return flipped_wcs
 
 
@@ -667,14 +687,17 @@ def annotate_image_with_wcs(
                 plate_solve_datetime = wcs_info.get('plate_solve_datetime')
                 if plate_solve_datetime: print("警告: WCSヘッダーに時刻情報がありません。wcs_infoの時刻を使用します。")
 
-        # 描画用のWCSは、元のWCSを単純に上下反転させるだけにする。
-        # 自転補正は座標に対して行うため、ここではWCSを動かさない。
+        # WCSAxes always uses a FITS-style lower-left origin, while camera and
+        # OpenCV images use a top-left origin.  Convert both the raster and WCS
+        # so the saved summary retains the camera's normal orientation.  The
+        # explicit compatibility option intentionally requests the old,
+        # vertically inverted presentation.
         if flip_vertically:
-            image_to_show = np.flipud(image_data)
-            wcs_for_plotting = _create_flipped_wcs(original_wcs, image_shape)
-        else:
             image_to_show = image_data
             wcs_for_plotting = original_wcs
+        else:
+            image_to_show = np.flipud(image_data)
+            wcs_for_plotting = _create_flipped_wcs(original_wcs, image_shape)
 
         output_dpi = 300
         fig_width_inch = image_shape[1] / output_dpi
@@ -702,7 +725,7 @@ def annotate_image_with_wcs(
                 dec_str = sky_coord_adjusted.dec.to_string(unit=u.deg, sep=':', precision=2, alwayssign=True)
                 label = f"RA: {ra_str}\nDec: {dec_str}"
                 
-                y_for_text = (image_shape[0] - 1 - y) if flip_vertically else y
+                y_for_text = y if flip_vertically else (image_shape[0] - 1 - y)
                 ax.text(x, y_for_text, label, color='lime', fontsize=6, ha='center', va='bottom',
                         bbox=dict(facecolor='black', alpha=0.6, boxstyle='round,pad=0.2', edgecolor='none'))
 
