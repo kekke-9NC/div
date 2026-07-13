@@ -366,7 +366,10 @@ def concatenate_videos(
     if fps and fps > 0:
         video_filters = ["-vf", f"fps={fps}"]
     
-    encoder_info = f"GPU (NVENC)" if use_nvenc else "CPU"
+    encoder_info = "GPU (NVENC)" if use_nvenc else "CPU (自動マルチスレッド)"
+    # FFmpeg/libx264/libx265 normally selects this automatically, but make it
+    # explicit so CPU encoding is not accidentally constrained to one thread.
+    encoder_thread_params = [] if use_nvenc else ["-threads", "0"]
     
     # 入力ファイルの事前検証（有効なファイルのみをフィルタリング）
     if progress_callback:
@@ -679,6 +682,7 @@ def concatenate_videos(
             # "-async", "1",  # 廃止されたため削除
             "-max_muxing_queue_size", "9999",  # muxingキューサイズを大幅に増加
             "-c:v", video_codec,
+            *encoder_thread_params,
             "-b:v", bitrate,
             *codec_params,
             *video_filters,

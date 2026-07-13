@@ -631,18 +631,56 @@ class AnalysisMixin:
             f"設定: ビットレート={bitrate}, コーデック={codec}, FPS={fps_str}, "
             f"保存物補正={'ON' if apply_enhancement else 'OFF'}"
         )
-        
+
+        # Tk calls from a worker thread can block on macOS before the first
+        # ffprobe invocation.  The main thread polls this queue and performs
+        # every log/dialog update itself.
+        event_queue = queue.Queue()
+        self.btn_video_concat_start.configure(state=tk.DISABLED)
         thread = threading.Thread(
             target=self._video_concat_worker,
-            args=(files, output_path, bitrate, codec, fps_val, safe_mode, apply_enhancement),
+            args=(files, output_path, bitrate, codec, fps_val, safe_mode, apply_enhancement, event_queue),
             daemon=True
         )
         thread.start()
+        self._poll_video_concat_events(event_queue, thread)
 
-    def _video_concat_worker(self, files, output_path, bitrate, codec, fps, safe_mode, apply_enhancement):
+    def _poll_video_concat_events(self, event_queue, thread):
+        """Apply video-concatenation worker events on Tk's main thread."""
+        finished = False
+        try:
+            while True:
+                event_type, payload = event_queue.get_nowait()
+                if event_type == "progress":
+                    self.append_log(payload)
+                elif event_type == "success":
+                    message, output_path = payload
+                    self.append_log(f"連結完了: {output_path}")
+                    messagebox.showinfo("完了", message)
+                    finished = True
+                elif event_type == "error":
+                    self.append_log(f"連結エラー: {payload}")
+                    messagebox.showerror("エラー", payload)
+                    finished = True
+        except queue.Empty:
+            pass
+
+        if finished:
+            self.btn_video_concat_start.configure(state=tk.NORMAL)
+            return
+
+        if thread.is_alive() or not event_queue.empty():
+            self.after(50, self._poll_video_concat_events, event_queue, thread)
+        else:
+            # A terminal event should always be sent, but do not leave the UI
+            # disabled if the worker terminates unexpectedly.
+            self.append_log("連結エラー: ワーカースレッドが予期せず終了しました")
+            self.btn_video_concat_start.configure(state=tk.NORMAL)
+
+    def _video_concat_worker(self, files, output_path, bitrate, codec, fps, safe_mode, apply_enhancement, event_queue):
         """動画連結のバックグラウンド処理"""
         def progress_callback(progress, message):
-            self.after(0, lambda: self.append_log(message))
+            event_queue.put(("progress", message))
         
         def cancel_check():
             return self.cancel_flag.is_set()
@@ -662,15 +700,12 @@ class AnalysisMixin:
             )
             
             if success:
-                self.after(0, lambda: messagebox.showinfo("完了", message))
-                self.after(0, lambda: self.append_log(f"連結完了: {output_path}"))
+                event_queue.put(("success", (message, output_path)))
             else:
-                self.after(0, lambda: messagebox.showerror("エラー", message))
-                self.after(0, lambda: self.append_log(f"連結エラー: {message}"))
+                event_queue.put(("error", message))
         except Exception as e:
             error_msg = f"予期せぬエラー: {e}"
-            self.after(0, lambda: messagebox.showerror("エラー", error_msg))
-            self.after(0, lambda: self.append_log(error_msg))
+            event_queue.put(("error", error_msg))
 
     def start_analysis(self):
         if not self.check_admin_password():
