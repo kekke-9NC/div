@@ -107,6 +107,7 @@ class NavigationMixin:
     def navigate_to_model_training_button(self):
         self.notebook.select(self.tab_analysis)
         if hasattr(self, "btn_model_training"):
+            self._scroll_analysis_to_widget(self.btn_model_training)
             self._flash_button(self.btn_model_training)
 
     def navigate_to_model_selector(self):
@@ -122,42 +123,70 @@ class NavigationMixin:
     def navigate_to_analysis_start_button(self):
         self.notebook.select(self.tab_analysis)
         if hasattr(self, "btn_analysis_start"):
+            self._scroll_analysis_to_widget(self.btn_analysis_start)
             self._flash_button(self.btn_analysis_start)
 
     def navigate_to_blend_image_button(self):
         self.notebook.select(self.tab_analysis)
         if hasattr(self, "btn_blend_image"):
+            self._scroll_analysis_to_widget(self.btn_blend_image)
             self._flash_button(self.btn_blend_image)
 
     def navigate_to_blend_video_button(self):
         self.notebook.select(self.tab_analysis)
         if hasattr(self, "btn_blend_video"):
+            self._scroll_analysis_to_widget(self.btn_blend_video)
             self._flash_button(self.btn_blend_video)
 
     def navigate_to_timelapse_button(self):
         self.notebook.select(self.tab_analysis)
         if hasattr(self, "btn_timelapse"):
+            self._scroll_analysis_to_widget(self.btn_timelapse)
             self._flash_button(self.btn_timelapse)
 
     def navigate_to_long_exposure_button(self):
         self.notebook.select(self.tab_analysis)
         if hasattr(self, "btn_long_exposure"):
+            self._scroll_analysis_to_widget(self.btn_long_exposure)
             self._flash_button(self.btn_long_exposure)
 
     def navigate_to_distortion_button(self):
         self.notebook.select(self.tab_analysis)
         if hasattr(self, "btn_distortion"):
+            self._scroll_analysis_to_widget(self.btn_distortion)
             self._flash_button(self.btn_distortion)
 
     def navigate_to_angle_analysis_button(self):
         self.notebook.select(self.tab_analysis)
         if hasattr(self, "btn_angle_analysis"):
+            self._scroll_analysis_to_widget(self.btn_angle_analysis)
             self._flash_button(self.btn_angle_analysis)
 
     def navigate_to_video_concat_start_button(self):
         self.notebook.select(self.tab_analysis)
         if hasattr(self, "btn_video_concat_start"):
+            self._scroll_analysis_to_widget(self.btn_video_concat_start)
             self._flash_button(self.btn_video_concat_start)
+
+    def _scroll_analysis_to_widget(self, widget, top_margin=16):
+        """Scroll the analysis tab so a requested action is visible."""
+        def do_scroll():
+            try:
+                canvas = self.analysis_tab_canvas
+                scrollable_frame = self.analysis_scrollable_frame
+                if not canvas.winfo_exists() or not scrollable_frame.winfo_exists():
+                    return
+                bbox = canvas.bbox("all")
+                if not bbox:
+                    return
+                max_scroll = max(1, (bbox[3] - bbox[1]) - canvas.winfo_height())
+                widget_y = widget.winfo_rooty() - scrollable_frame.winfo_rooty()
+                canvas.yview_moveto(min(1.0, max(0.0, (widget_y - top_margin) / max_scroll)))
+            except (AttributeError, tk.TclError):
+                pass
+
+        self.after(20, do_scroll)
+        self.after(140, do_scroll)
 
     def navigate_to_chat_tab(self):
         self.notebook.select(self.tab_chat)
