@@ -312,6 +312,10 @@ class App(
         self.video_concat_fps_var = tk.StringVar(value="Auto")
         self.video_concat_safe_mode_var = tk.BooleanVar(value=True) 
         self.video_concat_enhancement_var = tk.BooleanVar(value=False)
+        self.video_concat_timestamp_enabled_var = tk.BooleanVar(value=config.VIDEO_CONCAT_TIMESTAMP_ENABLED)
+        self.video_concat_timestamp_position_var = tk.StringVar(value="右下")
+        self.video_concat_timestamp_size_var = tk.StringVar(value=str(config.VIDEO_CONCAT_TIMESTAMP_SIZE_PERCENT))
+        self.video_concat_timestamp_offset_var = tk.StringVar(value=str(config.VIDEO_CONCAT_TIMESTAMP_OFFSET_SECONDS))
         self.camera_control_base_url_var = tk.StringVar(value="")
 
         # Advanced settings variables (config.py values)

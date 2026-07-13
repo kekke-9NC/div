@@ -32,6 +32,7 @@ import sys
 import tempfile
 import time
 import json
+import media_time
 
 
 _TIMESTAMP_POSITIONS = {
@@ -399,23 +400,9 @@ def _run_annotate_pipeline(
 
 
 def _source_created_datetime(path: str) -> datetime:
-    """Prefer the recorder's YYYYMMDD/HH/MM path, then filesystem time."""
-    source = Path(path)
-    parts = source.parts
-    for index, part in enumerate(parts):
-        if not re.fullmatch(r"(?:19|20)\d{6}", part):
-            continue
-        hour = parts[index + 1][:2] if index + 1 < len(parts) else "00"
-        minute = source.stem[:2] if source.stem[:2].isdigit() else "00"
-        if hour.isdigit():
-            try:
-                return datetime.strptime(
-                    f"{part}_{int(hour):02d}_{int(minute):02d}", "%Y%m%d_%H_%M"
-                )
-            except ValueError:
-                pass
-    stat = os.stat(path)
-    return datetime.fromtimestamp(getattr(stat, "st_birthtime", stat.st_mtime))
+    """Return filesystem creation time, falling back to media path metadata."""
+    timestamp, _source = media_time.get_media_start_time(path)
+    return timestamp or datetime.now()
 
 
 def _draw_timestamp(frame: np.ndarray, timestamp: datetime, settings: Dict) -> np.ndarray:
@@ -2216,16 +2203,21 @@ def create_timelapse(
     return True
 
 
-def get_default_output_path() -> str:
-    """デフォルトの出力パスを取得する（ダウンロードフォルダ + 日時）。"""
+def get_default_output_path(input_paths: Optional[Sequence[str]] = None) -> str:
+    """Return YYYYMMDDHHMMSS.mp4 based on the first input's creation time."""
     downloads_path = os.path.join(os.path.expanduser("~"), "Downloads")
 
     if not os.path.exists(downloads_path):
         downloads_path = os.path.join(os.path.expanduser("~"), "Desktop")
 
-    now = datetime.now()
-    date = now.strftime("%Y%m%d")
-    time = now.strftime("%H%M%S")
-    filename = f"{date}_timelapse_{time}.mp4"
+    media_files = []
+    for input_path in input_paths or []:
+        images, videos = get_files_from_path(input_path)
+        media_files.extend(images)
+        media_files.extend(videos)
+    media_files = sorted(set(media_files))
+    start_time, _source, _path = media_time.first_media_start_time(media_files)
+    start_time = start_time or datetime.now()
+    filename = f"{start_time.strftime('%Y%m%d%H%M%S')}.mp4"
 
     return os.path.join(downloads_path, filename)

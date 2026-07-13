@@ -1155,6 +1155,10 @@ class SettingsMixin:
                 'fps': self.video_concat_fps_var.get(),
                 'safe_mode': self.video_concat_safe_mode_var.get(),
                 'apply_enhancement': self.video_concat_enhancement_var.get(),
+                'timestamp_enabled': self.video_concat_timestamp_enabled_var.get(),
+                'timestamp_position': self.video_concat_timestamp_position_var.get(),
+                'timestamp_size_percent': self.video_concat_timestamp_size_var.get(),
+                'timestamp_offset_seconds': self.video_concat_timestamp_offset_var.get(),
             },
             'auto_time_updater_enabled': self.auto_time_updater_enabled_var.get(),
             'rtsp_preset': self.rtsp_preset_var.get(),
@@ -1280,6 +1284,10 @@ class SettingsMixin:
             self.video_concat_fps_var.set(concat_settings.get('fps', 'Auto'))
             self.video_concat_safe_mode_var.set(bool(concat_settings.get('safe_mode', True)))
             self.video_concat_enhancement_var.set(bool(concat_settings.get('apply_enhancement', False)))
+            self.video_concat_timestamp_enabled_var.set(bool(concat_settings.get('timestamp_enabled', True)))
+            self.video_concat_timestamp_position_var.set(concat_settings.get('timestamp_position', '右下'))
+            self.video_concat_timestamp_size_var.set(str(concat_settings.get('timestamp_size_percent', 1.8)))
+            self.video_concat_timestamp_offset_var.set(str(concat_settings.get('timestamp_offset_seconds', 0.0)))
 
             self.plate_solve_wcs_path_var.set(settings.get('plate_solve_wcs_path', ''))
             self.plate_solve_video_path_var.set(settings.get('plate_solve_video_path', ''))

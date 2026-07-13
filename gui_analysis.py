@@ -1,4 +1,6 @@
 from gui_common import *
+import media_time
+from datetime import timedelta
 
 
 class AnalysisMixin:
@@ -227,9 +229,42 @@ class AnalysisMixin:
         
         help_text = ("動画連結時に、入力ファイルのタイムスタンプ情報が正しくない場合や、\n"
                      "動画間で不整合がある場合に、このオプションを有効にしてください。\n"
-                     "全フレームを再エンコードして一時ファイルを作成するため、\n"
-                     "処理に時間がかかりますが、連結の安定性が向上します。")
+                     "映像情報を保持した一時ファイルへ高速変換するため、追加の空き容量が必要ですが、\n"
+                     "連結の安定性が向上します。")
         self._setup_help_tooltip(help_label, help_text)
+
+        concat_timestamp_row = ttk.Frame(lf_concat)
+        concat_timestamp_row.pack(fill=tk.X, pady=(0, 5))
+        ttk.Checkbutton(
+            concat_timestamp_row,
+            text="実時刻を動画に表示",
+            variable=self.video_concat_timestamp_enabled_var,
+        ).pack(side=tk.LEFT, padx=(5, 8))
+        ttk.Label(concat_timestamp_row, text="位置:").pack(side=tk.LEFT)
+        ttk.Combobox(
+            concat_timestamp_row,
+            textvariable=self.video_concat_timestamp_position_var,
+            values=["右下", "左下", "右上", "左上"],
+            width=5,
+            state="readonly",
+        ).pack(side=tk.LEFT, padx=(3, 8))
+        ttk.Label(concat_timestamp_row, text="文字サイズ:").pack(side=tk.LEFT)
+        ttk.Spinbox(
+            concat_timestamp_row,
+            from_=0.8,
+            to=4.0,
+            increment=0.1,
+            textvariable=self.video_concat_timestamp_size_var,
+            width=5,
+        ).pack(side=tk.LEFT, padx=(3, 2))
+        ttk.Label(concat_timestamp_row, text="%").pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Label(concat_timestamp_row, text="実時刻補正:").pack(side=tk.LEFT)
+        ttk.Entry(
+            concat_timestamp_row,
+            textvariable=self.video_concat_timestamp_offset_var,
+            width=7,
+        ).pack(side=tk.LEFT, padx=(3, 2))
+        ttk.Label(concat_timestamp_row, text="秒（+で後へ）").pack(side=tk.LEFT)
 
         self.btn_video_concat_start = ttk.Button(lf_concat, text="連結開始", command=self.start_video_concat)
         self.btn_video_concat_start.pack(pady=5)
@@ -597,9 +632,20 @@ class AnalysisMixin:
             messagebox.showwarning("情報", "連結するには2つ以上の動画ファイルを追加してください。")
             return
         
+        files = list(self.video_concat_files)
+        start_time, time_source, start_file = media_time.first_media_start_time(files)
+        try:
+            timestamp_offset = float(self.video_concat_timestamp_offset_var.get())
+        except (TypeError, ValueError, tk.TclError):
+            timestamp_offset = 0.0
+        if start_time is not None:
+            start_time += timedelta(seconds=timestamp_offset)
+        default_name = f"{(start_time or datetime.now()).strftime('%Y%m%d%H%M%S')}.mp4"
+
         # 出力ファイルを選択
         output_path = filedialog.asksaveasfilename(
             title="出力ファイルを保存",
+            initialfile=default_name,
             defaultextension=".mp4",
             filetypes=[("MP4ファイル", "*.mp4"), ("すべてのファイル", "*.*")]
         )
@@ -612,7 +658,16 @@ class AnalysisMixin:
         fps_str = self.video_concat_fps_var.get()
         safe_mode = self.video_concat_safe_mode_var.get()
         apply_enhancement = self.video_concat_enhancement_var.get()
-        files = list(self.video_concat_files)
+        try:
+            timestamp_size = float(self.video_concat_timestamp_size_var.get())
+        except (TypeError, ValueError, tk.TclError):
+            timestamp_size = config.VIDEO_CONCAT_TIMESTAMP_SIZE_PERCENT
+        timestamp_settings = {
+            "enabled": self.video_concat_timestamp_enabled_var.get(),
+            "position": self.video_concat_timestamp_position_var.get(),
+            "size_percent": max(0.8, min(4.0, timestamp_size)),
+            "offset_seconds": timestamp_offset,
+        }
         
         fps_val = None
         if fps_str != "Auto":
@@ -631,6 +686,11 @@ class AnalysisMixin:
             f"設定: ビットレート={bitrate}, コーデック={codec}, FPS={fps_str}, "
             f"保存物補正={'ON' if apply_enhancement else 'OFF'}"
         )
+        if start_time is not None:
+            self.append_log(
+                f"開始時刻: {start_time.strftime('%Y-%m-%d %H:%M:%S')} "
+                f"({time_source}, 補正={timestamp_offset:+g}秒, {os.path.basename(start_file or '')})"
+            )
 
         # Tk calls from a worker thread can block on macOS before the first
         # ffprobe invocation.  The main thread polls this queue and performs
@@ -640,7 +700,7 @@ class AnalysisMixin:
         self.btn_video_concat_start.configure(state=tk.DISABLED)
         thread = threading.Thread(
             target=self._video_concat_worker,
-            args=(files, output_path, bitrate, codec, fps_val, safe_mode, apply_enhancement, event_queue),
+            args=(files, output_path, bitrate, codec, fps_val, safe_mode, apply_enhancement, timestamp_settings, event_queue),
             daemon=True
         )
         self.video_concat_thread = thread
@@ -709,7 +769,7 @@ class AnalysisMixin:
         # for a validation/remux subprocess to finish.
         terminate_process()
 
-    def _video_concat_worker(self, files, output_path, bitrate, codec, fps, safe_mode, apply_enhancement, event_queue):
+    def _video_concat_worker(self, files, output_path, bitrate, codec, fps, safe_mode, apply_enhancement, timestamp_settings, event_queue):
         """動画連結のバックグラウンド処理"""
         def progress_callback(progress, message):
             event_queue.put(("progress", message))
@@ -733,6 +793,7 @@ class AnalysisMixin:
                 process_callback=process_callback,
                 apply_enhancement=apply_enhancement,
                 fixed_pattern_path=self.rtsp_dark_file,
+                timestamp_settings=timestamp_settings,
             )
             
             if success:

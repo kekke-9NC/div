@@ -13,9 +13,14 @@ import json
 import re
 import time
 import shutil
-from typing import List, Callable, Optional, Tuple
+import math
+from datetime import datetime, timedelta
+from typing import List, Callable, Optional, Tuple, Dict
+
+from PIL import Image, ImageDraw, ImageFont
 
 import video_enhancement
+import media_time
 
 # NVENCの利用可否をキャッシュ
 _nvenc_available: Optional[bool] = None
@@ -208,6 +213,166 @@ def format_time(seconds: float) -> str:
     return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
 
+def _normalize_concat_timestamp_settings(settings: Optional[Dict]) -> Dict:
+    settings = settings or {}
+    position_map = {
+        "右下": "bottom_right", "左下": "bottom_left",
+        "右上": "top_right", "左上": "top_left",
+    }
+    try:
+        size_percent = float(settings.get("size_percent", 1.8))
+    except (TypeError, ValueError):
+        size_percent = 1.8
+    try:
+        offset_seconds = float(settings.get("offset_seconds", 0.0))
+    except (TypeError, ValueError):
+        offset_seconds = 0.0
+    raw_position = str(settings.get("position", "bottom_right"))
+    return {
+        "enabled": bool(settings.get("enabled", False)),
+        "position": position_map.get(raw_position, raw_position),
+        "size_percent": max(0.8, min(4.0, size_percent)),
+        "offset_seconds": offset_seconds,
+    }
+
+
+def _build_concat_schedule(source_files: List[str], offset_seconds: float = 0.0) -> List[Dict]:
+    schedule = []
+    output_offset = 0.0
+    fallback_start = None
+    for source in source_files:
+        duration = get_video_duration(source)
+        start_time, time_source = media_time.get_media_start_time(source)
+        if start_time is None:
+            start_time = fallback_start or datetime.now()
+            time_source = "直前区間から推定"
+        start_time += timedelta(seconds=offset_seconds)
+        schedule.append({
+            "file": source,
+            "start": output_offset,
+            "end": output_offset + duration,
+            "duration": duration,
+            "source_start_time": start_time,
+            "time_source": time_source,
+        })
+        output_offset += duration
+        fallback_start = start_time + timedelta(seconds=duration)
+    return schedule
+
+
+def _timestamp_for_output_second(schedule: List[Dict], output_second: float) -> datetime:
+    for item in schedule:
+        if item["start"] <= output_second < item["end"]:
+            return item["source_start_time"] + timedelta(seconds=output_second - item["start"])
+    if schedule:
+        last = schedule[-1]
+        return last["source_start_time"] + timedelta(seconds=max(0.0, output_second - last["start"]))
+    return datetime.now()
+
+
+def _load_timestamp_font(font_size: int):
+    candidates = [
+        "/System/Library/Fonts/SFNSMono.ttf",
+        "/System/Library/Fonts/Menlo.ttc",
+        "C:/Windows/Fonts/consola.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+    ]
+    for path in candidates:
+        if os.path.isfile(path):
+            try:
+                return ImageFont.truetype(path, font_size)
+            except OSError:
+                pass
+    return ImageFont.load_default()
+
+
+def _create_timestamp_overlay(
+    schedule: List[Dict],
+    width: int,
+    height: int,
+    settings: Dict,
+    temp_dir: str,
+    cancel_check=None,
+    process_callback=None,
+) -> Tuple[str, str]:
+    """Create a compact 1fps timestamp video and return path/overlay position."""
+    font_size = max(12, int(round(height * settings["size_percent"] / 100.0)))
+    font = _load_timestamp_font(font_size)
+    timezone_label = media_time.local_timezone_label()
+    sample_text = f"2000-00-00 00:00:00 {timezone_label}"
+    sample_box = ImageDraw.Draw(Image.new("RGB", (1, 1))).textbbox((0, 0), sample_text, font=font)
+    padding_x = max(8, font_size // 2)
+    padding_y = max(5, font_size // 3)
+    overlay_width = sample_box[2] - sample_box[0] + padding_x * 2
+    overlay_height = sample_box[3] - sample_box[1] + padding_y * 2
+    overlay_path = os.path.join(temp_dir, "timestamp_overlay.mkv")
+    command = [
+        get_ffmpeg_path(), "-y", "-hide_banner", "-loglevel", "error",
+        "-f", "rawvideo", "-pix_fmt", "rgb24",
+        "-s", f"{overlay_width}x{overlay_height}", "-r", "1", "-i", "-",
+        "-an", "-c:v", "ffv1", "-level", "3", overlay_path,
+    ]
+    process = subprocess.Popen(command, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+    if process_callback:
+        process_callback(process)
+    total_seconds = max(1, int(math.ceil(schedule[-1]["end"] if schedule else 1.0)) + 1)
+    try:
+        for second in range(total_seconds):
+            if cancel_check and cancel_check():
+                process.terminate()
+                process.wait(timeout=3)
+                raise RuntimeError("処理がキャンセルされました")
+            timestamp = _timestamp_for_output_second(schedule, float(second))
+            text = f"{timestamp.strftime('%Y-%m-%d %H:%M:%S')} {timezone_label}"
+            frame = Image.new("RGB", (overlay_width, overlay_height), (0, 0, 0))
+            draw = ImageDraw.Draw(frame)
+            draw.text((padding_x, padding_y - sample_box[1]), text, font=font, fill=(255, 255, 255))
+            process.stdin.write(frame.tobytes())
+        process.stdin.close()
+        stderr = process.stderr.read().decode("utf-8", errors="replace")
+        return_code = process.wait()
+        if return_code != 0:
+            raise RuntimeError(f"タイムスタンプ映像の作成に失敗しました: {stderr[-500:]}")
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+        if process_callback:
+            process_callback(None)
+
+    margin = max(8, int(round(height * 0.01)))
+    positions = {
+        "top_left": f"{margin}:{margin}",
+        "top_right": f"W-w-{margin}:{margin}",
+        "bottom_left": f"{margin}:H-h-{margin}",
+        "bottom_right": f"W-w-{margin}:H-h-{margin}",
+    }
+    return overlay_path, positions.get(settings["position"], positions["bottom_right"])
+
+
+def _write_concat_timeline(output_path: str, schedule: List[Dict], settings: Dict) -> str:
+    timeline_path = os.path.splitext(output_path)[0] + ".timeline.json"
+    payload = {
+        "version": 1,
+        "timezone": media_time.local_timezone_label(),
+        "output_start_time": schedule[0]["source_start_time"].isoformat() if schedule else None,
+        "timestamp_offset_seconds": settings["offset_seconds"],
+        "segments": [
+            {
+                "source_file": item["file"],
+                "output_start_seconds": item["start"],
+                "output_end_seconds": item["end"],
+                "source_start_time": item["source_start_time"].isoformat(),
+                "time_source": item["time_source"],
+            }
+            for item in schedule
+        ],
+    }
+    with open(timeline_path, "w", encoding="utf-8") as file_obj:
+        json.dump(payload, file_obj, ensure_ascii=False, indent=2)
+    return timeline_path
+
+
 def parse_ffmpeg_progress(line: str, total_duration: float) -> Optional[float]:
     """
     FFmpegの出力から進捗率を解析する
@@ -347,6 +512,7 @@ def concatenate_videos(
     process_callback: Optional[Callable[[Optional[subprocess.Popen]], None]] = None,
     apply_enhancement: bool = False,
     fixed_pattern_path: Optional[str] = None,
+    timestamp_settings: Optional[Dict] = None,
 ) -> Tuple[bool, str]:
     """
     複数の動画ファイルを連結する
@@ -364,6 +530,7 @@ def concatenate_videos(
         progress_callback: 進捗コールバック(進捗率, メッセージ)
         cancel_check: キャンセル確認コールバック（Trueを返すとキャンセル）
         process_callback: 実行中FFmpegプロセスの開始・終了通知
+        timestamp_settings: 実時刻の焼き込み設定
         
     Returns:
         (成功フラグ, メッセージ)のタプル
@@ -373,6 +540,8 @@ def concatenate_videos(
     
     if len(input_files) < 2:
         return False, "連結には2つ以上の動画ファイルが必要です"
+
+    timestamp_settings = _normalize_concat_timestamp_settings(timestamp_settings)
     
     # ハードウェアエンコーダの利用可否をチェック
     use_nvenc = check_nvenc_available()
@@ -570,24 +739,12 @@ def concatenate_videos(
     if progress_callback:
         progress_callback(0.0, f"[DEBUG] 合計再生時間: {total_duration:.2f}秒 ({total_duration/60:.2f}分)")
 
-    # ファイルごとの開始時間を計算（デバッグ用）
-    file_schedule = []
-    current_offset = 0.0
-    for f in valid_files:
-        dur = get_video_duration(f)
-        file_schedule.append({
-            'file': f,
-            'start': current_offset,
-            'end': current_offset + dur
-        })
-        current_offset += dur
-    # 一番最後のファイルの終了時間がtotal_durationと一致しない場合の微修正（get_video_durationの誤差などで）は許容
-
     # セーフモード: タイムスタンプを正規化した一時Matroskaファイルを作成する。
     # MPEG-4 Part 2をMPEG-TSへstream copyすると映像サイズ/extradataが
     # 失われるため、codec parametersを保持できるMatroskaを使用する。
     ts_temp_files = []
     files_to_concat = base_files # デフォルトは元ファイルまたは補正済み一時ファイル
+    concat_source_files = list(valid_files)
 
     if safe_mode:
         if progress_callback:
@@ -595,6 +752,7 @@ def concatenate_videos(
         
         try:
             ts_dir = tempfile.mkdtemp(prefix="safe_concat_")
+            converted_source_files = []
             
             for i, vf in enumerate(base_files):
                 # キャンセル確認
@@ -652,6 +810,7 @@ def concatenate_videos(
                 
                 if conversion_success:
                     ts_temp_files.append(ts_path)
+                    converted_source_files.append(valid_files[i])
                 
                 if progress_callback and i % 5 == 0:
                      progress_callback(0.0, f"セーフモード: 変換中 ({i+1}/{len(base_files)})")
@@ -659,17 +818,25 @@ def concatenate_videos(
             # 変換できたファイルのみを連結対象とする
             if ts_temp_files:
                 files_to_concat = ts_temp_files
+                concat_source_files = converted_source_files
                 if progress_callback:
                     progress_callback(0.0, f"セーフモード: 変換完了 ({len(ts_temp_files)}/{len(base_files)}ファイル)")
             else:
                 if progress_callback:
                     progress_callback(0.0, "エラー: 有効なファイルが一つも変換できませんでした -> 元ファイルを使用します")
                 files_to_concat = base_files
+                concat_source_files = list(valid_files)
 
         except Exception as e:
             if progress_callback:
                 progress_callback(0.0, f"セーフモード初期化エラー: {e} -> 通常モードで続行")
             files_to_concat = base_files
+            concat_source_files = list(valid_files)
+
+    file_schedule = _build_concat_schedule(
+        concat_source_files, timestamp_settings["offset_seconds"]
+    )
+    total_duration = file_schedule[-1]["end"] if file_schedule else 0.0
 
     
     # concat demuxer用の一時ファイルを作成
@@ -703,6 +870,46 @@ def concatenate_videos(
     # エラーログを収集する変数
     error_lines = []
     all_output_lines = []  # デバッグ用: 全出力を記録
+    timestamp_temp_dir = None
+    timestamp_overlay_path = None
+    timestamp_overlay_position = None
+
+    if timestamp_settings["enabled"]:
+        try:
+            info = get_video_info(files_to_concat[0]) or {}
+            video_stream = next(
+                (stream for stream in info.get("streams", []) if stream.get("codec_type") == "video"),
+                {},
+            )
+            frame_width = int(video_stream.get("width", 1920) or 1920)
+            frame_height = int(video_stream.get("height", 1080) or 1080)
+            timestamp_temp_dir = tempfile.mkdtemp(prefix="concat_timestamp_")
+            if progress_callback:
+                progress_callback(0.0, "実時刻タイムスタンプ映像を作成中...")
+            timestamp_overlay_path, timestamp_overlay_position = _create_timestamp_overlay(
+                file_schedule,
+                frame_width,
+                frame_height,
+                timestamp_settings,
+                timestamp_temp_dir,
+                cancel_check=cancel_check,
+                process_callback=process_callback,
+            )
+        except Exception as exc:
+            if timestamp_temp_dir:
+                shutil.rmtree(timestamp_temp_dir, ignore_errors=True)
+            try:
+                os.unlink(concat_list_path)
+            except OSError:
+                pass
+            for temp_file in ts_temp_files:
+                try:
+                    os.unlink(temp_file)
+                except OSError:
+                    pass
+            if enhancement_temp_dir:
+                shutil.rmtree(enhancement_temp_dir, ignore_errors=True)
+            return False, f"実時刻タイムスタンプの作成に失敗しました: {exc}"
     
     try:
         # FFmpegコマンドを構築（DTS/PTSタイムスタンプ問題を修正するオプション追加）
@@ -715,20 +922,45 @@ def concatenate_videos(
             "-f", "concat",
             "-safe", "0",
             "-i", concat_list_path,
+        ]
+
+        timestamp_filter_params = []
+        if timestamp_overlay_path:
+            cmd.extend(["-i", timestamp_overlay_path])
+            fps_filter = f"fps={fps}," if fps and fps > 0 else ""
+            filter_graph = (
+                f"[0:v]{fps_filter}setpts=PTS-STARTPTS[base];"
+                f"[1:v]setpts=PTS-STARTPTS[clock];"
+                f"[base][clock]overlay={timestamp_overlay_position}:shortest=1[v]"
+            )
+            timestamp_filter_params = [
+                "-filter_complex", filter_graph,
+                "-map", "[v]", "-map", "0:a?",
+            ]
+
+        creation_time_metadata = ""
+        if file_schedule:
+            local_tz = datetime.now().astimezone().tzinfo
+            creation_time_metadata = file_schedule[0]["source_start_time"].replace(
+                tzinfo=local_tz
+            ).isoformat()
+
+        cmd.extend([
             "-fps_mode", "passthrough",  # フレームレートモードをパススルーに変更（DTSエラー回避）
             # "-async", "1",  # 廃止されたため削除
-            "-max_muxing_queue_size", "9999",  # muxingキューサイズを大幅に増加
             "-c:v", video_codec,
             *encoder_thread_params,
             "-b:v", bitrate,
             *codec_params,
-            *video_filters,
+            *(timestamp_filter_params if timestamp_overlay_path else video_filters),
             "-c:a", "aac",
             "-b:a", "192k",
+            "-metadata", f"creation_time={creation_time_metadata}",
+            "-metadata", "comment=Absolute capture timeline is stored in the companion .timeline.json file",
             "-movflags", "+faststart",
             "-progress", "pipe:1",
             output_path
-        ]
+        ])
         
         # デバッグ用: コマンドをログ出力
         if progress_callback:
@@ -857,6 +1089,17 @@ def concatenate_videos(
                 progress_callback(1.0, f"[DEBUG] stderrログ保存に失敗: {e}")
         
         if return_code == 0:
+            timeline_path = None
+            try:
+                timeline_path = _write_concat_timeline(
+                    output_path, file_schedule, timestamp_settings
+                )
+                if progress_callback:
+                    progress_callback(1.0, f"解析用タイムラインを保存: {timeline_path}")
+            except Exception as exc:
+                if progress_callback:
+                    progress_callback(1.0, f"警告: 解析用タイムラインを保存できませんでした: {exc}")
+
             # 出力ファイルの長さを確認
             output_duration = get_video_duration(output_path)
             duration_ratio = output_duration / total_duration if total_duration > 0 else 0
@@ -888,12 +1131,14 @@ def concatenate_videos(
                     progress_callback(1.0, f"連結完了（警告あり） (処理時間: {elapsed_str})")
                 
                 auto_line = f"\n{automatic_bitrate_summary}" if automatic_bitrate_summary else ""
-                return True, f"{warning_msg}\n出力パス: {output_path}{auto_line}\n詳細ログ: {debug_stderr_path}"
+                timeline_line = f"\n解析用タイムライン: {timeline_path}" if timeline_path else ""
+                return True, f"{warning_msg}\n出力パス: {output_path}{auto_line}{timeline_line}\n詳細ログ: {debug_stderr_path}"
             
             if progress_callback:
                 progress_callback(1.0, f"連結完了 (処理時間: {elapsed_str})")
             auto_line = f"\n{automatic_bitrate_summary}" if automatic_bitrate_summary else ""
-            return True, f"連結が完了しました: {output_path}{auto_line}"
+            timeline_line = f"\n解析用タイムライン: {timeline_path}" if timeline_path else ""
+            return True, f"連結が完了しました: {output_path}{auto_line}{timeline_line}"
         else:
             # エラー詳細を取得
             error_detail = ""
@@ -933,6 +1178,8 @@ def concatenate_videos(
                 shutil.rmtree(enhancement_temp_dir)
             except OSError:
                 pass
+        if timestamp_temp_dir:
+            shutil.rmtree(timestamp_temp_dir, ignore_errors=True)
 
 
 def get_supported_video_extensions() -> List[str]:
