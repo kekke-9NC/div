@@ -741,7 +741,7 @@ class TimelapseDragDropWindow(Toplevel):
             return
         
         # 保存先を選択
-        default_output = timelapse_creator.get_default_output_path()
+        default_output = timelapse_creator.get_default_output_path(self.dropped_paths)
         output_path = filedialog.asksaveasfilename(
             title="タイムラプス動画の保存先",
             initialdir=os.path.dirname(default_output),

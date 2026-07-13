@@ -321,8 +321,8 @@ class NavigationMixin:
                 return path
             dirpath = os.path.dirname(path)
             basename = os.path.basename(path)
-            # If already starts with YYYYMMDD_ then leave as-is
-            if len(basename) >= 9 and basename[:9].isdigit() and basename[8] == '_':
+            # YYYYMMDD_... and YYYYMMDDHHMMSS... are already date-prefixed.
+            if re.match(r"^\d{8}(?:_|\d{6})", basename):
                 return path
             date_prefix = datetime.now().strftime("%Y%m%d_")
             new_name = date_prefix + basename
