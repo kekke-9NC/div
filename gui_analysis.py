@@ -636,12 +636,14 @@ class AnalysisMixin:
         # ffprobe invocation.  The main thread polls this queue and performs
         # every log/dialog update itself.
         event_queue = queue.Queue()
+        self.cancel_flag.clear()
         self.btn_video_concat_start.configure(state=tk.DISABLED)
         thread = threading.Thread(
             target=self._video_concat_worker,
             args=(files, output_path, bitrate, codec, fps_val, safe_mode, apply_enhancement, event_queue),
             daemon=True
         )
+        self.video_concat_thread = thread
         thread.start()
         self._poll_video_concat_events(event_queue, thread)
 
@@ -666,6 +668,7 @@ class AnalysisMixin:
             pass
 
         if finished:
+            self.video_concat_thread = None
             self.btn_video_concat_start.configure(state=tk.NORMAL)
             return
 
@@ -675,7 +678,36 @@ class AnalysisMixin:
             # A terminal event should always be sent, but do not leave the UI
             # disabled if the worker terminates unexpectedly.
             self.append_log("連結エラー: ワーカースレッドが予期せず終了しました")
+            self.video_concat_thread = None
             self.btn_video_concat_start.configure(state=tk.NORMAL)
+
+    def stop_video_concat(self, wait_timeout=5):
+        """Cancel concatenation and ensure its FFmpeg child cannot outlive the app."""
+        self.cancel_flag.set()
+
+        def terminate_process():
+            process = getattr(self, "video_concat_process", None)
+            if process is None or process.poll() is not None:
+                return
+            try:
+                process.terminate()
+                process.wait(timeout=wait_timeout)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    pass
+            except OSError:
+                pass
+
+        terminate_process()
+        worker = getattr(self, "video_concat_thread", None)
+        if worker is not None and worker.is_alive() and worker is not threading.current_thread():
+            worker.join(timeout=wait_timeout)
+        # Cover the small race where FFmpeg starts while shutdown is waiting
+        # for a validation/remux subprocess to finish.
+        terminate_process()
 
     def _video_concat_worker(self, files, output_path, bitrate, codec, fps, safe_mode, apply_enhancement, event_queue):
         """動画連結のバックグラウンド処理"""
@@ -684,6 +716,9 @@ class AnalysisMixin:
         
         def cancel_check():
             return self.cancel_flag.is_set()
+
+        def process_callback(process):
+            self.video_concat_process = process
         
         try:
             success, message = video_processor.concatenate_videos(
@@ -695,6 +730,7 @@ class AnalysisMixin:
                 safe_mode=safe_mode,
                 progress_callback=progress_callback,
                 cancel_check=cancel_check,
+                process_callback=process_callback,
                 apply_enhancement=apply_enhancement,
                 fixed_pattern_path=self.rtsp_dark_file,
             )
