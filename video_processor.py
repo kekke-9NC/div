@@ -536,7 +536,9 @@ def concatenate_videos(
         current_offset += dur
     # 一番最後のファイルの終了時間がtotal_durationと一致しない場合の微修正（get_video_durationの誤差などで）は許容
 
-    # セーフモード: すべてのファイルを一時MPEG-TSに変換
+    # セーフモード: タイムスタンプを正規化した一時Matroskaファイルを作成する。
+    # MPEG-4 Part 2をMPEG-TSへstream copyすると映像サイズ/extradataが
+    # 失われるため、codec parametersを保持できるMatroskaを使用する。
     ts_temp_files = []
     files_to_concat = base_files # デフォルトは元ファイルまたは補正済み一時ファイル
 
@@ -553,33 +555,20 @@ def concatenate_videos(
                     # Cleanup below will handle removing created files
                     pass
 
-                ts_path = os.path.join(ts_dir, f"temp_{i:04d}.ts")
-                
-                # ストリームコピーでTS変換 (高速)
-                # -bsf:v h264_mp4toannexb は自動で適用されることが多いが明示的に指定も可
-                # ここではシンプルにコンテナ変換
+                ts_path = os.path.join(ts_dir, f"temp_{i:04d}.mkv")
+
+                # 高速remuxし、映像パラメータを保持したまま各ファイルの
+                # タイムスタンプを0基準へ正規化する。
                 ts_cmd = [
                     get_ffmpeg_path(),
                     "-y", "-hide_banner", "-loglevel", "error",
+                    "-fflags", "+genpts",
                     "-i", vf,
+                    "-map", "0:v:0",
+                    "-map", "0:a?",
                     "-c", "copy",
-                    "-bsf:v", "h264_mp4toannexb", # H.264の場合必須に近い
-                    "-f", "mpegts",
-                    ts_path
-                ]
-                
-                # H.265の場合は hevc_mp4toannexb
-                # 入力のコーデックを簡易判定するか、あるいはFFmpegのオートに任せる
-                # いったんオートで試すが、エラーが出るならフィルタ指定が必要
-                # H.264/HEVC両対応のため、まずはフィルタなしで試行し、だめなら...
-                # 実は -bsf:v h264_mp4toannexb はH264以外に使うとエラーになる可能性
-                # 安全策: フィルタ指定なしで実行し、FFmpegの自動解決に任せる
-                ts_cmd = [
-                    get_ffmpeg_path(),
-                    "-y", "-hide_banner", "-loglevel", "error",
-                    "-i", vf,
-                    "-c", "copy",
-                    "-f", "mpegts",
+                    "-avoid_negative_ts", "make_zero",
+                    "-f", "matroska",
                     ts_path
                 ]
 
@@ -598,9 +587,10 @@ def concatenate_videos(
                         get_ffmpeg_path(),
                         "-y", "-hide_banner", "-loglevel", "error",
                         "-i", vf,
+                        "-map", "0:v:0", "-map", "0:a?",
                         "-c:v", "libx264", "-preset", "ultrafast",
                         "-c:a", "aac",
-                        "-f", "mpegts",
+                        "-f", "matroska",
                         ts_path
                     ]
                     
