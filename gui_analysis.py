@@ -4,7 +4,61 @@ from gui_common import *
 class AnalysisMixin:
     def create_analysis_tab(self, parent):
         """Create the '解析' tab where users can drop meteor info .txt files and run batch drawing."""
-        frame = ttk.Frame(parent)
+        # The tab is taller than many laptop displays.  Previously only the
+        # file lists scrolled, leaving the video-concatenation controls below
+        # the visible area with no way to reach them.
+        tab_frame = ttk.Frame(parent)
+        tab_frame.pack(fill=tk.BOTH, expand=True)
+        self.analysis_tab_canvas = tk.Canvas(tab_frame, highlightthickness=0, bg="#2E3F5B")
+        analysis_scrollbar = ttk.Scrollbar(tab_frame, orient=tk.VERTICAL, command=self.analysis_tab_canvas.yview)
+        analysis_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.analysis_tab_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.analysis_tab_canvas.configure(yscrollcommand=analysis_scrollbar.set)
+
+        self.analysis_scrollable_frame = ttk.Frame(self.analysis_tab_canvas)
+        analysis_window = self.analysis_tab_canvas.create_window(
+            (0, 0), window=self.analysis_scrollable_frame, anchor="nw"
+        )
+        self.analysis_scrollable_frame.bind(
+            "<Configure>",
+            lambda _event: self.analysis_tab_canvas.configure(scrollregion=self.analysis_tab_canvas.bbox("all")),
+        )
+        self.analysis_tab_canvas.bind(
+            "<Configure>",
+            lambda event: self.analysis_tab_canvas.itemconfigure(analysis_window, width=event.width),
+        )
+
+        def is_descendant(widget, ancestor):
+            while widget is not None:
+                if widget == ancestor:
+                    return True
+                try:
+                    widget = widget.master
+                except (AttributeError, tk.TclError):
+                    return False
+            return False
+
+        def on_analysis_tab_mousewheel(event):
+            # Keep each file list's own scrollbar independent from the tab.
+            if is_descendant(event.widget, self.analysis_list_canvas) or is_descendant(event.widget, self.video_concat_list_canvas):
+                return None
+            if event.widget != self.analysis_tab_canvas and not is_descendant(event.widget, self.analysis_scrollable_frame):
+                return None
+            delta = getattr(event, "delta", 0)
+            if delta:
+                # macOS trackpads may report deltas smaller than 120.
+                amount = -delta if abs(delta) < 120 else -int(delta / 120)
+            else:
+                amount = -1 if getattr(event, "num", None) == 4 else 1
+            self.analysis_tab_canvas.yview_scroll(amount, "units")
+            return "break"
+
+        # Wheel events are delivered to the child control beneath the pointer.
+        self.bind_all("<MouseWheel>", on_analysis_tab_mousewheel, add="+")
+        self.bind_all("<Button-4>", on_analysis_tab_mousewheel, add="+")
+        self.bind_all("<Button-5>", on_analysis_tab_mousewheel, add="+")
+
+        frame = ttk.Frame(self.analysis_scrollable_frame)
         frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
         lf = ttk.LabelFrame(frame, text="流星解析 (info.txt ドロップ)")
