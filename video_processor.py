@@ -19,6 +19,7 @@ import video_enhancement
 
 # NVENCの利用可否をキャッシュ
 _nvenc_available: Optional[bool] = None
+_videotoolbox_available = {}
 
 
 def get_ffmpeg_path() -> str:
@@ -59,6 +60,36 @@ def check_nvenc_available() -> bool:
     
     _nvenc_available = False
     return False
+
+
+def check_videotoolbox_available(codec: str) -> bool:
+    """Return whether macOS VideoToolbox can actually encode the codec."""
+    normalized = "hevc" if codec.lower() in ("h265", "hevc") else "h264"
+    if normalized in _videotoolbox_available:
+        return _videotoolbox_available[normalized]
+
+    encoder = f"{normalized}_videotoolbox"
+    try:
+        # Listing the encoder is insufficient on some Macs, so perform a tiny
+        # real encode once and cache the result.
+        result = subprocess.run(
+            [
+                get_ffmpeg_path(), "-y", "-hide_banner", "-loglevel", "error",
+                "-f", "lavfi", "-i", "color=c=black:s=64x64:d=0.1",
+                "-frames:v", "1", "-c:v", encoder, "-f", "null", "-",
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+        )
+        available = result.returncode == 0
+    except Exception:
+        available = False
+
+    _videotoolbox_available[normalized] = available
+    return available
 
 
 def get_video_info(video_path: str) -> Optional[dict]:
@@ -341,14 +372,18 @@ def concatenate_videos(
     if len(input_files) < 2:
         return False, "連結には2つ以上の動画ファイルが必要です"
     
-    # NVENCの利用可否をチェック
+    # ハードウェアエンコーダの利用可否をチェック
     use_nvenc = check_nvenc_available()
+    use_videotoolbox = not use_nvenc and check_videotoolbox_available(codec)
     
     # コーデックの設定
     if codec.lower() == "h265" or codec.lower() == "hevc":
         if use_nvenc:
             video_codec = "hevc_nvenc"
             codec_params = ["-tag:v", "hvc1", "-preset", "p4", "-rc", "vbr"]
+        elif use_videotoolbox:
+            video_codec = "hevc_videotoolbox"
+            codec_params = ["-tag:v", "hvc1", "-realtime", "1", "-prio_speed", "1"]
         else:
             video_codec = "libx265"
             codec_params = ["-tag:v", "hvc1"]
@@ -356,6 +391,9 @@ def concatenate_videos(
         if use_nvenc:
             video_codec = "h264_nvenc"
             codec_params = ["-preset", "p4", "-rc", "vbr"]
+        elif use_videotoolbox:
+            video_codec = "h264_videotoolbox"
+            codec_params = ["-realtime", "1", "-prio_speed", "1"]
         else:
             video_codec = "libx264"
             codec_params = []
@@ -366,10 +404,15 @@ def concatenate_videos(
     if fps and fps > 0:
         video_filters = ["-vf", f"fps={fps}"]
     
-    encoder_info = "GPU (NVENC)" if use_nvenc else "CPU (自動マルチスレッド)"
+    if use_nvenc:
+        encoder_info = "GPU (NVENC)"
+    elif use_videotoolbox:
+        encoder_info = "Apple VideoToolbox (ハードウェア)"
+    else:
+        encoder_info = "CPU (自動マルチスレッド)"
     # FFmpeg/libx264/libx265 normally selects this automatically, but make it
     # explicit so CPU encoding is not accidentally constrained to one thread.
-    encoder_thread_params = [] if use_nvenc else ["-threads", "0"]
+    encoder_thread_params = [] if (use_nvenc or use_videotoolbox) else ["-threads", "0"]
     
     # 入力ファイルの事前検証（有効なファイルのみをフィルタリング）
     if progress_callback:
