@@ -234,7 +234,9 @@ class AnalysisMixin:
         self.btn_video_concat_start = ttk.Button(lf_concat, text="連結開始", command=self.start_video_concat)
         self.btn_video_concat_start.pack(pady=5)
 
-        return frame
+        # A Notebook tab must be a direct child of the Notebook.  ``frame`` is
+        # embedded in the canvas, so return the outer tab container instead.
+        return tab_frame
 
     def _ensure_training_tool_dependencies(self):
         required = [
