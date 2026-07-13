@@ -65,6 +65,8 @@ class App(
         self._clear_lighten_blend_cache()
 
         self.worker_thread = None
+        self.video_concat_thread = None
+        self.video_concat_process = None
         self.rtsp_thread = None
         self.periodic_scan_thread = None
         self.cancel_flag = threading.Event()
@@ -397,6 +399,9 @@ class App(
 
     def on_closing(self):
         if messagebox.askokcancel("終了", "アプリケーションを終了しますか？"):
+            # Stop FFmpeg before destroying Tk.  The concat worker is a daemon
+            # thread, so destroying the app first could otherwise orphan it.
+            self.stop_video_concat()
             self.append_log("設定を保存しています...")
             self._hide_summary_preview()
             self.close_rtsp_live_preview()
@@ -405,7 +410,6 @@ class App(
             # 自動更新を停止
             if self.auto_updater:
                 self.auto_updater.stop()
-            self.cancel_flag.set()
             self.destroy()
 
 

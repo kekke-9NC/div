@@ -344,6 +344,7 @@ def concatenate_videos(
     safe_mode: bool = False,
     progress_callback: Optional[Callable[[float, str], None]] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
+    process_callback: Optional[Callable[[Optional[subprocess.Popen]], None]] = None,
     apply_enhancement: bool = False,
     fixed_pattern_path: Optional[str] = None,
 ) -> Tuple[bool, str]:
@@ -359,9 +360,10 @@ def concatenate_videos(
         bitrate: 出力ビットレート（例: "8000k"）
         codec: コーデック（"h264" または "h265"）
         fps: 出力フレームレート（Noneの場合は自動）
-        safe_mode: Trueの場合、一時的にMPEG-TS形式に変換してから連結する（タイムスタンプエラー回避用）
+        safe_mode: Trueの場合、一時的にMatroska形式へremuxしてから連結する（タイムスタンプエラー回避用）
         progress_callback: 進捗コールバック(進捗率, メッセージ)
         cancel_check: キャンセル確認コールバック（Trueを返すとキャンセル）
+        process_callback: 実行中FFmpegプロセスの開始・終了通知
         
     Returns:
         (成功フラグ, メッセージ)のタプル
@@ -423,6 +425,8 @@ def concatenate_videos(
     total_duration = 0.0
     
     for i, f in enumerate(input_files):
+        if cancel_check and cancel_check():
+            return False, "処理がキャンセルされました"
         if not os.path.isfile(f):
             skipped_files.append((f, "ファイルが存在しません"))
             continue
@@ -595,8 +599,8 @@ def concatenate_videos(
             for i, vf in enumerate(base_files):
                 # キャンセル確認
                 if cancel_check and cancel_check():
-                    # Cleanup below will handle removing created files
-                    pass
+                    shutil.rmtree(ts_dir, ignore_errors=True)
+                    return False, "処理がキャンセルされました"
 
                 ts_path = os.path.join(ts_dir, f"temp_{i:04d}.mkv")
 
@@ -733,6 +737,9 @@ def concatenate_videos(
         
         if progress_callback:
             progress_callback(0.0, f"連結処理を開始中... (エンコーダ: {encoder_info})")
+
+        if cancel_check and cancel_check():
+            return False, "処理がキャンセルされました"
         
         # FFmpegを実行（stderrを別途キャプチャ）
         process = subprocess.Popen(
@@ -743,6 +750,8 @@ def concatenate_videos(
             encoding='utf-8',
             errors='replace'
         )
+        if process_callback:
+            process_callback(process)
         
         # 進捗を監視
         start_time = time.time()
@@ -766,6 +775,13 @@ def concatenate_videos(
                     process.wait(timeout=5)
                 except subprocess.TimeoutExpired:
                     process.kill()
+                    process.wait(timeout=2)
+                try:
+                    os.remove(output_path)
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    pass
                 return False, "処理がキャンセルされました"
             
             line = process.stdout.readline()
@@ -889,6 +905,11 @@ def concatenate_videos(
     except Exception as e:
         return False, f"連結処理中にエラーが発生しました: {e}"
     finally:
+        if process_callback:
+            try:
+                process_callback(None)
+            except Exception:
+                pass
         # 一時ファイルを削除（デバッグ用にconcat_listは残す）
         try:
             os.unlink(concat_list_path)
