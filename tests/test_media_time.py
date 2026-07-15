@@ -25,6 +25,15 @@ class MediaTimeTests(unittest.TestCase):
         self.assertEqual(datetime(2026, 7, 10, 23, 4), timestamp)
         self.assertEqual("ファイル階層・名前", source)
 
+    def test_path_fallback_keeps_seconds_from_noise_twin_segment_name(self):
+        with mock.patch.object(media_time, "_filesystem_creation_time", return_value=None), \
+                mock.patch.object(media_time, "_embedded_creation_time", return_value=None):
+            timestamp, source = media_time.get_media_start_time(
+                "/archive/20260710/23/42_35.mp4"
+            )
+        self.assertEqual(datetime(2026, 7, 10, 23, 42, 35), timestamp)
+        self.assertEqual("ファイル階層・名前", source)
+
     def test_schedule_applies_manual_offset_to_each_source(self):
         starts = {
             "a.mp4": datetime(2026, 7, 10, 23, 0, 39),

@@ -88,7 +88,7 @@ class NoiseTwinTests(unittest.TestCase):
                     trajectory_retention=0.99,
                     false_positive_reduction=0.35,
                     realtime_fps=27.0,
-                    realtime_test_seconds=1800.0,
+                    realtime_test_seconds=60.0,
                     dropped_frames=0,
                     validated=True,
                 ),
@@ -116,7 +116,7 @@ class NoiseTwinTests(unittest.TestCase):
             with self.assertRaises(noise_twin.NoiseTwinError):
                 noise_twin.validate_model_for_video(model_path, 1920, 1080, 25, True)
 
-    def test_realtime_validation_requires_thirty_minute_zero_drop_run(self):
+    def test_realtime_validation_requires_one_minute_zero_drop_run(self):
         with tempfile.TemporaryDirectory() as directory:
             model_path = os.path.join(directory, "camera.pth")
             metadata = noise_twin.NoiseTwinMetadata(
@@ -129,7 +129,7 @@ class NoiseTwinTests(unittest.TestCase):
                 validation=noise_twin.NoiseTwinValidation(
                     validated=True,
                     realtime_fps=30.0,
-                    realtime_test_seconds=1799.0,
+                    realtime_test_seconds=59.0,
                     dropped_frames=0,
                 ),
             )

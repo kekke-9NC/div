@@ -176,7 +176,9 @@ class SettingsMixin:
             style="Hint.TLabel",
         ).pack(anchor=tk.W, padx=24, pady=(0, 3))
 
-        twin_frame = ttk.LabelFrame(scrollable_frame, text="Camera Digital Twin ノイズ分離")
+        twin_frame = ttk.LabelFrame(
+            scrollable_frame, text="共通ノイズ前処理（NoiseTwin / モデル不要時間平均）"
+        )
         twin_frame.pack(fill=tk.X, pady=(6, 2))
         ttk.Checkbutton(
             twin_frame,
@@ -198,12 +200,70 @@ class SettingsMixin:
         )
         self.btn_noise_twin_video_train.pack(side=tk.LEFT)
         self.btn_noise_twin_rtsp_train = ttk.Button(
-            action_row, text="RTSPから10分間学習", command=self.start_noise_twin_training_from_rtsp
+            action_row, text="RTSPから5分間学習", command=self.start_noise_twin_training_from_rtsp
         )
         self.btn_noise_twin_rtsp_train.pack(side=tk.LEFT, padx=(6, 0))
         ttk.Label(twin_frame, textvariable=self.noise_twin_status_var, style="Hint.TLabel").pack(
             anchor=tk.W, padx=4, pady=(2, 4)
         )
+        mean_row = ttk.Frame(twin_frame)
+        mean_row.pack(fill=tk.X, padx=4, pady=(2, 4))
+        ttk.Label(mean_row, text="モデル不要の時間平均:").pack(side=tk.LEFT)
+        for label, value in (("OFF", 0), ("3フレーム", 3), ("5フレーム", 5)):
+            ttk.Radiobutton(
+                mean_row,
+                text=label,
+                variable=self.temporal_mean_frames_var,
+                value=value,
+                command=self.on_temporal_mean_changed,
+            ).pack(side=tk.LEFT, padx=(6, 0))
+
+        encoding_frame = ttk.LabelFrame(twin_frame, text="ノイズ低減済み連続動画の圧縮")
+        encoding_frame.pack(fill=tk.X, padx=4, pady=(2, 5))
+        codec_row = ttk.Frame(encoding_frame)
+        codec_row.pack(fill=tk.X, padx=4, pady=(3, 1))
+        ttk.Label(codec_row, text="コーデック:", width=12).pack(side=tk.LEFT)
+        codec_box = ttk.Combobox(
+            codec_row,
+            textvariable=self.processed_video_codec_var,
+            values=("H.265 / HEVC (推奨)", "H.264 / AVC", "MPEG-4 (互換)"),
+            state="readonly",
+            width=24,
+        )
+        codec_box.pack(side=tk.LEFT)
+        quality_row = ttk.Frame(encoding_frame)
+        quality_row.pack(fill=tk.X, padx=4, pady=1)
+        ttk.Label(quality_row, text="品質:", width=12).pack(side=tk.LEFT)
+        quality_box = ttk.Combobox(
+            quality_row,
+            textvariable=self.processed_video_quality_var,
+            values=("入力品質基準（推奨）", "最高品質", "高品質", "標準", "容量優先", "カスタム", "可逆圧縮（低速）"),
+            state="readonly",
+            width=24,
+        )
+        quality_box.pack(side=tk.LEFT)
+        ttk.Label(quality_row, text="ビットレート:").pack(side=tk.LEFT, padx=(12, 3))
+        self.processed_video_bitrate_spin = ttk.Spinbox(
+            quality_row,
+            from_=5,
+            to=200,
+            increment=5,
+            textvariable=self.processed_video_bitrate_var,
+            width=5,
+        )
+        self.processed_video_bitrate_spin.pack(side=tk.LEFT)
+        ttk.Label(quality_row, text="Mbps").pack(side=tk.LEFT, padx=(3, 0))
+        ttk.Label(
+            encoding_frame,
+            textvariable=self.processed_video_encoding_info_var,
+            style="Hint.TLabel",
+        ).pack(anchor=tk.W, padx=16, pady=(1, 3))
+        codec_box.bind("<<ComboboxSelected>>", lambda _event: self.update_processed_video_encoding_ui())
+        quality_box.bind("<<ComboboxSelected>>", lambda _event: self.update_processed_video_encoding_ui())
+        self.processed_video_bitrate_var.trace_add(
+            "write", lambda *_: self.update_processed_video_encoding_ui(update_bitrate=False)
+        )
+        self.update_processed_video_encoding_ui()
 
         lf_path = ttk.LabelFrame(scrollable_frame, text="保存先")
         lf_path.pack(fill=tk.X, pady=5)
@@ -1164,7 +1224,7 @@ class SettingsMixin:
             rtsp_state = (
                 "RTSP可"
                 if (
-                    validation.realtime_test_seconds >= 1800.0
+                    validation.realtime_test_seconds >= 60.0
                     and validation.dropped_frames == 0
                     and validation.realtime_fps >= metadata.fps
                 )
@@ -1187,9 +1247,51 @@ class SettingsMixin:
                 "検証基準を満たしたNoiseTwinモデルを選択または作成してください。",
             )
             return
+        if self.noise_twin_enabled_var.get():
+            self.temporal_mean_frames_var.set(0)
         self.append_log(
             f"Camera Digital Twinノイズ分離: {'ON' if self.noise_twin_enabled_var.get() else 'OFF'}"
         )
+
+    def update_processed_video_encoding_ui(self, update_bitrate=True):
+        quality = self.processed_video_quality_var.get()
+        preset_bitrates = {
+            "最高品質": 80,
+            "高品質": 60,
+            "標準": 40,
+            "容量優先": 20,
+        }
+        if update_bitrate and quality in preset_bitrates:
+            value = str(preset_bitrates[quality])
+            if self.processed_video_bitrate_var.get() != value:
+                self.processed_video_bitrate_var.set(value)
+        editable = quality == "カスタム"
+        if hasattr(self, "processed_video_bitrate_spin"):
+            self.processed_video_bitrate_spin.configure(
+                state=tk.NORMAL if editable else tk.DISABLED
+            )
+        if quality == "入力品質基準（推奨）":
+            text = "各RTSP・動画の実ビットレートを測定し、情報量を超えない値へ自動設定します。"
+        elif quality == "可逆圧縮（低速）":
+            text = "量子化による情報損失なし。容量は映像ノイズ量に依存し、処理速度は低下します。"
+        else:
+            try:
+                bitrate = max(5, min(200, int(float(self.processed_video_bitrate_var.get()))))
+                estimated = bitrate * 60 / 8
+                text = f"上限目安: 約{estimated:.0f} MB/分（実容量は通常これ以下）"
+            except ValueError:
+                text = "ビットレートは5〜200 Mbpsで指定してください。"
+        if self.processed_video_codec_var.get().startswith("H.265"):
+            text += " / Apple VideoToolbox使用"
+        self.processed_video_encoding_info_var.set(text)
+
+    def on_temporal_mean_changed(self):
+        frames = int(self.temporal_mean_frames_var.get())
+        if frames in (3, 5):
+            self.noise_twin_enabled_var.set(False)
+            self.append_log(f"モデル不要の時間平均: {frames}フレーム")
+        else:
+            self.append_log("モデル不要の時間平均: OFF")
 
     def select_noise_twin_model(self):
         path = filedialog.askopenfilename(
@@ -1222,8 +1324,8 @@ class SettingsMixin:
             return
         if not messagebox.askokcancel(
             "NoiseTwin学習",
-            "RTSPを10分間収録した後、背景モデル・流星保護ゲートの学習と\n"
-            "10,000本の合成流星検証、30分の連続無欠落試験を行います。\n"
+            "RTSPを5分間収録した後、背景モデル・流星保護ゲートの学習と\n"
+            "256本の高速合成流星検証、1分の連続無欠落試験を行います。\n"
             "処理中は通常検出を開始できません。",
         ):
             return
@@ -1256,7 +1358,7 @@ class SettingsMixin:
         for path in video_paths:
             command.extend(("--video", path))
         if rtsp_url:
-            command.extend(("--rtsp-url", rtsp_url, "--rtsp-duration", "600"))
+            command.extend(("--rtsp-url", rtsp_url, "--rtsp-duration", "300"))
         if self.apply_rtsp_dark_var.get() and os.path.exists(self.rtsp_dark_file):
             command.extend(("--correction", self.rtsp_dark_file))
         self._set_noise_twin_training_buttons(False)
@@ -1402,6 +1504,12 @@ class SettingsMixin:
             'apply_rtsp_dark': self.apply_rtsp_dark_var.get(),
             'noise_twin_enabled': self.noise_twin_enabled_var.get(),
             'noise_twin_model_path': self.noise_twin_model_path_var.get(),
+            'temporal_mean_frames': int(self.temporal_mean_frames_var.get()),
+            'processed_video_encoding': {
+                'codec': self.processed_video_codec_var.get(),
+                'quality': self.processed_video_quality_var.get(),
+                'bitrate_mbps': self.processed_video_bitrate_var.get(),
+            },
             # Plate solve mode
             'plate_solve_mode': self.plate_solve_mode_var.get(),
             'rtsp_end_hour': self.rtsp_end_hour_var.get(), 'rtsp_end_minute': self.rtsp_end_min_var.get(),
@@ -1472,6 +1580,21 @@ class SettingsMixin:
             self.noise_twin_model_path_var.set(settings.get('noise_twin_model_path', ''))
             requested_twin = bool(settings.get('noise_twin_enabled', False))
             self.noise_twin_enabled_var.set(requested_twin and self.refresh_noise_twin_status())
+            mean_frames = int(settings.get('temporal_mean_frames', 0) or 0)
+            self.temporal_mean_frames_var.set(
+                0 if self.noise_twin_enabled_var.get() else (mean_frames if mean_frames in (3, 5) else 0)
+            )
+            encoding = settings.get('processed_video_encoding', {})
+            self.processed_video_codec_var.set(
+                encoding.get('codec', "H.265 / HEVC (推奨)")
+            )
+            self.processed_video_quality_var.set(
+                encoding.get('quality', "入力品質基準（推奨）")
+            )
+            self.processed_video_bitrate_var.set(
+                str(encoding.get('bitrate_mbps', "40"))
+            )
+            self.update_processed_video_encoding_ui(update_bitrate=False)
             self.toggle_rtsp_time_limit_frame()
 
             self.folder_paths = settings.get('folder_paths', [])

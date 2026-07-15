@@ -310,6 +310,11 @@ class App(
         self.noise_twin_model_path_var = tk.StringVar(value="")
         self.noise_twin_status_var = tk.StringVar(value="NoiseTwin: 未選択")
         self.noise_twin_training_process = None
+        self.temporal_mean_frames_var = tk.IntVar(value=0)
+        self.processed_video_codec_var = tk.StringVar(value="H.265 / HEVC (推奨)")
+        self.processed_video_quality_var = tk.StringVar(value="入力品質基準（推奨）")
+        self.processed_video_bitrate_var = tk.StringVar(value="40")
+        self.processed_video_encoding_info_var = tk.StringVar(value="RTSPの実ビットレートを測定して自動設定")
         self.plate_solve_mode_var = tk.StringVar(value="local")
         self.astrometry_api_key_var = tk.StringVar(value="")
         self.video_concat_files = []
