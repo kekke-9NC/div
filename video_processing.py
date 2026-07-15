@@ -26,6 +26,7 @@ import video_enhancement
 import ml_training_data
 import automatic_video_mask
 import noise_twin
+import temporal_mean
 
 
 def _open_video_capture(source: str, decoder_threads: int = 2) -> cv2.VideoCapture:
@@ -277,6 +278,10 @@ def _write_noise_twin_info(
     innovation_max: Optional[float] = None,
 ) -> None:
     options = save_options or {}
+    mean_window = temporal_mean.normalize_window(options.get("temporal_mean_frames", 0))
+    if mean_window:
+        handle.write(f"Temporal Mean Frames: {mean_window}\n")
+        handle.write("Temporal Mean Model Required: false\n")
     metadata = options.get("noise_twin_metadata")
     if not isinstance(metadata, dict):
         return
@@ -528,6 +533,12 @@ def create_line_video_clips(
 
     twin_options = noise_twin.NoiseTwinOptions.from_value(noise_twin_options)
     prepared_video: Optional[noise_twin.PreparedVideo] = None
+    prepared_mean: Optional[temporal_mean.PreparedTemporalVideo] = None
+    mean_window = temporal_mean.normalize_window(
+        (noise_twin_options or {}).get("temporal_mean_frames", 0)
+    )
+    if twin_options.enabled and mean_window:
+        raise ValueError("NoiseTwinと3/5フレーム平均は同時に使用できません。")
     analysis_source = source
     evidence_path = ""
     active_fixed_pattern_correction = fixed_pattern_correction
@@ -570,6 +581,7 @@ def create_line_video_clips(
                 temp_dir=config.TEMP_CLIP_DIR,
                 progress_callback=twin_progress,
                 require_validated=twin_options.require_validated,
+                encoding_options=(noise_twin_options or {}).get("encoding"),
             )
             analysis_source = prepared_video.video_path
             evidence_path = prepared_video.innovation_path
@@ -594,6 +606,37 @@ def create_line_video_clips(
                 "flux_retention": metadata.validation.flux_retention,
             },
         )
+    elif mean_window:
+        save_options["temporal_mean_frames"] = mean_window
+        mean_marker = temporal_mean.load_processing_marker(source)
+        already_mean_processed = twin_options.already_processed or (
+            mean_marker is not None
+            and mean_marker.get("method") == "temporal_mean"
+            and int(mean_marker.get("frames", 0)) == mean_window
+        )
+        if not already_mean_processed:
+            message = f"{mean_window}フレーム時間平均前処理を開始: {os.path.basename(source)}"
+            print(message)
+            if progress_callback:
+                progress_callback((message, None))
+
+            def mean_progress(done: int, total: int) -> None:
+                if progress_callback and (done == total or done % 100 == 0):
+                    progress_callback(
+                        (f"{mean_window}フレーム平均 {done}/{max(total, 0)}", None)
+                    )
+
+            prepared_mean = temporal_mean.prepare_video(
+                source,
+                mean_window,
+                correction=fixed_pattern_correction,
+                temp_dir=config.TEMP_CLIP_DIR,
+                progress_callback=mean_progress,
+                encoding_options=(noise_twin_options or {}).get("encoding"),
+            )
+            analysis_source = prepared_mean.video_path
+            active_fixed_pattern_correction = None
+            save_options["temporal_mean_metrics"] = dict(prepared_mean.metrics)
 
     if not is_rtsp and save_options.get('auto_video_mask_enabled', False):
         try:
@@ -1893,6 +1936,8 @@ def create_line_video_clips(
             evidence_cap.release()
         if prepared_video is not None:
             prepared_video.cleanup()
+        if prepared_mean is not None:
+            prepared_mean.cleanup()
 
     if progress_callback:
         # Emit a single concise completion line including full path and detection count.

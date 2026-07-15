@@ -63,13 +63,17 @@ def _path_time(path: str) -> Optional[datetime]:
             continue
         if index + 1 >= len(parts) or not re.fullmatch(r"\d{1,2}", parts[index + 1]):
             continue
-        minute_match = re.match(r"(\d{2})", source.stem)
-        if not minute_match:
+        # Legacy RTSP files use MM.mp4.  The disk-backed NoiseTwin pipeline
+        # uses MM_SS.mp4 so reconnects within the same minute cannot
+        # overwrite one another; retain those seconds in the fallback time.
+        segment_match = re.match(r"(\d{2})(?:_(\d{2}))?", source.stem)
+        if not segment_match:
             continue
         try:
             return datetime.strptime(
-                f"{part}{int(parts[index + 1]):02d}{minute_match.group(1)}",
-                "%Y%m%d%H%M",
+                f"{part}{int(parts[index + 1]):02d}"
+                f"{segment_match.group(1)}{segment_match.group(2) or '00'}",
+                "%Y%m%d%H%M%S",
             )
         except ValueError:
             continue
@@ -116,4 +120,3 @@ def first_media_start_time(paths: Iterable[str]) -> Tuple[Optional[datetime], st
 
 def local_timezone_label() -> str:
     return datetime.now().astimezone().tzname() or "LOCAL"
-

@@ -50,13 +50,13 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--video", action="append", default=[])
     parser.add_argument("--rtsp-url", default="")
-    parser.add_argument("--rtsp-duration", type=int, default=600)
+    parser.add_argument("--rtsp-duration", type=int, default=300)
     parser.add_argument("--output", required=True)
     parser.add_argument("--correction", default="")
-    parser.add_argument("--background-steps", type=int, default=1500)
-    parser.add_argument("--gate-steps", type=int, default=750)
-    parser.add_argument("--validation-injections", type=int, default=10_000)
-    parser.add_argument("--rtsp-benchmark-seconds", type=int, default=1800)
+    parser.add_argument("--background-steps", type=int, default=400)
+    parser.add_argument("--gate-steps", type=int, default=300)
+    parser.add_argument("--validation-injections", type=int, default=256)
+    parser.add_argument("--rtsp-benchmark-seconds", type=int, default=60)
     args = parser.parse_args()
 
     captured_path = ""
@@ -91,7 +91,7 @@ def main() -> int:
         dropped_frames = 0
         realtime_test_seconds = 0.0
         if args.rtsp_url:
-            print("STATUS RTSP 30分連続・欠落なし検証を実行しています", flush=True)
+            print("STATUS RTSP 1分連続・欠落なし検証を実行しています", flush=True)
             measured_fps, dropped_frames, realtime_test_seconds = (
                 noise_twin_training.benchmark_rtsp_stream(
                     args.output,

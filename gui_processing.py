@@ -23,6 +23,24 @@ class ProcessingMixin:
         self.append_log("処理準備中...")
 
         try:
+            codec_label = self.processed_video_codec_var.get()
+            codec = "hevc" if codec_label.startswith("H.265") else (
+                "h264" if codec_label.startswith("H.264") else "mpeg4"
+            )
+            quality = {
+                "入力品質基準（推奨）": "source",
+                "最高品質": "maximum",
+                "高品質": "high",
+                "標準": "standard",
+                "容量優先": "compact",
+                "カスタム": "custom",
+                "可逆圧縮（低速）": "lossless",
+            }.get(self.processed_video_quality_var.get(), "source")
+            bitrate_mbps = int(float(self.processed_video_bitrate_var.get()))
+            if not 5 <= bitrate_mbps <= 200:
+                raise ValueError("保存ビットレートは5〜200 Mbpsで指定してください。")
+            if quality == "lossless" and codec == "mpeg4":
+                raise ValueError("可逆圧縮ではH.265またはH.264を選択してください。")
             params = {
                 'max_workers': int(self.concurrency_var.get()),
                 'interval_sec': float(self.interval_var.get()),
@@ -38,6 +56,12 @@ class ProcessingMixin:
                     'enabled': self.noise_twin_enabled_var.get(),
                     'model_path': self.noise_twin_model_path_var.get().strip(),
                     'require_validated': True,
+                    'temporal_mean_frames': int(self.temporal_mean_frames_var.get()),
+                    'encoding': {
+                        'codec': codec,
+                        'quality': quality,
+                        'bitrate_mbps': bitrate_mbps,
+                    },
                 },
                 'rtsp_notification_sound': self.rtsp_notification_sound_var.get(),
                 'summary_config': [item.copy() for item in self.summary_video_config]
@@ -79,6 +103,11 @@ class ProcessingMixin:
                 metadata = noise_twin.load_metadata(params['noise_twin_options']['model_path'])
                 if not metadata.validation.validated:
                     raise ValueError("NoiseTwinモデルが採用基準を満たしていません。")
+            mean_frames = int(params['noise_twin_options'].get('temporal_mean_frames', 0))
+            if mean_frames not in (0, 3, 5):
+                raise ValueError("時間平均はOFF、3、5フレームから選択してください。")
+            if params['noise_twin_options']['enabled'] and mean_frames:
+                raise ValueError("NoiseTwinと時間平均は同時に使用できません。")
             
             if self.rtsp_preset_var.get() == "clear":
                 preset = config.RTSP_PRESET_CLEAR_SKY
@@ -173,8 +202,23 @@ class ProcessingMixin:
             self.append_log(
                 f"流星検出通知音: {'ON' if params['rtsp_notification_sound'] else 'OFF'}"
             )
+            if params['noise_twin_options']['enabled']:
+                self.append_log(
+                    "NoiseTwin 3段パイプライン: RTSP受信 → MPSノイズ分離 → 流星分析"
+                )
+            elif params['noise_twin_options'].get('temporal_mean_frames') in (3, 5):
+                self.append_log(
+                    "時間平均3段パイプライン: RTSP受信 → "
+                    f"{params['noise_twin_options']['temporal_mean_frames']}フレーム平均 → 流星分析"
+                )
             if params['fixed_pattern_correction'] is not None:
-                mode = "NoiseTwin前処理" if params['noise_twin_options']['enabled'] else "保存物21フレーム平均"
+                mean_frames = params['noise_twin_options'].get('temporal_mean_frames', 0)
+                if params['noise_twin_options']['enabled']:
+                    mode = "NoiseTwin前処理"
+                elif mean_frames in (3, 5):
+                    mode = f"{mean_frames}フレーム平均前処理"
+                else:
+                    mode = "保存物21フレーム平均"
                 self.append_log(f"固定パターン補正 ON ({mode})")
             
             rtsp_args = (

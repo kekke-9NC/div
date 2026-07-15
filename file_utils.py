@@ -11,6 +11,8 @@ import video_processing
 import utils  # RTSP最適化用
 from fixed_pattern import apply_fixed_pattern_correction
 import noise_twin
+import noise_twin_pipeline
+import temporal_mean
 
 rtsp_processed_files: Set[str] = set()
 
@@ -1119,6 +1121,79 @@ def rtsp_save_and_process_thread_target(
 ):
     global rtsp_processed_files
     video_extensions = config.PERIODIC_VIDEO_EXTENSIONS
+
+    twin_options = noise_twin.NoiseTwinOptions.from_value(noise_twin_options)
+    mean_window = temporal_mean.normalize_window(
+        (noise_twin_options or {}).get("temporal_mean_frames", 0)
+    )
+    if twin_options.enabled and mean_window:
+        raise ValueError("NoiseTwinと3/5フレーム平均は同時に使用できません。")
+    if twin_options.enabled or mean_window:
+        effective_cancel = cancel_flag or threading.Event()
+
+        def pipeline_status(message: str) -> None:
+            if progress_callback:
+                progress_callback((message, None))
+
+        def recording_allowed() -> bool:
+            return is_within_time_range(
+                datetime.now(),
+                time_limit_enabled,
+                start_hour,
+                start_minute,
+                end_hour,
+                end_minute,
+            )
+
+        def analyze_denoised_segment(video_path: str, evidence_path: str) -> bool:
+            options = dict(noise_twin_options or {})
+            options.update(
+                {
+                    "enabled": twin_options.enabled,
+                    "already_processed": True,
+                    "evidence_path": evidence_path,
+                    "temporal_mean_frames": mean_window,
+                }
+            )
+            success = process_video_file_periodic(
+                video_path,
+                progress_callback,
+                mask,
+                global_wcs_info,
+                plate_solve_mask,
+                meteor_save_path,
+                not_meteor_save_path,
+                effective_cancel,
+                save_options,
+                interval,
+                duration,
+                min_length,
+                summary_video_config,
+                notify_on_detection,
+                None,
+                options,
+            )
+            if success:
+                rtsp_processed_files.add(video_path)
+            return success
+
+        pipeline = noise_twin_pipeline.RtspNoiseTwinPipeline(
+            rtsp_url=rtsp_url,
+            save_root=save_root,
+            model_path=twin_options.model_path,
+            analyze_callback=analyze_denoised_segment,
+            cancel_event=effective_cancel,
+            correction=dark_frame,
+            segment_seconds=segment_duration,
+            require_validated=twin_options.require_validated,
+            status_callback=pipeline_status,
+            recording_allowed=recording_allowed,
+            preview_callback=preview_callback,
+            temporal_mean_frames=mean_window,
+            encoding_options=(noise_twin_options or {}).get("encoding"),
+        )
+        pipeline.run()
+        return
 
     if os.path.isdir(save_root):
         try:
