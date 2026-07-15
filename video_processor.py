@@ -14,6 +14,7 @@ import re
 import time
 import shutil
 import math
+from collections import deque
 from datetime import datetime, timedelta
 from typing import List, Callable, Optional, Tuple, Dict
 
@@ -25,6 +26,7 @@ import media_time
 # NVENCの利用可否をキャッシュ
 _nvenc_available: Optional[bool] = None
 _videotoolbox_available = {}
+SAFE_CONCAT_DECODER_THREADS = 4
 
 
 def get_ffmpeg_path() -> str:
@@ -373,6 +375,39 @@ def _write_concat_timeline(output_path: str, schedule: List[Dict], settings: Dic
     return timeline_path
 
 
+def _build_independent_concat_filter(
+    input_count: int,
+    fps: Optional[float],
+    timestamp_overlay_position: Optional[str] = None,
+) -> Tuple[str, str]:
+    """Build a filter that resets and concatenates independently decoded files."""
+    if input_count < 1:
+        raise ValueError("連結する入力動画がありません")
+
+    chains = [
+        f"[{index}:v]settb=AVTB,setpts=PTS-STARTPTS[segment{index}]"
+        for index in range(input_count)
+    ]
+    segment_inputs = "".join(f"[segment{index}]" for index in range(input_count))
+    chains.append(f"{segment_inputs}concat=n={input_count}:v=1:a=0[joined]")
+
+    base_label = "joined"
+    if fps and fps > 0:
+        chains.append(f"[joined]fps={fps}[base]")
+        base_label = "base"
+
+    output_label = base_label
+    if timestamp_overlay_position:
+        overlay_index = input_count
+        chains.append(f"[{overlay_index}:v]setpts=PTS-STARTPTS[clock]")
+        chains.append(
+            f"[{base_label}][clock]overlay={timestamp_overlay_position}:shortest=1[v]"
+        )
+        output_label = "v"
+
+    return ";".join(chains), output_label
+
+
 def parse_ffmpeg_progress(line: str, total_duration: float) -> Optional[float]:
     """
     FFmpegの出力から進捗率を解析する
@@ -526,7 +561,7 @@ def concatenate_videos(
         bitrate: 出力ビットレート（例: "8000k"）
         codec: コーデック（"h264" または "h265"）
         fps: 出力フレームレート（Noneの場合は自動）
-        safe_mode: Trueの場合、一時的にMatroska形式へremuxしてから連結する（タイムスタンプエラー回避用）
+        safe_mode: Trueの場合、入力タイムスタンプを再生成して連結する
         progress_callback: 進捗コールバック(進捗率, メッセージ)
         cancel_check: キャンセル確認コールバック（Trueを返すとキャンセル）
         process_callback: 実行中FFmpegプロセスの開始・終了通知
@@ -739,99 +774,17 @@ def concatenate_videos(
     if progress_callback:
         progress_callback(0.0, f"[DEBUG] 合計再生時間: {total_duration:.2f}秒 ({total_duration/60:.2f}分)")
 
-    # セーフモード: タイムスタンプを正規化した一時Matroskaファイルを作成する。
-    # MPEG-4 Part 2をMPEG-TSへstream copyすると映像サイズ/extradataが
-    # 失われるため、codec parametersを保持できるMatroskaを使用する。
-    ts_temp_files = []
+    # The final job already decodes and re-encodes every frame with regenerated
+    # timestamps. Remuxing first is redundant and can hide per-file MPEG-4 VOL
+    # header changes when RTSP FPS shifts (for example 25.0 -> 24.963).
     files_to_concat = base_files # デフォルトは元ファイルまたは補正済み一時ファイル
     concat_source_files = list(valid_files)
 
-    if safe_mode:
-        if progress_callback:
-            progress_callback(0.0, "セーフモード: 一時ファイルを作成中（タイムスタンプ補正）...")
-        
-        try:
-            ts_dir = tempfile.mkdtemp(prefix="safe_concat_")
-            converted_source_files = []
-            
-            for i, vf in enumerate(base_files):
-                # キャンセル確認
-                if cancel_check and cancel_check():
-                    shutil.rmtree(ts_dir, ignore_errors=True)
-                    return False, "処理がキャンセルされました"
-
-                ts_path = os.path.join(ts_dir, f"temp_{i:04d}.mkv")
-
-                # 高速remuxし、映像パラメータを保持したまま各ファイルの
-                # タイムスタンプを0基準へ正規化する。
-                ts_cmd = [
-                    get_ffmpeg_path(),
-                    "-y", "-hide_banner", "-loglevel", "error",
-                    "-fflags", "+genpts",
-                    "-i", vf,
-                    "-map", "0:v:0",
-                    "-map", "0:a?",
-                    "-c", "copy",
-                    "-avoid_negative_ts", "make_zero",
-                    "-f", "matroska",
-                    ts_path
-                ]
-
-                res = subprocess.run(ts_cmd, capture_output=True, text=True, encoding='utf-8')
-                
-                # 変換成功チェック
-                conversion_success = (res.returncode == 0)
-                
-                if not conversion_success:
-                    if progress_callback:
-                        progress_callback(0.0, f"警告: ストリームコピー失敗 ({os.path.basename(vf)}) -> 再エンコードを試行します...")
-                    
-                    # 再エンコードでの修復を試みる
-                    # 高速化のため ultrafast を使用、画質より修復優先
-                    repair_cmd = [
-                        get_ffmpeg_path(),
-                        "-y", "-hide_banner", "-loglevel", "error",
-                        "-i", vf,
-                        "-map", "0:v:0", "-map", "0:a?",
-                        "-c:v", "libx264", "-preset", "ultrafast",
-                        "-c:a", "aac",
-                        "-f", "matroska",
-                        ts_path
-                    ]
-                    
-                    res_repair = subprocess.run(repair_cmd, capture_output=True, text=True, encoding='utf-8')
-                    if res_repair.returncode == 0:
-                        conversion_success = True
-                        if progress_callback:
-                            progress_callback(0.0, f"修復成功: {os.path.basename(vf)}")
-                    else:
-                        if progress_callback:
-                            progress_callback(0.0, f"エラー: ファイルの修復に失敗しました ({os.path.basename(vf)}) -> このファイルをスキップします")
-                
-                if conversion_success:
-                    ts_temp_files.append(ts_path)
-                    converted_source_files.append(valid_files[i])
-                
-                if progress_callback and i % 5 == 0:
-                     progress_callback(0.0, f"セーフモード: 変換中 ({i+1}/{len(base_files)})")
-            
-            # 変換できたファイルのみを連結対象とする
-            if ts_temp_files:
-                files_to_concat = ts_temp_files
-                concat_source_files = converted_source_files
-                if progress_callback:
-                    progress_callback(0.0, f"セーフモード: 変換完了 ({len(ts_temp_files)}/{len(base_files)}ファイル)")
-            else:
-                if progress_callback:
-                    progress_callback(0.0, "エラー: 有効なファイルが一つも変換できませんでした -> 元ファイルを使用します")
-                files_to_concat = base_files
-                concat_source_files = list(valid_files)
-
-        except Exception as e:
-            if progress_callback:
-                progress_callback(0.0, f"セーフモード初期化エラー: {e} -> 通常モードで続行")
-            files_to_concat = base_files
-            concat_source_files = list(valid_files)
+    if safe_mode and progress_callback:
+        progress_callback(
+            0.0,
+            "セーフモード: ファイル別デコードで連結（PTS再生成・4スレッド）",
+        )
 
     file_schedule = _build_concat_schedule(
         concat_source_files, timestamp_settings["offset_seconds"]
@@ -868,7 +821,11 @@ def concatenate_videos(
         return False, f"一時ファイルの作成に失敗しました: {e}"
     
     # エラーログを収集する変数
-    error_lines = []
+    # A corrupted RTSP recording can emit hundreds of thousands of decoder
+    # messages. Keep the useful tail without letting a diagnostic log exhaust
+    # memory or create a huge file.
+    error_lines = deque(maxlen=2000)
+    error_line_count = 0
     all_output_lines = []  # デバッグ用: 全出力を記録
     timestamp_temp_dir = None
     timestamp_overlay_path = None
@@ -902,11 +859,6 @@ def concatenate_videos(
                 os.unlink(concat_list_path)
             except OSError:
                 pass
-            for temp_file in ts_temp_files:
-                try:
-                    os.unlink(temp_file)
-                except OSError:
-                    pass
             if enhancement_temp_dir:
                 shutil.rmtree(enhancement_temp_dir, ignore_errors=True)
             return False, f"実時刻タイムスタンプの作成に失敗しました: {exc}"
@@ -919,24 +871,42 @@ def concatenate_videos(
             "-loglevel", "verbose", # デバッグログを詳細に出力
             "-err_detect", "ignore_err",  # エラーを無視して続行
             "-fflags", "+genpts+igndts+discardcorrupt",  # タイムスタンプを再生成、破損フレームを破棄
-            "-f", "concat",
-            "-safe", "0",
-            "-i", concat_list_path,
         ]
 
-        timestamp_filter_params = []
-        if timestamp_overlay_path:
-            cmd.extend(["-i", timestamp_overlay_path])
-            fps_filter = f"fps={fps}," if fps and fps > 0 else ""
-            filter_graph = (
-                f"[0:v]{fps_filter}setpts=PTS-STARTPTS[base];"
-                f"[1:v]setpts=PTS-STARTPTS[clock];"
-                f"[base][clock]overlay={timestamp_overlay_position}:shortest=1[v]"
+        output_filter_params = []
+        audio_params = ["-c:a", "aac", "-b:a", "192k"]
+        if safe_mode:
+            # Each source gets its own decoder so MPEG-4 VOL/extradata changes
+            # are re-read at every RTSP file boundary. Resetting PTS per input
+            # also removes large capture-clock gaps before concatenation.
+            for video_file in files_to_concat:
+                cmd.extend(["-threads", str(SAFE_CONCAT_DECODER_THREADS), "-i", video_file])
+            if timestamp_overlay_path:
+                cmd.extend(["-threads", "1", "-i", timestamp_overlay_path])
+            filter_graph, output_label = _build_independent_concat_filter(
+                len(files_to_concat), fps, timestamp_overlay_position
             )
-            timestamp_filter_params = [
+            output_filter_params = [
                 "-filter_complex", filter_graph,
-                "-map", "[v]", "-map", "0:a?",
+                "-map", f"[{output_label}]", "-an",
             ]
+            audio_params = []
+        else:
+            cmd.extend(["-f", "concat", "-safe", "0", "-i", concat_list_path])
+            if timestamp_overlay_path:
+                cmd.extend(["-i", timestamp_overlay_path])
+                fps_filter = f"fps={fps}," if fps and fps > 0 else ""
+                filter_graph = (
+                    f"[0:v]{fps_filter}setpts=PTS-STARTPTS[base];"
+                    f"[1:v]setpts=PTS-STARTPTS[clock];"
+                    f"[base][clock]overlay={timestamp_overlay_position}:shortest=1[v]"
+                )
+                output_filter_params = [
+                    "-filter_complex", filter_graph,
+                    "-map", "[v]", "-map", "0:a?",
+                ]
+            else:
+                output_filter_params = video_filters
 
         creation_time_metadata = ""
         if file_schedule:
@@ -952,9 +922,8 @@ def concatenate_videos(
             *encoder_thread_params,
             "-b:v", bitrate,
             *codec_params,
-            *(timestamp_filter_params if timestamp_overlay_path else video_filters),
-            "-c:a", "aac",
-            "-b:a", "192k",
+            *output_filter_params,
+            *audio_params,
             "-metadata", f"creation_time={creation_time_metadata}",
             "-metadata", "comment=Absolute capture timeline is stored in the companion .timeline.json file",
             "-movflags", "+faststart",
@@ -993,7 +962,9 @@ def concatenate_videos(
         
         # stderrを別スレッドで読み取る
         def read_stderr():
+            nonlocal error_line_count
             for line in process.stderr:
+                error_line_count += 1
                 error_lines.append(line.strip())
         
         stderr_thread = threading.Thread(target=read_stderr, daemon=True)
@@ -1079,7 +1050,9 @@ def concatenate_videos(
                 f.write(f"Total input files: {len(valid_files)}\n")
                 f.write(f"Expected duration: {total_duration:.2f}s\n")
                 f.write(f"Return code: {return_code}\n")
-                f.write(f"=== Error lines ({len(error_lines)}) ===\n")
+                f.write(
+                    f"=== Captured error lines ({len(error_lines)} of {error_line_count}) ===\n"
+                )
                 for line in error_lines:
                     f.write(line + '\n')
             if progress_callback:
@@ -1124,7 +1097,7 @@ def concatenate_videos(
                 
                 if error_lines:
                     # 最後の数行のエラーを追加
-                    recent_errors = error_lines[-10:] if len(error_lines) > 10 else error_lines
+                    recent_errors = list(error_lines)[-10:]
                     warning_msg += f"\nFFmpegエラー(抜粋): {'; '.join(recent_errors)}"
                     
                 if progress_callback:
@@ -1143,7 +1116,7 @@ def concatenate_videos(
             # エラー詳細を取得
             error_detail = ""
             if error_lines:
-                recent_errors = error_lines[-10:] if len(error_lines) > 10 else error_lines
+                recent_errors = list(error_lines)[-10:]
                 error_detail = "\n".join(recent_errors)
             return False, f"FFmpegがエラーで終了しました（コード: {return_code}）\n{error_detail}"
             
@@ -1161,18 +1134,6 @@ def concatenate_videos(
         except:
             pass
         
-        # セーフモードの一時ファイルを削除
-        for ts_file in ts_temp_files:
-            try:
-                os.unlink(ts_file)
-            except:
-                pass
-        # 一時ディレクトリ削除
-        if ts_temp_files:
-            try:
-                os.rmdir(os.path.dirname(ts_temp_files[0]))
-            except:
-                pass
         if enhancement_temp_dir:
             try:
                 shutil.rmtree(enhancement_temp_dir)
