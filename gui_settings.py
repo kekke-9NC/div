@@ -162,20 +162,6 @@ class SettingsMixin:
                 var.trace_add("write", lambda *args: self.toggle_summary_settings_button())
                 self.toggle_summary_settings_button()
 
-        enhancement_frame = ttk.LabelFrame(lf_save, text="共通保存物補正")
-        enhancement_frame.pack(fill=tk.X, pady=(6, 2))
-        ttk.Checkbutton(
-            enhancement_frame,
-            text="固定パターン補正を使用（NoiseTwinより先に適用）",
-            variable=self.apply_rtsp_dark_var,
-            command=self.on_apply_rtsp_dark_changed,
-        ).pack(anchor=tk.W, padx=4, pady=2)
-        ttk.Label(
-            enhancement_frame,
-            text="NoiseTwin OFF時は従来の保存物21フレーム平均も使用します。原本動画は変更しません。",
-            style="Hint.TLabel",
-        ).pack(anchor=tk.W, padx=24, pady=(0, 3))
-
         twin_frame = ttk.LabelFrame(
             scrollable_frame, text="共通ノイズ前処理（NoiseTwin / モデル不要時間平均）"
         )

@@ -233,7 +233,7 @@ class SourceMixin:
         rtsp_pattern.grid(row=0, column=1, sticky=tk.NSEW, padx=(3, 0))
         ttk.Label(
             rtsp_pattern,
-            text="補正マップを作成します。NoiseTwin使用時はAI推論の前に適用します。",
+            text="補正マップを作成し、この欄で補正の有効／無効を設定します。",
             style="Hint.TLabel",
         ).pack(anchor=tk.W, pady=(0, 6))
         rtsp_pattern_buttons = ttk.Frame(rtsp_pattern)
@@ -244,11 +244,16 @@ class SourceMixin:
         self.btn_rtsp_dark_video.pack(side=tk.LEFT, padx=(0, 8))
         self.chk_apply_rtsp_dark = ttk.Checkbutton(
             rtsp_pattern_buttons,
-            text="保存物へ適用",
+            text="固定パターン補正を有効化",
             variable=self.apply_rtsp_dark_var,
             command=self.on_apply_rtsp_dark_changed,
         )
         self.chk_apply_rtsp_dark.pack(side=tk.LEFT)
+        ttk.Label(
+            rtsp_pattern,
+            text="NoiseTwin・時間平均使用時は検出前、それ以外は検出後の保存物へ適用します。",
+            style="Hint.TLabel",
+        ).pack(anchor=tk.W, pady=(5, 0))
         ttk.Label(rtsp_pattern, textvariable=self.rtsp_dark_status_var, style="Hint.TLabel", anchor=tk.W).pack(fill=tk.X, pady=(6, 0))
         self.load_rtsp_dark_frame()
         
