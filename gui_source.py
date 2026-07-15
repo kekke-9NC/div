@@ -233,7 +233,7 @@ class SourceMixin:
         rtsp_pattern.grid(row=0, column=1, sticky=tk.NSEW, padx=(3, 0))
         ttk.Label(
             rtsp_pattern,
-            text="補正マップを作成し、保存する全動画・画像へ適応補正＋21フレーム平均を適用します。",
+            text="補正マップを作成します。NoiseTwin使用時はAI推論の前に適用します。",
             style="Hint.TLabel",
         ).pack(anchor=tk.W, pady=(0, 6))
         rtsp_pattern_buttons = ttk.Frame(rtsp_pattern)
@@ -786,7 +786,7 @@ atomcam2で利用する場合は、GitHubで公開されている
                 messagebox.showwarning("固定パターン補正", "適用できる補正マップがありません。先に補正マップを作成してください。")
                 return
         state = "ON" if self.apply_rtsp_dark_var.get() else "OFF"
-        self.append_log(f"保存物への適応固定パターン＋21フレーム平均: {state}")
+        self.append_log(f"固定パターン補正: {state}")
 
     def get_active_rtsp_dark_frame(self):
         if not self.apply_rtsp_dark_var.get():

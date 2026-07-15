@@ -1,4 +1,5 @@
 import os
+import math
 import cv2
 import numpy as np
 from pathlib import Path
@@ -24,6 +25,7 @@ import video_denoising
 import video_enhancement
 import ml_training_data
 import automatic_video_mask
+import noise_twin
 
 
 def _open_video_capture(source: str, decoder_threads: int = 2) -> cv2.VideoCapture:
@@ -268,6 +270,43 @@ def _extract_diff_cutout(
     return cutout
 
 
+def _write_noise_twin_info(
+    handle,
+    save_options: Optional[Dict[str, Any]],
+    trajectory_score: float = 0.0,
+    innovation_max: Optional[float] = None,
+) -> None:
+    options = save_options or {}
+    metadata = options.get("noise_twin_metadata")
+    if not isinstance(metadata, dict):
+        return
+    handle.write("NoiseTwin Enabled: true\n")
+    handle.write(f"NoiseTwin Model ID: {metadata.get('model_id', 'N/A')}\n")
+    handle.write(f"NoiseTwin Architecture: {metadata.get('architecture', 'N/A')}\n")
+    handle.write(f"NoiseTwin AI Background Version: {metadata.get('format_version', 'N/A')}\n")
+    handle.write("NoiseTwin Residual Protection Version: physical-trajectory-gate-v1\n")
+    handle.write(
+        f"NoiseTwin Fixed Pattern SHA256: {metadata.get('fixed_pattern_sha256', '')}\n"
+    )
+    metrics = options.get("noise_twin_metrics", {})
+    handle.write(f"NoiseTwin Trajectory Score: {float(trajectory_score):.4f}\n")
+    if isinstance(metrics, dict):
+        handle.write(f"NoiseTwin Noise Sigma: {float(metrics.get('noise_sigma', 0.0)):.4f}\n")
+        effective_innovation_max = (
+            float(innovation_max)
+            if innovation_max is not None
+            else float(metrics.get("innovation_max", 0.0))
+        )
+        handle.write(f"NoiseTwin Innovation Max: {effective_innovation_max:.4f}\n")
+        handle.write(f"NoiseTwin Flux Retention: {float(metrics.get('flux_retention', 0.0)):.4f}\n")
+    validation = metadata.get("validation", {})
+    if isinstance(validation, dict):
+        handle.write(
+            "NoiseTwin Validated Noise Reduction: "
+            f"{float(validation.get('false_positive_reduction', 0.0)) * 100.0:.2f}%\n"
+        )
+
+
 def get_rtsp_recording_start_datetime(
     source: str,
     total_frames: int,
@@ -459,6 +498,7 @@ def create_line_video_clips(
     notify_on_detection: bool = False,
     summary_video_config: Optional[List[Dict[str, Any]]] = None,
     fixed_pattern_correction: Optional[np.ndarray] = None,
+    noise_twin_options: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """
     動画ソースから流星候補の線分を検出し、詳細検出を行い、関連情報を保存する。
@@ -486,10 +526,79 @@ def create_line_video_clips(
     except (TypeError, ValueError):
         decoder_threads = 2
 
+    twin_options = noise_twin.NoiseTwinOptions.from_value(noise_twin_options)
+    prepared_video: Optional[noise_twin.PreparedVideo] = None
+    analysis_source = source
+    evidence_path = ""
+    active_fixed_pattern_correction = fixed_pattern_correction
+    if twin_options.enabled:
+        if not twin_options.model_path:
+            raise noise_twin.NoiseTwinError("NoiseTwinモデルが選択されていません。")
+        processed_marker = noise_twin.load_processing_marker(source)
+        if processed_marker is not None and not twin_options.already_processed:
+            selected_metadata = noise_twin.load_metadata(twin_options.model_path)
+            if processed_marker.get("model_id") != selected_metadata.model_id:
+                raise noise_twin.NoiseTwinError(
+                    "この動画は別のNoiseTwinモデルで処理済みです。二重推論を防止しました。"
+                )
+            twin_options = noise_twin.NoiseTwinOptions(
+                enabled=True,
+                model_path=twin_options.model_path,
+                already_processed=True,
+                require_validated=twin_options.require_validated,
+            )
+        if twin_options.already_processed:
+            evidence_path = str((noise_twin_options or {}).get("evidence_path", "") or "")
+            if not evidence_path:
+                candidate = os.path.splitext(source)[0] + "_innovation.mp4"
+                if os.path.exists(candidate):
+                    evidence_path = candidate
+        else:
+            message = f"Camera Digital Twin前処理を開始: {os.path.basename(source)}"
+            print(message)
+            if progress_callback:
+                progress_callback((message, None))
+
+            def twin_progress(done: int, total: int) -> None:
+                if progress_callback and (done == total or done % 100 == 0):
+                    progress_callback((f"NoiseTwin前処理 {done}/{max(total, 0)}", None))
+
+            prepared_video = noise_twin.prepare_video(
+                source,
+                twin_options.model_path,
+                correction=fixed_pattern_correction,
+                temp_dir=config.TEMP_CLIP_DIR,
+                progress_callback=twin_progress,
+                require_validated=twin_options.require_validated,
+            )
+            analysis_source = prepared_video.video_path
+            evidence_path = prepared_video.innovation_path
+            # The calibration map has already been applied before inference.
+            active_fixed_pattern_correction = None
+            save_options["noise_twin_metrics"] = dict(prepared_video.metrics)
+        metadata = noise_twin.load_metadata(twin_options.model_path)
+        if twin_options.require_validated and not metadata.validation.validated:
+            raise noise_twin.NoiseTwinError("検証基準を満たしていないNoiseTwinモデルです。")
+        save_options["noise_twin_metadata"] = {
+            "model_id": metadata.model_id,
+            "architecture": metadata.architecture,
+            "format_version": metadata.format_version,
+            "fixed_pattern_sha256": metadata.fixed_pattern_sha256,
+            "validation": dict(vars(metadata.validation)),
+        }
+        save_options.setdefault(
+            "noise_twin_metrics",
+            {
+                "noise_sigma": 0.0,
+                "innovation_max": 0.0,
+                "flux_retention": metadata.validation.flux_retention,
+            },
+        )
+
     if not is_rtsp and save_options.get('auto_video_mask_enabled', False):
         try:
             automatic_mask, preview_path, mask_stats = automatic_video_mask.create_auto_mask(
-                source,
+                analysis_source,
                 save_options.get('auto_video_mask_cache_dir', config.AUTO_VIDEO_MASK_CACHE_DIR),
             )
             mask = automatic_video_mask.combine_masks(mask, automatic_mask)
@@ -513,7 +622,7 @@ def create_line_video_clips(
         if progress_callback:
             progress_callback((message, None))
 
-    cap = _open_video_capture(source, decoder_threads)
+    cap = _open_video_capture(analysis_source, decoder_threads)
     if not cap.isOpened():
         message = f"動画/ストリームを開けませんでした: {source}"
         print(f"エラー: {message}")
@@ -565,8 +674,10 @@ def create_line_video_clips(
     detection_counter = 0
 
     try:
+        evidence_cap = _open_video_capture(evidence_path, decoder_threads) if evidence_path else None
         diff_generator = image_processing.create_diff_images(
-            cap, interval, duration, 1.0, buffer_duration, is_rtsp, cancel_flag
+            cap, interval, duration, 1.0, buffer_duration, is_rtsp, cancel_flag,
+            evidence_cap=evidence_cap,
         )
 
         last_read_frame_index_by_diff = -1
@@ -684,7 +795,7 @@ def create_line_video_clips(
                         else:
                             # 動画ファイルから取得
                             if not cap.isOpened():
-                                cap = _open_video_capture(source, decoder_threads)
+                                cap = _open_video_capture(analysis_source, decoder_threads)
                                 if not cap.isOpened():
                                     print(f"エラー: 動画を再オープンできませんでした: {source}")
                                     continue
@@ -843,7 +954,7 @@ def create_line_video_clips(
                                     print(f"RTSPバッファから最終クリップフレームを取得: {actual_start_final} - {actual_end_final}, {len(final_frames_for_clip)} フレーム")
                                 else:
                                     if not cap.isOpened():
-                                        cap = _open_video_capture(source, decoder_threads)
+                                        cap = _open_video_capture(analysis_source, decoder_threads)
                                         if not cap.isOpened():
                                             continue
                                 
@@ -887,10 +998,10 @@ def create_line_video_clips(
                                 saved_diff_img = diff_img
                                 ml_source_frames = final_frames_for_clip
                                 enhancement_result: Optional[video_enhancement.EnhancementResult] = None
-                                if fixed_pattern_correction is not None:
+                                if active_fixed_pattern_correction is not None:
                                     enhancement_result = video_enhancement.enhance_frames(
                                         final_frames_for_clip,
-                                        fixed_pattern_correction,
+                                        active_fixed_pattern_correction,
                                         detected_line=((x1, y1), (x2, y2)),
                                     )
                                     final_frames_for_clip = enhancement_result.frames
@@ -1017,7 +1128,7 @@ def create_line_video_clips(
                                         print(f"エラー: フルサイズ動画の書き込み開始に失敗 ({full_video_path})")
 
                                 if (
-                                    fixed_pattern_correction is None
+                                    active_fixed_pattern_correction is None
                                     and save_options.get('denoised_full_video', False)
                                     and final_frames_for_clip
                                 ):
@@ -1116,6 +1227,13 @@ def create_line_video_clips(
                                                 f.write(f"Enhancement Noise Sigma Before: {enhancement_result.noise_before:.4f}\n")
                                                 f.write(f"Enhancement Noise Sigma After: {enhancement_result.noise_after:.4f}\n")
                                                 f.write(f"Enhancement Noise Reduction (%): {enhancement_result.noise_reduction_percent:.2f}\n")
+                                            _write_noise_twin_info(
+                                                f,
+                                                save_options,
+                                                math.hypot(x2 - x1, y2 - y1)
+                                                / max(1.0, math.hypot(img_w, img_h)),
+                                                float(diff_img.max()) / 16.0 if evidence_path else None,
+                                            )
                                             f.write(f"RA Start (deg): {ra_start_str}\nDec Start (deg): {dec_start_str}\n")
                                             f.write(f"RA End (deg): {ra_end_str}\nDec End (deg): {dec_end_str}\n")
                                             for key, path in saved_paths.items(): f.write(f"Saved {key.capitalize()} Path: {path}\n")
@@ -1241,7 +1359,7 @@ def create_line_video_clips(
                     else:
                         if not cap.isOpened():
                             print("動画キャプチャが閉じています。再オープンします。")
-                            cap = _open_video_capture(source, decoder_threads)
+                            cap = _open_video_capture(analysis_source, decoder_threads)
                             if not cap.isOpened():
                                 print(f"エラー: 動画を再オープンできませんでした: {source}")
                                 continue
@@ -1414,7 +1532,7 @@ def create_line_video_clips(
                     else:
                         if not cap.isOpened():
                             print("動画キャプチャが閉じています。再オープンします。")
-                            cap = _open_video_capture(source, decoder_threads)
+                            cap = _open_video_capture(analysis_source, decoder_threads)
                             if not cap.isOpened(): continue
                             last_read_frame_index_by_diff = -1
 
@@ -1451,16 +1569,16 @@ def create_line_video_clips(
                                 masked_frames_final.append(frame)
                         final_frames_for_clip = masked_frames_final
 
-                    # Classification must continue to use the raw detector difference image.
-                    # Fixed-pattern correction and temporal averaging affect saved media only.
+                    # The classifier sees the same detector evidence: legacy
+                    # max/min difference when OFF, innovation when NoiseTwin is ON.
                     classification_diff_img = diff_img
                     saved_diff_img = diff_img
                     ml_source_frames = final_frames_for_clip
                     enhancement_result: Optional[video_enhancement.EnhancementResult] = None
-                    if fixed_pattern_correction is not None:
+                    if active_fixed_pattern_correction is not None:
                         enhancement_result = video_enhancement.enhance_frames(
                             final_frames_for_clip,
-                            fixed_pattern_correction,
+                            active_fixed_pattern_correction,
                             detected_line=((x1, y1), (x2, y2)),
                         )
                         final_frames_for_clip = enhancement_result.frames
@@ -1588,7 +1706,7 @@ def create_line_video_clips(
                             print(f"エラー: フルサイズ動画の書き込み開始に失敗 ({full_video_path})")
 
                     if (
-                        fixed_pattern_correction is None
+                        active_fixed_pattern_correction is None
                         and save_options.get('denoised_full_video', False)
                         and final_frames_for_clip
                     ):
@@ -1687,6 +1805,13 @@ def create_line_video_clips(
                                     f.write(f"Enhancement Noise Sigma Before: {enhancement_result.noise_before:.4f}\n")
                                     f.write(f"Enhancement Noise Sigma After: {enhancement_result.noise_after:.4f}\n")
                                     f.write(f"Enhancement Noise Reduction (%): {enhancement_result.noise_reduction_percent:.2f}\n")
+                                _write_noise_twin_info(
+                                    f,
+                                    save_options,
+                                    math.hypot(x2 - x1, y2 - y1)
+                                    / max(1.0, math.hypot(img_w, img_h)),
+                                    float(diff_img.max()) / 16.0 if evidence_path else None,
+                                )
                                 f.write(f"RA Start (deg): {ra_start_str}\nDec Start (deg): {dec_start_str}\n")
                                 f.write(f"RA End (deg): {ra_end_str}\nDec End (deg): {dec_end_str}\n")
                                 for key, path in saved_paths.items(): f.write(f"Saved {key.capitalize()} Path: {path}\n")
@@ -1764,6 +1889,10 @@ def create_line_video_clips(
         if cap.isOpened():
             cap.release()
             print("動画キャプチャを解放しました。")
+        if 'evidence_cap' in locals() and evidence_cap is not None:
+            evidence_cap.release()
+        if prepared_video is not None:
+            prepared_video.cleanup()
 
     if progress_callback:
         # Emit a single concise completion line including full path and detection count.

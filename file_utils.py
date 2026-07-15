@@ -10,6 +10,7 @@ import config
 import video_processing
 import utils  # RTSP最適化用
 from fixed_pattern import apply_fixed_pattern_correction
+import noise_twin
 
 rtsp_processed_files: Set[str] = set()
 
@@ -75,6 +76,7 @@ def process_video_file_periodic(
     summary_video_config: Optional[List[Dict[str, Any]]] = None,
     notify_on_detection: bool = True,
     fixed_pattern_correction: Optional[np.ndarray] = None,
+    noise_twin_options: Optional[Dict[str, Any]] = None,
 ) -> bool:
     # 開始ログはvideo_processing側で出力されるため、ここでは出力しない
     try:
@@ -86,6 +88,7 @@ def process_video_file_periodic(
             plate_solve_mask=plate_solve_mask, cancel_flag=cancel_flag, save_options=save_options,
             notify_on_detection=notify_on_detection, summary_video_config=summary_video_config,
             fixed_pattern_correction=fixed_pattern_correction,
+            noise_twin_options=noise_twin_options,
         )
         # 完了ログはvideo_processing側で出力されるため、ここでは出力しない
         return True
@@ -114,6 +117,7 @@ def monitor_directory(
     summary_video_config: Optional[List[Dict[str, Any]]] = None, time_limit_enabled: bool = False,
     start_hour: int = 17, start_minute: int = 0, end_hour: int = 7, end_minute: int = 0,
     fixed_pattern_correction: Optional[np.ndarray] = None,
+    noise_twin_options: Optional[Dict[str, Any]] = None,
 ):
     processed_files: Set[str] = set()
     video_extensions = config.PERIODIC_VIDEO_EXTENSIONS
@@ -199,6 +203,7 @@ def monitor_directory(
                               meteor_save_path, not_meteor_save_path, cancel_flag, save_options,
                               interval, duration, min_length, summary_video_config,
                               fixed_pattern_correction=fixed_pattern_correction,
+                              noise_twin_options=noise_twin_options,
                           )
                           if processed_successfully:
                               processed_files.add(file_path)
@@ -216,6 +221,12 @@ def monitor_directory(
                 if cancel_flag is not None and cancel_flag.is_set(): break
                 time.sleep(1)
 
+        except noise_twin.NoiseTwinError as e:
+            message = f"[定期スキャン] NoiseTwinを開始できません: {e}"
+            print(f"エラー: {message}")
+            if progress_callback:
+                progress_callback((message, None))
+            break
         except Exception as e:
             message = f"[定期スキャン] ループ中にエラー: {e}"
             print(f"エラー: {message}")
@@ -629,7 +640,8 @@ def save_rtsp_video_segments(
     time_limit_enabled: bool = False, start_hour: int = 17, start_minute: int = 0,
     end_hour: int = 7, end_minute: int = 0,
     preview_callback: Optional[Callable[[np.ndarray], None]] = None,
-    dark_frame: Optional[np.ndarray] = None
+    dark_frame: Optional[np.ndarray] = None,
+    noise_twin_options: Optional[Dict[str, Any]] = None,
 ):
     """
     RTSPストリームから設定されたフレーム数ごとに動画ファイルを保存する。
@@ -640,7 +652,8 @@ def save_rtsp_video_segments(
     - 切断検出時は即座に再接続（無限リトライ）
     """
     # NVIDIAハードウェアデコードが有効ならFFmpegモードを使用
-    if config.RTSP_USE_NVIDIA_HWACCEL and dark_frame is None:
+    twin_options = noise_twin.NoiseTwinOptions.from_value(noise_twin_options)
+    if config.RTSP_USE_NVIDIA_HWACCEL and dark_frame is None and not twin_options.enabled:
         import shutil
         if shutil.which("ffmpeg"):
             return save_rtsp_video_segments_ffmpeg(
@@ -661,6 +674,8 @@ def save_rtsp_video_segments(
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     dark_frame_cache = None
     dark_frame_cache_shape = None
+    twin_processor = None
+    pending_twin_results = []
 
     def apply_dark_frame(frame: np.ndarray) -> np.ndarray:
         nonlocal dark_frame_cache, dark_frame_cache_shape
@@ -676,7 +691,7 @@ def save_rtsp_video_segments(
     
     def connect_rtsp():
         """RTSPストリームに接続。成功するまで無限リトライ"""
-        nonlocal cap, width, height, fps
+        nonlocal cap, width, height, fps, twin_processor
         while cancel_flag is None or not cancel_flag.is_set():
             print(f"[RTSP保存] ストリームに接続中: {rtsp_url}")
             cap = utils.create_rtsp_capture(rtsp_url)
@@ -688,6 +703,20 @@ def save_rtsp_video_segments(
                     fps = detected_fps
                 else:
                     fps = config.RTSP_FPS
+                if twin_options.enabled:
+                    if not twin_options.model_path:
+                        raise noise_twin.NoiseTwinError("NoiseTwinモデルが選択されていません。")
+                    noise_twin.validate_model_for_video(
+                        twin_options.model_path, width, height, fps, require_realtime=True
+                    )
+                    if twin_processor is None:
+                        twin_processor = noise_twin.NoiseTwinStreamProcessor(
+                            noise_twin.NoiseTwinEngine(
+                                twin_options.model_path,
+                                correction=dark_frame,
+                                require_validated=twin_options.require_validated,
+                            )
+                        )
                 print(f"[RTSP保存] ストリーム接続成功 ({width}x{height} @ {fps} fps)")
                 return True
             print(f"[RTSP保存] 接続失敗。{RECONNECT_WAIT}秒後に再試行...")
@@ -720,7 +749,10 @@ def save_rtsp_video_segments(
                 was_outside_time_range_cv = True
         
         out = None
+        evidence_out = None
+        pair_writer = None
         temp_file_path = ""
+        temp_evidence_path = ""
         try:
             if cap is None or not cap.isOpened():
                 if not connect_rtsp():
@@ -734,12 +766,19 @@ def save_rtsp_video_segments(
             minute_str = now.strftime("%M")
             base_file_path = os.path.join(dir_path, f"{minute_str}.mp4")
             temp_file_path = os.path.join(dir_path, f"{minute_str}_temp_{time.time_ns()}.mp4")
+            temp_evidence_path = os.path.splitext(temp_file_path)[0] + "_innovation.mp4"
 
             out = cv2.VideoWriter(temp_file_path, fourcc, fps, (width, height))
-            if not out.isOpened():
+            if twin_options.enabled:
+                evidence_out = cv2.VideoWriter(temp_evidence_path, fourcc, fps, (width, height))
+            if not out.isOpened() or (twin_options.enabled and not evidence_out.isOpened()):
                 print(f"エラー: VideoWriter を開けませんでした: {temp_file_path}")
+                out.release()
+                if evidence_out is not None:
+                    evidence_out.release()
                 time.sleep(2)
                 continue
+            pair_writer = noise_twin.AsyncVideoPairWriter(out, evidence_out)
 
             print(f"[RTSP保存] セグメント開始 (一時ファイル): {os.path.basename(temp_file_path)}")
             frames_written = 0
@@ -761,31 +800,54 @@ def save_rtsp_video_segments(
                         was_outside_time_range_cv = False
                         break
 
-                ret, frame = cap.read()
-                if not ret:
-                    consecutive_read_failures += 1
-                    if consecutive_read_failures >= MAX_READ_FAILURES:
-                        # 切断検出！
-                        print(f"[RTSP保存] ネットワーク切断検出 (連続 {MAX_READ_FAILURES} 回読み込み失敗)。即座に再接続します...")
-                        stream_error = True
-                        break
-                    # 少し待って再試行
-                    time.sleep(0.1)
-                    continue
-                
-                # 成功時はリセット
-                consecutive_read_failures = 0
-                frame = apply_dark_frame(frame)
+                if not pending_twin_results:
+                    ret, frame = cap.read()
+                    if not ret:
+                        consecutive_read_failures += 1
+                        if consecutive_read_failures >= MAX_READ_FAILURES:
+                            print(f"[RTSP保存] ネットワーク切断検出 (連続 {MAX_READ_FAILURES} 回読み込み失敗)。即座に再接続します...")
+                            stream_error = True
+                            break
+                        time.sleep(0.1)
+                        continue
+                    consecutive_read_failures = 0
+                    if twin_options.enabled:
+                        pending_twin_results.extend(twin_processor.push(frame))
+                        if not pending_twin_results:
+                            continue
+                    else:
+                        corrected = apply_dark_frame(frame)
+                        pending_twin_results.append(
+                            noise_twin.NoiseTwinResult(corrected, corrected, 0.0, 0.0, 0.0, 1.0)
+                        )
+                result = pending_twin_results.pop(0)
                 if preview_callback is not None:
                     try:
-                        preview_callback(frame)
+                        preview_callback(result.frame)
                     except Exception as e:
                         print(f"[RTSPライブプレビュー] プレビューフレーム送信エラー: {e}")
-                out.write(frame)
+                pair_writer.submit(result)
                 frames_written += 1
 
-            out.release()
+            if twin_options.enabled and (stream_error or paused_for_time_limit):
+                pending_twin_results.extend(twin_processor.flush())
+                while pending_twin_results and frames_written < segment_frames:
+                    result = pending_twin_results.pop(0)
+                    pair_writer.submit(result)
+                    frames_written += 1
+
+            pair_writer.close()
+            pair_writer = None
             out = None
+            evidence_out = None
+
+            def finalize_segment(final_file_path: str) -> None:
+                os.replace(temp_file_path, final_file_path)
+                if twin_options.enabled and os.path.exists(temp_evidence_path):
+                    final_evidence = os.path.splitext(final_file_path)[0] + "_innovation.mp4"
+                    os.replace(temp_evidence_path, final_evidence)
+                    metadata = noise_twin.load_metadata(twin_options.model_path)
+                    noise_twin.write_processing_marker(final_file_path, metadata)
 
             if paused_for_time_limit:
                 if os.path.exists(temp_file_path):
@@ -793,14 +855,19 @@ def save_rtsp_video_segments(
                         file_size = os.path.getsize(temp_file_path)
                         if file_size > 10000 and frames_written > 10:
                             final_file_path = get_unique_file_path(base_file_path)
-                            os.replace(temp_file_path, final_file_path)
+                            finalize_segment(final_file_path)
                             print(f"[RTSP保存] 時間制限による部分セグメント保存: {final_file_path} ({frames_written} フレーム)")
                         else:
                             os.remove(temp_file_path)
+                            if temp_evidence_path and os.path.exists(temp_evidence_path):
+                                os.remove(temp_evidence_path)
                     except OSError:
                         pass
                 if cap is not None and cap.isOpened():
                     cap.release()
+                if twin_options.enabled:
+                    twin_processor = None
+                    pending_twin_results.clear()
                 continue
 
             if stream_error:
@@ -810,10 +877,12 @@ def save_rtsp_video_segments(
                         file_size = os.path.getsize(temp_file_path)
                         if file_size > 10000 and frames_written > 10:  # 10KB以上かつ10フレーム以上
                             final_file_path = get_unique_file_path(base_file_path)
-                            os.replace(temp_file_path, final_file_path)
+                            finalize_segment(final_file_path)
                             print(f"[RTSP保存] 部分セグメント保存: {final_file_path} ({frames_written} フレーム)")
                         else:
                             os.remove(temp_file_path)
+                            if temp_evidence_path and os.path.exists(temp_evidence_path):
+                                os.remove(temp_evidence_path)
                     except OSError:
                         pass
                 
@@ -824,6 +893,9 @@ def save_rtsp_video_segments(
                 # 再接続
                 if cap is not None and cap.isOpened():
                     cap.release()
+                if twin_options.enabled:
+                    twin_processor = None
+                    pending_twin_results.clear()
                 if not connect_rtsp():
                     break
                 continue
@@ -831,21 +903,53 @@ def save_rtsp_video_segments(
             elif frames_written > 0:
                 # 正常完了
                 final_file_path = get_unique_file_path(base_file_path)
-                os.replace(temp_file_path, final_file_path)
+                finalize_segment(final_file_path)
                 print(f"[RTSP保存] セグメント保存完了: {final_file_path} ({frames_written} フレーム)")
             else:
                 if os.path.exists(temp_file_path):
                     os.remove(temp_file_path)
+                if temp_evidence_path and os.path.exists(temp_evidence_path):
+                    os.remove(temp_evidence_path)
 
+        except noise_twin.NoiseTwinError as e:
+            print(f"[RTSP保存] NoiseTwinを開始できません: {e}")
+            if pair_writer is not None:
+                try:
+                    pair_writer.close()
+                except Exception:
+                    pass
+            if out is not None and out.isOpened():
+                out.release()
+            if evidence_out is not None and evidence_out.isOpened():
+                evidence_out.release()
+            for path in (temp_file_path, temp_evidence_path):
+                if path and os.path.exists(path):
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
+            break
         except Exception as e:
             print(f"[RTSP保存] ループ中にエラー: {e}")
             import traceback
             traceback.print_exc()
+            if pair_writer is not None:
+                try:
+                    pair_writer.close()
+                except Exception:
+                    pass
             if out is not None and out.isOpened():
                 out.release()
+            if evidence_out is not None and evidence_out.isOpened():
+                evidence_out.release()
             if temp_file_path and os.path.exists(temp_file_path):
                 try:
                     os.remove(temp_file_path)
+                except OSError:
+                    pass
+            if temp_evidence_path and os.path.exists(temp_evidence_path):
+                try:
+                    os.remove(temp_evidence_path)
                 except OSError:
                     pass
             
@@ -853,6 +957,9 @@ def save_rtsp_video_segments(
             print("[RTSP保存] 再接続します...")
             if cap is not None and cap.isOpened():
                 cap.release()
+            if twin_options.enabled:
+                twin_processor = None
+                pending_twin_results.clear()
             if not connect_rtsp():
                 break
             continue
@@ -877,6 +984,7 @@ def process_new_rtsp_files(
     end_hour: int = 7, end_minute: int = 0,
     notify_on_detection: bool = True,
     fixed_pattern_correction: Optional[np.ndarray] = None,
+    noise_twin_options: Optional[Dict[str, Any]] = None,
 ):
     new_files_to_process = []
     video_extensions = config.PERIODIC_VIDEO_EXTENSIONS
@@ -888,9 +996,29 @@ def process_new_rtsp_files(
     WRITING_THRESHOLD_SECONDS = 5
     
     try:
+        def options_for_saved_rtsp(file_path: str):
+            options = dict(noise_twin_options or {})
+            if options.get("enabled", False):
+                options["already_processed"] = True
+                options["evidence_path"] = os.path.splitext(file_path)[0] + "_innovation.mp4"
+            return options
+
+        def cleanup_saved_evidence(file_path: str) -> None:
+            if not (noise_twin_options or {}).get("enabled", False):
+                return
+            evidence = os.path.splitext(file_path)[0] + "_innovation.mp4"
+            try:
+                os.remove(evidence)
+            except OSError:
+                pass
+
         for root_dir, _, files in os.walk(rtsp_root):
             for file in files:
-                if file.lower().endswith(video_extensions) and '_temp_' not in file:
+                if (
+                    file.lower().endswith(video_extensions)
+                    and '_temp_' not in file
+                    and '_innovation' not in file
+                ):
                     # 現在書き込み中のファイルはスキップ
                     if file == current_minute_filename:
                         continue
@@ -932,8 +1060,11 @@ def process_new_rtsp_files(
                         fp, progress_callback, mask, global_wcs_info, plate_solve_mask,
                         meteor_save_path, not_meteor_save_path, cancel_flag, save_options,
                         interval, duration, min_length, summary_video_config, notify_on_detection,
-                        fixed_pattern_correction,
+                        None if (noise_twin_options or {}).get("enabled", False) else fixed_pattern_correction,
+                        noise_twin_options=options_for_saved_rtsp(fp),
                     )
+                    if result:
+                        cleanup_saved_evidence(fp)
                     return fp, result
                 
                 with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -955,9 +1086,11 @@ def process_new_rtsp_files(
                          file_path, progress_callback, mask, global_wcs_info, plate_solve_mask,
                          meteor_save_path, not_meteor_save_path, cancel_flag, save_options,
                          interval, duration, min_length, summary_video_config, notify_on_detection,
-                         fixed_pattern_correction,
+                         None if (noise_twin_options or {}).get("enabled", False) else fixed_pattern_correction,
+                         noise_twin_options=options_for_saved_rtsp(file_path),
                     )
                     if processed_successfully:
+                        cleanup_saved_evidence(file_path)
                         processed_files_set.add(file_path)
         else:
              print("[RTSP解析] 解析対象の新規ファイルは見つかりませんでした。")
@@ -981,7 +1114,8 @@ def rtsp_save_and_process_thread_target(
     max_workers: int = 1,
     preview_callback: Optional[Callable[[np.ndarray], None]] = None,
     dark_frame: Optional[np.ndarray] = None,
-    notify_on_detection: bool = True
+    notify_on_detection: bool = True,
+    noise_twin_options: Optional[Dict[str, Any]] = None,
 ):
     global rtsp_processed_files
     video_extensions = config.PERIODIC_VIDEO_EXTENSIONS
@@ -993,6 +1127,19 @@ def rtsp_save_and_process_thread_target(
             if progress_callback: progress_callback((initial_scan_message, None))
             for root, _, files in os.walk(save_root):
                 for file in files:
+                    if (
+                        (noise_twin_options or {}).get("enabled", False)
+                        and "_innovation" in file
+                        and file.lower().endswith(video_extensions)
+                    ):
+                        # Existing main segments are deliberately excluded by the
+                        # startup scan, so their transient evidence is no longer
+                        # needed. The persistent processed marker remains.
+                        try:
+                            os.remove(os.path.join(root, file))
+                        except OSError:
+                            pass
+                        continue
                     if file.lower().endswith(video_extensions):
                         rtsp_processed_files.add(os.path.join(root, file))
             completion_message = f"[RTSP統合] 初回スキャン完了。既存の {len(rtsp_processed_files)} ファイルは処理対象外。"
@@ -1006,10 +1153,14 @@ def rtsp_save_and_process_thread_target(
         print(f"[RTSP統合] 保存ディレクトリが見つからないため、初回スキャンをスキップします: {save_root}")
 
     # 時間制限は録画とRTSP保存ファイルの解析対象判定に適用する
+    recording_correction = (
+        dark_frame if (noise_twin_options or {}).get("enabled", False) else None
+    )
     save_thread = threading.Thread(
         target=save_rtsp_video_segments, 
         args=(rtsp_url, save_root, segment_duration, cancel_flag,
-              time_limit_enabled, start_hour, start_minute, end_hour, end_minute, preview_callback, None),
+              time_limit_enabled, start_hour, start_minute, end_hour, end_minute,
+              preview_callback, recording_correction, noise_twin_options),
         daemon=True
     )
     save_thread.start()
@@ -1024,7 +1175,8 @@ def rtsp_save_and_process_thread_target(
             meteor_save_path, not_meteor_save_path, cancel_flag, save_options,
             interval, duration, min_length, summary_video_config, max_workers,
             time_limit_enabled, start_hour, start_minute, end_hour, end_minute,
-            notify_on_detection, dark_frame
+            notify_on_detection, dark_frame,
+            noise_twin_options,
         )
         wait_message = f"[RTSP統合] 解析スキャン完了。次のスキャンまで {scan_interval} 秒待機。"
         print(wait_message)
