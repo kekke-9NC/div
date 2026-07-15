@@ -7,6 +7,9 @@ class ProcessingMixin:
     def start_processing(self):
         # 詳細設定をconfigに適用
         self.apply_advanced_settings_to_config()
+        if self.noise_twin_training_process is not None:
+            messagebox.showwarning("情報", "NoiseTwin学習が完了してから通常処理を開始してください。")
+            return
         if not self.apply_selected_model(silent=True):
             messagebox.showerror("設定エラー", "有効な学習モデルを選択してください。")
             return
@@ -31,6 +34,11 @@ class ProcessingMixin:
                 'global_wcs_info': self.global_wcs_info if self.use_plate_solve_var.get() else None,
                 'plate_solve_mask': self.plate_solve_mask_image,
                 'fixed_pattern_correction': self.rtsp_dark_frame if self.apply_rtsp_dark_var.get() else None,
+                'noise_twin_options': {
+                    'enabled': self.noise_twin_enabled_var.get(),
+                    'model_path': self.noise_twin_model_path_var.get().strip(),
+                    'require_validated': True,
+                },
                 'rtsp_notification_sound': self.rtsp_notification_sound_var.get(),
                 'summary_config': [item.copy() for item in self.summary_video_config]
             }
@@ -65,6 +73,12 @@ class ProcessingMixin:
                 if not params['save_options']['ml_training_data_root']:
                     raise ValueError("機械学習向けデータの保存先が空です。")
                 os.makedirs(params['save_options']['ml_training_data_root'], exist_ok=True)
+            if params['noise_twin_options']['enabled']:
+                if not params['noise_twin_options']['model_path']:
+                    raise ValueError("NoiseTwinモデルが選択されていません。")
+                metadata = noise_twin.load_metadata(params['noise_twin_options']['model_path'])
+                if not metadata.validation.validated:
+                    raise ValueError("NoiseTwinモデルが採用基準を満たしていません。")
             
             if self.rtsp_preset_var.get() == "clear":
                 preset = config.RTSP_PRESET_CLEAR_SKY
@@ -135,6 +149,7 @@ class ProcessingMixin:
                 'start_hour': int(self.start_hour_var.get()), 'start_minute': int(self.start_min_var.get()),
                 'end_hour': int(self.end_hour_var.get()), 'end_minute': int(self.end_min_var.get()),
                 'fixed_pattern_correction': params['fixed_pattern_correction'],
+                'noise_twin_options': params['noise_twin_options'],
             }
             if monitor_kwargs['time_limit_enabled']:
                 log_msg += f", 時間制限: {monitor_kwargs['start_hour']:02d}:{monitor_kwargs['start_minute']:02d} - {monitor_kwargs['end_hour']:02d}:{monitor_kwargs['end_minute']:02d}"
@@ -159,7 +174,8 @@ class ProcessingMixin:
                 f"流星検出通知音: {'ON' if params['rtsp_notification_sound'] else 'OFF'}"
             )
             if params['fixed_pattern_correction'] is not None:
-                self.append_log("保存物補正: 適応固定パターン＋21フレーム平均 ON")
+                mode = "NoiseTwin前処理" if params['noise_twin_options']['enabled'] else "保存物21フレーム平均"
+                self.append_log(f"固定パターン補正 ON ({mode})")
             
             rtsp_args = (
                 url, config.RTSP_SAVE_ROOT, config.RTSP_SEGMENT_DURATION, 60, self.progress_queue.put,
@@ -169,7 +185,8 @@ class ProcessingMixin:
                 config.MIN_LINE_LENGTH, params['summary_config'],
                 rtsp_time_limit, rtsp_sh, rtsp_sm, rtsp_eh, rtsp_em,
                 params['max_workers'], self.handle_rtsp_live_preview_frame, params['fixed_pattern_correction'],
-                params['rtsp_notification_sound']
+                params['rtsp_notification_sound'],
+                params['noise_twin_options'],
             )
             self.rtsp_thread = threading.Thread(target=file_utils.rtsp_save_and_process_thread_target, args=rtsp_args, daemon=True)
             self.rtsp_thread.start()
@@ -405,6 +422,7 @@ def prepare_folder_sources_and_run(
             params['plate_solve_mask'], params['meteor_save_path'], params['not_meteor_save_path'],
             cancel_flag, params['save_options'], params['summary_config'],
             params['fixed_pattern_correction'],
+            params['noise_twin_options'],
         )
     except Exception as exc:
         progress_queue.put((f"動画フォルダの走査中にエラー: {exc}", None))
@@ -416,6 +434,7 @@ def worker_main_loop(
     meteor_save_path: str, not_meteor_save_path: str, cancel_flag: threading.Event,
     save_options: Dict[str, bool], summary_video_config: List[Dict[str, Any]],
     fixed_pattern_correction: Optional[np.ndarray] = None,
+    noise_twin_options: Optional[Dict[str, Any]] = None,
 ):
     total_videos = len(sources)
     if total_videos == 0: return
@@ -443,6 +462,7 @@ def worker_main_loop(
             tmp_root=tmp_root_dir,
             status_callback=common.STATUS_CALLBACK,
             fixed_pattern_correction=fixed_pattern_correction,
+            noise_twin_options=noise_twin_options,
         )
 
         if not cancel_flag.is_set():

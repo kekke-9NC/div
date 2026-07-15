@@ -39,6 +39,7 @@ import astrometry
 import image_processing
 import model
 import model_catalog
+import noise_twin
 import ml_review
 import observation_time_filter
 import folder_source_discovery

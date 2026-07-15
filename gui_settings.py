@@ -166,15 +166,44 @@ class SettingsMixin:
         enhancement_frame.pack(fill=tk.X, pady=(6, 2))
         ttk.Checkbutton(
             enhancement_frame,
-            text="適応固定パターン補正 → 21フレーム平均を全保存動画・画像へ適用",
+            text="固定パターン補正を使用（NoiseTwinより先に適用）",
             variable=self.apply_rtsp_dark_var,
             command=self.on_apply_rtsp_dark_changed,
         ).pack(anchor=tk.W, padx=4, pady=2)
         ttk.Label(
             enhancement_frame,
-            text="RTSP・フォルダ・単体動画のすべてで同じ処理を使用します。原本動画は変更しません。",
+            text="NoiseTwin OFF時は従来の保存物21フレーム平均も使用します。原本動画は変更しません。",
             style="Hint.TLabel",
         ).pack(anchor=tk.W, padx=24, pady=(0, 3))
+
+        twin_frame = ttk.LabelFrame(scrollable_frame, text="Camera Digital Twin ノイズ分離")
+        twin_frame.pack(fill=tk.X, pady=(6, 2))
+        ttk.Checkbutton(
+            twin_frame,
+            text="NoiseTwinを検出前・保存映像へ適用",
+            variable=self.noise_twin_enabled_var,
+            command=self.on_noise_twin_enabled_changed,
+        ).pack(anchor=tk.W, padx=4, pady=(3, 1))
+        model_row = ttk.Frame(twin_frame)
+        model_row.pack(fill=tk.X, padx=4, pady=2)
+        ttk.Label(model_row, text="モデル:", width=9).pack(side=tk.LEFT)
+        ttk.Entry(
+            model_row, textvariable=self.noise_twin_model_path_var, state="readonly"
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(model_row, text="選択", command=self.select_noise_twin_model).pack(side=tk.LEFT, padx=(5, 0))
+        action_row = ttk.Frame(twin_frame)
+        action_row.pack(fill=tk.X, padx=4, pady=2)
+        self.btn_noise_twin_video_train = ttk.Button(
+            action_row, text="動画から学習", command=self.start_noise_twin_training_from_video
+        )
+        self.btn_noise_twin_video_train.pack(side=tk.LEFT)
+        self.btn_noise_twin_rtsp_train = ttk.Button(
+            action_row, text="RTSPから10分間学習", command=self.start_noise_twin_training_from_rtsp
+        )
+        self.btn_noise_twin_rtsp_train.pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Label(twin_frame, textvariable=self.noise_twin_status_var, style="Hint.TLabel").pack(
+            anchor=tk.W, padx=4, pady=(2, 4)
+        )
 
         lf_path = ttk.LabelFrame(scrollable_frame, text="保存先")
         lf_path.pack(fill=tk.X, pady=5)
@@ -1116,6 +1145,207 @@ class SettingsMixin:
                 self.after(0, lambda: messagebox.showerror("現在地取得エラー", str(exc)))
         threading.Thread(target=worker, daemon=True).start()
 
+    def _set_noise_twin_training_buttons(self, enabled):
+        state = tk.NORMAL if enabled else tk.DISABLED
+        if hasattr(self, "btn_noise_twin_video_train"):
+            self.btn_noise_twin_video_train.config(state=state)
+        if hasattr(self, "btn_noise_twin_rtsp_train"):
+            self.btn_noise_twin_rtsp_train.config(state=state)
+
+    def refresh_noise_twin_status(self):
+        path = self.noise_twin_model_path_var.get().strip()
+        if not path:
+            self.noise_twin_status_var.set("NoiseTwin: 未選択")
+            return False
+        try:
+            metadata = noise_twin.load_metadata(path)
+            validation = metadata.validation
+            state = "検証済み" if validation.validated else "未検証（本番利用不可）"
+            rtsp_state = (
+                "RTSP可"
+                if (
+                    validation.realtime_test_seconds >= 1800.0
+                    and validation.dropped_frames == 0
+                    and validation.realtime_fps >= metadata.fps
+                )
+                else "RTSP未検証"
+            )
+            self.noise_twin_status_var.set(
+                f"NoiseTwin: {state}・{rtsp_state} / {metadata.width}x{metadata.height} / "
+                f"{validation.realtime_fps:.1f} fps / 光量保持 {validation.flux_retention * 100:.1f}%"
+            )
+            return validation.validated
+        except Exception as exc:
+            self.noise_twin_status_var.set(f"NoiseTwin: 読込失敗 ({exc})")
+            return False
+
+    def on_noise_twin_enabled_changed(self):
+        if self.noise_twin_enabled_var.get() and not self.refresh_noise_twin_status():
+            self.noise_twin_enabled_var.set(False)
+            messagebox.showwarning(
+                "Camera Digital Twin",
+                "検証基準を満たしたNoiseTwinモデルを選択または作成してください。",
+            )
+            return
+        self.append_log(
+            f"Camera Digital Twinノイズ分離: {'ON' if self.noise_twin_enabled_var.get() else 'OFF'}"
+        )
+
+    def select_noise_twin_model(self):
+        path = filedialog.askopenfilename(
+            title="NoiseTwinモデルを選択",
+            initialdir=self.noise_twin_model_dir,
+            filetypes=[("NoiseTwinモデル", "*.pth *.pt"), ("すべてのファイル", "*.*")],
+        )
+        if not path:
+            return
+        self.noise_twin_model_path_var.set(path)
+        if not self.refresh_noise_twin_status():
+            self.noise_twin_enabled_var.set(False)
+
+    def start_noise_twin_training_from_video(self):
+        paths = filedialog.askopenfilenames(
+            title="NoiseTwin学習に使う動画を選択",
+            filetypes=[("動画ファイル", "*.mp4 *.mov *.mkv *.avi *.m4v"), ("すべてのファイル", "*.*")],
+        )
+        if paths:
+            self._start_noise_twin_training(list(paths), "")
+
+    def start_noise_twin_training_from_rtsp(self):
+        url = ""
+        if self.rtsp_urls:
+            url = self.rtsp_urls[0]
+        if not url:
+            url = self.rtsp_url_var.get().strip()
+        if not url:
+            messagebox.showwarning("NoiseTwin学習", "RTSP URLを入力または追加してください。")
+            return
+        if not messagebox.askokcancel(
+            "NoiseTwin学習",
+            "RTSPを10分間収録した後、背景モデル・流星保護ゲートの学習と\n"
+            "10,000本の合成流星検証、30分の連続無欠落試験を行います。\n"
+            "処理中は通常検出を開始できません。",
+        ):
+            return
+        self._start_noise_twin_training([], url)
+
+    def _start_noise_twin_training(self, video_paths, rtsp_url):
+        if self.noise_twin_training_process is not None:
+            messagebox.showwarning("NoiseTwin学習", "NoiseTwin学習はすでに実行中です。")
+            return
+        if any((
+            self.worker_thread and self.worker_thread.is_alive(),
+            self.rtsp_thread and self.rtsp_thread.is_alive(),
+            self.periodic_scan_thread and self.periodic_scan_thread.is_alive(),
+        )):
+            messagebox.showwarning("NoiseTwin学習", "通常処理を停止してから学習を開始してください。")
+            return
+        output = os.path.join(
+            self.noise_twin_model_dir,
+            f"noise_twin_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pth",
+        )
+        if getattr(sys, "frozen", False):
+            command = [sys.executable, "--noise-twin-worker", "--output", output]
+        else:
+            command = [
+                sys.executable,
+                os.path.join(os.path.dirname(os.path.abspath(__file__)), "noise_twin_worker.py"),
+                "--output",
+                output,
+            ]
+        for path in video_paths:
+            command.extend(("--video", path))
+        if rtsp_url:
+            command.extend(("--rtsp-url", rtsp_url, "--rtsp-duration", "600"))
+        if self.apply_rtsp_dark_var.get() and os.path.exists(self.rtsp_dark_file):
+            command.extend(("--correction", self.rtsp_dark_file))
+        self._set_noise_twin_training_buttons(False)
+        self.noise_twin_status_var.set("NoiseTwin: 学習準備中...")
+        self.append_log("NoiseTwin学習を開始しました。")
+        training_queue = queue.Queue()
+
+        def worker():
+            process = None
+            error = None
+            result = None
+            try:
+                process = subprocess.Popen(
+                    command,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                )
+                self.noise_twin_training_process = process
+                if process.stdout is not None:
+                    for raw_line in process.stdout:
+                        line = raw_line.strip()
+                        if line.startswith("PROGRESS "):
+                            parts = line.split(maxsplit=3)
+                            training_queue.put(("progress", parts[1], int(parts[2]), int(parts[3])))
+                        elif line.startswith("STATUS "):
+                            training_queue.put(("status", line[7:]))
+                        elif line.startswith("RESULT "):
+                            result = json.loads(line[7:])
+                        elif line.startswith("ERROR "):
+                            error = line[6:]
+                        elif line:
+                            training_queue.put(("status", line))
+                return_code = process.wait()
+                if return_code != 0 and not error:
+                    error = f"学習ワーカーが終了しました (exit={return_code})"
+            except Exception as exc:
+                error = str(exc)
+            training_queue.put(("done", error, result, output))
+
+        phase_names = {
+            "capture": "RTSP収録",
+            "background": "背景モデル学習",
+            "gate": "流星保護ゲート学習",
+            "validation": "合成流星検証",
+            "realtime": "RTSP連続検証",
+        }
+
+        def poll():
+            finished = False
+            while True:
+                try:
+                    item = training_queue.get_nowait()
+                except queue.Empty:
+                    break
+                if item[0] == "progress":
+                    _, phase, done, total = item
+                    label = phase_names.get(phase, phase)
+                    self.noise_twin_status_var.set(f"NoiseTwin: {label} {done}/{total}")
+                    if done == total or done % max(1, total // 20) == 0:
+                        self.append_log(f"NoiseTwin {label}: {done}/{total}")
+                elif item[0] == "status":
+                    self.noise_twin_status_var.set(f"NoiseTwin: {item[1]}")
+                elif item[0] == "done":
+                    _, error, result, model_path = item
+                    self.noise_twin_training_process = None
+                    self._set_noise_twin_training_buttons(True)
+                    if error or not result:
+                        self.noise_twin_status_var.set("NoiseTwin: 学習失敗")
+                        messagebox.showerror("NoiseTwin学習", f"学習に失敗しました:\n{error}")
+                    else:
+                        self.noise_twin_model_path_var.set(model_path)
+                        valid = self.refresh_noise_twin_status()
+                        if valid:
+                            self.noise_twin_enabled_var.set(True)
+                            messagebox.showinfo("NoiseTwin学習", "検証済みNoiseTwinを作成し、適用をONにしました。")
+                        else:
+                            messagebox.showwarning(
+                                "NoiseTwin学習",
+                                "モデルは保存しましたが、信号保持または誤検出低減の採用基準を満たしませんでした。",
+                            )
+                    finished = True
+            if not finished:
+                self.after(100, poll)
+
+        threading.Thread(target=worker, daemon=True).start()
+        self.after(100, poll)
+
     def save_settings(self):
         settings = {
             'periodic_scan_enabled': self.periodic_scan_var.get(), 'periodic_scan_directory': self.periodic_dir_var.get(),
@@ -1170,6 +1400,8 @@ class SettingsMixin:
             'rtsp_time_limit_enabled': self.rtsp_time_limit_var.get(),
             'rtsp_start_hour': self.rtsp_start_hour_var.get(), 'rtsp_start_minute': self.rtsp_start_min_var.get(),
             'apply_rtsp_dark': self.apply_rtsp_dark_var.get(),
+            'noise_twin_enabled': self.noise_twin_enabled_var.get(),
+            'noise_twin_model_path': self.noise_twin_model_path_var.get(),
             # Plate solve mode
             'plate_solve_mode': self.plate_solve_mode_var.get(),
             'rtsp_end_hour': self.rtsp_end_hour_var.get(), 'rtsp_end_minute': self.rtsp_end_min_var.get(),
@@ -1237,6 +1469,9 @@ class SettingsMixin:
             self.rtsp_notification_sound_var.set(settings.get('rtsp_notification_sound', True))
             self.load_rtsp_dark_frame()
             self.apply_rtsp_dark_var.set(bool(settings.get('apply_rtsp_dark', False)) and self.rtsp_dark_frame is not None)
+            self.noise_twin_model_path_var.set(settings.get('noise_twin_model_path', ''))
+            requested_twin = bool(settings.get('noise_twin_enabled', False))
+            self.noise_twin_enabled_var.set(requested_twin and self.refresh_noise_twin_status())
             self.toggle_rtsp_time_limit_frame()
 
             self.folder_paths = settings.get('folder_paths', [])

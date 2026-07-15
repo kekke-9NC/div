@@ -125,7 +125,8 @@ def create_diff_images(
     median_duration: float = 1.0,
     buffer_duration: float = config.RTSP_BUFFER_DURATION,
     is_rtsp: bool = False,
-    cancel_flag: Optional[threading.Event] = None
+    cancel_flag: Optional[threading.Event] = None,
+    evidence_cap: Optional[cv2.VideoCapture] = None,
 ) -> Generator[
         Union[
             Tuple[np.ndarray, Tuple[int, int], np.ndarray, np.ndarray],
@@ -160,6 +161,7 @@ def create_diff_images(
     required_frames = max(1, int(fps * duration))
     min_val_frames_count = max(1, int(fps * median_duration))
     frames_for_diff = deque(maxlen=required_frames)
+    evidence_for_diff = deque(maxlen=required_frames) if evidence_cap is not None else None
 
     buffer_frames: Optional[Deque[np.ndarray]] = None
     if is_rtsp:
@@ -183,6 +185,16 @@ def create_diff_images(
             print(f"フレーム {frame_index} の読み込みに失敗、またはストリームが終了しました。")
             break
 
+        if evidence_cap is not None and evidence_for_diff is not None:
+            evidence_ok, evidence_frame = evidence_cap.read()
+            if evidence_ok and evidence_frame is not None:
+                evidence_for_diff.append(evidence_frame)
+            else:
+                # Never desynchronise the main stream because of a damaged
+                # optional evidence sidecar.  Falling back retains legacy
+                # detection behaviour for this frame.
+                evidence_for_diff.append(frame)
+
         frames_for_diff.append(frame)
         if is_rtsp and buffer_frames is not None:
             buffer_frames.append(frame)
@@ -195,7 +207,10 @@ def create_diff_images(
 
         if should_process and len(frames_for_diff) > 0:
             brightness_composite_image, min_val_image = _temporal_min_max(frames_for_diff)
-            diff_image = cv2.absdiff(brightness_composite_image, min_val_image)
+            if evidence_for_diff is not None and len(evidence_for_diff) == len(frames_for_diff):
+                diff_image, _unused_minimum = _temporal_min_max(evidence_for_diff)
+            else:
+                diff_image = cv2.absdiff(brightness_composite_image, min_val_image)
 
             end_idx = frame_index
             start_idx = max(0, end_idx - len(frames_for_diff) + 1)

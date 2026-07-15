@@ -109,6 +109,7 @@ def run_pipeline(
     tmp_root: Optional[str] = None,
     status_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     fixed_pattern_correction: Optional[Any] = None,
+    noise_twin_options: Optional[Dict[str, Any]] = None,
 ):
     """Run a 2-stage pipeline: download workers and processing workers.
 
@@ -119,6 +120,10 @@ def run_pipeline(
     if not sources:
         return
 
+    if (noise_twin_options or {}).get("enabled", False):
+        # A single MPS command stream avoids loading one 7M-parameter model per
+        # archive worker and keeps output order deterministic.
+        max_workers = 1
     worker_plan = compute_worker_plan(max_workers)
     max_workers = worker_plan["video_workers"]
     download_worker_count = worker_plan["download_workers"]
@@ -275,6 +280,7 @@ def run_pipeline(
                     save_options=save_options or {},
                     summary_video_config=summary_video_config,
                     fixed_pattern_correction=fixed_pattern_correction,
+                    noise_twin_options=noise_twin_options,
                 )
             except Exception as e:
                 try:

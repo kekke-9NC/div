@@ -61,6 +61,8 @@ class App(
         self.masks_file = os.path.join(base_path, "app_masks.npz")
         self.rtsp_dark_file = os.path.join(base_path, "rtsp_dark_frame.npz")
         self.rtsp_dark_preview_file = os.path.join(base_path, "rtsp_dark_preview.jpg")
+        self.noise_twin_model_dir = os.path.join(base_path, "noise_twin_models")
+        os.makedirs(self.noise_twin_model_dir, exist_ok=True)
         self._migrate_legacy_settings_files()
         self._clear_lighten_blend_cache()
 
@@ -304,6 +306,10 @@ class App(
         self.rtsp_end_min_var = tk.StringVar(value="00")
         self.apply_rtsp_dark_var = tk.BooleanVar(value=False)
         self.rtsp_dark_status_var = tk.StringVar(value="ダーク: 未撮影")
+        self.noise_twin_enabled_var = tk.BooleanVar(value=False)
+        self.noise_twin_model_path_var = tk.StringVar(value="")
+        self.noise_twin_status_var = tk.StringVar(value="NoiseTwin: 未選択")
+        self.noise_twin_training_process = None
         self.plate_solve_mode_var = tk.StringVar(value="local")
         self.astrometry_api_key_var = tk.StringVar(value="")
         self.video_concat_files = []
@@ -406,6 +412,11 @@ class App(
             # Stop FFmpeg before destroying Tk.  The concat worker is a daemon
             # thread, so destroying the app first could otherwise orphan it.
             self.stop_video_concat()
+            if self.noise_twin_training_process is not None:
+                try:
+                    self.noise_twin_training_process.terminate()
+                except Exception:
+                    pass
             self.append_log("設定を保存しています...")
             self._hide_summary_preview()
             self.close_rtsp_live_preview()
@@ -418,6 +429,13 @@ class App(
 
 
 if __name__ == "__main__":
-    os.makedirs(config.TEMP_CLIP_DIR, exist_ok=True)
-    app = App()
-    app.mainloop()
+    if "--noise-twin-worker" in sys.argv:
+        worker_index = sys.argv.index("--noise-twin-worker")
+        sys.argv = [sys.argv[0]] + sys.argv[worker_index + 1 :]
+        import noise_twin_worker
+
+        raise SystemExit(noise_twin_worker.main())
+    else:
+        os.makedirs(config.TEMP_CLIP_DIR, exist_ok=True)
+        app = App()
+        app.mainloop()
