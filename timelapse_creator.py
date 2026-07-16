@@ -1507,6 +1507,7 @@ def _build_fast_filter_graph(
     target_size: Tuple[int, int],
     timestamp_input: Optional[Tuple[int, int, int]],
     mask_input_index: Optional[int],
+    source_label: str = "0:v",
 ) -> Optional[str]:
     """Build a centered temporal mean with fixed-size endpoint padding."""
     output_count = len(sample_indices)
@@ -1516,7 +1517,7 @@ def _build_fast_filter_graph(
 
     if radius <= 0:
         filters.append(
-            f"[0:v]select=gte(n\\,floor(selected_n*{total_frames}/{output_count})),"
+            f"[{source_label}]select=gte(n\\,floor(selected_n*{total_frames}/{output_count})),"
             f"setpts=N/({OUTPUT_FPS}*TB)[sampled]"
         )
     else:
@@ -1535,7 +1536,7 @@ def _build_fast_filter_graph(
         )
         if not tail_samples:
             filters.append(
-                f"[0:v]{forward_filter},setpts=N/({OUTPUT_FPS}*TB)[sampled]"
+                f"[{source_label}]{forward_filter},setpts=N/({OUTPUT_FPS}*TB)[sampled]"
             )
         else:
             reverse_positions = [
@@ -1548,7 +1549,7 @@ def _build_fast_filter_graph(
                 f"eq(n\\,{position})" for position in sorted(reverse_positions)
             )
             filters.extend([
-                "[0:v]split=2[mean_forward][mean_tail]",
+                f"[{source_label}]split=2[mean_forward][mean_tail]",
                 f"[mean_forward]{forward_filter},setpts=PTS-STARTPTS[mean_main]",
                 (
                     f"[mean_tail]trim=start_frame={tail_trim_start},setpts=PTS-STARTPTS,"
@@ -1599,33 +1600,64 @@ def _create_video_timelapse_fast(
     ``None`` means the inputs are not suitable and the caller should use the
     portable Python path. ``False`` means FFmpeg failed and fallback is safe.
     """
-    if not _videos_are_concat_compatible(video_paths, target_size):
-        return None
     if radius > 0 and total_frames <= radius * 2:
         return None
 
+    concat_compatible = _videos_are_concat_compatible(video_paths, target_size)
     encoder_name, encoder_args, encoder_label = _select_h264_encoder()
+    input_mode = "concat demuxer" if concat_compatible else "異形式マルチ入力"
     _report_progress(
         progress_callback,
         f"高速タイムラプス処理を使用します "
-        f"({max(1, os.cpu_count() or 1)}コア対応FFmpeg + {encoder_label})",
+        f"({input_mode}, {max(1, os.cpu_count() or 1)}コア対応FFmpeg + {encoder_label})",
         0.0,
         None,
     )
 
     with tempfile.TemporaryDirectory(prefix="meteor_timelapse_") as temp_dir:
-        concat_path = os.path.join(temp_dir, "inputs.ffconcat")
-        with open(concat_path, "w", encoding="utf-8") as concat_file:
-            concat_file.write("ffconcat version 1.0\n")
-            for path in video_paths:
-                concat_file.write(f"file '{_ffconcat_escape(path)}'\n")
-
         command = [
             "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
             "-filter_complex_threads", str(max(1, os.cpu_count() or 1)),
-            "-f", "concat", "-safe", "0", "-i", concat_path,
         ]
-        next_input_index = 1
+        filter_prefix: List[str] = []
+        if concat_compatible:
+            concat_path = os.path.join(temp_dir, "inputs.ffconcat")
+            with open(concat_path, "w", encoding="utf-8") as concat_file:
+                concat_file.write("ffconcat version 1.0\n")
+                for path in video_paths:
+                    concat_file.write(f"file '{_ffconcat_escape(path)}'\n")
+            command.extend(["-f", "concat", "-safe", "0", "-i", concat_path])
+            source_label = "0:v"
+            next_input_index = 1
+        else:
+            # The concat demuxer requires matching encoded stream parameters.
+            # Decode each segment independently instead, normalise the decoded
+            # frames, and concatenate inside the filter graph.  This keeps HEVC,
+            # MPEG-4, varying frame rates and resolution changes on the native
+            # FFmpeg path without an intermediate re-encode or Python copies.
+            width, height = target_size
+            # These decoders run one segment at a time as concat requests it.
+            # A high-memory workstation can therefore give the active HEVC
+            # decoder substantially more threads without multiplying the
+            # frame cache by the number of input files.  Twelve was faster
+            # than VideoToolbox decode on the 18-core Apple Silicon target.
+            decoder_threads = max(2, min(12, max(1, os.cpu_count() or 1)))
+            for input_index, path in enumerate(video_paths):
+                command.extend(["-threads", str(decoder_threads), "-i", path])
+                filter_prefix.append(
+                    f"[{input_index}:v]settb=AVTB,setpts=PTS-STARTPTS,"
+                    f"scale={width}:{height}:flags=fast_bilinear,setsar=1,"
+                    f"format=yuv420p[normalised{input_index}]"
+                )
+            joined_inputs = "".join(
+                f"[normalised{input_index}]" for input_index in range(len(video_paths))
+            )
+            filter_prefix.append(
+                f"{joined_inputs}concat=n={len(video_paths)}:v=1:a=0[joined]"
+            )
+            source_label = "joined"
+            next_input_index = len(video_paths)
+
         timestamp_input = None
         if timestamp_settings["enabled"]:
             overlay_path = os.path.join(temp_dir, "timestamp.mov")
@@ -1663,9 +1695,12 @@ def _create_video_timelapse_fast(
             target_size,
             timestamp_input,
             mask_input_index,
+            source_label,
         )
         if filter_graph is None:
             return None
+        if filter_prefix:
+            filter_graph = ";".join([*filter_prefix, filter_graph])
 
         command.extend([
             "-filter_complex", filter_graph,

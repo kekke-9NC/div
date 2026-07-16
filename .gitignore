@@ -8,6 +8,7 @@ __pycache__/
 venv/
 env/
 .venv/
+.venv-*/
 
 # IDE
 .vscode/
@@ -15,11 +16,29 @@ env/
 *.swp
 *.swo
 
+# OS metadata
+.DS_Store
+
 # Temporary files
 temp_clips/
 temp_video/
 rtsp/
 noise_twin_models/
+
+# Local generated media and training data
+analysis_fixed_pattern/
+auto_video_masks/
+diagnostics/
+meteor/
+meteor_review_web/
+ml_training_data/
+not_meteor/
+rtsp_fixed_pattern_captures/
+
+# Local model and cache artifacts
+hf_cache/
+quantized_model/
+*.safetensors
 
 # Data files (large)
 *.pth
@@ -49,6 +68,7 @@ file_utils_temp.py
 diff.txt
 
 # Build artifacts
+build/
 dist/
 
 README.md
