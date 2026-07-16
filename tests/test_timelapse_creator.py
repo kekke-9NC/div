@@ -239,6 +239,46 @@ class TimelapseCreatorTests(unittest.TestCase):
 
         self.assertIsNone(graph)
 
+    def test_fast_filter_can_consume_a_normalised_multi_input_stream(self):
+        graph = timelapse_creator._build_fast_filter_graph(
+            9000, [0, 100, 200], 0, (1920, 1080), None, None, "joined"
+        )
+
+        self.assertIn("[joined]select=", graph)
+        self.assertNotIn("[0:v]select=", graph)
+
+    def test_incompatible_videos_use_native_multi_input_concat(self):
+        loader = mock.MagicMock()
+        proc = mock.MagicMock()
+        proc.stdout = []
+        proc.stderr.read.return_value = ""
+        proc.wait.return_value = 0
+
+        with (
+            mock.patch.object(
+                timelapse_creator, "_videos_are_concat_compatible", return_value=False
+            ),
+            mock.patch.object(
+                timelapse_creator, "_select_h264_encoder",
+                return_value=("test", ["-c:v", "libx264"], "test"),
+            ),
+            mock.patch.object(timelapse_creator.subprocess, "Popen", return_value=proc) as popen,
+        ):
+            result = timelapse_creator._create_video_timelapse_fast(
+                ["hevc.mp4", "mpeg4.mp4"], "output.mp4", 1000,
+                [0, 100, 200], loader, (1920, 1080), 0, None,
+                {"enabled": False}, None,
+            )
+
+        self.assertTrue(result)
+        command = popen.call_args.args[0]
+        self.assertEqual(command.count("-i"), 2)
+        filter_graph = command[command.index("-filter_complex") + 1]
+        self.assertIn("[0:v]settb=AVTB", filter_graph)
+        self.assertIn("[1:v]settb=AVTB", filter_graph)
+        self.assertIn("concat=n=2:v=1:a=0[joined]", filter_graph)
+        self.assertIn("[joined]select=", filter_graph)
+
     def test_runtime_fast_failure_does_not_silently_use_slow_path(self):
         loader = mock.MagicMock()
         loader.load_frame.return_value = timelapse_creator.np.zeros(
