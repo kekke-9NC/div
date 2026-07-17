@@ -238,10 +238,22 @@ class SourceMixin:
         ).pack(anchor=tk.W, pady=(0, 6))
         rtsp_pattern_buttons = ttk.Frame(rtsp_pattern)
         rtsp_pattern_buttons.pack(anchor=tk.W)
-        self.btn_rtsp_dark_capture = ttk.Button(rtsp_pattern_buttons, text="撮影（30秒）", style="Primary.TButton", command=self.capture_rtsp_dark_frame)
-        self.btn_rtsp_dark_capture.pack(side=tk.LEFT, padx=(0, 5))
-        self.btn_rtsp_dark_video = ttk.Button(rtsp_pattern_buttons, text="保存動画から作成", command=self.load_rtsp_dark_video)
-        self.btn_rtsp_dark_video.pack(side=tk.LEFT, padx=(0, 8))
+        self.btn_rtsp_dark_directory = ttk.Button(
+            rtsp_pattern_buttons,
+            text="録画フォルダから作成",
+            style="Primary.TButton",
+            command=self.load_rtsp_dark_directory,
+        )
+        self.btn_rtsp_dark_directory.pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Label(rtsp_pattern_buttons, text="抽出数").pack(side=tk.LEFT, padx=(0, 4))
+        self.cmb_rtsp_fixed_pattern_samples = ttk.Combobox(
+            rtsp_pattern_buttons,
+            textvariable=self.rtsp_fixed_pattern_samples_var,
+            values=[str(value) for value in config.RTSP_FIXED_PATTERN_SAMPLE_COUNTS],
+            state="readonly",
+            width=6,
+        )
+        self.cmb_rtsp_fixed_pattern_samples.pack(side=tk.LEFT, padx=(0, 8))
         self.chk_apply_rtsp_dark = ttk.Checkbutton(
             rtsp_pattern_buttons,
             text="固定パターン補正を有効化",
@@ -251,9 +263,14 @@ class SourceMixin:
         self.chk_apply_rtsp_dark.pack(side=tk.LEFT)
         ttk.Label(
             rtsp_pattern,
-            text="NoiseTwin・時間平均使用時は検出前、それ以外は検出後の保存物へ適用します。",
+            text="約1時間の録画全体からランダム抽出します。推奨: 360枚（実測約55秒）。",
             style="Hint.TLabel",
         ).pack(anchor=tk.W, pady=(5, 0))
+        ttk.Label(
+            rtsp_pattern,
+            text="NoiseTwin・時間平均使用時は検出前、それ以外は検出後の保存物へ適用します。",
+            style="Hint.TLabel",
+        ).pack(anchor=tk.W, pady=(2, 0))
         ttk.Label(rtsp_pattern, textvariable=self.rtsp_dark_status_var, style="Hint.TLabel", anchor=tk.W).pack(fill=tk.X, pady=(6, 0))
         self.load_rtsp_dark_frame()
         
@@ -847,10 +864,39 @@ atomcam2で利用する場合は、GitHubで公開されている
         ]
         self._start_rtsp_fixed_pattern_worker(command, "保存動画から固定パターン作成")
 
-    def _start_rtsp_fixed_pattern_worker(self, command, job_name):
-        self.btn_rtsp_dark_capture.config(state=tk.DISABLED)
-        if hasattr(self, "btn_rtsp_dark_video"):
-            self.btn_rtsp_dark_video.config(state=tk.DISABLED)
+    def load_rtsp_dark_directory(self):
+        directory = filedialog.askdirectory(title="約1時間分の録画フォルダを選択")
+        if not directory:
+            return
+        try:
+            sample_count = int(self.rtsp_fixed_pattern_samples_var.get())
+        except (TypeError, ValueError):
+            sample_count = config.RTSP_FIXED_PATTERN_DEFAULT_SAMPLES
+        if sample_count not in config.RTSP_FIXED_PATTERN_SAMPLE_COUNTS:
+            sample_count = config.RTSP_FIXED_PATTERN_DEFAULT_SAMPLES
+            self.rtsp_fixed_pattern_samples_var.set(str(sample_count))
+        command = [
+            sys.executable, os.path.join(os.path.dirname(self.rtsp_dark_file), "rtsp_dark_capture_worker.py"),
+            "--input-directory", directory, "--output", self.rtsp_dark_file,
+            "--preview", self.rtsp_dark_preview_file, "--samples", str(sample_count),
+            "--random-seed", "0",
+        ]
+        self._start_rtsp_fixed_pattern_worker(
+            command,
+            "録画フォルダから固定パターン作成",
+            timeout_seconds=300,
+        )
+
+    def _start_rtsp_fixed_pattern_worker(self, command, job_name, timeout_seconds=75):
+        worker_buttons = (
+            "btn_rtsp_dark_capture",
+            "btn_rtsp_dark_video",
+            "btn_rtsp_dark_directory",
+        )
+        for button_name in worker_buttons:
+            button = getattr(self, button_name, None)
+            if button is not None:
+                button.config(state=tk.DISABLED)
         self.rtsp_dark_status_var.set("固定補正: 作成中...")
         self.append_log(f"{job_name}開始")
         dark_queue = queue.Queue()
@@ -892,9 +938,12 @@ atomcam2で利用する場合は、GitHubで公開されている
 
                     if proc.poll() is not None:
                         break
-                    if time.time() - start_time > 75:
+                    if time.time() - start_time > timeout_seconds:
                         proc.kill()
-                        raise RuntimeError("固定パターン撮影がタイムアウトしました。RTSP接続を確認してください。")
+                        raise RuntimeError(
+                            f"固定パターン作成が{timeout_seconds}秒でタイムアウトしました。"
+                            "入力動画またはRTSP接続を確認してください。"
+                        )
 
                 return_code = proc.wait()
                 if return_code != 0:
@@ -931,9 +980,10 @@ atomcam2で利用する場合は、GitHubで公開されている
                     self.append_log(f"RTSPダーク撮影完了情報: {item[1]}")
                 elif kind == "done":
                     _, error, dark_frame, result_summary = item
-                    self.btn_rtsp_dark_capture.config(state=tk.NORMAL)
-                    if hasattr(self, "btn_rtsp_dark_video"):
-                        self.btn_rtsp_dark_video.config(state=tk.NORMAL)
+                    for button_name in worker_buttons:
+                        button = getattr(self, button_name, None)
+                        if button is not None:
+                            button.config(state=tk.NORMAL)
                     if error is not None or dark_frame is None:
                         self.rtsp_dark_status_var.set("固定補正: 作成失敗")
                         self.append_log(f"固定パターン作成失敗: {error}")

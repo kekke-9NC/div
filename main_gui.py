@@ -306,6 +306,9 @@ class App(
         self.rtsp_end_min_var = tk.StringVar(value="00")
         self.apply_rtsp_dark_var = tk.BooleanVar(value=False)
         self.rtsp_dark_status_var = tk.StringVar(value="ダーク: 未撮影")
+        self.rtsp_fixed_pattern_samples_var = tk.StringVar(
+            value=str(config.RTSP_FIXED_PATTERN_DEFAULT_SAMPLES)
+        )
         self.noise_twin_enabled_var = tk.BooleanVar(value=False)
         self.noise_twin_model_path_var = tk.StringVar(value="")
         self.noise_twin_status_var = tk.StringVar(value="NoiseTwin: 未選択")

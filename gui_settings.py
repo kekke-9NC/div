@@ -1496,6 +1496,7 @@ class SettingsMixin:
             'rtsp_time_limit_enabled': self.rtsp_time_limit_var.get(),
             'rtsp_start_hour': self.rtsp_start_hour_var.get(), 'rtsp_start_minute': self.rtsp_start_min_var.get(),
             'apply_rtsp_dark': self.apply_rtsp_dark_var.get(),
+            'rtsp_fixed_pattern_samples': int(self.rtsp_fixed_pattern_samples_var.get()),
             'noise_twin_enabled': self.noise_twin_enabled_var.get(),
             'noise_twin_model_path': self.noise_twin_model_path_var.get(),
             'temporal_mean_frames': int(self.temporal_mean_frames_var.get()),
@@ -1571,6 +1572,13 @@ class SettingsMixin:
             self.rtsp_notification_sound_var.set(settings.get('rtsp_notification_sound', True))
             self.load_rtsp_dark_frame()
             self.apply_rtsp_dark_var.set(bool(settings.get('apply_rtsp_dark', False)) and self.rtsp_dark_frame is not None)
+            fixed_pattern_samples = int(settings.get(
+                'rtsp_fixed_pattern_samples',
+                config.RTSP_FIXED_PATTERN_DEFAULT_SAMPLES,
+            ))
+            if fixed_pattern_samples not in config.RTSP_FIXED_PATTERN_SAMPLE_COUNTS:
+                fixed_pattern_samples = config.RTSP_FIXED_PATTERN_DEFAULT_SAMPLES
+            self.rtsp_fixed_pattern_samples_var.set(str(fixed_pattern_samples))
             self.noise_twin_model_path_var.set(settings.get('noise_twin_model_path', ''))
             requested_twin = bool(settings.get('noise_twin_enabled', False))
             self.noise_twin_enabled_var.set(requested_twin and self.refresh_noise_twin_status())

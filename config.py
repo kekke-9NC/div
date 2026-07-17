@@ -117,6 +117,8 @@ RTSP_BUFFER_SIZE = 3  # VideoCaptureバッファサイズ（フレーム数、�
 RTSP_USE_NVIDIA_HWACCEL = not IS_MAC  # NVIDIA GPU (RTX/GTX) のハードウェアデコードを使用
 RTSP_PARALLEL_ENABLED = True  # RTSP並列処理の有効/無効
 RTSP_PARALLEL_WORKERS = None  # 並列ワーカー数 (None=CPU数自動, 数値=固定)
+RTSP_FIXED_PATTERN_SAMPLE_COUNTS = (90, 180, 360)
+RTSP_FIXED_PATTERN_DEFAULT_SAMPLES = 360
 
 # --- RTSP用検出パラメータ プリセット ---
 # 雲が少ないとき（感度高め）
