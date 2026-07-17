@@ -1,7 +1,7 @@
 import os
 import multiprocessing
 import threading
-from typing import Dict, Optional
+from typing import Dict, Optional, Sequence
 
 import torch
 import torch.nn as nn
@@ -10,6 +10,11 @@ from torchvision import transforms
 
 import config
 import model_catalog
+from universal_meteor_model import (
+    ARCHITECTURE_NAME as UNIVERSAL_ARCHITECTURE_NAME,
+    MeteorFusionUniversal,
+    build_universal_inputs,
+)
 
 
 def _configure_torch_threads() -> None:
@@ -114,7 +119,7 @@ device = _select_device()
 print(f"Using device: {device}")
 
 
-model: Optional[ComplexCNN] = None
+model: Optional[nn.Module] = None
 transform = None
 _model_ready = False
 _model_lock = threading.RLock()
@@ -125,6 +130,7 @@ _active_model_info: Dict = {
     "input_resize": list(model_catalog.DEFAULT_INPUT_RESIZE),
     "class_names": list(model_catalog.DEFAULT_CLASS_NAMES),
     "meteor_class_index": 0,
+    "architecture": "complex_cnn_v1",
 }
 
 
@@ -168,7 +174,13 @@ def _reload_model_unlocked(model_path: Optional[str] = None, metadata: Optional[
 
     try:
         state_dict = _load_state_dict(target_path)
-        loaded = ComplexCNN(num_classes=2).to(device)
+        architecture = str(meta.get("architecture", "complex_cnn_v1"))
+        if architecture == UNIVERSAL_ARCHITECTURE_NAME:
+            loaded = MeteorFusionUniversal(
+                feature_count=int(meta.get("feature_count", 12))
+            ).to(device)
+        else:
+            loaded = ComplexCNN(num_classes=2).to(device)
         loaded.load_state_dict(state_dict)
         loaded.eval()
 
@@ -188,11 +200,17 @@ def _reload_model_unlocked(model_path: Optional[str] = None, metadata: Optional[
             "class_names": list(meta.get("class_names", model_catalog.DEFAULT_CLASS_NAMES)),
             "meteor_class_index": int(meta.get("meteor_class_index", 0)),
             "metadata_path": meta.get("metadata_path", model_catalog.metadata_path_for_model(target_path)),
+            "architecture": architecture,
+            "decision_threshold": float(
+                meta.get("decision_threshold", config.METEOR_PROBABILITY_THRESHOLD)
+            ),
+            "target_recall": meta.get("target_recall"),
         }
         config.MODEL_PATH = target_path
         print(f"Loaded model: {target_path}")
         print(f"Normalization mean/std: {_active_model_info['mean']} / {_active_model_info['std']}")
         print(f"Resize policy: {_active_model_info['input_resize']}")
+        print(f"Architecture: {architecture}")
         return True, "ok"
     except Exception as e:
         _model_ready = False
@@ -218,7 +236,6 @@ def predict_meteor_probability(image_path: str) -> float:
         if not _model_ready or model is None or transform is None:
             print("Warning: prediction requested before model is ready.")
             return 0.0
-
         try:
             with Image.open(image_path) as source_image:
                 pil_image = source_image.convert("RGB")
@@ -241,6 +258,43 @@ def predict_meteor_probability(image_path: str) -> float:
             return 0.0
         except Exception as e:
             print(f"Prediction error ({image_path}): {e}")
+            return 0.0
+
+
+def predict_meteor_event(
+    frames: Sequence,
+    cutout_rect,
+    detected_line,
+    frame_rate: float,
+    fallback_image_path: Optional[str] = None,
+) -> float:
+    """Classify a complete event when supported, with legacy-image fallback."""
+    with _model_lock:
+        if (
+            _active_model_info.get("architecture") != UNIVERSAL_ARCHITECTURE_NAME
+            or not _model_ready
+            or model is None
+        ):
+            if fallback_image_path:
+                return predict_meteor_probability(fallback_image_path)
+            return 0.0
+        try:
+            image, kymograph, features = build_universal_inputs(
+                frames=frames,
+                rect=cutout_rect,
+                detected_line=detected_line,
+                frame_rate=frame_rate,
+            )
+            image_tensor = torch.from_numpy(image).unsqueeze(0).to(device)
+            kymograph_tensor = torch.from_numpy(kymograph).unsqueeze(0).to(device)
+            feature_tensor = torch.from_numpy(features).unsqueeze(0).to(device)
+            with torch.inference_mode():
+                logit = model(image_tensor, kymograph_tensor, feature_tensor)
+                return float(torch.sigmoid(logit)[0].item())
+        except Exception as exc:
+            print(f"Universal event prediction error: {exc}")
+            if fallback_image_path:
+                return predict_meteor_probability(fallback_image_path)
             return 0.0
 
 

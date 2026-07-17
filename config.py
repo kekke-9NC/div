@@ -19,6 +19,7 @@ else:
 
 # Resolve model path relative to this file (portable/exe-friendly).
 _MODEL_CANDIDATES = [
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "meteor_fusion_universal_v1.pth"),
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "model_epoch_47.pth"),
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "model_latest_1.pth"),
 ]

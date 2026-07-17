@@ -1093,7 +1093,13 @@ def create_line_video_clips(
                                 os.makedirs(temp_dir, exist_ok=True)
                                 temp_diff_image_path = os.path.join(temp_dir, f"temp_diff_{datetime.now().strftime('%Y%m%d%H%M%S%f')}.jpg")
                                 cv2.imwrite(temp_diff_image_path, classification_diff_cutout)
-                                probability = model.predict_meteor_probability(temp_diff_image_path)
+                                probability = model.predict_meteor_event(
+                                    frames=ml_source_frames,
+                                    cutout_rect=cutout_rect,
+                                    detected_line=((x1, y1), (x2, y2)),
+                                    frame_rate=frame_rate,
+                                    fallback_image_path=temp_diff_image_path,
+                                )
                                 try: os.remove(temp_diff_image_path)
                                 except OSError as e: print(f"警告: 一時差分ファイルの削除に失敗: {e}")
                                 print(f"流星確率: {probability:.4f}")
@@ -1671,7 +1677,13 @@ def create_line_video_clips(
                     os.makedirs(temp_dir, exist_ok=True)
                     temp_diff_image_path = os.path.join(temp_dir, f"temp_diff_{datetime.now().strftime('%Y%m%d%H%M%S%f')}.jpg")
                     cv2.imwrite(temp_diff_image_path, classification_diff_cutout)
-                    probability = model.predict_meteor_probability(temp_diff_image_path)
+                    probability = model.predict_meteor_event(
+                        frames=ml_source_frames,
+                        cutout_rect=cutout_rect,
+                        detected_line=((x1, y1), (x2, y2)),
+                        frame_rate=frame_rate,
+                        fallback_image_path=temp_diff_image_path,
+                    )
                     try: os.remove(temp_diff_image_path)
                     except OSError as e: print(f"警告: 一時差分ファイルの削除に失敗: {e}")
                     print(f"流星確率: {probability:.4f}")

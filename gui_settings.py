@@ -982,6 +982,7 @@ class SettingsMixin:
     def _model_search_dirs(self):
         candidates = [
             os.path.dirname(os.path.abspath(__file__)),
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "models"),
             getattr(config, "EXE_DIR", ""),
         ]
         result = []
@@ -1023,7 +1024,14 @@ class SettingsMixin:
         std = np.round(np.array(meta.get("std", model_catalog.DEFAULT_STD), dtype=float), 3).tolist()
         resize = meta.get("input_resize")
         resize_text = "no resize" if resize is None else f"{int(resize[0])}x{int(resize[1])}"
-        self.model_meta_info_var.set(f"mean={mean} std={std} resize={resize_text}")
+        architecture = meta.get("architecture", "complex_cnn_v1")
+        if architecture == "meteor_fusion_universal_v1":
+            threshold = float(meta.get("decision_threshold", 0.5))
+            self.model_meta_info_var.set(
+                f"汎用カメラモデル / 推奨閾値={threshold:.3f} / resize={resize_text}"
+            )
+        else:
+            self.model_meta_info_var.set(f"mean={mean} std={std} resize={resize_text}")
 
     def on_model_combobox_selected(self, _event=None):
         self.apply_selected_model(show_message=False)

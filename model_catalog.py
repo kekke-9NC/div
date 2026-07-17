@@ -67,7 +67,7 @@ def load_model_metadata(model_path: str) -> Dict:
     if meteor_index < 0 or meteor_index >= len(class_names):
         meteor_index = 0
 
-    return {
+    normalized = {
         "model_path": str(model_path),
         "metadata_path": meta_path,
         "mean": _to_float_triplet(payload.get("mean"), DEFAULT_MEAN),
@@ -76,6 +76,21 @@ def load_model_metadata(model_path: str) -> Dict:
         "class_names": class_names,
         "meteor_class_index": meteor_index,
     }
+    # Architecture-specific fields are intentionally preserved so the runtime
+    # can load newer event models without weakening legacy model metadata.
+    for key in (
+        "architecture",
+        "preprocess_version",
+        "decision_threshold",
+        "target_recall",
+        "kymograph_size",
+        "feature_count",
+        "validation_metrics",
+        "camera_policy",
+    ):
+        if key in payload:
+            normalized[key] = payload[key]
+    return normalized
 
 
 def save_model_metadata(
