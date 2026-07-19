@@ -39,7 +39,9 @@ class StatusPanel(ttk.Frame):
         log_btn_frame = ttk.Frame(self.log_frame)
         log_btn_frame.pack(fill=tk.X, padx=5, pady=(0, 5))
         save_log_btn = ttk.Button(log_btn_frame, text="ログを保存", command=self._save_log)
+        open_meteor_btn = ttk.Button(log_btn_frame, text="📂", command=lambda: self._open_meteor_folder())
         save_log_btn.pack(side=tk.RIGHT)
+        open_meteor_btn.pack(side=tk.RIGHT, padx=(0, 5))
 
         # Processing status tab
         self.status_frame = ttk.Frame(self.notebook)
@@ -103,6 +105,12 @@ class StatusPanel(ttk.Frame):
                 messagebox.showinfo("成功", f"ログを保存しました:\n{file_path}")
             except Exception as e:
                 messagebox.showerror("エラー", f"ログの保存に失敗しました:\n{e}")
+
+
+    def _open_meteor_folder(self):
+        """Open the meteor save folder in Finder via the app."""
+        if hasattr(self.app, "open_meteor_folder_in_finder"):
+            self.app.open_meteor_folder_in_finder()
 
     def get_status_callback(self) -> Callable[[Dict[str, Any]], None]:
         """Return a callback which never enters Tcl from a worker thread.
