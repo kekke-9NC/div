@@ -262,6 +262,7 @@ class SettingsMixin:
         ttk.Label(path_frame2, text="非流星:", width=10).pack(side=tk.LEFT)
         ttk.Entry(path_frame2, textvariable=self.not_meteor_save_path_var, state='readonly').pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Button(path_frame2, text="選択", command=lambda: self.select_save_path(self.not_meteor_save_path_var)).pack(side=tk.LEFT, padx=(5,0))
+        ttk.Button(path_frame2, text="📂", command=lambda: self.open_not_meteor_folder_in_finder()).pack(side=tk.LEFT, padx=(2,0))
 
         ml_frame = ttk.LabelFrame(scrollable_frame, text="機械学習向けデータセット")
         ml_frame.pack(fill=tk.X, pady=5)
@@ -1833,6 +1834,22 @@ class SettingsMixin:
         path = self.meteor_save_path_var.get()
         if not path:
             path = config.DEFAULT_METEOR_SAVE_PATH
+        if not os.path.exists(path):
+            messagebox.showwarning("フォルダを開けません",
+                                   f"指定されたフォルダが存在しません:\n{path}")
+            return
+        if sys.platform == "darwin":
+            subprocess.Popen(["open", path])
+        elif sys.platform == "win32":
+            os.startfile(path)
+        else:
+            subprocess.Popen(["xdg-open", path])
+
+    def open_not_meteor_folder_in_finder(self):
+        """Open the current non-meteor data save folder in Finder."""
+        path = self.not_meteor_save_path_var.get()
+        if not path:
+            path = config.DEFAULT_NOT_METEOR_SAVE_PATH
         if not os.path.exists(path):
             messagebox.showwarning("フォルダを開けません",
                                    f"指定されたフォルダが存在しません:\n{path}")
