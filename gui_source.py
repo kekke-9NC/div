@@ -280,7 +280,13 @@ class SourceMixin:
         rtsp_time_row1 = ttk.Frame(rtsp_time_frame)
         rtsp_time_row1.pack(fill=tk.X)
         ttk.Checkbutton(rtsp_time_row1, text="時間帯を指定して録画する", variable=self.rtsp_time_limit_var, command=self.toggle_rtsp_time_limit_frame).pack(side=tk.LEFT, anchor=tk.W)
-        ttk.Button(rtsp_time_row1, text="日没・日出から設定", style="Quiet.TButton", command=self.fetch_current_location_rtsp).pack(side=tk.LEFT, padx=(10,0))
+        self.btn_rtsp_auto_time = ttk.Button(
+            rtsp_time_row1,
+            text="日没・日出から設定",
+            style="Quiet.TButton",
+            command=self.fetch_current_location_rtsp,
+        )
+        self.btn_rtsp_auto_time.pack(side=tk.LEFT, padx=(10,0))
         
         self.rtsp_time_limit_detail_frame = ttk.Frame(rtsp_time_frame)
         
@@ -1024,9 +1030,52 @@ atomcam2で利用する場合は、GitHubで公開されている
 
     def fetch_current_location_rtsp(self):
         """Fetch current location and auto-set RTSP recording time based on sunset/sunrise."""
-        threading.Thread(target=self._fetch_current_location_rtsp_thread, daemon=True).start()
+        if self.btn_rtsp_auto_time.instate([tk.DISABLED]):
+            return
 
-    def _fetch_current_location_rtsp_thread(self):
+        self.btn_rtsp_auto_time.config(state=tk.DISABLED, text="時刻を取得中...")
+        self.append_log("RTSP時間設定: 現在地と日没・日出時刻を取得しています...")
+        result_queue = queue.Queue()
+
+        def poll_result():
+            try:
+                result = result_queue.get_nowait()
+            except queue.Empty:
+                self.after(100, poll_result)
+                return
+
+            kind = result[0]
+            if kind == "error":
+                error_message = result[1]
+                self.btn_rtsp_auto_time.config(state=tk.NORMAL, text="日没・日出から設定")
+                self.append_log(f"RTSP時間設定失敗: {error_message}")
+                messagebox.showerror("時刻自動設定", f"時刻を自動設定できませんでした:\n{error_message}")
+                return
+
+            _, lat, lon, sh, sm, eh, em = result
+            self.rtsp_start_hour_var.set(f"{sh:02d}")
+            self.rtsp_start_min_var.set(f"{sm:02d}")
+            self.rtsp_end_hour_var.set(f"{eh:02d}")
+            self.rtsp_end_min_var.set(f"{em:02d}")
+            self.append_log(f"RTSP時間設定: 位置情報取得 (緯度={lat}, 経度={lon})")
+            self.append_log(f"RTSP時間設定: 録画時刻={sh:02d}:{sm:02d}～{eh:02d}:{em:02d}")
+            self.btn_rtsp_auto_time.config(state=tk.NORMAL, text="設定完了")
+
+            def restore_button_text():
+                if self.btn_rtsp_auto_time.winfo_exists():
+                    self.btn_rtsp_auto_time.config(text="日没・日出から設定")
+
+            self.after(1200, restore_button_text)
+
+        threading.Thread(
+            target=self._fetch_current_location_rtsp_thread,
+            args=(result_queue,),
+            daemon=True,
+        ).start()
+        self.after(100, poll_result)
+
+    def _fetch_current_location_rtsp_thread(self, result_queue):
+        """Compute RTSP schedule without touching Tk from the worker thread."""
         try:
             lat, lon = location_utils.get_current_location()
         except Exception as e:
@@ -1034,26 +1083,24 @@ atomcam2で利用する場合は、GitHubで公開されている
             lat, lon = 35.0, 135.0
 
         try:
-            self.after(0, lambda: self.append_log(f"RTSP時間設定: 位置情報取得 (緯度={lat}, 経度={lon})"))
-        except Exception:
-            pass
-
-        try:
             period = sun_times.compute_night_period(lat, lon)
             start_dt = period.get('start')
             end_dt = period.get('end')
-            if start_dt:
-                sh, sm = start_dt.hour, start_dt.minute
-                self.after(0, lambda: self.rtsp_start_hour_var.set(f"{sh:02d}"))
-                self.after(0, lambda: self.rtsp_start_min_var.set(f"{sm:02d}"))
-                self.after(0, lambda: self.append_log(f"RTSP時間設定: 録画開始時刻={sh:02d}:{sm:02d}"))
-            if end_dt:
-                eh, em = end_dt.hour, end_dt.minute
-                self.after(0, lambda: self.rtsp_end_hour_var.set(f"{eh:02d}"))
-                self.after(0, lambda: self.rtsp_end_min_var.set(f"{em:02d}"))
-                self.after(0, lambda: self.append_log(f"RTSP時間設定: 録画終了時刻={eh:02d}:{em:02d}"))
+            if start_dt is None or end_dt is None:
+                raise RuntimeError("現在地の日没・日出時刻を計算できませんでした。")
+
+            result_queue.put((
+                "done",
+                lat,
+                lon,
+                start_dt.hour,
+                start_dt.minute,
+                end_dt.hour,
+                end_dt.minute,
+            ))
         except Exception as e:
             print(f"compute_night_period for RTSP failed: {e}")
+            result_queue.put(("error", str(e)))
 
     def fetch_current_location(self):
         """Start background thread to fetch current location and print the result.

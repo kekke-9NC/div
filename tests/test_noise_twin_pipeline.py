@@ -61,6 +61,43 @@ class NoiseTwinPipelineTests(unittest.TestCase):
             pipeline.capture_running.clear()
             self.assertEqual(pipeline._completed_raw_segments(), [old, newest])
 
+    def test_spool_ignores_segment_removed_during_scan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pipeline = self.make_pipeline(directory)
+            raw = pipeline.spool_root / "20260719" / "02" / "36_00.mp4"
+            raw.parent.mkdir(parents=True)
+            raw.write_bytes(b"0" * 20_000)
+            original_stat = Path.stat
+
+            def remove_before_stat(path, *args, **kwargs):
+                if path == raw:
+                    raw.unlink()
+                return original_stat(path, *args, **kwargs)
+
+            with mock.patch.object(Path, "stat", remove_before_stat):
+                completed = pipeline._completed_raw_segments()
+
+            self.assertEqual(completed, [])
+
+    def test_spool_does_not_stat_enqueued_segment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pipeline = self.make_pipeline(directory)
+            raw = pipeline.spool_root / "20260719" / "02" / "36_00.mp4"
+            raw.parent.mkdir(parents=True)
+            raw.write_bytes(b"0" * 20_000)
+            pipeline.enqueued.add(str(raw))
+            original_stat = Path.stat
+
+            def reject_enqueued_stat(path, *args, **kwargs):
+                if path == raw:
+                    raise AssertionError("enqueued segment was stat-ed")
+                return original_stat(path, *args, **kwargs)
+
+            with mock.patch.object(Path, "stat", reject_enqueued_stat):
+                completed = pipeline._completed_raw_segments()
+
+            self.assertEqual(completed, [])
+
     def test_final_paths_preserve_date_hour_structure(self):
         with tempfile.TemporaryDirectory() as directory:
             pipeline = self.make_pipeline(directory)

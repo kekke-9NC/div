@@ -159,12 +159,34 @@ class TimelapseCreatorTests(unittest.TestCase):
             video.write_bytes(b"video")
             probe = SimpleNamespace(
                 returncode=0,
-                stdout=json.dumps({"streams": [{"nb_frames": "1500"}]}),
+                stdout=json.dumps({"streams": [{
+                    "nb_frames": "1500", "r_frame_rate": "25/1"
+                }]}),
                 stderr="",
             )
             with mock.patch.object(timelapse_creator.subprocess, "run", return_value=probe):
                 count = timelapse_creator.get_video_frame_count(str(video))
         self.assertEqual(count, 1500)
+
+    def test_ffprobe_rejects_abnormally_low_fps_video(self):
+        with tempfile.TemporaryDirectory() as directory:
+            video = Path(directory, "bad-timestamps.mp4")
+            video.write_bytes(b"video")
+            probe = SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps({"streams": [{
+                    "nb_frames": "1481", "r_frame_rate": "1/10"
+                }]}),
+                stderr="",
+            )
+            with mock.patch.object(timelapse_creator.subprocess, "run", return_value=probe):
+                count = timelapse_creator.get_video_frame_count(str(video))
+
+        self.assertEqual(count, 0)
+        self.assertIn(
+            "0.100fps",
+            timelapse_creator._video_probe_errors[os.path.abspath(str(video))],
+        )
 
     def test_folder_scan_excludes_recorder_temp_video(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -246,6 +268,61 @@ class TimelapseCreatorTests(unittest.TestCase):
 
         self.assertIn("[joined]select=", graph)
         self.assertNotIn("[0:v]select=", graph)
+
+    def test_fast_filter_applies_fixed_pattern_before_mask(self):
+        graph = timelapse_creator._build_fast_filter_graph(
+            9000, [0, 100, 200], 0, (1920, 1080), None, 3, "0:v", (1, 2)
+        )
+
+        self.assertIn("blend=all_expr='clip(A-B,0,255)'", graph)
+        self.assertIn("blend=all_expr='clip(A+B,0,255)'", graph)
+        self.assertLess(graph.index("[fixed_corrected]"), graph.index("maskedmerge"))
+
+    def test_concat_compatibility_allows_small_fps_rounding_drift(self):
+        def capture(fps):
+            item = mock.MagicMock()
+            item.isOpened.return_value = True
+            item.get.side_effect = lambda prop: {
+                timelapse_creator.cv2.CAP_PROP_FRAME_WIDTH: 1920,
+                timelapse_creator.cv2.CAP_PROP_FRAME_HEIGHT: 1080,
+                timelapse_creator.cv2.CAP_PROP_FPS: fps,
+                timelapse_creator.cv2.CAP_PROP_FOURCC: 1668703592,
+            }[prop]
+            return item
+
+        with mock.patch.object(
+            timelapse_creator.cv2,
+            "VideoCapture",
+            side_effect=[capture(24.962), capture(24.963)],
+        ):
+            compatible = timelapse_creator._videos_are_concat_compatible(
+                ["first.mp4", "second.mp4"], (1920, 1080)
+            )
+
+        self.assertTrue(compatible)
+
+    def test_concat_compatibility_rejects_large_fps_difference(self):
+        def capture(fps):
+            item = mock.MagicMock()
+            item.isOpened.return_value = True
+            item.get.side_effect = lambda prop: {
+                timelapse_creator.cv2.CAP_PROP_FRAME_WIDTH: 1920,
+                timelapse_creator.cv2.CAP_PROP_FRAME_HEIGHT: 1080,
+                timelapse_creator.cv2.CAP_PROP_FPS: fps,
+                timelapse_creator.cv2.CAP_PROP_FOURCC: 1668703592,
+            }[prop]
+            return item
+
+        with mock.patch.object(
+            timelapse_creator.cv2,
+            "VideoCapture",
+            side_effect=[capture(24.962), capture(0.1)],
+        ):
+            compatible = timelapse_creator._videos_are_concat_compatible(
+                ["normal.mp4", "broken-timestamps.mp4"], (1920, 1080)
+            )
+
+        self.assertFalse(compatible)
 
     def test_incompatible_videos_use_native_multi_input_concat(self):
         loader = mock.MagicMock()
@@ -407,6 +484,24 @@ class TimelapseCreatorTests(unittest.TestCase):
         self.assertTrue(settings["draw_grid"])
         self.assertFalse(settings["draw_constellations"])
         self.assertFalse(settings["draw_detected_stars"])
+
+    def test_annotation_path_applies_fixed_pattern_before_annotation(self):
+        frame = timelapse_creator.np.full((4, 4, 3), 100, dtype=timelapse_creator.np.uint8)
+        correction = timelapse_creator.np.full((4, 4), 10, dtype=timelapse_creator.np.int16)
+        annotator = mock.Mock(side_effect=lambda image, _time, **_kwargs: image)
+
+        result = timelapse_creator._annotate_and_overlay(
+            frame,
+            datetime(2026, 7, 10, 1, 0, 0),
+            annotator,
+            {},
+            None,
+            {"enabled": False},
+            correction,
+        )
+
+        self.assertTrue((result == 90).all())
+        self.assertTrue((annotator.call_args.args[0] == 90).all())
 
     def test_annotation_enabled_bypasses_fast_ffmpeg_and_annotates_each_frame(self):
         frame = timelapse_creator.np.zeros((16, 16, 3), dtype=timelapse_creator.np.uint8)

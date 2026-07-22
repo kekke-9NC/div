@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import queue
 import shutil
+import stat
 import subprocess
 import threading
 import time
@@ -219,43 +220,49 @@ class RtspNoiseTwinPipeline:
                     self.capture_process = None
 
     def _completed_raw_segments(self) -> list[Path]:
-        candidates = [
-            path for path in self.spool_root.rglob("*.mp4")
-            if self.work_root not in path.parents and path.is_file()
-        ]
-        candidates.sort(key=lambda path: path.stat().st_mtime)
+        candidates: list[tuple[Path, os.stat_result]] = []
+        for path in self.spool_root.rglob("*.mp4"):
+            key = str(path)
+            if self.work_root in path.parents or key in self.enqueued:
+                continue
+            try:
+                metadata = path.stat()
+            except OSError:
+                # A completed segment can be removed by the transform worker
+                # while this directory scan is in progress.
+                continue
+            if stat.S_ISREG(metadata.st_mode):
+                candidates.append((path, metadata))
+        candidates.sort(key=lambda item: item[1].st_mtime)
         if not candidates:
             return []
-        newest = candidates[-1]
+        newest = candidates[-1][0]
         now = time.time()
         completed = []
-        for path in candidates:
-            key = str(path)
-            if key in self.enqueued:
-                continue
+        for path, metadata in candidates:
             # While FFmpeg is alive, its newest segment is considered open.
             if path == newest and self.capture_running.is_set():
                 continue
-            try:
-                if now - path.stat().st_mtime < 2.0:
-                    continue
-                if path.stat().st_size < 10_000:
-                    continue
-            except OSError:
+            if now - metadata.st_mtime < 2.0:
+                continue
+            if metadata.st_size < 10_000:
                 continue
             completed.append(path)
         return completed
 
     def _spool_loop(self) -> None:
         while not self.cancel_event.is_set():
-            for path in self._completed_raw_segments():
-                key = str(path)
-                self.enqueued.add(key)
-                self.raw_queue.put(key)
-                self._status(
-                    f"受信完了: {path.name} / NoiseTwin待ち={self.raw_queue.qsize()}"
-                )
-            time.sleep(1)
+            try:
+                for path in self._completed_raw_segments():
+                    key = str(path)
+                    self.enqueued.add(key)
+                    self.raw_queue.put(key)
+                    self._status(
+                        f"受信完了: {path.name} / NoiseTwin待ち={self.raw_queue.qsize()}"
+                    )
+            except OSError as exc:
+                self._status(f"スプール監視の一時エラー: {exc}。1秒後に再試行します。")
+            self.cancel_event.wait(1)
 
     def _final_paths(self, raw_path: Path) -> tuple[Path, Path]:
         relative = raw_path.relative_to(self.spool_root)

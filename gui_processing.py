@@ -211,15 +211,17 @@ class ProcessingMixin:
                     "時間平均3段パイプライン: RTSP受信 → "
                     f"{params['noise_twin_options']['temporal_mean_frames']}フレーム平均 → 流星分析"
                 )
-            if params['fixed_pattern_correction'] is not None:
-                mean_frames = params['noise_twin_options'].get('temporal_mean_frames', 0)
-                if params['noise_twin_options']['enabled']:
-                    mode = "NoiseTwin前処理"
-                elif mean_frames in (3, 5):
-                    mode = f"{mean_frames}フレーム平均前処理"
-                else:
-                    mode = "保存物21フレーム平均"
-                self.append_log(f"固定パターン補正 ON ({mode})")
+            mean_frames = params['noise_twin_options'].get('temporal_mean_frames', 0)
+            if params['noise_twin_options']['enabled']:
+                mode = "NoiseTwin前処理"
+            elif mean_frames in (3, 5):
+                mode = f"{mean_frames}フレーム平均前処理"
+            else:
+                mode = "保存物21フレーム平均"
+            correction_state = (
+                "ON" if params['fixed_pattern_correction'] is not None else "OFF"
+            )
+            self.append_log(f"固定パターン補正 {correction_state} ({mode})")
             
             rtsp_args = (
                 url, config.RTSP_SAVE_ROOT, config.RTSP_SEGMENT_DURATION, 60, self.progress_queue.put,

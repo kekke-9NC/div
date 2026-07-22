@@ -34,6 +34,12 @@ class TimelapseDragDropWindow(Toplevel):
         self.timelapse_annotation_reference_sample_var = tk.IntVar(value=0)
         self.timelapse_annotation_reference_selected_var = tk.BooleanVar(value=False)
         self.timelapse_insert_meteors_var = tk.BooleanVar(value=False)
+        self.timelapse_fixed_pattern_enabled_var = tk.BooleanVar(
+            value=bool(
+                getattr(parent, "apply_rtsp_dark_var", None)
+                and parent.apply_rtsp_dark_var.get()
+            )
+        )
         
         self.title("タイムラプス作成")
         self.geometry("500x870")
@@ -163,6 +169,29 @@ class TimelapseDragDropWindow(Toplevel):
         self.timelapse_timestamp_size_spin.pack(side=tk.LEFT)
         ttk.Label(timestamp_frame, text="%（画面高）").pack(side=tk.LEFT, padx=(3, 0))
         self._toggle_timelapse_timestamp_settings()
+
+        fixed_pattern_frame = ttk.LabelFrame(
+            main_frame, text="固定パターン補正", padding=10
+        )
+        fixed_pattern_frame.pack(fill=tk.X, pady=(0, 10))
+        ttk.Checkbutton(
+            fixed_pattern_frame,
+            text="RTSP固定パターン補正マップをタイムラプスへ適用",
+            variable=self.timelapse_fixed_pattern_enabled_var,
+        ).pack(anchor=tk.W)
+        fixed_pattern_available = bool(
+            getattr(self.parent, "rtsp_dark_frame", None) is not None
+            or os.path.exists(getattr(self.parent, "rtsp_dark_file", ""))
+        )
+        ttk.Label(
+            fixed_pattern_frame,
+            text=(
+                "補正マップを利用できます"
+                if fixed_pattern_available
+                else "補正マップがありません。先にRTSP設定で作成してください。"
+            ),
+            foreground="gray",
+        ).pack(anchor=tk.W, pady=(2, 0))
 
         annotation_frame = ttk.LabelFrame(
             main_frame,
@@ -792,15 +821,35 @@ class TimelapseDragDropWindow(Toplevel):
         except (TypeError, ValueError, tk.TclError):
             temporal_mean_radius = config.TIMELAPSE_TEMPORAL_MEAN_RADIUS_FRAMES
         temporal_mean_radius = max(0, min(100, temporal_mean_radius))
+        fixed_pattern_correction = None
+        if self.timelapse_fixed_pattern_enabled_var.get():
+            fixed_pattern_correction = getattr(self.parent, "rtsp_dark_frame", None)
+            if fixed_pattern_correction is None:
+                loader = getattr(self.parent, "load_rtsp_dark_frame", None)
+                if callable(loader):
+                    loader()
+                fixed_pattern_correction = getattr(
+                    self.parent, "rtsp_dark_frame", None
+                )
+            if fixed_pattern_correction is None:
+                messagebox.showerror(
+                    "固定パターン補正",
+                    "補正マップを読み込めません。RTSP設定で補正マップを作成してください。",
+                )
+                return
         
         # ウィンドウを閉じる
         self.destroy()
         
         mask_status = "あり" if mask is not None else "なし"
         annotation_status = "あり（ローカル）" if annotation_settings["enabled"] else "なし"
+        fixed_pattern_status = (
+            "あり" if fixed_pattern_correction is not None else "なし"
+        )
         self.log_callback(
             f"タイムラプス作成を開始します... (長さ: {duration}秒, "
-            f"{len(paths)}個のアイテム, マスク: {mask_status}, 星空注釈: {annotation_status})"
+            f"{len(paths)}個のアイテム, マスク: {mask_status}, "
+            f"固定パターン補正: {fixed_pattern_status}, 星空注釈: {annotation_status})"
         )
         
         def create_task(progress_callback):
@@ -814,6 +863,7 @@ class TimelapseDragDropWindow(Toplevel):
                 temporal_mean_radius_frames=temporal_mean_radius,
                 annotation_settings=annotation_settings,
                 meteor_insert_settings=meteor_insert_settings,
+                fixed_pattern_correction=fixed_pattern_correction,
             )
 
         task_runner = getattr(self.parent, "_run_synthesis_task_async", None)

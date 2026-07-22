@@ -33,6 +33,7 @@ import tempfile
 import time
 import json
 import media_time
+from fixed_pattern import apply_fixed_pattern_correction
 
 
 _TIMESTAMP_POSITIONS = {
@@ -245,10 +246,12 @@ def _annotate_and_overlay(
     annotation_settings: Dict,
     mask: Optional[np.ndarray],
     timestamp_settings: Dict,
+    fixed_pattern_correction: Optional[np.ndarray] = None,
 ) -> np.ndarray:
-    """Apply mask, annotation, and timestamp overlay for one frame (worker task)."""
+    """Apply fixed-pattern correction, mask, annotation and timestamp."""
     if frame is None:
         return None
+    frame = apply_fixed_pattern_correction(frame, fixed_pattern_correction)
     if mask is not None:
         frame = cv2.bitwise_and(frame, frame, mask=mask)
     frame = _apply_local_annotation(
@@ -267,6 +270,7 @@ def _annotation_worker_init(
     annotation_settings: Dict,
     resized_mask: Optional[np.ndarray],
     timestamp_settings: Dict,
+    fixed_pattern_correction: Optional[np.ndarray] = None,
 ) -> None:
     """Initialise one spawned worker without copying settings per frame."""
     global _annotation_worker_state, _annotation_thread_limit
@@ -289,6 +293,7 @@ def _annotation_worker_init(
         "annotation_settings": annotation_settings,
         "mask": resized_mask,
         "timestamp_settings": timestamp_settings,
+        "fixed_pattern_correction": fixed_pattern_correction,
     }
 
 
@@ -301,6 +306,7 @@ def _annotation_worker(frame: np.ndarray, frame_timestamp: datetime) -> np.ndarr
         _annotation_worker_state["annotation_settings"],
         _annotation_worker_state["mask"],
         _annotation_worker_state["timestamp_settings"],
+        _annotation_worker_state["fixed_pattern_correction"],
     )
 
 
@@ -327,6 +333,7 @@ def _run_annotate_pipeline(
     timestamp_settings: Dict,
     ffmpeg_stdin,
     progress_callback: Optional[Callable],
+    fixed_pattern_correction: Optional[np.ndarray] = None,
 ) -> None:
     """Overlap sequential temporal means with bounded parallel annotation.
 
@@ -379,7 +386,12 @@ def _run_annotate_pipeline(
     with ProcessPoolExecutor(
         max_workers=worker_count,
         initializer=_annotation_worker_init,
-        initargs=(annotation_settings, resized_mask, timestamp_settings),
+        initargs=(
+            annotation_settings,
+            resized_mask,
+            timestamp_settings,
+            fixed_pattern_correction,
+        ),
     ) as executor:
         for global_index in remaining_indices:
             # Keep temporal means sequential for the rolling cache, while the
@@ -482,6 +494,14 @@ VIDEO_EXTENSIONS = {'.mp4', '.avi', '.mov', '.mkv', '.wmv', '.m4v'}
 
 # 出力動画のFPS
 OUTPUT_FPS = 60
+
+# RTSP録画セグメントでは、同じ入力レートでもコンテナに記録される平均FPSに
+# 0.001程度の丸め差が生じる。concat可否ではその差を同一レートとして扱う。
+CONCAT_FPS_TOLERANCE = 0.01
+# Extremely low/high rates normally indicate broken container timestamps rather
+# than intentional RTSP footage. Exclude them before sampling or concatenation.
+MIN_VALID_VIDEO_FPS = 1.0
+MAX_VALID_VIDEO_FPS = 240.0
 
 # タイムラプスの各採用フレームは、この前後範囲の時間平均画像に置き換える。
 TEMPORAL_MEAN_RADIUS_FRAMES = 50
@@ -689,11 +709,16 @@ def get_video_frame_count(video_path: str) -> int:
         streams = payload.get("streams") or []
         if result.returncode == 0 and not errors and streams:
             stream = streams[0]
+            numerator, denominator = str(stream.get("r_frame_rate", "0/1")).split("/", 1)
+            fps = float(numerator) / max(float(denominator), 1.0)
+            if not MIN_VALID_VIDEO_FPS <= fps <= MAX_VALID_VIDEO_FPS:
+                reason = f"異常なFPSを検出しました: {fps:.3f}fps"
+                _video_probe_cache[cache_key] = (0, reason)
+                _video_probe_errors[os.path.abspath(video_path)] = reason
+                return 0
             raw_count = stream.get("nb_frames")
             frame_count = int(raw_count) if str(raw_count).isdigit() else 0
             if frame_count <= 0:
-                numerator, denominator = str(stream.get("r_frame_rate", "0/1")).split("/", 1)
-                fps = float(numerator) / max(float(denominator), 1.0)
                 frame_count = int(round(float(stream.get("duration", 0)) * fps))
             if frame_count > 0:
                 _video_probe_cache[cache_key] = (frame_count, "")
@@ -1118,7 +1143,7 @@ def load_frame_wrapper(args):
 def _videos_are_concat_compatible(
     video_paths: List[str], target_size: Tuple[int, int]
 ) -> bool:
-    """The concat demuxer is safe only for matching video stream parameters."""
+    """Return whether streams match, allowing harmless FPS rounding drift."""
     expected = None
     for path in video_paths:
         cap = cv2.VideoCapture(path)
@@ -1135,7 +1160,11 @@ def _videos_are_concat_compatible(
             return False
         if expected is None:
             expected = signature
-        elif signature != expected:
+        elif (
+            signature[0:2] != expected[0:2]
+            or signature[3] != expected[3]
+            or abs(signature[2] - expected[2]) > CONCAT_FPS_TOLERANCE
+        ):
             return False
     return bool(expected)
 
@@ -1508,6 +1537,7 @@ def _build_fast_filter_graph(
     timestamp_input: Optional[Tuple[int, int, int]],
     mask_input_index: Optional[int],
     source_label: str = "0:v",
+    fixed_pattern_inputs: Optional[Tuple[int, int]] = None,
 ) -> Optional[str]:
     """Build a centered temporal mean with fixed-size endpoint padding."""
     output_count = len(sample_indices)
@@ -1564,6 +1594,23 @@ def _build_fast_filter_graph(
             ])
 
     current = "sampled"
+    if fixed_pattern_inputs is not None:
+        positive_input, negative_input = fixed_pattern_inputs
+        filters.extend([
+            f"[{current}]format=gbrp[fp_source]",
+            f"[{positive_input}:v]format=gbrp[fp_positive]",
+            (
+                "[fp_source][fp_positive]"
+                "blend=all_expr='clip(A-B,0,255)':shortest=1[fp_subtracted]"
+            ),
+            f"[{negative_input}:v]format=gbrp[fp_negative]",
+            (
+                "[fp_subtracted][fp_negative]"
+                "blend=all_expr='clip(A+B,0,255)':shortest=1,"
+                "format=yuv420p[fixed_corrected]"
+            ),
+        ])
+        current = "fixed_corrected"
     width, height = target_size
     if mask_input_index is not None:
         filters.extend([
@@ -1594,6 +1641,7 @@ def _create_video_timelapse_fast(
     mask: Optional[np.ndarray],
     timestamp_settings: Dict,
     progress_callback: Optional[Callable[[str], None]],
+    fixed_pattern_correction: Optional[np.ndarray] = None,
 ) -> Optional[bool]:
     """Run the all-video path as one parallel FFmpeg filter/encode pipeline.
 
@@ -1687,6 +1735,37 @@ def _create_video_timelapse_fast(
                 "-loop", "1", "-framerate", str(OUTPUT_FPS), "-i", mask_path
             ])
             mask_input_index = next_input_index
+            next_input_index += 1
+
+        fixed_pattern_inputs = None
+        if fixed_pattern_correction is not None:
+            width, height = target_size
+            correction = fixed_pattern_correction
+            if correction.shape[:2] != (height, width):
+                correction = cv2.resize(
+                    correction, (width, height), interpolation=cv2.INTER_LINEAR
+                )
+            if correction.dtype == np.uint8:
+                positive = correction
+                negative = np.zeros_like(correction)
+            else:
+                signed = correction.astype(np.int32)
+                positive = np.clip(signed, 0, 255).astype(np.uint8)
+                negative = np.clip(-signed, 0, 255).astype(np.uint8)
+            if positive.ndim == 2:
+                positive = cv2.cvtColor(positive, cv2.COLOR_GRAY2BGR)
+                negative = cv2.cvtColor(negative, cv2.COLOR_GRAY2BGR)
+            positive_path = os.path.join(temp_dir, "fixed_positive.png")
+            negative_path = os.path.join(temp_dir, "fixed_negative.png")
+            if not cv2.imwrite(positive_path, positive):
+                return False
+            if not cv2.imwrite(negative_path, negative):
+                return False
+            command.extend([
+                "-loop", "1", "-framerate", str(OUTPUT_FPS), "-i", positive_path,
+                "-loop", "1", "-framerate", str(OUTPUT_FPS), "-i", negative_path,
+            ])
+            fixed_pattern_inputs = (next_input_index, next_input_index + 1)
 
         filter_graph = _build_fast_filter_graph(
             total_frames,
@@ -1696,6 +1775,7 @@ def _create_video_timelapse_fast(
             timestamp_input,
             mask_input_index,
             source_label,
+            fixed_pattern_inputs,
         )
         if filter_graph is None:
             return None
@@ -1787,6 +1867,7 @@ def create_timelapse(
     temporal_mean_radius_frames: Optional[int] = None,
     annotation_settings: Optional[Dict] = None,
     meteor_insert_settings: Optional[Dict] = None,
+    fixed_pattern_correction: Optional[np.ndarray] = None,
 ) -> bool:
     """
     タイムラプス動画を作成する（並列処理版）。
@@ -1919,6 +2000,16 @@ def create_timelapse(
 
     base_height, base_width = first_frame.shape[:2]
     target_size = (base_width, base_height)
+    resized_fixed_pattern = fixed_pattern_correction
+    if (
+        resized_fixed_pattern is not None
+        and resized_fixed_pattern.shape[:2] != (base_height, base_width)
+    ):
+        resized_fixed_pattern = cv2.resize(
+            resized_fixed_pattern, target_size, interpolation=cv2.INTER_LINEAR
+        )
+    if resized_fixed_pattern is not None:
+        _report_progress(progress_callback, "固定パターン補正を適用します")
 
     if insert_meteors:
         meteor_events = _discover_meteor_insertions(
@@ -1966,6 +2057,7 @@ def create_timelapse(
             mask,
             timestamp_settings,
             progress_callback,
+            resized_fixed_pattern,
         )
         if fast_result is True:
             loader.cleanup()
@@ -2050,10 +2142,6 @@ def create_timelapse(
         if progress_callback:
             progress_callback("マスクを適用します")
 
-    # 最初のフレームにマスクを適用
-    if resized_mask is not None:
-        first_frame = cv2.bitwise_and(first_frame, first_frame, mask=resized_mask)
-
     first_timestamp = loader.timestamp_for_index(sample_indices[first_valid_idx])
     if local_annotator is not None:
         try:
@@ -2064,6 +2152,7 @@ def create_timelapse(
                 annotation_settings,
                 resized_mask,
                 timestamp_settings,
+                resized_fixed_pattern,
             )
         except Exception as exc:
             _report_progress(progress_callback, f"エラー: ローカル星空注釈に失敗しました: {exc}")
@@ -2071,12 +2160,18 @@ def create_timelapse(
             loader.cleanup()
             return False
 
-    if timestamp_settings["enabled"] and local_annotator is None:
-        first_frame = _draw_timestamp(
-            first_frame,
-            first_timestamp,
-            timestamp_settings,
+    if local_annotator is None:
+        first_frame = apply_fixed_pattern_correction(
+            first_frame, resized_fixed_pattern
         )
+        if resized_mask is not None:
+            first_frame = cv2.bitwise_and(first_frame, first_frame, mask=resized_mask)
+        if timestamp_settings["enabled"]:
+            first_frame = _draw_timestamp(
+                first_frame,
+                first_timestamp,
+                timestamp_settings,
+            )
 
     # 有効なフレーム以降のサンプルインデックスを使用
     sample_indices = sample_indices[first_valid_idx:]
@@ -2153,6 +2248,7 @@ def create_timelapse(
                 timestamp_settings,
                 proc.stdin,
                 progress_callback,
+                resized_fixed_pattern,
             )
         else:
             processed = 1
@@ -2164,6 +2260,9 @@ def create_timelapse(
                     if progress_callback:
                         progress_callback(f"警告: 時間平均を作成できませんでした: フレーム {global_idx}")
                 elif proc.stdin:
+                    frame = apply_fixed_pattern_correction(
+                        frame, resized_fixed_pattern
+                    )
                     if resized_mask is not None:
                         frame = cv2.bitwise_and(frame, frame, mask=resized_mask)
                     frame_timestamp = loader.timestamp_for_index(global_idx)
