@@ -33,6 +33,7 @@ import download_pipeline
 import meteor_sky_viewer as msv
 import coordinate_manager as coord_mgr
 import config
+import ui_theme
 import file_utils
 import video_processing
 import astrometry

@@ -9,6 +9,7 @@ import json
 import tkinter as tk
 from tkinter import ttk, messagebox, Toplevel
 from typing import List, Tuple, Optional, Callable
+import ui_theme
 
 
 class CoordinatePoint:
@@ -112,7 +113,7 @@ class CoordinateDialog:
         self.dialog.transient(self.parent)
         
         # Apply dark theme colors to match the app
-        self.dialog.configure(background="#2E3F5B")
+        self.dialog.configure(background=ui_theme.COLORS["window"])
 
         ttk.Label(self.dialog, text="名前:").grid(row=0, column=0, padx=10, pady=10, sticky="w")
         name_entry = ttk.Entry(self.dialog, width=25)
@@ -167,7 +168,7 @@ class CoordinateListDialog:
         self.dialog.transient(self.parent)
         
         # Apply dark theme
-        self.dialog.configure(background="#2E3F5B")
+        self.dialog.configure(background=ui_theme.COLORS["window"])
         
         # Label
         ttk.Label(self.dialog, text="登録済み座標点:").pack(pady=5, padx=10, anchor='w')
@@ -179,8 +180,10 @@ class CoordinateListDialog:
         self.listbox = tk.Listbox(
             list_frame, 
             selectmode=tk.EXTENDED, 
-            bg="#3A4D6B", 
-            fg="#EAEAEA", 
+            bg=ui_theme.COLORS["field"],
+            fg=ui_theme.COLORS["text"],
+            selectbackground=ui_theme.COLORS["selection"],
+            selectforeground=ui_theme.COLORS["text"],
             relief=tk.FLAT, 
             highlightthickness=0
         )

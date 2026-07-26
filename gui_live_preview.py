@@ -58,7 +58,7 @@ class LivePreviewMixin:
         win = Toplevel(self)
         win.title("RTSPライブプレビュー")
         win.geometry("1000x620")
-        win.configure(bg="#2E3F5B")
+        win.configure(bg=ui_theme.COLORS["window"])
         self.live_preview_window = win
 
         container = ttk.Frame(win, padding=10)

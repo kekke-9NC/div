@@ -79,12 +79,9 @@ class TimelapseDragDropWindow(Toplevel):
         drop_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
         
         self.drop_label = ttk.Label(
-            drop_frame, 
+            drop_frame,
             text="ここにフォルダや動画ファイルを\nドラッグ＆ドロップしてください",
-            relief=tk.SOLID, 
-            padding=30, 
-            anchor=tk.CENTER,
-            borderwidth=2,
+            style="DropZone.TLabel",
             justify=tk.CENTER
         )
         self.drop_label.pack(fill=tk.BOTH, expand=True, pady=5)
@@ -98,8 +95,10 @@ class TimelapseDragDropWindow(Toplevel):
         self.listbox = tk.Listbox(
             list_frame, 
             height=5, 
-            bg="#3A4D6B", 
-            fg="#EAEAEA",
+            bg=ui_theme.COLORS["field"],
+            fg=ui_theme.COLORS["text"],
+            selectbackground=ui_theme.COLORS["selection"],
+            selectforeground=ui_theme.COLORS["text"],
             relief=tk.FLAT,
             highlightthickness=0
         )

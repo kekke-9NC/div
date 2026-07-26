@@ -33,7 +33,8 @@ class App(
                 print(f"警告: タスクバーアイコンIDの設定に失敗しました: {e}")
 
         self.title(config.GUI_WINDOW_TITLE)
-        self.geometry("1280x800")
+        self.geometry("1480x900")
+        self.minsize(1180, 720)
         
         self.setup_icon()
         self.setup_style()
@@ -153,61 +154,232 @@ class App(
             print(f"アイコンの設定中にエラーが発生しました: {e}")
 
     def setup_style(self):
+        ui_theme.install_named_fonts(self)
+        ui_theme.configure_macos_window(self)
+
         style = ttk.Style(self)
         style.theme_use('clam')
-        
-        BG_COLOR = "#2E3F5B"
-        FG_COLOR = "#EAEAEA"
-        SELECT_BG = "#4A6A9B"
-        FRAME_BG = "#263347"
-        
-        self.configure(background=BG_COLOR)
-        
-        style.configure(".", background=BG_COLOR, foreground=FG_COLOR, font=('Segoe UI', 10))
-        style.configure("TFrame", background=BG_COLOR)
-        style.configure("TLabel", background=BG_COLOR, foreground=FG_COLOR)
-        style.configure("TButton", background="#4A6A9B", foreground="white", borderwidth=0)
-        style.map("TButton", background=[('active', '#5C7DB8')])
-        
-        # Admin protected button style (Gray)
-        style.configure("Gray.TButton", background="#666666", foreground="white", borderwidth=0)
-        style.map("Gray.TButton", background=[('active', '#888888')])
-        
-        style.configure("TNotebook", background=BG_COLOR, borderwidth=0)
-        style.configure("TNotebook.Tab", background=BG_COLOR, foreground=FG_COLOR, padding=[10, 5], font=('Segoe UI', 10))
-        style.map("TNotebook.Tab", background=[("selected", SELECT_BG)], foreground=[("selected", "white")])
-        
-        # Spacer tab style: blend into background, no visible border
-        style.configure("Spacer.TNotebook.Tab", background=BG_COLOR, foreground=BG_COLOR, borderwidth=0, padding=[10, 5])
-        style.map("Spacer.TNotebook.Tab", background=[("disabled", BG_COLOR)], foreground=[("disabled", BG_COLOR)])
-        
-        style.configure("TLabelframe", background=FRAME_BG, bordercolor=SELECT_BG, padding=10)
-        style.configure("TLabelframe.Label", font=('Segoe UI', 11, 'bold'), background=FRAME_BG, foreground=FG_COLOR)
-        # Compact section styles used by the RTSP control panel.
-        style.configure("Section.TLabelframe", background="#2B3A52", bordercolor="#4A6A9B", padding=8)
-        style.configure("Section.TLabelframe.Label", font=('Segoe UI', 10, 'bold'), background="#2B3A52", foreground="#DCE8FA")
-        style.configure("Primary.TButton", background="#3578B8", foreground="white", borderwidth=0)
-        style.map("Primary.TButton", background=[('active', '#4B91D2'), ('disabled', '#526479')])
-        style.configure("Quiet.TButton", background="#3B506F", foreground="#EAEAEA", borderwidth=0)
-        style.map("Quiet.TButton", background=[('active', '#4A6A9B')])
-        style.configure("Hint.TLabel", background="#2B3A52", foreground="#8ED8FF", font=('Segoe UI', 9))
 
-        style.configure("TEntry", fieldbackground="#3A4D6B", foreground=FG_COLOR, insertcolor=FG_COLOR, bordercolor=SELECT_BG)
-        style.configure("TSpinbox", fieldbackground="#3A4D6B", foreground=FG_COLOR, insertcolor=FG_COLOR, bordercolor=SELECT_BG)
-        
-        style.configure("Vertical.TScrollbar", background=BG_COLOR, troughcolor=FRAME_BG, bordercolor=BG_COLOR, arrowcolor=FG_COLOR)
-        style.map("Vertical.TScrollbar", background=[('active', SELECT_BG)])
+        c = ui_theme.COLORS
+        self.configure(background=c["window"])
+        self.option_add("*selectBackground", c["selection"])
+        self.option_add("*selectForeground", c["text"])
+        self.option_add("*insertBackground", c["text"])
 
-        style.configure("Horizontal.TProgressbar", background=SELECT_BG)
+        style.configure(".", background=c["content"], foreground=c["text"])
+        style.configure("TFrame", background=c["content_raised"])
+        style.configure("Content.TFrame", background=c["content"])
+        style.configure("Glass.TFrame", background=c["glass"])
+        style.configure("GlassStrong.TFrame", background=c["glass_strong"])
+        style.configure("TLabel", background=c["content_raised"], foreground=c["text"])
+        style.configure("Glass.TLabel", background=c["glass"], foreground=c["text"])
+        style.configure("GlassMuted.TLabel", background=c["glass"], foreground=c["text_secondary"])
+        style.configure(
+            "Eyebrow.TLabel",
+            background=c["content"],
+            foreground=c["accent"],
+            font=("SF Pro Text", 9, "bold"),
+        )
+        style.configure(
+            "PageTitle.TLabel",
+            background=c["content"],
+            foreground=c["text"],
+            font=("SF Pro Display", 24, "bold"),
+        )
+        style.configure(
+            "PageSubtitle.TLabel",
+            background=c["content"],
+            foreground=c["text_secondary"],
+            font=("SF Pro Text", 11),
+        )
+        style.configure(
+            "DropZone.TLabel",
+            background=c["field"],
+            foreground=c["text_secondary"],
+            bordercolor=c["border_bright"],
+            lightcolor=c["border_bright"],
+            darkcolor=c["border_bright"],
+            borderwidth=1,
+            relief=tk.SOLID,
+            padding=(18, 18),
+            anchor=tk.CENTER,
+            font=("SF Pro Text", 11, "bold"),
+        )
 
-        # Radiobutton style
-        style.configure("TRadiobutton", background=BG_COLOR, foreground=FG_COLOR, font=('Segoe UI', 10))
-        style.map("TRadiobutton", background=[('active', BG_COLOR), ('disabled', BG_COLOR)], foreground=[('disabled', '#AAAAAA')])
+        button = {
+            "foreground": c["text"],
+            "borderwidth": 0,
+            "padding": (12, 7),
+            "font": ("SF Pro Text", 11, "bold"),
+        }
+        style.configure("TButton", background=c["glass_hover"], **button)
+        style.map(
+            "TButton",
+            background=[
+                ("disabled", c["glass_strong"]),
+                ("pressed", c["glass_selected"]),
+                ("active", c["border_bright"]),
+            ],
+            foreground=[("disabled", c["text_tertiary"])],
+        )
+        style.configure("Primary.TButton", background=c["accent_pressed"], **button)
+        style.map(
+            "Primary.TButton",
+            background=[
+                ("disabled", c["glass_strong"]),
+                ("pressed", c["accent_pressed"]),
+                ("active", c["accent_hover"]),
+            ],
+            foreground=[("disabled", c["text_tertiary"]), ("active", "#07101E")],
+        )
+        style.configure("Gray.TButton", background=c["glass_hover"], **button)
+        style.map("Gray.TButton", background=[("active", c["border_bright"])])
+        style.configure("Quiet.TButton", background=c["glass_strong"], **button)
+        style.map("Quiet.TButton", background=[("active", c["glass_hover"])])
+        style.configure("Toolbar.TButton", background=c["content"], **button)
+        style.map("Toolbar.TButton", background=[("active", c["glass_hover"])])
+        style.configure("Danger.TButton", background="#713243", **button)
+        style.map("Danger.TButton", background=[("active", "#913E52")])
 
-        # Combobox style matching dark theme with Red text
-        style.configure("TCombobox", fieldbackground="#3A4D6B", background=BG_COLOR, foreground="#FF0000", arrowcolor=FG_COLOR, bordercolor=SELECT_BG)
-        style.map("TCombobox", fieldbackground=[('readonly', '#3A4D6B')], selectbackground=[('readonly', '#3A4D6B')], 
-                  foreground=[('readonly', '#FF0000')], selectforeground=[('readonly', '#FF0000')])
+        style.configure("TNotebook", background=c["content"], borderwidth=0, tabmargins=0)
+        style.configure(
+            "TNotebook.Tab",
+            background=c["glass_strong"],
+            foreground=c["text_secondary"],
+            padding=(14, 8),
+            borderwidth=0,
+            font=("SF Pro Text", 10, "bold"),
+        )
+        style.map(
+            "TNotebook.Tab",
+            background=[("selected", c["glass_selected"]), ("active", c["glass_hover"])],
+            foreground=[("selected", c["text"])],
+        )
+        style.configure(
+            "Content.TNotebook",
+            background=c["content"],
+            bordercolor=c["content"],
+            lightcolor=c["content"],
+            darkcolor=c["content"],
+            relief=tk.FLAT,
+            borderwidth=0,
+            tabmargins=0,
+        )
+        try:
+            style.layout("Content.TNotebook.Tab", [])
+        except tk.TclError:
+            pass
+
+        style.configure(
+            "TLabelframe",
+            background=c["content_raised"],
+            bordercolor=c["border"],
+            lightcolor=c["border"],
+            darkcolor=c["border"],
+            borderwidth=1,
+            relief=tk.SOLID,
+            padding=14,
+        )
+        style.configure(
+            "TLabelframe.Label",
+            background=c["content_raised"],
+            foreground=c["text"],
+            font=("SF Pro Text", 12, "bold"),
+            padding=(2, 0, 8, 4),
+        )
+        style.configure(
+            "Section.TLabelframe",
+            background=c["content_raised"],
+            bordercolor=c["border"],
+            lightcolor=c["border"],
+            darkcolor=c["border"],
+            borderwidth=1,
+            relief=tk.SOLID,
+            padding=12,
+        )
+        style.configure(
+            "Section.TLabelframe.Label",
+            background=c["content_raised"],
+            foreground=c["text"],
+            font=("SF Pro Text", 11, "bold"),
+        )
+        style.configure(
+            "Hint.TLabel",
+            background=c["content_raised"],
+            foreground=c["cyan"],
+            font=("SF Pro Text", 10),
+        )
+
+        field_options = {
+            "fieldbackground": c["field"],
+            "foreground": c["text"],
+            "insertcolor": c["text"],
+            "bordercolor": c["border"],
+            "lightcolor": c["border"],
+            "darkcolor": c["border"],
+            "padding": (8, 6),
+        }
+        style.configure("TEntry", **field_options)
+        style.configure("TSpinbox", **field_options, arrowcolor=c["text_secondary"])
+        style.configure(
+            "TCombobox",
+            **field_options,
+            background=c["field"],
+            arrowcolor=c["text_secondary"],
+        )
+        style.map(
+            "TCombobox",
+            fieldbackground=[("readonly", c["field"]), ("focus", c["field_focus"])],
+            selectbackground=[("readonly", c["field"])],
+            foreground=[("readonly", c["text"])],
+            selectforeground=[("readonly", c["text"])],
+        )
+
+        style.configure(
+            "TCheckbutton",
+            background=c["content_raised"],
+            foreground=c["text"],
+            padding=(2, 4),
+            font=("SF Pro Text", 11),
+        )
+        style.map(
+            "TCheckbutton",
+            background=[("active", c["content_raised"])],
+            foreground=[("disabled", c["text_tertiary"])],
+            indicatorcolor=[("selected", c["accent"]), ("!selected", c["field"])],
+        )
+        style.configure(
+            "TRadiobutton",
+            background=c["content_raised"],
+            foreground=c["text"],
+            padding=(2, 4),
+            font=("SF Pro Text", 11),
+        )
+        style.map(
+            "TRadiobutton",
+            background=[("active", c["content_raised"])],
+            foreground=[("disabled", c["text_tertiary"])],
+            indicatorcolor=[("selected", c["accent"]), ("!selected", c["field"])],
+        )
+
+        style.configure(
+            "Vertical.TScrollbar",
+            background=c["glass_hover"],
+            troughcolor=c["content"],
+            bordercolor=c["content"],
+            arrowcolor=c["text_secondary"],
+            width=10,
+        )
+        style.map("Vertical.TScrollbar", background=[("active", c["border_bright"])])
+        style.configure(
+            "Horizontal.TProgressbar",
+            background=c["accent"],
+            troughcolor=c["field"],
+            bordercolor=c["field"],
+            lightcolor=c["accent"],
+            darkcolor=c["accent"],
+            thickness=7,
+        )
 
     def setup_variables(self):
         self.rtsp_url_var = tk.StringVar()
@@ -361,49 +533,309 @@ class App(
         self.cfg_rtsp_scale_upper_var.trace_add("write", lambda *_: self._sync_rtsp_scale_from_ui())
 
     def setup_ui(self):
-        main_pane = PanedWindow(self, orient=tk.HORIZONTAL, sashrelief=tk.RAISED, bg="#2E3F5B")
-        main_pane.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        c = ui_theme.COLORS
+        shell = tk.Frame(self, bg=c["window"])
+        shell.pack(fill=tk.BOTH, expand=True, padx=12, pady=(8, 12))
 
-        left_frame = ttk.Frame(main_pane, padding=10)
-        
-        right_frame = ttk.Frame(main_pane, padding=10)
+        main_pane = PanedWindow(
+            shell,
+            orient=tk.HORIZONTAL,
+            sashrelief=tk.FLAT,
+            sashwidth=8,
+            showhandle=False,
+            borderwidth=0,
+            bg=c["window"],
+            opaqueresize=True,
+        )
+        main_pane.pack(fill=tk.BOTH, expand=True)
+
+        sidebar = tk.Frame(
+            main_pane,
+            bg=c["glass"],
+            highlightbackground=c["border"],
+            highlightcolor=c["border_bright"],
+            highlightthickness=1,
+        )
+        content = ttk.Frame(main_pane, style="Content.TFrame", padding=(22, 14, 22, 18))
+        right_frame = tk.Frame(
+            main_pane,
+            bg=c["glass"],
+            highlightbackground=c["border"],
+            highlightcolor=c["border_bright"],
+            highlightthickness=1,
+            padx=14,
+            pady=14,
+        )
+        # Source-tab construction queries the processing controls to determine
+        # whether Start should be enabled, so build this panel first.
         self.create_info_panel(right_frame)
 
-        self.notebook = ttk.Notebook(left_frame)
+        brand = tk.Frame(sidebar, bg=c["glass"])
+        brand.pack(fill=tk.X, padx=18, pady=(20, 22))
+        brand_mark = tk.Label(
+            brand,
+            text="◉",
+            bg=c["glass"],
+            fg=c["cyan"],
+            font=("SF Pro Display", 25, "bold"),
+        )
+        brand_mark.pack(side=tk.LEFT, padx=(0, 10))
+        brand_copy = tk.Frame(brand, bg=c["glass"])
+        brand_copy.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        tk.Label(
+            brand_copy,
+            text="Meteor Detector",
+            bg=c["glass"],
+            fg=c["text"],
+            anchor=tk.W,
+            font=("SF Pro Display", 13, "bold"),
+        ).pack(fill=tk.X)
+        tk.Label(
+            brand_copy,
+            text="OBSERVATION STUDIO",
+            bg=c["glass"],
+            fg=c["text_tertiary"],
+            anchor=tk.W,
+            font=("SF Pro Text", 8, "bold"),
+        ).pack(fill=tk.X, pady=(2, 0))
+
+        nav_host = tk.Frame(sidebar, bg=c["glass"])
+        nav_host.pack(fill=tk.BOTH, expand=True, padx=10)
+        tk.Label(
+            nav_host,
+            text="ワークスペース",
+            bg=c["glass"],
+            fg=c["text_tertiary"],
+            anchor=tk.W,
+            font=("SF Pro Text", 9, "bold"),
+        ).pack(fill=tk.X, padx=12, pady=(0, 7))
+
+        header = ttk.Frame(content, style="Content.TFrame")
+        header.pack(fill=tk.X, pady=(2, 12))
+        header_copy = ttk.Frame(header, style="Content.TFrame")
+        header_copy.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.page_eyebrow_var = tk.StringVar()
+        self.page_title_var = tk.StringVar()
+        self.page_subtitle_var = tk.StringVar()
+        ttk.Label(
+            header_copy,
+            textvariable=self.page_eyebrow_var,
+            style="Eyebrow.TLabel",
+        ).pack(anchor=tk.W)
+        ttk.Label(
+            header_copy,
+            textvariable=self.page_title_var,
+            style="PageTitle.TLabel",
+        ).pack(anchor=tk.W, pady=(2, 2))
+        ttk.Label(
+            header_copy,
+            textvariable=self.page_subtitle_var,
+            style="PageSubtitle.TLabel",
+        ).pack(anchor=tk.W)
+
+        header_actions = ttk.Frame(header, style="Content.TFrame")
+        header_actions.pack(side=tk.RIGHT, padx=(12, 0))
+        ttk.Button(
+            header_actions,
+            text="使い方",
+            style="Toolbar.TButton",
+            command=lambda: self._select_page(self.tab_usage),
+        ).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(
+            header_actions,
+            text="アクティビティ",
+            style="Quiet.TButton",
+            command=self._focus_activity,
+        ).pack(side=tk.LEFT)
+
+        ttk.Separator(content, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=(0, 12))
+
+        self.notebook = ttk.Notebook(content, style="Content.TNotebook")
         self.notebook.pack(fill=tk.BOTH, expand=True)
 
         self.tab_usage = self.create_usage_tab(self.notebook)
         self.tab_source = self.create_source_tab(self.notebook)
-
         self.tab_settings = self.create_settings_tab(self.notebook)
         self.tab_analysis = self.create_analysis_tab(self.notebook)
         self.tab_chat = chat_gui.create_tab(self.notebook, app=self)
         self.tab_advanced_settings = self.create_advanced_settings_tab(self.notebook)
 
-        self.notebook.add(self.tab_usage, text="使い方")
-        self.notebook.add(self.tab_source, text="ソース選択")
+        tabs = (
+            self.tab_usage,
+            self.tab_source,
+            self.tab_settings,
+            self.tab_analysis,
+            self.tab_chat,
+            self.tab_advanced_settings,
+        )
+        for tab, meta in zip(tabs, ui_theme.PAGE_META):
+            self.notebook.add(tab, text=meta["label"])
 
-        self.notebook.add(self.tab_settings, text="保存設定")
-        self.notebook.add(self.tab_analysis, text="解析")
-        self.notebook.add(self.tab_chat, text="Chat")
-        self.notebook.add(self.tab_advanced_settings, text="⚙️")
-        
-        # 右ログ領域を少し狭くし、左の設定領域を広く確保する
-        main_pane.add(left_frame, width=860, minsize=720)
-        main_pane.add(right_frame, width=360, minsize=300)
+        self._page_tabs = tabs
+        self._page_meta_by_tab = {
+            str(tab): meta for tab, meta in zip(self._page_tabs, ui_theme.PAGE_META)
+        }
+        self._sidebar_buttons = {}
+
+        for index, (tab, meta) in enumerate(zip(tabs, ui_theme.PAGE_META)):
+            if index == 5:
+                ttk.Separator(nav_host, orient=tk.HORIZONTAL).pack(fill=tk.X, padx=8, pady=(15, 14))
+                tk.Label(
+                    nav_host,
+                    text="システム",
+                    bg=c["glass"],
+                    fg=c["text_tertiary"],
+                    anchor=tk.W,
+                    font=("SF Pro Text", 9, "bold"),
+                ).pack(fill=tk.X, padx=12, pady=(0, 7))
+            button = ui_theme.SidebarButton(
+                nav_host,
+                meta["glyph"],
+                meta["label"],
+                command=lambda selected_tab=tab: self._select_page(selected_tab),
+            )
+            button.pack(fill=tk.X, pady=2)
+            self._sidebar_buttons[str(tab)] = button
+
+        footer = tk.Frame(sidebar, bg=c["glass_strong"], padx=14, pady=12)
+        footer.pack(fill=tk.X, padx=12, pady=12)
+        tk.Label(
+            footer,
+            text="●  準備完了",
+            bg=c["glass_strong"],
+            fg=c["success"],
+            anchor=tk.W,
+            font=("SF Pro Text", 10, "bold"),
+        ).pack(fill=tk.X)
+        tk.Label(
+            footer,
+            text="入力ソースを選ぶと開始できます",
+            bg=c["glass_strong"],
+            fg=c["text_tertiary"],
+            anchor=tk.W,
+            font=("SF Pro Text", 9),
+        ).pack(fill=tk.X, pady=(3, 0))
+
+        main_pane.add(sidebar, width=232, minsize=210, stretch="never")
+        main_pane.add(content, width=880, minsize=640, stretch="always")
+        main_pane.add(right_frame, width=340, minsize=300, stretch="never")
+
+        self.notebook.bind("<<NotebookTabChanged>>", self._on_page_changed, add="+")
+        for index, tab in enumerate(tabs, start=1):
+            self.bind_all(
+                f"<Command-Key-{index}>",
+                lambda _event, selected_tab=tab: self._select_page(selected_tab),
+                add="+",
+            )
+            self.bind_all(
+                f"<Control-Key-{index}>",
+                lambda _event, selected_tab=tab: self._select_page(selected_tab),
+                add="+",
+            )
+        self.bind_all("<Command-Return>", lambda _event: self.start_button.invoke(), add="+")
+        self._create_application_menu()
 
         def _set_initial_sash():
             try:
                 total = main_pane.winfo_width()
                 if total <= 0:
                     return
-                desired_right = 360
-                sash_x = max(720, total - desired_right - 20)
-                main_pane.sash_place(0, sash_x, 0)
+                main_pane.sash_place(0, 232, 0)
+                main_pane.sash_place(1, max(880, total - 340), 0)
             except Exception:
                 pass
 
         self.after(120, _set_initial_sash)
+        self.after_idle(lambda: self._select_page(self.tab_usage))
+
+    def _create_application_menu(self):
+        """Expose the main workflow through a conventional macOS menu bar."""
+        menu_bar = tk.Menu(self, tearoff=False)
+
+        app_menu = tk.Menu(menu_bar, tearoff=False)
+        app_menu.add_command(
+            label="Meteor Detectorについて",
+            command=lambda: messagebox.showinfo(
+                "Meteor Detector",
+                f"{config.GUI_WINDOW_TITLE}\n流星観測・解析ワークスペース",
+            ),
+        )
+        app_menu.add_separator()
+        app_menu.add_command(
+            label="設定…",
+            accelerator="⌘,",
+            command=lambda: self._select_page(self.tab_advanced_settings),
+        )
+        app_menu.add_separator()
+        app_menu.add_command(label="Meteor Detectorを終了", accelerator="⌘Q", command=self.on_closing)
+        menu_bar.add_cascade(label="Meteor Detector", menu=app_menu)
+
+        file_menu = tk.Menu(menu_bar, tearoff=False)
+        file_menu.add_command(
+            label="動画を追加…",
+            accelerator="⌘O",
+            command=self.choose_source_videos,
+        )
+        file_menu.add_command(
+            label="フォルダを追加…",
+            accelerator="⇧⌘O",
+            command=self.choose_source_folder,
+        )
+        file_menu.add_separator()
+        file_menu.add_command(
+            label="処理を開始",
+            accelerator="⌘↩",
+            command=lambda: self.start_button.invoke(),
+        )
+        file_menu.add_command(label="処理を停止", command=lambda: self.cancel_button.invoke())
+        menu_bar.add_cascade(label="ファイル", menu=file_menu)
+
+        view_menu = tk.Menu(menu_bar, tearoff=False)
+        for index, (tab, meta) in enumerate(zip(self._page_tabs, ui_theme.PAGE_META), start=1):
+            view_menu.add_command(
+                label=meta["label"],
+                accelerator=f"⌘{index}",
+                command=lambda selected_tab=tab: self._select_page(selected_tab),
+            )
+        view_menu.add_separator()
+        view_menu.add_command(label="イベントログ", command=self._focus_activity)
+        menu_bar.add_cascade(label="表示", menu=view_menu)
+
+        self.configure(menu=menu_bar)
+        self.bind_all("<Command-comma>", lambda _event: self._select_page(self.tab_advanced_settings), add="+")
+        self.bind_all("<Command-o>", lambda _event: self.choose_source_videos(), add="+")
+        self.bind_all("<Command-Shift-O>", lambda _event: self.choose_source_folder(), add="+")
+
+    def _select_page(self, tab):
+        try:
+            self.notebook.select(tab)
+            self._sync_page_chrome(tab)
+        except (AttributeError, tk.TclError):
+            pass
+
+    def _on_page_changed(self, _event=None):
+        try:
+            self._sync_page_chrome(self.notebook.select())
+        except (AttributeError, tk.TclError):
+            pass
+
+    def _sync_page_chrome(self, tab):
+        key = str(tab)
+        meta = self._page_meta_by_tab.get(key)
+        if not meta:
+            return
+        self.page_eyebrow_var.set(meta["eyebrow"])
+        self.page_title_var.set(meta["title"])
+        self.page_subtitle_var.set(meta["subtitle"])
+        for tab_key, button in self._sidebar_buttons.items():
+            button.set_selected(tab_key == key)
+
+    def _focus_activity(self):
+        try:
+            self.status_panel.notebook.select(self.status_panel.log_frame)
+            self.log_text.focus_set()
+        except (AttributeError, tk.TclError):
+            pass
 
     def _sync_rtsp_scale_from_ui(self):
         try:

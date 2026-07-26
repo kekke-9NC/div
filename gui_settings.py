@@ -1,12 +1,20 @@
 from gui_common import *
 
+UI_BG = ui_theme.COLORS["content_raised"]
+UI_FIELD = ui_theme.COLORS["field"]
+UI_GLASS = ui_theme.COLORS["glass"]
+UI_TEXT = ui_theme.COLORS["text"]
+UI_MUTED = ui_theme.COLORS["text_secondary"]
+UI_CYAN = ui_theme.COLORS["cyan"]
+UI_BORDER = ui_theme.COLORS["border"]
+
 
 class SettingsMixin:
     def create_settings_tab(self, parent):
         frame = ttk.Frame(parent)
 
         # スクロール可能なキャンバスとスクロールバーを作成
-        canvas = tk.Canvas(frame, highlightthickness=0, bg="#2E3F5B")
+        canvas = tk.Canvas(frame, highlightthickness=0, bg=UI_BG)
         scrollbar = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=canvas.yview)
         scrollable_frame = ttk.Frame(canvas)
         self.settings_canvas = canvas
@@ -121,7 +129,7 @@ class SettingsMixin:
                 self.toggle_full_video_timestamp_settings()
             if key == 'summary':
                 # ヘルプの?マーク
-                summary_help_label = tk.Label(f, text="?", font=("", 9, "bold"), fg="#87CEEB", bg="#2E3F5B", cursor="hand2")
+                summary_help_label = tk.Label(f, text="?", font=("", 9, "bold"), fg=UI_CYAN, bg=UI_BG, cursor="hand2")
                 summary_help_label.pack(side=tk.LEFT, padx=(2, 0))
                 summary_help_label._tooltip = None
                 
@@ -131,11 +139,11 @@ class SettingsMixin:
                     tooltip = tk.Toplevel(self)
                     tooltip.wm_overrideredirect(True)
                     tooltip.wm_geometry(f"+{event.x_root + 15}+{event.y_root + 10}")
-                    tooltip.configure(bg="#2E3F5B")
-                    content_frame = tk.Frame(tooltip, bg="#2E3F5B", padx=8, pady=5)
+                    tooltip.configure(bg=UI_BG)
+                    content_frame = tk.Frame(tooltip, bg=UI_BG, padx=8, pady=5)
                     content_frame.pack()
                     tk.Label(content_frame, text="SNSなどの投稿に便利な編集済みの動画を作成します", 
-                             bg="#2E3F5B", fg="#EAEAEA", font=("Yu Gothic UI", 9)).pack()
+                             bg=UI_BG, fg=UI_TEXT, font=("SF Pro Text", 9)).pack()
                     label._tooltip = tooltip
                     
                     def hide_after_delay():
@@ -329,7 +337,7 @@ class SettingsMixin:
         
         # プレートソルブ説明用ヘルプアイコン
         ps_help_frame = ttk.Frame(lf_astro); ps_help_frame.pack(fill=tk.X, pady=2)
-        ps_help_label = ttk.Label(ps_help_frame, text="ⓘ", font=("Arial", 11), foreground="#87CEEB", cursor="question_arrow")
+        ps_help_label = ttk.Label(ps_help_frame, text="ⓘ", font=("Arial", 11), foreground=UI_CYAN, cursor="question_arrow")
         ps_help_label.pack(side=tk.LEFT, padx=(0,5))
         ttk.Label(ps_help_frame, text="機能の説明を表示", foreground="gray").pack(side=tk.LEFT)
         
@@ -360,12 +368,12 @@ class SettingsMixin:
             tooltip = tk.Toplevel(self)
             tooltip.wm_overrideredirect(True)
             tooltip.wm_geometry(f"+{event.x_root + 15}+{event.y_root + 10}")
-            tooltip.configure(bg="#333D4D")
+            tooltip.configure(bg=UI_GLASS)
             
-            content_frame = tk.Frame(tooltip, bg="#333D4D", padx=10, pady=8)
+            content_frame = tk.Frame(tooltip, bg=UI_GLASS, padx=10, pady=8)
             content_frame.pack()
             
-            text_label = tk.Label(content_frame, text=ps_help_text, justify=tk.LEFT, bg="#333D4D", fg="#FFFFFF", font=("Yu Gothic UI", 10))
+            text_label = tk.Label(content_frame, text=ps_help_text, justify=tk.LEFT, bg=UI_GLASS, fg=UI_TEXT, font=("SF Pro Text", 10))
             text_label.pack()
             
             tooltip._hover = False
@@ -452,7 +460,7 @@ class SettingsMixin:
    と表示されている英数字の文字列が、
    あなたのAPIキーです。"""
         
-        help_label = ttk.Label(api_key_frame, text=" ? ", font=("Arial", 10, "bold"), foreground="#87CEEB", cursor="question_arrow")
+        help_label = ttk.Label(api_key_frame, text=" ? ", font=("Arial", 10, "bold"), foreground=UI_CYAN, cursor="question_arrow")
         help_label.pack(side=tk.LEFT)
         
         ttk.Label(api_key_frame, text=":").pack(side=tk.LEFT, padx=(0,5))
@@ -473,12 +481,12 @@ class SettingsMixin:
             tooltip = tk.Toplevel(self)
             tooltip.wm_overrideredirect(True)
             tooltip.wm_geometry(f"+{event.x_root + 10}+{event.y_root + 10}")
-            tooltip.configure(bg="#2E3F5B")
+            tooltip.configure(bg=UI_BG)
             frame = ttk.Frame(tooltip, padding=10)
             frame.pack()
             
             # Textウィジェットでクリック可能なURLを実装
-            text_widget = tk.Text(frame, wrap=tk.WORD, width=45, height=20, bg="#3A4D6B", fg="#EAEAEA", 
+            text_widget = tk.Text(frame, wrap=tk.WORD, width=45, height=20, bg=UI_FIELD, fg=UI_TEXT,
                                   relief=tk.FLAT, highlightthickness=0, cursor="arrow", font=("Arial", 9))
             text_widget.pack()
             text_widget.insert(tk.END, api_key_help_text_before)
@@ -528,7 +536,7 @@ class SettingsMixin:
         help_label.bind("<Enter>", show_tooltip)
         help_label.bind("<Leave>", hide_tooltip)
 
-        ttk.Label(lf_astro, textvariable=self.plate_solve_status_var, foreground="#87CEEB").pack(pady=2)
+        ttk.Label(lf_astro, textvariable=self.plate_solve_status_var, foreground=UI_CYAN).pack(pady=2)
         ttk.Checkbutton(lf_astro, text="プレートソルブ結果を利用する", variable=self.use_plate_solve_var).pack(anchor=tk.W)
 
         ttk.Separator(lf_astro, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=10)
@@ -581,23 +589,23 @@ class SettingsMixin:
 
         win = tk.Toplevel(self)
         win.title("フルサイズ動画の時刻表示プレビュー")
-        win.configure(bg="#18263A")
+        win.configure(bg=UI_GLASS)
         win.resizable(False, False)
         self._full_video_timestamp_preview_window = win
 
-        body = tk.Frame(win, bg="#18263A", padx=12, pady=12)
+        body = tk.Frame(win, bg=UI_GLASS, padx=12, pady=12)
         body.pack(fill=tk.BOTH, expand=True)
         tk.Label(
             body,
             text="プレビュー内の四隅をクリックすると、時刻の位置を変更できます。",
-            bg="#18263A",
-            fg="#D9E5FF",
+            bg=UI_GLASS,
+            fg=UI_TEXT,
             anchor=tk.W,
         ).pack(fill=tk.X, pady=(0, 8))
 
         canvas = tk.Canvas(
-            body, width=640, height=360, bg="#050A10", highlightthickness=1,
-            highlightbackground="#7896BF", cursor="crosshair",
+            body, width=640, height=360, bg=ui_theme.COLORS["shadow"], highlightthickness=1,
+            highlightbackground=UI_BORDER, cursor="crosshair",
         )
         canvas.pack()
         canvas.bind("<Button-1>", self._on_full_video_timestamp_preview_click)
@@ -605,8 +613,8 @@ class SettingsMixin:
 
         self._full_video_timestamp_preview_status = tk.Label(
             body,
-            bg="#18263A",
-            fg="#A9C9EF",
+            bg=UI_GLASS,
+            fg=UI_MUTED,
             anchor=tk.W,
         )
         self._full_video_timestamp_preview_status.pack(fill=tk.X, pady=(8, 0))
@@ -713,7 +721,7 @@ class SettingsMixin:
         model_row2 = ttk.Frame(lf_model)
         model_row2.pack(fill=tk.X, pady=(2, 4))
         ttk.Button(model_row2, text="流星分類モデルとして適用", command=lambda: self.apply_selected_model(show_message=True)).pack(side=tk.LEFT)
-        ttk.Label(model_row2, textvariable=self.model_meta_info_var, foreground="#87CEEB").pack(side=tk.LEFT, padx=(10, 0))
+        ttk.Label(model_row2, textvariable=self.model_meta_info_var, foreground=UI_CYAN).pack(side=tk.LEFT, padx=(10, 0))
         self.refresh_model_candidates()
 
     def _is_lm_studio_backend_selected(self):
@@ -770,7 +778,7 @@ class SettingsMixin:
         self.btn_load_ai_vlm.pack(side=tk.LEFT)
         self.btn_unload_ai_vlm = ttk.Button(ai_vlm_action_row, text="Unload Model", command=self.unload_ai_vlm_model_async)
         self.btn_unload_ai_vlm.pack(side=tk.LEFT, padx=(5, 0))
-        ttk.Label(ai_vlm_action_row, textvariable=self.ai_vlm_status_var, foreground="#87CEEB").pack(side=tk.LEFT, padx=(10, 0))
+        ttk.Label(ai_vlm_action_row, textvariable=self.ai_vlm_status_var, foreground=UI_CYAN).pack(side=tk.LEFT, padx=(10, 0))
 
         self.lm_studio_vlm_url_var.trace_add("write", lambda *_: self._set_lm_studio_action_buttons_state())
 

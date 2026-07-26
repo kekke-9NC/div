@@ -7,17 +7,29 @@ class NavigationMixin:
         self.notebook.select(self.tab_source)
 
         style = ttk.Style()
-        style.configure("Highlight.TLabel", background="#FFD700", foreground="#000000")
+        style.configure(
+            "Highlight.TLabel",
+            background=ui_theme.COLORS["accent"],
+            foreground=ui_theme.COLORS["window"],
+        )
         self.source_drop_label.configure(style="Highlight.TLabel")
 
         def flash_highlight(count=0):
             if count >= 6:
-                self.source_drop_label.configure(style="TLabel")
+                self.source_drop_label.configure(style="DropZone.TLabel")
                 return
             if count % 2 == 0:
-                style.configure("Highlight.TLabel", background="#FFD700", foreground="#000000")
+                style.configure(
+                    "Highlight.TLabel",
+                    background=ui_theme.COLORS["accent"],
+                    foreground=ui_theme.COLORS["window"],
+                )
             else:
-                style.configure("Highlight.TLabel", background="#4A6A9B", foreground="#EAEAEA")
+                style.configure(
+                    "Highlight.TLabel",
+                    background=ui_theme.COLORS["glass_selected"],
+                    foreground=ui_theme.COLORS["text"],
+                )
             self.after(400, lambda: flash_highlight(count + 1))
 
         flash_highlight()
@@ -265,7 +277,11 @@ class NavigationMixin:
             base_style = entry.cget("style") or "TEntry"
             style = ttk.Style()
             highlight_style = f"Highlight{entry.winfo_id()}.TEntry"
-            style.configure(highlight_style, fieldbackground="#FFD700", foreground="#000000")
+            style.configure(
+                highlight_style,
+                fieldbackground=ui_theme.COLORS["accent"],
+                foreground=ui_theme.COLORS["window"],
+            )
 
             def flash(count=0):
                 if not entry.winfo_exists():
@@ -289,7 +305,11 @@ class NavigationMixin:
             base_style = button.cget("style") or "TButton"
             style = ttk.Style()
             highlight_style = f"Highlight{button.winfo_id()}.TButton"
-            style.configure(highlight_style, background="#FFD700", foreground="#000000")
+            style.configure(
+                highlight_style,
+                background=ui_theme.COLORS["accent"],
+                foreground=ui_theme.COLORS["window"],
+            )
 
             def flash(count=0):
                 if not button.winfo_exists():

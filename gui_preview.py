@@ -4,41 +4,79 @@ import gui_common as common
 
 class PreviewMixin:
     def create_info_panel(self, parent):
+        c = ui_theme.COLORS
+        activity_header = tk.Frame(parent, bg=c["glass"])
+        activity_header.pack(fill=tk.X, pady=(2, 12))
+        activity_copy = tk.Frame(activity_header, bg=c["glass"])
+        activity_copy.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        tk.Label(
+            activity_copy,
+            text="アクティビティ",
+            bg=c["glass"],
+            fg=c["text"],
+            anchor=tk.W,
+            font=("SF Pro Display", 16, "bold"),
+        ).pack(fill=tk.X)
+        tk.Label(
+            activity_copy,
+            text="処理状況とイベント",
+            bg=c["glass"],
+            fg=c["text_tertiary"],
+            anchor=tk.W,
+            font=("SF Pro Text", 9),
+        ).pack(fill=tk.X, pady=(2, 0))
+        ui_theme.make_badge(activity_header, "● READY").pack(side=tk.RIGHT)
+
+        control_card = ttk.LabelFrame(parent, text="観測コントロール")
+        control_card.pack(fill=tk.X, pady=(0, 12))
+
+        status_row = ttk.Frame(control_card)
+        status_row.pack(fill=tk.X, pady=(0, 7))
+        self.progress = ttk.Progressbar(status_row, orient=tk.HORIZONTAL, mode='determinate')
+        self.progress.pack(fill=tk.X, expand=True, side=tk.LEFT, padx=(0, 10))
+        self.status_label = ttk.Label(status_row, text="待機中", width=9, anchor=tk.E)
+        self.status_label.pack(side=tk.LEFT)
+
+        time_frame = ttk.Frame(control_card)
+        time_frame.pack(fill=tk.X, pady=(0, 8))
+        self.eta_label = ttk.Label(time_frame, text="残り --:--:--")
+        self.eta_label.pack(side=tk.LEFT)
+        self.elapsed_label = ttk.Label(time_frame, text="経過 00:00:00")
+        self.elapsed_label.pack(side=tk.RIGHT)
+
+        btn_frame = ttk.Frame(control_card)
+        btn_frame.pack(fill=tk.X)
+        self.start_button = ttk.Button(
+            btn_frame,
+            text="開始",
+            style="Primary.TButton",
+            command=self.start_processing,
+        )
+        self.start_button.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
+        self.live_preview_button = ttk.Button(
+            btn_frame,
+            text="ライブ",
+            style="Quiet.TButton",
+            command=self.open_rtsp_live_preview,
+            state=tk.DISABLED,
+        )
+        self.live_preview_button.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
+        self.cancel_button = ttk.Button(
+            control_card,
+            text="停止",
+            style="Danger.TButton",
+            command=self.cancel_processing,
+            state=tk.DISABLED,
+        )
+        self.cancel_button.pack(fill=tk.X, pady=(7, 0))
+        self._update_live_preview_button_state()
+
         panel = status_panel.StatusPanel(parent, progress_queue=self.progress_queue, app=self)
-        panel.pack(fill=tk.BOTH, expand=True, pady=5)
+        panel.pack(fill=tk.BOTH, expand=True)
         self.status_panel = panel
 
         self.log_text = panel.log_text
         self._init_summary_log_hover_preview()
-
-        status_row = ttk.Frame(parent)
-        status_row.pack(fill=tk.X, pady=5)
-        self.progress = ttk.Progressbar(status_row, orient=tk.HORIZONTAL, mode='determinate')
-        self.progress.pack(fill=tk.X, expand=True, side=tk.LEFT, padx=(0,10))
-        self.status_label = ttk.Label(status_row, text="待機中", width=15)
-        self.status_label.pack(side=tk.LEFT)
-
-        time_frame = ttk.Frame(parent)
-        time_frame.pack(fill=tk.X, pady=5)
-        self.eta_label = ttk.Label(time_frame, text="ETA: --:--:--", width=20)
-        self.eta_label.pack(side=tk.LEFT)
-        self.elapsed_label = ttk.Label(time_frame, text="経過: 00:00:00", width=20)
-        self.elapsed_label.pack(side=tk.LEFT)
-
-        btn_frame = ttk.Frame(parent)
-        btn_frame.pack(fill=tk.X, pady=(10,0))
-        self.start_button = ttk.Button(btn_frame, text="開始", command=self.start_processing)
-        self.start_button.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0,5))
-        self.live_preview_button = ttk.Button(
-            btn_frame,
-            text="ライブプレビュー",
-            command=self.open_rtsp_live_preview,
-            state=tk.DISABLED,
-        )
-        self.live_preview_button.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-        self.cancel_button = ttk.Button(btn_frame, text="キャンセル", command=self.cancel_processing, state=tk.DISABLED)
-        self.cancel_button.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5,0))
-        self._update_live_preview_button_state()
 
         # Share status callback with worker-side pipeline.
         try:
@@ -103,7 +141,7 @@ class PreviewMixin:
         self._summary_preview_hide_after_id = None
         self._summary_preview_fps = 12.0
 
-        self.log_text.tag_config("summary_hover", foreground="#87CEEB", underline=True)
+        self.log_text.tag_config("summary_hover", foreground=ui_theme.COLORS["cyan"], underline=True)
         self.log_text.bind("<Motion>", self._on_log_text_motion_for_summary_preview, add="+")
         self.log_text.bind("<Leave>", self._on_log_text_leave_for_summary_preview, add="+")
 
@@ -255,11 +293,11 @@ class PreviewMixin:
         win.withdraw()
         win.overrideredirect(True)
         win.attributes("-topmost", True)
-        win.configure(bg="#0F1724")
+        win.configure(bg=ui_theme.COLORS["glass"])
         win.bind("<Enter>", self._on_summary_preview_enter, add="+")
         win.bind("<Leave>", self._on_summary_preview_leave, add="+")
 
-        container = tk.Frame(win, bg="#0F1724", bd=1, relief=tk.SOLID)
+        container = tk.Frame(win, bg=ui_theme.COLORS["glass"], bd=1, relief=tk.SOLID)
         container.pack(fill=tk.BOTH, expand=True)
         container.bind("<Enter>", self._on_summary_preview_enter, add="+")
         container.bind("<Leave>", self._on_summary_preview_leave, add="+")
@@ -271,12 +309,12 @@ class PreviewMixin:
         self._summary_preview_title_label = tk.Label(
             container,
             text=title,
-            bg="#0F1724",
-            fg="#D9E5FF",
+            bg=ui_theme.COLORS["glass"],
+            fg=ui_theme.COLORS["text"],
             anchor="w",
             padx=8,
             pady=4,
-            font=("Segoe UI", 9, "bold"),
+            font=("SF Pro Text", 9, "bold"),
         )
         self._summary_preview_title_label.pack(fill=tk.X)
         self._summary_preview_title_label.bind("<Enter>", self._on_summary_preview_enter, add="+")
@@ -291,14 +329,14 @@ class PreviewMixin:
         self._summary_preview_image_label = tk.Label(
             preview_area,
             bg="#000000",
-            fg="#EAEAEA",
+            fg=ui_theme.COLORS["text"],
             text="プレビューを読み込み中...",
         )
         self._summary_preview_image_label.pack(fill=tk.BOTH, expand=True)
         self._summary_preview_image_label.bind("<Enter>", self._on_summary_preview_enter, add="+")
         self._summary_preview_image_label.bind("<Leave>", self._on_summary_preview_leave, add="+")
 
-        action_frame = tk.Frame(container, bg="#0F1724")
+        action_frame = tk.Frame(container, bg=ui_theme.COLORS["glass"])
         action_frame.pack(fill=tk.X, padx=6, pady=(0, 6))
         action_frame.bind("<Enter>", self._on_summary_preview_enter, add="+")
         action_frame.bind("<Leave>", self._on_summary_preview_leave, add="+")

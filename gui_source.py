@@ -2,12 +2,23 @@ from gui_common import *
 import ui_state
 from fixed_pattern import apply_fixed_pattern_correction
 
+UI_BG = ui_theme.COLORS["content_raised"]
+UI_FIELD = ui_theme.COLORS["field"]
+UI_HOVER = ui_theme.COLORS["glass_hover"]
+UI_SELECTED = ui_theme.COLORS["glass_selected"]
+UI_BORDER = ui_theme.COLORS["border"]
+UI_BORDER_BRIGHT = ui_theme.COLORS["border_bright"]
+UI_TEXT = ui_theme.COLORS["text"]
+UI_MUTED = ui_theme.COLORS["text_secondary"]
+UI_ACCENT = ui_theme.COLORS["accent"]
+UI_CYAN = ui_theme.COLORS["cyan"]
+
 
 class SourceMixin:
     def create_source_tab(self, parent):
         frame = ttk.Frame(parent)
         # スクロール可能なキャンバスとスクロールバーを作成
-        canvas = tk.Canvas(frame, highlightthickness=0, bg="#2E3F5B")
+        canvas = tk.Canvas(frame, highlightthickness=0, bg=UI_BG)
         scrollbar = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=canvas.yview)
         scrollable_frame = ttk.Frame(canvas)
 
@@ -48,7 +59,11 @@ class SourceMixin:
         lf_folder = ttk.LabelFrame(scrollable_frame, text="フォルダ / 動画ファイル")
         lf_folder.pack(fill=tk.X, expand=True, pady=5)
         
-        self.source_drop_label = ttk.Label(lf_folder, text="ここにフォルダや動画ファイルをドラッグ＆ドロップ", relief=tk.SOLID, padding=20, anchor=tk.CENTER, borderwidth=1)
+        self.source_drop_label = ttk.Label(
+            lf_folder,
+            text="動画またはフォルダをここにドロップ",
+            style="DropZone.TLabel",
+        )
         self.source_drop_label.pack(fill=tk.X, pady=5)
         self.source_drop_label.drop_target_register(DND_FILES)
         self.source_drop_label.dnd_bind('<<Drop>>', self.drop)
@@ -60,14 +75,14 @@ class SourceMixin:
         list_container.pack(fill=tk.BOTH, expand=True, pady=5)
         
         # 内側のリスト用のキャンバス（スクロールイベントの競合に注意）
-        self.folder_list_canvas = tk.Canvas(list_container, bg="#3A4D6B", highlightthickness=0, height=120)
+        self.folder_list_canvas = tk.Canvas(list_container, bg=UI_FIELD, highlightthickness=0, height=120)
         self.folder_list_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         
         inner_scrollbar = ttk.Scrollbar(list_container, orient=tk.VERTICAL, command=self.folder_list_canvas.yview)
         inner_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.folder_list_canvas.configure(yscrollcommand=inner_scrollbar.set)
         
-        self.folder_list_frame = tk.Frame(self.folder_list_canvas, bg="#3A4D6B")
+        self.folder_list_frame = tk.Frame(self.folder_list_canvas, bg=UI_FIELD)
         self.folder_list_window = self.folder_list_canvas.create_window((0, 0), window=self.folder_list_frame, anchor="nw")
         
         def on_frame_configure(event):
@@ -94,8 +109,29 @@ class SourceMixin:
 
         btn_frame = ttk.Frame(lf_folder)
         btn_frame.pack(fill=tk.X, pady=(5,0))
-        ttk.Button(btn_frame, text="選択項目を削除", command=self.remove_selected_folders).pack(side=tk.LEFT, padx=2)
-        ttk.Button(btn_frame, text="すべて削除", command=self.remove_all_folders).pack(side=tk.LEFT, padx=2)
+        ttk.Button(
+            btn_frame,
+            text="動画を選択…",
+            style="Primary.TButton",
+            command=self.choose_source_videos,
+        ).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(
+            btn_frame,
+            text="フォルダを選択…",
+            command=self.choose_source_folder,
+        ).pack(side=tk.LEFT, padx=4)
+        ttk.Button(
+            btn_frame,
+            text="すべて削除",
+            style="Quiet.TButton",
+            command=self.remove_all_folders,
+        ).pack(side=tk.RIGHT, padx=(4, 0))
+        ttk.Button(
+            btn_frame,
+            text="選択項目を削除",
+            style="Quiet.TButton",
+            command=self.remove_selected_folders,
+        ).pack(side=tk.RIGHT, padx=4)
 
         lf_rtsp = ttk.LabelFrame(scrollable_frame, text="RTSPストリーム")
         lf_rtsp.pack(fill=tk.X, expand=True, pady=5)
@@ -107,7 +143,7 @@ class SourceMixin:
             text="カメラを追加して、録画・解析・固定パターン補正をこの場所で管理します。",
             style="Hint.TLabel",
         ).pack(side=tk.LEFT)
-        rtsp_info_label = ttk.Label(rtsp_intro, text="ⓘ", font=("Arial", 11), foreground="#87CEEB", cursor="hand2")
+        rtsp_info_label = ttk.Label(rtsp_intro, text="ⓘ", font=("Arial", 11), foreground=UI_CYAN, cursor="hand2")
         rtsp_info_label.pack(side=tk.LEFT, padx=(6, 0))
         
         rtsp_info_text = "外部GPUが無い場合はCPUの負荷が高くなり\n映像が乱れることがあります。"
@@ -120,7 +156,7 @@ class SourceMixin:
             tooltip = tk.Toplevel(self)
             tooltip.wm_overrideredirect(True)
             tooltip.wm_geometry(f"+{event.x_root + 10}+{event.y_root + 10}")
-            tooltip.configure(bg="#2E3F5B")
+            tooltip.configure(bg=UI_BG)
             frame_tt = ttk.Frame(tooltip, padding=8)
             frame_tt.pack()
             ttk.Label(frame_tt, text=rtsp_info_text, justify=tk.LEFT).pack()
@@ -180,14 +216,14 @@ class SourceMixin:
         rtsp_list_container = ttk.Frame(rtsp_list_section)
         rtsp_list_container.pack(fill=tk.BOTH, expand=True)
         
-        self.rtsp_list_canvas = tk.Canvas(rtsp_list_container, bg="#3A4D6B", highlightthickness=0, height=60)
+        self.rtsp_list_canvas = tk.Canvas(rtsp_list_container, bg=UI_FIELD, highlightthickness=0, height=60)
         self.rtsp_list_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         
         rtsp_scrollbar = ttk.Scrollbar(rtsp_list_container, orient=tk.VERTICAL, command=self.rtsp_list_canvas.yview)
         rtsp_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.rtsp_list_canvas.configure(yscrollcommand=rtsp_scrollbar.set)
         
-        self.rtsp_list_frame = tk.Frame(self.rtsp_list_canvas, bg="#3A4D6B")
+        self.rtsp_list_frame = tk.Frame(self.rtsp_list_canvas, bg=UI_FIELD)
         self.rtsp_list_window = self.rtsp_list_canvas.create_window((0, 0), window=self.rtsp_list_frame, anchor="nw")
         
         def on_rtsp_frame_configure(event):
@@ -320,7 +356,7 @@ class SourceMixin:
         self.chk_periodic_scan = ttk.Checkbutton(header_frame, text="定期スキャンを有効にする", variable=self.periodic_scan_var, command=self.update_start_button_state)
         self.chk_periodic_scan.pack(side=tk.LEFT)
         
-        help_label = ttk.Label(header_frame, text=" ? ", font=("Arial", 10, "bold"), foreground="#87CEEB", cursor="hand2")
+        help_label = ttk.Label(header_frame, text=" ? ", font=("Arial", 10, "bold"), foreground=UI_CYAN, cursor="hand2")
         help_label.pack(side=tk.LEFT, padx=5)
         
         help_text = """指定した監視フォルダを一定間隔でスキャンし、
@@ -339,10 +375,10 @@ atomcam2で利用する場合は、GitHubで公開されている
             tooltip = tk.Toplevel(self)
             tooltip.wm_overrideredirect(True)
             tooltip.wm_geometry(f"+{event.x_root+10}+{event.y_root+10}")
-            tooltip.configure(bg="#2E3F5B")
+            tooltip.configure(bg=UI_BG)
             f = ttk.Frame(tooltip, padding=8)
             f.pack()
-            ttk.Label(f, text=help_text, justify=tk.LEFT, foreground="#EAEAEA", background="#2E3F5B").pack()
+            ttk.Label(f, text=help_text, justify=tk.LEFT, foreground=UI_TEXT, background=UI_BG).pack()
             
             def on_enter(e): help_label._tooltip_hover = True
             def on_leave(e): 
@@ -415,12 +451,12 @@ atomcam2で利用する場合は、GitHubで公開されている
         tk.Label(
             frame,
             text="カードをドラッグして並べ替えます。複数の入力が有効な場合は、最上位の1種類だけを実行します。",
-            bg="#2E3F5B",
-            fg="#A9C9EF",
+            bg=UI_BG,
+            fg=UI_MUTED,
             anchor=tk.W,
         ).pack(fill=tk.X, padx=8, pady=(6, 2))
 
-        self.processing_priority_cards_frame = tk.Frame(frame, bg="#2E3F5B")
+        self.processing_priority_cards_frame = tk.Frame(frame, bg=UI_BG)
         self.processing_priority_cards_frame.pack(fill=tk.X, padx=8, pady=(2, 6))
         self._processing_priority_drag_key = None
         self._processing_priority_drop_key = None
@@ -452,20 +488,20 @@ atomcam2で利用する場合は、GitHubで公開されている
         }
         for index, source_type in enumerate(self.processing_source_priority, start=1):
             card = tk.Frame(
-                container, bg="#3A4D6B", highlightbackground="#6E91BF",
+                container, bg=UI_FIELD, highlightbackground=UI_BORDER,
                 highlightthickness=1, cursor="fleur", pady=6,
             )
             card.pack(fill=tk.X, pady=2)
             rank = tk.Label(
-                card, text=str(index), bg="#5476A8", fg="#FFFFFF", width=3,
+                card, text=str(index), bg=UI_SELECTED, fg=UI_TEXT, width=3,
                 font=("Segoe UI", 10, "bold"), cursor="fleur",
             )
             rank.pack(side=tk.LEFT, padx=(6, 8))
-            handle = tk.Label(card, text="⠿", bg="#3A4D6B", fg="#A9C9EF", font=("Segoe UI", 14), cursor="fleur")
+            handle = tk.Label(card, text="⠿", bg=UI_FIELD, fg=UI_MUTED, font=("SF Pro Text", 14), cursor="fleur")
             handle.pack(side=tk.LEFT, padx=(0, 8))
             text = tk.Label(
-                card, text=labels[source_type], bg="#3A4D6B", fg="#F0F4FA",
-                font=("Segoe UI", 10, "bold"), anchor=tk.W, cursor="fleur",
+                card, text=labels[source_type], bg=UI_FIELD, fg=UI_TEXT,
+                font=("SF Pro Text", 10, "bold"), anchor=tk.W, cursor="fleur",
             )
             text.pack(side=tk.LEFT, fill=tk.X, expand=True)
             self._processing_priority_cards[source_type] = (card, rank, handle, text)
@@ -479,11 +515,11 @@ atomcam2で利用する場合は、GitHubで公開されている
         if not widgets:
             return
         card, rank, handle, text = widgets
-        card_color = "#597EAE" if highlighted else "#3A4D6B"
+        card_color = UI_SELECTED if highlighted else UI_FIELD
         for widget in (card, handle, text):
             widget.configure(bg=card_color)
-        card.configure(highlightbackground="#9AC4FF" if highlighted else "#6E91BF")
-        rank.configure(bg="#6E9DDD" if highlighted else "#5476A8")
+        card.configure(highlightbackground=UI_ACCENT if highlighted else UI_BORDER)
+        rank.configure(bg=UI_ACCENT if highlighted else UI_SELECTED)
 
     def _on_processing_priority_press(self, source_type, _event):
         self._processing_priority_drag_key = source_type
@@ -549,6 +585,27 @@ atomcam2で利用する場合は、GitHubで公開されている
 
     def drop(self, event):
         paths = self.splitlist(event.data)
+        self._register_source_paths(paths, warn_if_empty=True)
+
+    def choose_source_videos(self):
+        """Choose one or more video files without requiring drag and drop."""
+        files = filedialog.askopenfilenames(
+            title="解析する動画を選択",
+            filetypes=[
+                ("動画ファイル", "*.mp4 *.mov *.avi *.mkv *.m4v *.mts *.m2ts *.ts"),
+                ("すべてのファイル", "*.*"),
+            ],
+        )
+        if files:
+            self._register_source_paths(files)
+
+    def choose_source_folder(self):
+        """Choose a folder to scan when processing starts."""
+        directory = filedialog.askdirectory(title="解析する動画フォルダを選択")
+        if directory:
+            self._register_source_paths((directory,))
+
+    def _register_source_paths(self, paths, warn_if_empty=False):
         items_to_add = []  # (fps_str, display_path, internal_path)
         existing = {os.path.abspath(path) for path in self.folder_paths}
         for path in paths:
@@ -570,26 +627,26 @@ atomcam2で利用する場合は、GitHubで公開されている
                     self._add_folder_item(fps_str, path_str)
             self.update_start_button_state()
             self.append_log(f"{len(items_to_add)}件を登録しました。動画の走査は開始後にバックグラウンドで行います。")
-        else:
+        elif warn_if_empty:
             messagebox.showwarning("情報", "有効なフォルダまたは動画ファイルがドロップされませんでした。")
 
     def _add_folder_item(self, fps_str, path_str):
         """Add a styled item to the folder list with modern FPS badge."""
         index = len(self.folder_item_frames)
         
-        item_frame = tk.Frame(self.folder_list_frame, bg="#3A4D6B", cursor="hand2")
+        item_frame = tk.Frame(self.folder_list_frame, bg=UI_FIELD, cursor="hand2")
         item_frame.pack(fill=tk.X, padx=2, pady=1)
         
-        badge_canvas = tk.Canvas(item_frame, width=70, height=22, bg="#3A4D6B", highlightthickness=0)
+        badge_canvas = tk.Canvas(item_frame, width=70, height=22, bg=UI_FIELD, highlightthickness=0)
         badge_canvas.pack(side=tk.LEFT, padx=(4, 6), pady=2)
         
-        self._draw_rounded_rect(badge_canvas, 2, 2, 68, 20, 8, fill="#4A90D9", outline="")
+        self._draw_rounded_rect(badge_canvas, 2, 2, 68, 20, 8, fill=UI_ACCENT, outline="")
         badge_text = "開始時取得" if fps_str == "自動" else f"{fps_str} fps"
         badge_canvas.create_text(35, 11, text=badge_text, fill="white", font=("Segoe UI", 8, "bold"))
         
         # Path label
-        path_label = tk.Label(item_frame, text=path_str, bg="#3A4D6B", fg="#EAEAEA", 
-                              anchor="w", font=("Segoe UI", 9))
+        path_label = tk.Label(item_frame, text=path_str, bg=UI_FIELD, fg=UI_TEXT,
+                              anchor="w", font=("SF Pro Text", 9))
         path_label.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
         
         def on_click(event, idx=index):
@@ -639,16 +696,16 @@ atomcam2で利用する場合は、GitHubで公開されている
         item = self.folder_item_frames[index]
         if item['selected']:
             # Deselect
-            item['frame'].config(bg="#3A4D6B")
-            item['label'].config(bg="#3A4D6B")
-            item['badge'].config(bg="#3A4D6B")
+            item['frame'].config(bg=UI_FIELD)
+            item['label'].config(bg=UI_FIELD)
+            item['badge'].config(bg=UI_FIELD)
             item['selected'] = False
             self.folder_selected_indices.discard(index)
         else:
             # Select
-            item['frame'].config(bg="#5A7D9B")
-            item['label'].config(bg="#5A7D9B")
-            item['badge'].config(bg="#5A7D9B")
+            item['frame'].config(bg=UI_SELECTED)
+            item['label'].config(bg=UI_SELECTED)
+            item['badge'].config(bg=UI_SELECTED)
             item['selected'] = True
             self.folder_selected_indices.add(index)
 
@@ -693,17 +750,17 @@ atomcam2で利用する場合は、GitHubで公開されている
         """Add a styled item to the RTSP list with modern badge."""
         index = len(self.rtsp_item_frames)
         
-        item_frame = tk.Frame(self.rtsp_list_frame, bg="#3A4D6B", cursor="hand2")
+        item_frame = tk.Frame(self.rtsp_list_frame, bg=UI_FIELD, cursor="hand2")
         item_frame.pack(fill=tk.X, padx=2, pady=1)
         
-        badge_canvas = tk.Canvas(item_frame, width=55, height=22, bg="#3A4D6B", highlightthickness=0)
+        badge_canvas = tk.Canvas(item_frame, width=55, height=22, bg=UI_FIELD, highlightthickness=0)
         badge_canvas.pack(side=tk.LEFT, padx=(4, 6), pady=2)
         
         self._draw_rounded_rect(badge_canvas, 2, 2, 53, 20, 8, fill="#2ECC71", outline="")
         badge_canvas.create_text(27, 11, text="RTSP", fill="white", font=("Segoe UI", 8, "bold"))
         
-        url_label = tk.Label(item_frame, text=url, bg="#3A4D6B", fg="#EAEAEA", 
-                             anchor="w", font=("Segoe UI", 9))
+        url_label = tk.Label(item_frame, text=url, bg=UI_FIELD, fg=UI_TEXT,
+                             anchor="w", font=("SF Pro Text", 9))
         url_label.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
         
         def on_click(event, idx=index):
@@ -733,15 +790,15 @@ atomcam2で利用する場合は、GitHubで公開されている
         
         item = self.rtsp_item_frames[index]
         if item['selected']:
-            item['frame'].config(bg="#3A4D6B")
-            item['label'].config(bg="#3A4D6B")
-            item['badge'].config(bg="#3A4D6B")
+            item['frame'].config(bg=UI_FIELD)
+            item['label'].config(bg=UI_FIELD)
+            item['badge'].config(bg=UI_FIELD)
             item['selected'] = False
             self.rtsp_selected_indices.discard(index)
         else:
-            item['frame'].config(bg="#5A7D9B")
-            item['label'].config(bg="#5A7D9B")
-            item['badge'].config(bg="#5A7D9B")
+            item['frame'].config(bg=UI_SELECTED)
+            item['label'].config(bg=UI_SELECTED)
+            item['badge'].config(bg=UI_SELECTED)
             item['selected'] = True
             self.rtsp_selected_indices.add(index)
 

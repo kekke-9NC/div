@@ -1,11 +1,22 @@
 from gui_common import *
 
+UI_BG = ui_theme.COLORS["content_raised"]
+UI_FIELD = ui_theme.COLORS["field"]
+UI_GLASS = ui_theme.COLORS["glass"]
+UI_HOVER = ui_theme.COLORS["glass_hover"]
+UI_SELECTED = ui_theme.COLORS["glass_selected"]
+UI_BORDER = ui_theme.COLORS["border"]
+UI_TEXT = ui_theme.COLORS["text"]
+UI_MUTED = ui_theme.COLORS["text_secondary"]
+UI_ACCENT = ui_theme.COLORS["accent"]
+UI_SUCCESS = ui_theme.COLORS["success"]
+
 
 class UsageMixin:
     def create_usage_tab(self, parent):
         frame = ttk.Frame(parent)
 
-        canvas = tk.Canvas(frame, highlightthickness=0, bg="#2E3F5B")
+        canvas = tk.Canvas(frame, highlightthickness=0, bg=UI_BG)
         scrollbar = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=canvas.yview)
         scrollable_frame = ttk.Frame(canvas)
 
@@ -37,32 +48,32 @@ class UsageMixin:
         canvas.bind("<Enter>", _bind_mousewheel)
         canvas.bind("<Leave>", _unbind_mousewheel)
 
-        pad_x = 10
-        pad_y = 6
-        wrap_w = 520
-        base_bg = "#2E3F5B"
+        pad_x = 12
+        pad_y = 7
+        wrap_w = 720
+        base_bg = UI_BG
         phase_styles = {
             "detect": {
-                "border": "#4F77A8",
-                "header_bg": "#2F4E74",
-                "header_fg": "#EAF4FF",
-                "body_bg": "#314765",
-                "text_fg": "#EAEAEA",
+                "border": UI_BORDER,
+                "header_bg": UI_SELECTED,
+                "header_fg": UI_TEXT,
+                "body_bg": UI_GLASS,
+                "text_fg": UI_TEXT,
             },
             "post": {
-                "border": "#4E8C72",
-                "header_bg": "#2F5A4B",
-                "header_fg": "#ECFFF6",
-                "body_bg": "#355346",
-                "text_fg": "#EAEAEA",
+                "border": UI_BORDER,
+                "header_bg": "#1D3B39",
+                "header_fg": UI_TEXT,
+                "body_bg": UI_GLASS,
+                "text_fg": UI_TEXT,
             },
         }
 
         ttk.Label(
             scrollable_frame,
-            text="✨ 流星検出アプリの使い方",
-            font=("Arial", 16, "bold"),
-            foreground="#87CEEB",
+            text="クイックスタート",
+            font=("SF Pro Display", 18, "bold"),
+            foreground=UI_TEXT,
         ).pack(pady=(15, 8), padx=pad_x, anchor="w")
 
         ttk.Label(
@@ -74,28 +85,17 @@ class UsageMixin:
             wraplength=wrap_w,
         ).pack(padx=pad_x, pady=(0, 14), anchor="w")
 
-        def make_inline_button(parent_frame, label, command, text_color="#FFD700", button_bg="#3A4D6B"):
-            btn = tk.Button(
+        def make_inline_button(parent_frame, label, command, text_color=UI_ACCENT, button_bg=UI_HOVER):
+            del text_color, button_bg
+            return ttk.Button(
                 parent_frame,
                 text=label,
                 command=command,
-                bg=button_bg,
-                fg=text_color,
-                activebackground="#4A6A9B",
-                activeforeground=text_color,
-                font=("Segoe UI", 10, "bold"),
-                relief="raised",
-                bd=1,
-                padx=6,
-                pady=1,
-                cursor="hand2",
+                style="Quiet.TButton",
             )
-            btn.bind("<Enter>", lambda e, b=btn: b.configure(bg="#4A6A9B"))
-            btn.bind("<Leave>", lambda e, b=btn, bg=button_bg: b.configure(bg=bg))
-            return btn
 
         default_font = tkfont.nametofont("TkDefaultFont")
-        button_font = tkfont.Font(family="Segoe UI", size=10, weight="bold")
+        button_font = tkfont.Font(family="SF Pro Text", size=10, weight="bold")
 
         def _fit_prefix(text, max_px):
             if not text:
@@ -133,14 +133,14 @@ class UsageMixin:
                     label = seg[1]
                     command = seg[2]
                     color = seg[3] if len(seg) >= 4 else "#FFD700"
-                    btn = make_inline_button(row, label, command, color, button_bg="#3A4D6B")
+                    btn = make_inline_button(row, label, command, color, button_bg=UI_HOVER)
                     btn.update_idletasks()
                     req_px = btn.winfo_reqwidth() + 10
                     if used_px > 0 and used_px + req_px > max_line_px:
                         btn.destroy()
                         row = new_row()
                         used_px = 0
-                        btn = make_inline_button(row, label, command, color, button_bg="#3A4D6B")
+                        btn = make_inline_button(row, label, command, color, button_bg=UI_HOVER)
                         btn.update_idletasks()
                         req_px = btn.winfo_reqwidth() + 10
                     btn.pack(side=tk.LEFT, padx=4)
@@ -176,15 +176,15 @@ class UsageMixin:
         def add_phase_separator(text):
             sep = tk.Frame(scrollable_frame, bg=base_bg)
             sep.pack(fill=tk.X, padx=pad_x, pady=(10, 8))
-            tk.Frame(sep, bg="#6FB792", height=2).pack(fill=tk.X, pady=(0, 4))
+            tk.Frame(sep, bg=UI_SUCCESS, height=1).pack(fill=tk.X, pady=(0, 6))
             tk.Label(
                 sep,
                 text=text,
                 bg=base_bg,
-                fg="#9DE3BC",
-                font=("Segoe UI", 10, "bold"),
+                fg=UI_SUCCESS,
+                font=("SF Pro Text", 10, "bold"),
             ).pack(anchor="center")
-            tk.Frame(sep, bg="#6FB792", height=2).pack(fill=tk.X, pady=(4, 0))
+            tk.Frame(sep, bg=UI_SUCCESS, height=1).pack(fill=tk.X, pady=(6, 0))
 
         def add_section(title, lines, phase="detect"):
             style = phase_styles["detect"] if phase not in phase_styles else phase_styles[phase]
@@ -202,9 +202,9 @@ class UsageMixin:
                 anchor="w",
                 bg=style["header_bg"],
                 fg=style["header_fg"],
-                font=("Segoe UI", 11, "bold"),
-                padx=8,
-                pady=5,
+                font=("SF Pro Text", 11, "bold"),
+                padx=12,
+                pady=8,
             )
             header.pack(fill=tk.X, padx=1, pady=(1, 0))
 
@@ -291,7 +291,7 @@ class UsageMixin:
             text="迷った場合は Step 0 から順に進めてください。",
             justify=tk.LEFT,
             wraplength=wrap_w,
-            foreground="#AAAAAA",
+            foreground=UI_MUTED,
         ).pack(padx=pad_x, pady=(8, 14), anchor="w")
 
         return frame

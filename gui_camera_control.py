@@ -92,7 +92,7 @@ class CameraControlMixin:
         win = Toplevel(self)
         win.title("カメラコントロール")
         win.geometry("1280x820")
-        win.configure(bg="#2E3F5B")
+        win.configure(bg=ui_theme.COLORS["window"])
         self.camera_control_window = win
 
         root = ttk.Frame(win, padding=10)

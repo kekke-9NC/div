@@ -2,6 +2,13 @@ from gui_common import *
 import media_time
 from datetime import timedelta
 
+UI_BG = ui_theme.COLORS["content_raised"]
+UI_FIELD = ui_theme.COLORS["field"]
+UI_SELECTED = ui_theme.COLORS["glass_selected"]
+UI_TEXT = ui_theme.COLORS["text"]
+UI_CYAN = ui_theme.COLORS["cyan"]
+UI_ACCENT = ui_theme.COLORS["accent"]
+
 
 class AnalysisMixin:
     def create_analysis_tab(self, parent):
@@ -11,7 +18,7 @@ class AnalysisMixin:
         # the visible area with no way to reach them.
         tab_frame = ttk.Frame(parent)
         tab_frame.pack(fill=tk.BOTH, expand=True)
-        self.analysis_tab_canvas = tk.Canvas(tab_frame, highlightthickness=0, bg="#2E3F5B")
+        self.analysis_tab_canvas = tk.Canvas(tab_frame, highlightthickness=0, bg=UI_BG)
         analysis_scrollbar = ttk.Scrollbar(tab_frame, orient=tk.VERTICAL, command=self.analysis_tab_canvas.yview)
         analysis_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.analysis_tab_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -66,7 +73,11 @@ class AnalysisMixin:
         lf = ttk.LabelFrame(frame, text="流星解析 (info.txt ドロップ)")
         lf.pack(fill=tk.BOTH, expand=True, pady=5)
 
-        drop_label = ttk.Label(lf, text="ここに流星の .txt ファイルをドラッグ＆ドロップ", relief=tk.SOLID, padding=20, anchor=tk.CENTER, borderwidth=1)
+        drop_label = ttk.Label(
+            lf,
+            text="流星の info.txt をここにドロップ",
+            style="DropZone.TLabel",
+        )
         drop_label.pack(fill=tk.X, pady=5)
         drop_label.drop_target_register(DND_FILES)
         drop_label.dnd_bind('<<Drop>>', self.drop_analysis)
@@ -75,14 +86,14 @@ class AnalysisMixin:
         analysis_list_container = ttk.Frame(lf)
         analysis_list_container.pack(fill=tk.BOTH, expand=True, pady=5)
         
-        self.analysis_list_canvas = tk.Canvas(analysis_list_container, bg="#3A4D6B", highlightthickness=0, height=100)
+        self.analysis_list_canvas = tk.Canvas(analysis_list_container, bg=UI_FIELD, highlightthickness=0, height=100)
         self.analysis_list_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         
         scrollbar = ttk.Scrollbar(analysis_list_container, orient=tk.VERTICAL, command=self.analysis_list_canvas.yview)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.analysis_list_canvas.configure(yscrollcommand=scrollbar.set)
         
-        self.analysis_list_frame = tk.Frame(self.analysis_list_canvas, bg="#3A4D6B")
+        self.analysis_list_frame = tk.Frame(self.analysis_list_canvas, bg=UI_FIELD)
         self.analysis_list_window = self.analysis_list_canvas.create_window((0, 0), window=self.analysis_list_frame, anchor="nw")
         
         def on_analysis_frame_configure(event):
@@ -108,57 +119,117 @@ class AnalysisMixin:
 
         action_frame = ttk.Frame(frame)
         action_frame.pack(fill=tk.X, pady=8)
-        
-        row1 = ttk.Frame(action_frame)
-        row1.pack(fill=tk.X, pady=2)
-        self.btn_analysis_start = ttk.Button(row1, text="解析開始", command=self.start_analysis, style="Gray.TButton")
-        self.btn_analysis_start.pack(side=tk.LEFT, padx=(0,5))
-        ttk.Button(row1, text="座標点を追加", command=self.add_custom_point, style="Gray.TButton").pack(side=tk.LEFT, padx=(0,5))
-        ttk.Button(row1, text="座標点を管理", command=self.manage_coordinates, style="Gray.TButton").pack(side=tk.LEFT, padx=(0,5))
+        action_frame.columnconfigure(0, weight=1, uniform="analysis_actions")
+        action_frame.columnconfigure(1, weight=1, uniform="analysis_actions")
 
-        row2 = ttk.Frame(action_frame)
-        row2.pack(fill=tk.X, pady=2)
-        self.btn_long_exposure = ttk.Button(row2, text="長時間輝線マップを作成", command=self.create_long_exposure_map_callback, style="Gray.TButton")
-        self.btn_long_exposure.pack(side=tk.LEFT, padx=(0,5))
-        self.btn_distortion = ttk.Button(row2, text="ゆがみ補正", command=self.apply_distortion_correction_callback, style="Gray.TButton")
-        self.btn_distortion.pack(side=tk.LEFT, padx=(0,5))
+        trajectory_tools = ttk.LabelFrame(action_frame, text="軌道・校正")
+        trajectory_tools.grid(row=0, column=0, sticky=tk.NSEW, padx=(0, 4), pady=(0, 8))
+        trajectory_grid = ttk.Frame(trajectory_tools)
+        trajectory_grid.pack(fill=tk.X)
+        trajectory_grid.columnconfigure(0, weight=1, uniform="trajectory")
+        trajectory_grid.columnconfigure(1, weight=1, uniform="trajectory")
+        self.btn_analysis_start = ttk.Button(
+            trajectory_grid,
+            text="解析を開始",
+            command=self.start_analysis,
+            style="Gray.TButton",
+        )
+        add_point_button = ttk.Button(
+            trajectory_grid,
+            text="座標点を追加",
+            command=self.add_custom_point,
+            style="Gray.TButton",
+        )
+        manage_point_button = ttk.Button(
+            trajectory_grid,
+            text="座標点を管理",
+            command=self.manage_coordinates,
+            style="Gray.TButton",
+        )
+        self.btn_long_exposure = ttk.Button(
+            trajectory_grid,
+            text="長時間輝線マップ",
+            command=self.create_long_exposure_map_callback,
+            style="Gray.TButton",
+        )
+        self.btn_distortion = ttk.Button(
+            trajectory_grid,
+            text="ゆがみ補正",
+            command=self.apply_distortion_correction_callback,
+            style="Gray.TButton",
+        )
         self.btn_distortion_selfcal = ttk.Button(
-            row2,
-            text="夜間自己校正(20分)",
+            trajectory_grid,
+            text="夜間自己校正",
             command=self.estimate_distortion_map_night_callback,
             style="Gray.TButton"
         )
-        self.btn_distortion_selfcal.pack(side=tk.LEFT, padx=(0,5))
         self.btn_distortion_map_view = ttk.Button(
-            row2,
+            trajectory_grid,
             text="ゆがみマップ表示",
             command=self.visualize_distortion_map_callback,
             style="Gray.TButton"
         )
-        self.btn_distortion_map_view.pack(side=tk.LEFT, padx=(0,5))
-        self.btn_angle_analysis = ttk.Button(row2, text="角度分布分析", command=self.analyze_angles_callback, style="Gray.TButton")
-        self.btn_angle_analysis.pack(side=tk.LEFT, padx=(0,5))
+        self.btn_angle_analysis = ttk.Button(
+            trajectory_grid,
+            text="角度分布分析",
+            command=self.analyze_angles_callback,
+            style="Gray.TButton",
+        )
+        trajectory_buttons = (
+            self.btn_analysis_start,
+            add_point_button,
+            manage_point_button,
+            self.btn_long_exposure,
+            self.btn_distortion,
+            self.btn_distortion_selfcal,
+            self.btn_distortion_map_view,
+            self.btn_angle_analysis,
+        )
+        for index, button in enumerate(trajectory_buttons):
+            button.grid(
+                row=index // 2,
+                column=index % 2,
+                sticky=tk.EW,
+                padx=(0, 4) if index % 2 == 0 else (4, 0),
+                pady=3,
+            )
 
-        row3 = ttk.Frame(action_frame)
-        row3.pack(fill=tk.X, pady=2)
-        self.btn_blend_image = ttk.Button(row3, text="比較明合成画像を作成", command=self.create_lighten_blend_image_callback)
-        self.btn_blend_image.pack(side=tk.LEFT, padx=(0,5))
-        self.btn_blend_video = ttk.Button(row3, text="比較明合成動画を作成", command=self.create_lighten_blend_video_callback)
-        self.btn_blend_video.pack(side=tk.LEFT, padx=(0,5))
-        self.btn_timelapse = ttk.Button(row3, text="タイムラプス作成", command=self.create_timelapse_callback)
-        self.btn_timelapse.pack(side=tk.LEFT, padx=(0,5))
-
-        row4 = ttk.Frame(action_frame)
-        row4.pack(fill=tk.X, pady=2)
-        self.btn_camera_control = ttk.Button(row4, text="カメラコントロール", command=self.open_camera_control, style="Gray.TButton")
-        self.btn_camera_control.pack(side=tk.LEFT, padx=(0, 5))
-        self.btn_model_training = ttk.Button(row4, text="機械学習モデル作成", command=self.open_model_training_tool)
-        self.btn_model_training.pack(side=tk.LEFT, padx=(0, 5))
+        media_tools = ttk.LabelFrame(action_frame, text="メディア作成")
+        media_tools.grid(row=0, column=1, sticky=tk.NSEW, padx=(4, 0), pady=(0, 8))
+        media_grid = ttk.Frame(media_tools)
+        media_grid.pack(fill=tk.X)
+        media_grid.columnconfigure(0, weight=1, uniform="media")
+        media_grid.columnconfigure(1, weight=1, uniform="media")
+        self.btn_blend_image = ttk.Button(media_grid, text="比較明合成画像", command=self.create_lighten_blend_image_callback)
+        self.btn_blend_video = ttk.Button(media_grid, text="比較明合成動画", command=self.create_lighten_blend_video_callback)
+        self.btn_timelapse = ttk.Button(media_grid, text="タイムラプス", command=self.create_timelapse_callback)
+        self.btn_camera_control = ttk.Button(media_grid, text="カメラコントロール", command=self.open_camera_control, style="Gray.TButton")
+        self.btn_model_training = ttk.Button(media_grid, text="機械学習モデル作成", command=self.open_model_training_tool)
+        media_buttons = (
+            self.btn_blend_image,
+            self.btn_blend_video,
+            self.btn_timelapse,
+            self.btn_camera_control,
+            self.btn_model_training,
+        )
+        for index, button in enumerate(media_buttons):
+            button.grid(
+                row=index // 2,
+                column=index % 2,
+                sticky=tk.EW,
+                padx=(0, 4) if index % 2 == 0 else (4, 0),
+                pady=3,
+            )
 
         lf_concat = ttk.LabelFrame(frame, text="動画連結")
         lf_concat.pack(fill=tk.BOTH, expand=True, pady=5)
 
-        concat_drop_label = ttk.Label(lf_concat, text="ここに動画ファイルをドラッグ＆ドロップ", relief=tk.SOLID, padding=15, anchor=tk.CENTER, borderwidth=1)
+        concat_drop_label = ttk.Label(
+            lf_concat,
+            text="連結する動画をここにドロップ",
+            style="DropZone.TLabel",
+        )
         concat_drop_label.pack(fill=tk.X, pady=5)
         concat_drop_label.drop_target_register(DND_FILES)
         concat_drop_label.dnd_bind('<<Drop>>', self.drop_video_concat)
@@ -166,14 +237,14 @@ class AnalysisMixin:
         concat_list_container = ttk.Frame(lf_concat)
         concat_list_container.pack(fill=tk.BOTH, expand=True, pady=5)
         
-        self.video_concat_list_canvas = tk.Canvas(concat_list_container, bg="#3A4D6B", highlightthickness=0, height=80)
+        self.video_concat_list_canvas = tk.Canvas(concat_list_container, bg=UI_FIELD, highlightthickness=0, height=80)
         self.video_concat_list_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         
         concat_scrollbar = ttk.Scrollbar(concat_list_container, orient=tk.VERTICAL, command=self.video_concat_list_canvas.yview)
         concat_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.video_concat_list_canvas.configure(yscrollcommand=concat_scrollbar.set)
         
-        self.video_concat_list_frame = tk.Frame(self.video_concat_list_canvas, bg="#3A4D6B")
+        self.video_concat_list_frame = tk.Frame(self.video_concat_list_canvas, bg=UI_FIELD)
         self.video_concat_list_window = self.video_concat_list_canvas.create_window((0, 0), window=self.video_concat_list_frame, anchor="nw")
         
         def on_concat_frame_configure(event):
@@ -223,7 +294,7 @@ class AnalysisMixin:
             text="適応固定パターン＋21フレーム平均を適用",
             variable=self.video_concat_enhancement_var,
         ).pack(side=tk.LEFT, padx=(12, 0))
-        help_label = tk.Label(concat_settings_row2, text="?", font=("", 9, "bold"), fg="#87CEEB", bg="#2E3F5B", cursor="hand2")
+        help_label = tk.Label(concat_settings_row2, text="?", font=("", 9, "bold"), fg=UI_CYAN, bg=UI_BG, cursor="hand2")
         
         help_label.pack(side=tk.LEFT, padx=(2, 5))
         
@@ -343,8 +414,8 @@ class AnalysisMixin:
             self._help_tooltip.wm_geometry(f"+{x}+{y}")
             
             # ダークテーマっぽい配色を使用
-            bg_color = "#2E3F5B"
-            fg_color = "#EAEAEA"
+            bg_color = UI_BG
+            fg_color = UI_TEXT
             
             frame = tk.Frame(self._help_tooltip, background=bg_color, relief=tk.SOLID, borderwidth=1)
             frame.pack()
@@ -395,17 +466,17 @@ class AnalysisMixin:
         """Add a styled item to the analysis list with modern badge."""
         index = len(self.analysis_item_frames)
         
-        item_frame = tk.Frame(self.analysis_list_frame, bg="#3A4D6B", cursor="hand2")
+        item_frame = tk.Frame(self.analysis_list_frame, bg=UI_FIELD, cursor="hand2")
         item_frame.pack(fill=tk.X, padx=2, pady=1)
         
-        badge_canvas = tk.Canvas(item_frame, width=50, height=22, bg="#3A4D6B", highlightthickness=0)
+        badge_canvas = tk.Canvas(item_frame, width=50, height=22, bg=UI_FIELD, highlightthickness=0)
         badge_canvas.pack(side=tk.LEFT, padx=(4, 6), pady=2)
         
         self._draw_rounded_rect(badge_canvas, 2, 2, 48, 20, 8, fill="#E67E22", outline="")
         badge_canvas.create_text(25, 11, text="TXT", fill="white", font=("Segoe UI", 8, "bold"))
         
-        path_label = tk.Label(item_frame, text=filepath, bg="#3A4D6B", fg="#EAEAEA", 
-                               anchor="w", font=("Segoe UI", 9))
+        path_label = tk.Label(item_frame, text=filepath, bg=UI_FIELD, fg=UI_TEXT,
+                               anchor="w", font=("SF Pro Text", 9))
         path_label.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
         
         def on_click(event, idx=index):
@@ -435,15 +506,15 @@ class AnalysisMixin:
         
         item = self.analysis_item_frames[index]
         if item['selected']:
-            item['frame'].config(bg="#3A4D6B")
-            item['label'].config(bg="#3A4D6B")
-            item['badge'].config(bg="#3A4D6B")
+            item['frame'].config(bg=UI_FIELD)
+            item['label'].config(bg=UI_FIELD)
+            item['badge'].config(bg=UI_FIELD)
             item['selected'] = False
             self.analysis_selected_indices.discard(index)
         else:
-            item['frame'].config(bg="#5A7D9B")
-            item['label'].config(bg="#5A7D9B")
-            item['badge'].config(bg="#5A7D9B")
+            item['frame'].config(bg=UI_SELECTED)
+            item['label'].config(bg=UI_SELECTED)
+            item['badge'].config(bg=UI_SELECTED)
             item['selected'] = True
             self.analysis_selected_indices.add(index)
 
@@ -517,18 +588,18 @@ class AnalysisMixin:
         """動画連結リストにアイテムを追加"""
         index = len(self.video_concat_item_frames)
         
-        item_frame = tk.Frame(self.video_concat_list_frame, bg="#3A4D6B", cursor="hand2")
+        item_frame = tk.Frame(self.video_concat_list_frame, bg=UI_FIELD, cursor="hand2")
         item_frame.pack(fill=tk.X, padx=2, pady=1)
         
-        badge_canvas = tk.Canvas(item_frame, width=30, height=22, bg="#3A4D6B", highlightthickness=0)
+        badge_canvas = tk.Canvas(item_frame, width=30, height=22, bg=UI_FIELD, highlightthickness=0)
         badge_canvas.pack(side=tk.LEFT, padx=(4, 6), pady=2)
         
-        self._draw_rounded_rect(badge_canvas, 2, 2, 28, 20, 8, fill="#3498DB", outline="")
+        self._draw_rounded_rect(badge_canvas, 2, 2, 28, 20, 8, fill=UI_ACCENT, outline="")
         badge_canvas.create_text(15, 11, text=str(index + 1), fill="white", font=("Segoe UI", 8, "bold"))
         
         filename = os.path.basename(filepath)
-        path_label = tk.Label(item_frame, text=filename, bg="#3A4D6B", fg="#EAEAEA", 
-                               anchor="w", font=("Segoe UI", 9))
+        path_label = tk.Label(item_frame, text=filename, bg=UI_FIELD, fg=UI_TEXT,
+                               anchor="w", font=("SF Pro Text", 9))
         path_label.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
         
         def on_click(event, idx=index):
@@ -578,15 +649,15 @@ class AnalysisMixin:
         
         item = self.video_concat_item_frames[index]
         if item['selected']:
-            item['frame'].config(bg="#3A4D6B")
-            item['label'].config(bg="#3A4D6B")
-            item['badge'].config(bg="#3A4D6B")
+            item['frame'].config(bg=UI_FIELD)
+            item['label'].config(bg=UI_FIELD)
+            item['badge'].config(bg=UI_FIELD)
             item['selected'] = False
             self.video_concat_selected_indices.discard(index)
         else:
-            item['frame'].config(bg="#5A7D9B")
-            item['label'].config(bg="#5A7D9B")
-            item['badge'].config(bg="#5A7D9B")
+            item['frame'].config(bg=UI_SELECTED)
+            item['label'].config(bg=UI_SELECTED)
+            item['badge'].config(bg=UI_SELECTED)
             item['selected'] = True
             self.video_concat_selected_indices.add(index)
 
@@ -617,7 +688,7 @@ class AnalysisMixin:
         """動画連結リストの番号を振り直し"""
         for i, item in enumerate(self.video_concat_item_frames):
             item['badge'].delete("all")
-            self._draw_rounded_rect(item['badge'], 2, 2, 28, 20, 8, fill="#3498DB", outline="")
+            self._draw_rounded_rect(item['badge'], 2, 2, 28, 20, 8, fill=UI_ACCENT, outline="")
             item['badge'].create_text(15, 11, text=str(i + 1), fill="white", font=("Segoe UI", 8, "bold"))
             
             def make_click_handler(idx):

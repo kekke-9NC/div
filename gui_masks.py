@@ -13,8 +13,16 @@ class MaskMixin:
         
         ttk.Label(win, text="概要動画に含める項目と順序:").pack(pady=5, padx=10, anchor='w')
         list_frame = ttk.Frame(win); list_frame.pack(fill=tk.BOTH, expand=True, padx=10)
-        listbox = tk.Listbox(list_frame, selectmode=tk.SINGLE, exportselection=False,
-                             bg="#3A4D6B", fg="#EAEAEA", selectbackground="#5A7AA9", highlightthickness=0)
+        listbox = tk.Listbox(
+            list_frame,
+            selectmode=tk.SINGLE,
+            exportselection=False,
+            bg=ui_theme.COLORS["field"],
+            fg=ui_theme.COLORS["text"],
+            selectbackground=ui_theme.COLORS["selection"],
+            selectforeground=ui_theme.COLORS["text"],
+            highlightthickness=0,
+        )
         listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         check_vars = [tk.BooleanVar(value=item['enabled']) for item in temp_config]

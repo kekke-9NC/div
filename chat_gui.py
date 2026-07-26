@@ -4,13 +4,13 @@ from tkinter.scrolledtext import ScrolledText
 import threading
 import re
 import bright_area_detector
+import ui_theme
 
-# Define styles to match main_gui
-BG_COLOR = "#2E3F5B"
-FG_COLOR = "#EAEAEA"
-SELECT_BG = "#4A6A9B"
-FRAME_BG = "#263347"
-ENTRY_BG = "#3A4D6B"
+BG_COLOR = ui_theme.COLORS["content_raised"]
+FG_COLOR = ui_theme.COLORS["text"]
+SELECT_BG = ui_theme.COLORS["glass_selected"]
+FRAME_BG = ui_theme.COLORS["field"]
+ENTRY_BG = ui_theme.COLORS["glass_hover"]
 
 class ChatTab(ttk.Frame):
     def __init__(self, parent, app=None):
@@ -22,36 +22,43 @@ class ChatTab(ttk.Frame):
 
     def _setup_ui(self):
         self.history_frame = ttk.Frame(self)
-        self.history_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        self.history_frame.pack(fill=tk.BOTH, expand=True, padx=4, pady=(4, 10))
         
         self.history_area = ScrolledText(
             self.history_frame, 
             state='disabled', 
             wrap=tk.WORD, 
-            font=("Segoe UI", 10),
+            font=("SF Pro Text", 11),
             bg=FRAME_BG,
             fg=FG_COLOR,
             insertbackground=FG_COLOR, # caret color
             bd=0,
             highlightthickness=1,
-            highlightbackground=SELECT_BG
+            highlightbackground=ui_theme.COLORS["border"],
+            padx=14,
+            pady=12,
         )
         self.history_area.pack(fill=tk.BOTH, expand=True)
 
         # Tag configuration for colors
-        self.history_area.tag_config("user", foreground="#87CEEB", font=("Segoe UI", 10, "bold"))
-        self.history_area.tag_config("ai", foreground="#98FB98", font=("Segoe UI", 10, "bold"))
-        self.history_area.tag_config("system", foreground="#AAAAAA", font=("Segoe UI", 9, "italic"))
-        self.history_area.tag_config("error", foreground="#FF6B6B")
+        self.history_area.tag_config("user", foreground=ui_theme.COLORS["accent"], font=("SF Pro Text", 11, "bold"))
+        self.history_area.tag_config("ai", foreground=ui_theme.COLORS["success"], font=("SF Pro Text", 11, "bold"))
+        self.history_area.tag_config("system", foreground=ui_theme.COLORS["text_secondary"], font=("SF Pro Text", 10, "italic"))
+        self.history_area.tag_config("error", foreground=ui_theme.COLORS["danger"])
         # Link tag for clickable shortcuts
-        self.history_area.tag_config("link", foreground="#FFD700", underline=True, font=("Segoe UI", 10, "bold"))
+        self.history_area.tag_config("link", foreground=ui_theme.COLORS["warning"], underline=True, font=("SF Pro Text", 11, "bold"))
         self.history_area.tag_bind("link", "<Enter>", lambda e: self.history_area.configure(cursor="hand2"))
         self.history_area.tag_bind("link", "<Leave>", lambda e: self.history_area.configure(cursor=""))
         
         # Suggestions / Quick Actions Frame
         # Feature explanation label
-        self.suggestion_label = ttk.Label(self, text="💡 クリックしてAIに質問:", font=("Segoe UI", 15), foreground="#AAAAAA")
-        self.suggestion_label.pack(fill=tk.X, padx=12, pady=(5, 2))
+        self.suggestion_label = ttk.Label(
+            self,
+            text="よく使う質問",
+            font=("SF Pro Text", 11, "bold"),
+            foreground=ui_theme.COLORS["text_secondary"],
+        )
+        self.suggestion_label.pack(fill=tk.X, padx=6, pady=(2, 6))
 
         self.suggestion_frame_1 = ttk.Frame(self)
         self.suggestion_frame_1.pack(fill=tk.X, padx=10, pady=(0, 2))
@@ -76,14 +83,14 @@ class ChatTab(ttk.Frame):
                 text=label,
                 command=lambda q=query: self.send_quick_message(q),
                 bg=ENTRY_BG,
-                fg="#EAEAEA",
+                fg=FG_COLOR,
                 activebackground=SELECT_BG,
                 activeforeground="#FFFFFF",
-                font=("Segoe UI", 11),
+                font=("SF Pro Text", 10, "bold"),
                 relief="flat",
                 bd=0,
-                padx=8,
-                pady=2,
+                padx=10,
+                pady=6,
                 cursor="hand2"
             )
             btn.pack(side=tk.LEFT, padx=(0, 5))
@@ -105,7 +112,7 @@ class ChatTab(ttk.Frame):
         
         # Input area container
         input_container = ttk.Frame(self)
-        input_container.pack(fill=tk.X, padx=10, pady=(0, 10))
+        input_container.pack(fill=tk.X, padx=4, pady=(8, 4))
         
         # Input field
         self.input_field = ttk.Entry(input_container) # Style is handled by TEntry in main_gui
@@ -113,15 +120,15 @@ class ChatTab(ttk.Frame):
         self.input_field.bind("<Return>", self.send_message)
         
         # Send button
-        self.send_btn = ttk.Button(input_container, text="送信", command=self.send_message)
+        self.send_btn = ttk.Button(input_container, text="送信", style="Primary.TButton", command=self.send_message)
         self.send_btn.pack(side=tk.RIGHT, padx=(5, 0))
 
         # Clear button
-        self.clear_btn = ttk.Button(input_container, text="🗑️", width=3, command=self.clear_history)
+        self.clear_btn = ttk.Button(input_container, text="消去", style="Quiet.TButton", width=4, command=self.clear_history)
         self.clear_btn.pack(side=tk.RIGHT, padx=(5, 0))
 
         # Status Label
-        self.status_label = ttk.Label(self, text="", font=("Segoe UI", 9), foreground="#87CEEB")
+        self.status_label = ttk.Label(self, text="", font=("SF Pro Text", 9), foreground=ui_theme.COLORS["cyan"])
         self.status_label.pack(fill=tk.X, padx=12, pady=(0, 10))
 
         # Initial message
@@ -288,9 +295,9 @@ RTSPストリーム（ライブカメラ）を使う場合、URLを入力して�
             fg=text_color,
             activebackground=SELECT_BG,
             activeforeground=text_color,
-            font=("Segoe UI", 9, "bold"),
-            relief="raised",
-            bd=1,
+            font=("SF Pro Text", 9, "bold"),
+            relief="flat",
+            bd=0,
             cursor="hand2",
             padx=10,
             pady=2
@@ -345,7 +352,7 @@ RTSPストリーム（ライブカメラ）を使う場合、URLを入力して�
         btn = self._create_shortcut_button(
             "📹 RTSP入力欄を表示", 
             self._navigate_to_rtsp,
-            "#87CEEB"
+            ui_theme.COLORS["cyan"]
         )
         
         self.history_area.window_create(tk.END, window=btn, padx=5, pady=5)

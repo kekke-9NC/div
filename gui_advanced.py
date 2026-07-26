@@ -6,7 +6,11 @@ class AdvancedSettingsMixin:
         frame = ttk.Frame(parent)
         frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-        canvas = tk.Canvas(frame, highlightthickness=0, bg="#2E3F5B")
+        canvas = tk.Canvas(
+            frame,
+            highlightthickness=0,
+            bg=ui_theme.COLORS["content_raised"],
+        )
         scrollbar = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=canvas.yview)
         scrollable_frame = ttk.Frame(canvas)
 
