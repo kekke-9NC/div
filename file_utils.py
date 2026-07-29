@@ -1126,6 +1126,9 @@ def rtsp_save_and_process_thread_target(
     mean_window = temporal_mean.normalize_window(
         (noise_twin_options or {}).get("temporal_mean_frames", 0)
     )
+    save_temporal_mean_video = bool(
+        (noise_twin_options or {}).get("save_temporal_mean_video", True)
+    )
     if twin_options.enabled and mean_window:
         raise ValueError("NoiseTwinと3/5フレーム平均は同時に使用できません。")
     if twin_options.enabled or mean_window:
@@ -1150,7 +1153,10 @@ def rtsp_save_and_process_thread_target(
             options.update(
                 {
                     "enabled": twin_options.enabled,
-                    "already_processed": True,
+                    "already_processed": (
+                        twin_options.enabled
+                        or (mean_window and save_temporal_mean_video)
+                    ),
                     "evidence_path": evidence_path,
                     "temporal_mean_frames": mean_window,
                 }
@@ -1170,7 +1176,12 @@ def rtsp_save_and_process_thread_target(
                 min_length,
                 summary_video_config,
                 notify_on_detection,
-                None,
+                (
+                    None
+                    if twin_options.enabled
+                    or (mean_window and save_temporal_mean_video)
+                    else dark_frame
+                ),
                 options,
             )
             if success:
@@ -1190,6 +1201,7 @@ def rtsp_save_and_process_thread_target(
             recording_allowed=recording_allowed,
             preview_callback=preview_callback,
             temporal_mean_frames=mean_window,
+            save_temporal_mean_video=save_temporal_mean_video,
             encoding_options=(noise_twin_options or {}).get("encoding"),
         )
         pipeline.run()

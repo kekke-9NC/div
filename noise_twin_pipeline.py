@@ -66,6 +66,7 @@ class RtspNoiseTwinPipeline:
         preview_callback=None,
         resource_plan: Optional[PipelineResourcePlan] = None,
         temporal_mean_frames: int = 0,
+        save_temporal_mean_video: bool = True,
         encoding_options: Optional[dict] = None,
     ):
         self.rtsp_url = rtsp_url
@@ -83,6 +84,7 @@ class RtspNoiseTwinPipeline:
         self.preview_callback = preview_callback
         self.resource_plan = resource_plan or PipelineResourcePlan.for_host()
         self.temporal_mean_frames = temporal_mean.normalize_window(temporal_mean_frames)
+        self.save_temporal_mean_video = bool(save_temporal_mean_video)
         self.encoding_settings = video_encoding.EncodingSettings.from_value(encoding_options)
         if not self.model_path and not self.temporal_mean_frames:
             raise ValueError("NoiseTwinモデルまたは3/5フレーム平均が必要です。")
@@ -281,6 +283,10 @@ class RtspNoiseTwinPipeline:
             encoding="utf-8",
         )
 
+    @staticmethod
+    def _analysis_pending_marker(video_path: Path) -> Path:
+        return Path(str(video_path) + ".analysis_pending.json")
+
     def _denoise_loop(self) -> None:
         try:
             cv2.setNumThreads(self.resource_plan.noise_twin_cpu_threads)
@@ -294,7 +300,11 @@ class RtspNoiseTwinPipeline:
             raw_path = Path(raw_value)
             try:
                 transform_label = (
-                    f"{self.temporal_mean_frames}フレーム平均"
+                    (
+                        f"{self.temporal_mean_frames}フレーム平均"
+                        if self.save_temporal_mean_video
+                        else "RTSP原画保存"
+                    )
                     if self.temporal_mean_frames
                     else "NoiseTwin"
                 )
@@ -306,18 +316,42 @@ class RtspNoiseTwinPipeline:
                 final_video, final_evidence = self._final_paths(raw_path)
                 final_video.parent.mkdir(parents=True, exist_ok=True)
                 if self.temporal_mean_frames:
-                    prepared_mean = temporal_mean.prepare_video(
-                        str(raw_path),
-                        self.temporal_mean_frames,
-                        correction=self.correction,
-                        temp_dir=str(self.work_root),
-                        encoding_options=dict(vars(self.encoding_settings)),
-                    )
-                    os.replace(prepared_mean.video_path, final_video)
                     final_evidence_value = ""
-                    temporal_mean.write_processing_marker(
-                        str(final_video), self.temporal_mean_frames, analyzed=False
-                    )
+                    if self.save_temporal_mean_video:
+                        prepared_mean = temporal_mean.prepare_video(
+                            str(raw_path),
+                            self.temporal_mean_frames,
+                            correction=self.correction,
+                            temp_dir=str(self.work_root),
+                            encoding_options=dict(vars(self.encoding_settings)),
+                        )
+                        os.replace(prepared_mean.video_path, final_video)
+                        temporal_mean.write_processing_marker(
+                            str(final_video), self.temporal_mean_frames, analyzed=False
+                        )
+                        try:
+                            self._analysis_pending_marker(final_video).unlink()
+                        except OSError:
+                            pass
+                    else:
+                        # Preserve the received RTSP segment. The analysis callback
+                        # applies the selected temporal mean to a temporary video.
+                        os.replace(raw_path, final_video)
+                        self._analysis_pending_marker(final_video).write_text(
+                            json.dumps(
+                                {
+                                    "method": "temporal_mean_analysis",
+                                    "frames": self.temporal_mean_frames,
+                                },
+                                ensure_ascii=False,
+                                indent=2,
+                            ),
+                            encoding="utf-8",
+                        )
+                        try:
+                            Path(str(final_video) + ".preprocessed.json").unlink()
+                        except OSError:
+                            pass
                 else:
                     prepared = noise_twin.prepare_video(
                         str(raw_path),
@@ -396,6 +430,10 @@ class RtspNoiseTwinPipeline:
                             )
                         except (OSError, json.JSONDecodeError):
                             pass
+                    try:
+                        self._analysis_pending_marker(Path(video_path)).unlink()
+                    except OSError:
+                        pass
                     self._status(f"流星分析完了: {Path(video_path).name}")
                 else:
                     attempts = self.analysis_retry_counts.get(video_path, 0) + 1
@@ -440,23 +478,48 @@ class RtspNoiseTwinPipeline:
             video = Path(str(marker)[: -len(".preprocessed.json")])
             if video.exists():
                 self.analysis_queue.put((str(video), ""))
+        for marker in self.save_root.rglob("*.mp4.analysis_pending.json"):
+            if self.spool_root in marker.parents:
+                continue
+            try:
+                data = json.loads(marker.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if (
+                data.get("method") != "temporal_mean_analysis"
+                or int(data.get("frames", 0)) != self.temporal_mean_frames
+            ):
+                continue
+            video = Path(str(marker)[: -len(".analysis_pending.json")])
+            if video.exists():
+                self.analysis_queue.put((str(video), ""))
         plan = self.resource_plan
-        method = (
-            f"時間平均{self.temporal_mean_frames}フレーム"
-            if self.temporal_mean_frames
-            else "NoiseTwin MPS"
-        )
+        if self.temporal_mean_frames and not self.save_temporal_mean_video:
+            method = f"原画保存・分析時のみ時間平均{self.temporal_mean_frames}フレーム"
+        elif self.temporal_mean_frames:
+            method = f"時間平均{self.temporal_mean_frames}フレーム"
+        else:
+            method = "NoiseTwin MPS"
         self._status(
             f"リソース配分: 受信=FFmpeg copy 1、変換={method} 1 + "
             f"CPU {plan.noise_twin_cpu_threads}、分析={plan.analysis_workers}、"
             f"UI予約={plan.ui_reserved_cores}コア"
         )
-        estimated = video_encoding.estimated_megabytes_per_minute(self.encoding_settings)
-        if self.encoding_settings.quality == "source":
-            size_text = "各入力セグメントから自動算出"
+        if self.temporal_mean_frames and not self.save_temporal_mean_video:
+            self._status("RTSP動画の保存: 原画（stream copy）")
         else:
-            size_text = "容量は映像内容依存" if estimated is None else f"目安 {estimated:.0f} MB/分"
-        self._status(f"処理済み動画の保存: {self.encoding_settings.label}（{size_text}）")
+            estimated = video_encoding.estimated_megabytes_per_minute(self.encoding_settings)
+            if self.encoding_settings.quality == "source":
+                size_text = "各入力セグメントから自動算出"
+            else:
+                size_text = (
+                    "容量は映像内容依存"
+                    if estimated is None
+                    else f"目安 {estimated:.0f} MB/分"
+                )
+            self._status(
+                f"処理済み動画の保存: {self.encoding_settings.label}（{size_text}）"
+            )
         targets = (
             ("NoiseTwinCapture", self._capture_loop),
             ("NoiseTwinSpool", self._spool_loop),

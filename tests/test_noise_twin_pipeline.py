@@ -10,14 +10,18 @@ import noise_twin_pipeline
 
 
 class NoiseTwinPipelineTests(unittest.TestCase):
-    def make_pipeline(self, root):
+    def make_pipeline(self, root, **overrides):
+        options = {
+            "rtsp_url": "rtsp://camera/stream",
+            "save_root": root,
+            "model_path": "model.pth",
+            "analyze_callback": lambda _video, _evidence: True,
+            "cancel_event": threading.Event(),
+            "require_validated": False,
+        }
+        options.update(overrides)
         return noise_twin_pipeline.RtspNoiseTwinPipeline(
-            rtsp_url="rtsp://camera/stream",
-            save_root=root,
-            model_path="model.pth",
-            analyze_callback=lambda _video, _evidence: True,
-            cancel_event=threading.Event(),
-            require_validated=False,
+            **options,
         )
 
     def test_resource_plan_reserves_ui_and_limits_noise_twin_cpu(self):
@@ -107,6 +111,66 @@ class NoiseTwinPipelineTests(unittest.TestCase):
             self.assertEqual(
                 evidence,
                 Path(directory) / "20260716" / "01" / "23_00_innovation.mp4",
+            )
+
+    def test_temporal_mean_can_preserve_raw_saved_segment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pipeline = self.make_pipeline(
+                directory,
+                model_path="",
+                temporal_mean_frames=3,
+                save_temporal_mean_video=False,
+            )
+            raw = pipeline.spool_root / "20260716" / "01" / "23_00.mp4"
+            raw.parent.mkdir(parents=True)
+            original = b"raw-rtsp-segment"
+            raw.write_bytes(original)
+            final_video, _ = pipeline._final_paths(raw)
+
+            with mock.patch(
+                "noise_twin_pipeline.temporal_mean.prepare_video"
+            ) as prepare_video:
+                worker = threading.Thread(target=pipeline._denoise_loop)
+                worker.start()
+                pipeline.raw_queue.put(str(raw))
+                pipeline.raw_queue.join()
+                pipeline.cancel_event.set()
+                worker.join(timeout=2)
+
+            prepare_video.assert_not_called()
+            self.assertEqual(final_video.read_bytes(), original)
+            self.assertFalse(
+                Path(str(final_video) + ".preprocessed.json").exists()
+            )
+            pending_marker = Path(str(final_video) + ".analysis_pending.json")
+            self.assertTrue(pending_marker.exists())
+            self.assertEqual(
+                pipeline.analysis_queue.get_nowait(),
+                (str(final_video), ""),
+            )
+
+    def test_start_restores_pending_raw_video_analysis(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pipeline = self.make_pipeline(
+                directory,
+                model_path="",
+                temporal_mean_frames=3,
+                save_temporal_mean_video=False,
+            )
+            video = Path(directory) / "20260716" / "01" / "23_00.mp4"
+            video.parent.mkdir(parents=True)
+            video.write_bytes(b"raw")
+            pipeline._analysis_pending_marker(video).write_text(
+                '{"method":"temporal_mean_analysis","frames":3}',
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(threading.Thread, "start"):
+                pipeline.start()
+
+            self.assertEqual(
+                pipeline.analysis_queue.get_nowait(),
+                (str(video), ""),
             )
 
 

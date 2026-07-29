@@ -486,6 +486,7 @@ class App(
         self.noise_twin_status_var = tk.StringVar(value="NoiseTwin: 未選択")
         self.noise_twin_training_process = None
         self.temporal_mean_frames_var = tk.IntVar(value=0)
+        self.rtsp_save_temporal_mean_var = tk.BooleanVar(value=True)
         self.processed_video_codec_var = tk.StringVar(value="H.265 / HEVC (推奨)")
         self.processed_video_quality_var = tk.StringVar(value="入力品質基準（推奨）")
         self.processed_video_bitrate_var = tk.StringVar(value="40")

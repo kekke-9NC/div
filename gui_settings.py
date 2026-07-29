@@ -211,6 +211,18 @@ class SettingsMixin:
                 value=value,
                 command=self.on_temporal_mean_changed,
             ).pack(side=tk.LEFT, padx=(6, 0))
+        self.rtsp_save_temporal_mean_check = ttk.Checkbutton(
+            twin_frame,
+            text="RTSP保存動画にも時間平均を適用",
+            variable=self.rtsp_save_temporal_mean_var,
+        )
+        self.rtsp_save_temporal_mean_check.pack(anchor=tk.W, padx=20, pady=(0, 4))
+        ttk.Label(
+            twin_frame,
+            text="OFFでも流星検出には時間平均を使用し、保存動画だけを原画にします。",
+            style="Hint.TLabel",
+        ).pack(anchor=tk.W, padx=24, pady=(0, 4))
+        self._update_rtsp_save_temporal_mean_state()
 
         encoding_frame = ttk.LabelFrame(twin_frame, text="ノイズ低減済み連続動画の圧縮")
         encoding_frame.pack(fill=tk.X, padx=4, pady=(2, 5))
@@ -1253,6 +1265,7 @@ class SettingsMixin:
             return
         if self.noise_twin_enabled_var.get():
             self.temporal_mean_frames_var.set(0)
+        self._update_rtsp_save_temporal_mean_state()
         self.append_log(
             f"Camera Digital Twinノイズ分離: {'ON' if self.noise_twin_enabled_var.get() else 'OFF'}"
         )
@@ -1296,6 +1309,15 @@ class SettingsMixin:
             self.append_log(f"モデル不要の時間平均: {frames}フレーム")
         else:
             self.append_log("モデル不要の時間平均: OFF")
+        self._update_rtsp_save_temporal_mean_state()
+
+    def _update_rtsp_save_temporal_mean_state(self):
+        if not hasattr(self, "rtsp_save_temporal_mean_check"):
+            return
+        enabled = int(self.temporal_mean_frames_var.get()) in (3, 5)
+        self.rtsp_save_temporal_mean_check.configure(
+            state=tk.NORMAL if enabled else tk.DISABLED
+        )
 
     def select_noise_twin_model(self):
         path = filedialog.askopenfilename(
@@ -1510,6 +1532,7 @@ class SettingsMixin:
             'noise_twin_enabled': self.noise_twin_enabled_var.get(),
             'noise_twin_model_path': self.noise_twin_model_path_var.get(),
             'temporal_mean_frames': int(self.temporal_mean_frames_var.get()),
+            'rtsp_save_temporal_mean': self.rtsp_save_temporal_mean_var.get(),
             'processed_video_encoding': {
                 'codec': self.processed_video_codec_var.get(),
                 'quality': self.processed_video_quality_var.get(),
@@ -1596,6 +1619,10 @@ class SettingsMixin:
             self.temporal_mean_frames_var.set(
                 0 if self.noise_twin_enabled_var.get() else (mean_frames if mean_frames in (3, 5) else 0)
             )
+            self.rtsp_save_temporal_mean_var.set(
+                bool(settings.get('rtsp_save_temporal_mean', True))
+            )
+            self._update_rtsp_save_temporal_mean_state()
             encoding = settings.get('processed_video_encoding', {})
             self.processed_video_codec_var.set(
                 encoding.get('codec', "H.265 / HEVC (推奨)")

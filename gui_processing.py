@@ -57,6 +57,7 @@ class ProcessingMixin:
                     'model_path': self.noise_twin_model_path_var.get().strip(),
                     'require_validated': True,
                     'temporal_mean_frames': int(self.temporal_mean_frames_var.get()),
+                    'save_temporal_mean_video': self.rtsp_save_temporal_mean_var.get(),
                     'encoding': {
                         'codec': codec,
                         'quality': quality,
@@ -207,9 +208,13 @@ class ProcessingMixin:
                     "NoiseTwin 3段パイプライン: RTSP受信 → MPSノイズ分離 → 流星分析"
                 )
             elif params['noise_twin_options'].get('temporal_mean_frames') in (3, 5):
+                saved_mean = params['noise_twin_options'].get(
+                    'save_temporal_mean_video', True
+                )
                 self.append_log(
                     "時間平均3段パイプライン: RTSP受信 → "
-                    f"{params['noise_twin_options']['temporal_mean_frames']}フレーム平均 → 流星分析"
+                    f"{params['noise_twin_options']['temporal_mean_frames']}フレーム平均 → "
+                    f"流星分析（保存動画: {'平均済み' if saved_mean else '原画'}）"
                 )
             mean_frames = params['noise_twin_options'].get('temporal_mean_frames', 0)
             if params['noise_twin_options']['enabled']:
