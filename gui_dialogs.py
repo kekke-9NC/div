@@ -882,7 +882,7 @@ class ProcessingOptionDialog(tk.Toplevel):
         super().__init__(parent)
         self.title("処理オプション")
         self.result = None
-        self.geometry("500x320") 
+        self.geometry("500x360") 
         self.resizable(False, False)
         
         # メインフレームを作成して全体に配置（テーマの背景色を適用するため）
@@ -906,14 +906,13 @@ class ProcessingOptionDialog(tk.Toplevel):
         warning_frame = ttk.Frame(self.main_frame)
         warning_frame.pack(fill=tk.X, pady=(5, 10))
         # 黄色 (#FFD700) に変更
-        ttk.Label(warning_frame, text="※AI検出を選択時、VRAMが7GB未満の場合は", font=("", 9), foreground="#FFD700").pack(anchor=tk.W)
-        ttk.Label(warning_frame, text="  動作が非常に遅くなる可能性があります。", font=("", 9), foreground="#FFD700").pack(anchor=tk.W)
+        ttk.Label(warning_frame, text="※AI検出を選択時、VRAMが7GB未満の場合は動作が非常に遅くなる可能性があります。", font=("", 9), foreground="#FFD700").pack(anchor=tk.W)
         
         btn_frame = ttk.Frame(self.main_frame)
         btn_frame.pack(fill=tk.X, side=tk.BOTTOM)
         
-        ttk.Button(btn_frame, text="キャンセル", command=self.destroy).pack(side=tk.RIGHT, padx=5)
-        self.next_btn = ttk.Button(btn_frame, text="次へ", command=self.on_ok, state=tk.NORMAL) # 最初から有効化
+        ttk.Button(btn_frame, text="キャンセル", command=self.destroy).pack(side=tk.LEFT, padx=5)
+        self.next_btn = ttk.Button(btn_frame, text="確定", command=self.on_ok, state=tk.NORMAL) # 最初から有効化
         self.next_btn.pack(side=tk.RIGHT, padx=5)
         
         self.transient(parent)
