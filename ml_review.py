@@ -14,6 +14,19 @@ from PIL import Image, ImageTk
 import ml_training_data
 
 
+DEFAULT_CONFIRM_STYLE = "TButton"
+PREDICTED_CONFIRM_STYLE = "PredictedConfirm.TButton"
+
+
+def confirmation_button_styles(predicted_label: object) -> tuple[str, str]:
+    """Return the meteor and not_meteor button styles for a prediction."""
+    label = str(predicted_label).strip().lower()
+    return (
+        PREDICTED_CONFIRM_STYLE if label == "meteor" else DEFAULT_CONFIRM_STYLE,
+        PREDICTED_CONFIRM_STYLE if label == "not_meteor" else DEFAULT_CONFIRM_STYLE,
+    )
+
+
 class TrainingDataReviewWindow(tk.Toplevel):
     def __init__(self, parent: tk.Misc, root_dir: str):
         super().__init__(parent)
@@ -46,6 +59,21 @@ class TrainingDataReviewWindow(tk.Toplevel):
         self.refresh()
 
     def _build_ui(self) -> None:
+        style = ttk.Style(self)
+        style.configure(
+            PREDICTED_CONFIRM_STYLE,
+            background="#FFD54F",
+            foreground="#17130A",
+            bordercolor="#F9A825",
+            lightcolor="#FFD54F",
+            darkcolor="#F9A825",
+        )
+        style.map(
+            PREDICTED_CONFIRM_STYLE,
+            background=[("pressed", "#F9A825"), ("active", "#FFE082")],
+            foreground=[("pressed", "#17130A"), ("active", "#17130A")],
+        )
+
         toolbar = ttk.Frame(self, padding=8)
         toolbar.pack(fill=tk.X)
         ttk.Label(toolbar, textvariable=self.status_var).pack(side=tk.LEFT)
@@ -80,12 +108,14 @@ class TrainingDataReviewWindow(tk.Toplevel):
         navigation.pack(fill=tk.X, pady=(0, 5))
         ttk.Button(navigation, text="← 前の未確認", command=self._previous).pack(side=tk.LEFT)
         ttk.Button(navigation, text="次の未確認 →", command=self._next).pack(side=tk.LEFT, padx=5)
-        ttk.Button(
+        self.meteor_confirm_button = ttk.Button(
             navigation, text="流星として確定  [M]", command=lambda: self._classify("meteor")
-        ).pack(side=tk.LEFT, padx=(25, 5), expand=True, fill=tk.X)
-        ttk.Button(
+        )
+        self.meteor_confirm_button.pack(side=tk.LEFT, padx=(25, 5), expand=True, fill=tk.X)
+        self.not_meteor_confirm_button = ttk.Button(
             navigation, text="非流星として確定  [N]", command=lambda: self._classify("not_meteor")
-        ).pack(side=tk.LEFT, padx=5, expand=True, fill=tk.X)
+        )
+        self.not_meteor_confirm_button.pack(side=tk.LEFT, padx=5, expand=True, fill=tk.X)
 
         skip_controls = ttk.LabelFrame(controls, text="今は学習に使わない（次回から非表示・後で復元可）", padding=5)
         skip_controls.pack(fill=tk.X)
@@ -144,6 +174,7 @@ class TrainingDataReviewWindow(tk.Toplevel):
         self._stop_video()
         event = self.current_event
         if event is None:
+            self._highlight_predicted_confirmation(None)
             self.status_var.set("未確認データはありません")
             self.detail_var.set("すべて目視確認済みです。")
             for label in (self.diff_label, self.temporal_label, self.video_label):
@@ -154,11 +185,14 @@ class TrainingDataReviewWindow(tk.Toplevel):
         try:
             meta = ml_training_data.load_metadata(event)
         except Exception as exc:
+            self._highlight_predicted_confirmation(None)
             self.detail_var.set(f"メタデータを読み込めません: {exc}")
             return
+        predicted_label = meta.get("predicted_label")
+        self._highlight_predicted_confirmation(predicted_label)
         self.status_var.set(f"未確認 {self.index + 1} / {len(self.events)}")
         self.detail_var.set(
-            f"予測: {meta.get('predicted_label')}　流星確率: {meta.get('meteor_probability', 0):.3f}\n"
+            f"予測: {predicted_label}　流星確率: {meta.get('meteor_probability', 0):.3f}\n"
             f"日時: {meta.get('detection_time', '')}　元動画: {meta.get('source', '')}"
         )
 
@@ -180,6 +214,11 @@ class TrainingDataReviewWindow(tk.Toplevel):
             self.cap = cv2.VideoCapture(str(event / "clip.mp4"))
         self.video_frame_index = 0
         self._play_next_frame()
+
+    def _highlight_predicted_confirmation(self, predicted_label: object) -> None:
+        meteor_style, not_meteor_style = confirmation_button_styles(predicted_label)
+        self.meteor_confirm_button.configure(style=meteor_style)
+        self.not_meteor_confirm_button.configure(style=not_meteor_style)
 
     def _play_next_frame(self) -> None:
         if self.cap is None or not self.cap.isOpened():
