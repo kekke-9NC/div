@@ -396,6 +396,11 @@ def _persist_calibration(
             "sip_support_hull", "validation_path",
         ) if key in solve_result},
     }
+    # Keep the solver's catalog in the calibration metadata.  The automatic
+    # fixed-camera builder uses it as an auditable record of the stars that
+    # established the initial WCS; older calibration files simply omit it.
+    if solve_result.get("catalog_stars"):
+        payload["catalog_stars"] = solve_result["catalog_stars"]
     support_hull = solve_result.get("sip_support_hull")
     if support_hull and len(support_hull) >= 3:
         hull = np.asarray(support_hull, dtype=np.float32)

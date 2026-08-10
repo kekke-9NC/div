@@ -1,4 +1,6 @@
 from gui_common import *
+from camera_model_builder import CameraModelBuildRequest, build_camera_model
+from camera_model_monitor import RTSPCameraModelMonitor
 
 
 class PlateSolveMixin:
@@ -49,14 +51,180 @@ class PlateSolveMixin:
 
     def select_plate_solve_video(self):
         file_path = filedialog.askopenfilename(title="プレートソルブ用動画を選択", filetypes=[("動画ファイル", "*.mp4 *.avi *.mov"), ("すべてのファイル", "*.*")])
-        if file_path: self.plate_solve_video_path_var.set(file_path)
+        if file_path:
+            self.plate_solve_video_path_var.set(file_path)
+            if not self.camera_model_source_var.get().strip():
+                self.camera_model_source_var.set(file_path)
+
+    def select_camera_model_video(self):
+        file_path = filedialog.askopenfilename(
+            title="高精度モデル用動画を選択",
+            filetypes=[("動画ファイル", "*.mp4 *.avi *.mov *.mkv *.m4v *.ts"), ("すべてのファイル", "*.*")],
+        )
+        if file_path:
+            self.camera_model_source_var.set(file_path)
+            self.plate_solve_video_path_var.set(file_path)
+
+    def select_camera_model_folder(self):
+        folder = filedialog.askdirectory(title="高精度モデル用RTSP保存フォルダを選択")
+        if folder:
+            self.camera_model_source_var.set(folder)
+
+    def _set_camera_model_status(self, text: str):
+        def apply():
+            try:
+                self.camera_model_status_var.set(text)
+            except tk.TclError:
+                pass
+        if threading.current_thread() is threading.main_thread():
+            apply()
+        else:
+            try:
+                self.after(0, apply)
+            except tk.TclError:
+                pass
+
+    def _camera_model_request(self) -> CameraModelBuildRequest:
+        source = self.camera_model_source_var.get().strip() or self.plate_solve_video_path_var.get().strip()
+        if not source:
+            raise ValueError("モデル作成対象の動画またはRTSP保存フォルダを選択してください")
+        try:
+            threshold = float(self.camera_model_cloud_threshold_var.get())
+        except ValueError as exc:
+            raise ValueError("雲量しきい値は数値で指定してください") from exc
+        if not 0.0 <= threshold <= 1.0:
+            raise ValueError("雲量しきい値は0.0〜1.0で指定してください")
+        return CameraModelBuildRequest(
+            source=source,
+            start=self.camera_model_start_var.get().strip(),
+            end=self.camera_model_end_var.get().strip(),
+            cloud_threshold=threshold,
+            use_cloud_filter=bool(self.camera_model_cloud_filter_var.get()),
+            backend=self.ai_vlm_backend_var.get(),
+            lm_studio_url=self.lm_studio_vlm_url_var.get(),
+            lm_studio_model_id=self.lm_studio_vlm_model_var.get(),
+            lm_studio_api_key=self.lm_studio_vlm_api_key_var.get(),
+        )
+
+    def start_camera_model_build(self):
+        try:
+            request = self._camera_model_request()
+        except Exception as exc:
+            messagebox.showwarning("高精度モデル", str(exc), parent=self)
+            return
+        self.btn_build_camera_model.configure(state=tk.DISABLED)
+        self._set_camera_model_status("高精度モデル: 作成中...")
+
+        def progress(message):
+            self._set_camera_model_status(f"高精度モデル: {message}")
+            try:
+                self.progress_queue.put((message, None))
+            except Exception:
+                pass
+
+        def worker():
+            result = build_camera_model(request, progress_callback=progress)
+
+            def finished():
+                self.btn_build_camera_model.configure(state=tk.NORMAL)
+                if result.success and result.enabled:
+                    self.camera_model_status_var.set(
+                        f"高精度モデル: 登録済み（被覆率 {result.support_fraction * 100:.0f}% / "
+                        f"p95 {result.residual_p95_px:.2f}px）"
+                    )
+                    self.plate_solve_wcs_path_var.set(result.model_path)
+                    self.plate_solve_status_var.set("プレートソルブ: 高精度固定カメラモデルを適用")
+                    self.global_wcs_info = {
+                        "wcs_file": result.model_path,
+                        "calibration_path": result.model_path,
+                        "model_path": result.model_path,
+                        "job_id": "local-wideangle-camera-model",
+                    }
+                    self.update_start_button_state()
+                    if result.target_met:
+                        messagebox.showinfo("高精度モデル", "選択範囲から高精度固定カメラモデルを作成し、登録しました。", parent=self)
+                    else:
+                        messagebox.showwarning(
+                            "高精度モデル",
+                            "モデルは登録しましたが、目標被覆率80%またはp95 2pxの基準には未達です。\n"
+                            f"検証レポート:\n{result.report_path}", parent=self,
+                        )
+                elif result.success:
+                    self.camera_model_status_var.set(
+                        f"高精度モデル: 候補保存（被覆率 {result.support_fraction * 100:.0f}% / "
+                        f"p95 {result.residual_p95_px:.2f}px、未適用）"
+                    )
+                    messagebox.showwarning(
+                        "高精度モデル",
+                        "候補モデルは保存しましたが、安全な被覆率または誤差基準に届かないため適用しません。\n"
+                        f"検証レポート:\n{result.report_path}", parent=self,
+                    )
+                else:
+                    self.camera_model_status_var.set(f"高精度モデル: 失敗（{result.error}）")
+                    messagebox.showerror("高精度モデル", result.error, parent=self)
+
+            self.after(0, finished)
+
+        threading.Thread(target=worker, name="camera-model-build", daemon=True).start()
+
+    def toggle_camera_model_monitor(self):
+        monitor = getattr(self, "camera_model_monitor", None)
+        if monitor is not None and monitor.thread and monitor.thread.is_alive():
+            monitor.stop()
+            self.camera_model_monitor = None
+            self.btn_toggle_camera_model_monitor.configure(text="RTSP自動監視を開始")
+            self._set_camera_model_status("高精度モデル: RTSP自動監視を停止")
+            return
+        selected_indices = [i for i in self.rtsp_selected_indices if 0 <= i < len(self.rtsp_urls)]
+        rtsp_url = self.rtsp_urls[selected_indices[0]] if selected_indices else (self.rtsp_urls[0] if self.rtsp_urls else "")
+        if not rtsp_url:
+            messagebox.showwarning("高精度モデル", "RTSP URLを追加してください。", parent=self)
+            return
+        try:
+            interval = max(10, int(float(self.camera_model_interval_var.get())))
+            threshold = float(self.camera_model_cloud_threshold_var.get())
+        except ValueError:
+            messagebox.showwarning("高精度モデル", "監視間隔と雲量しきい値を確認してください。", parent=self)
+            return
+        monitor = RTSPCameraModelMonitor(
+            rtsp_url, interval_seconds=interval, cloud_threshold=threshold,
+            backend=self.ai_vlm_backend_var.get(), lm_studio_url=self.lm_studio_vlm_url_var.get(),
+            lm_studio_model_id=self.lm_studio_vlm_model_var.get(), lm_studio_api_key=self.lm_studio_vlm_api_key_var.get(),
+            status_callback=self._set_camera_model_status,
+        )
+        self.camera_model_monitor = monitor
+        monitor.start()
+        self.btn_toggle_camera_model_monitor.configure(text="RTSP自動監視を停止")
+        self._set_camera_model_status(f"高精度モデル: RTSPを{interval}秒間隔で監視中")
 
     def select_plate_solve_wcs_file(self):
-        file_path = filedialog.askopenfilename(title="既存のWCSファイルを選択", filetypes=[("WCS/FITSファイル", "*.wcs *.fits"), ("すべてのファイル", "*.*")])
+        file_path = filedialog.askopenfilename(title="既存のWCS/固定カメラモデルを選択", filetypes=[("WCS/FITS/モデル", "*.wcs *.fits *.fit *.json"), ("すべてのファイル", "*.*")])
         if file_path:
             try:
                 ps_datetime = None
                 local_wideangle_wcs = False
+                if file_path.lower().endswith(".json"):
+                    import local_wideangle_astrometry
+                    metadata, _model = local_wideangle_astrometry._load_calibration(file_path)
+                    if metadata.get("model_type") != "fixed-camera-stg-poly":
+                        raise ValueError("固定カメラモデルJSONではありません。")
+                    reference_value = metadata.get("reference_datetime")
+                    if reference_value:
+                        ps_datetime = datetime.fromisoformat(str(reference_value).replace("Z", "+00:00"))
+                    local_wideangle_wcs = True
+                    self.global_wcs_info = {
+                        "wcs_file": file_path,
+                        "calibration_path": file_path,
+                        "plate_solve_datetime": ps_datetime or datetime.now(),
+                        "job_id": "local-wideangle-camera-model",
+                    }
+                    self.plate_solve_wcs_path_var.set(file_path)
+                    self.plate_solve_status_var.set(
+                        f"プレートソルブ: 高精度モデル適用 @ {(ps_datetime or datetime.now()).strftime('%H:%M')}"
+                    )
+                    messagebox.showinfo("成功", "固定カメラモデルをロードしました。", parent=self)
+                    self.update_start_button_state()
+                    return
                 # まずWCSファイル(FITS)のヘッダーから'DATE-OBS'を読み込もうと試みる
                 try:
                     with fits.open(file_path) as hdul:

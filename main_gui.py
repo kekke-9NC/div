@@ -412,6 +412,14 @@ class App(
         self.plate_solve_wcs_path_var = tk.StringVar()
         self.plate_solve_video_path_var = tk.StringVar()
         self.plate_solve_status_var = tk.StringVar(value="プレートソルブ: 未実行")
+        self.camera_model_source_var = tk.StringVar()
+        self.camera_model_start_var = tk.StringVar()
+        self.camera_model_end_var = tk.StringVar()
+        self.camera_model_cloud_threshold_var = tk.StringVar(value="0.10")
+        self.camera_model_interval_var = tk.StringVar(value="60")
+        self.camera_model_cloud_filter_var = tk.BooleanVar(value=True)
+        self.camera_model_status_var = tk.StringVar(value="高精度モデル: 未実行")
+        self.camera_model_monitor = None
         self.use_plate_solve_var = tk.BooleanVar(value=True)
         self.concurrency_var = tk.StringVar(value=str(config.DEFAULT_CONCURRENCY))
         self.interval_var = tk.StringVar(value=str(config.DEFAULT_INTERVAL))
@@ -862,6 +870,9 @@ class App(
             self._hide_summary_preview()
             self.close_rtsp_live_preview()
             self.close_camera_control()
+            monitor = getattr(self, "camera_model_monitor", None)
+            if monitor is not None:
+                monitor.stop()
             self.save_settings()
             # 自動更新を停止
             if self.auto_updater:

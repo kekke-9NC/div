@@ -40,6 +40,8 @@ class TimelapseDragDropWindow(Toplevel):
                 and parent.apply_rtsp_dark_var.get()
             )
         )
+        self.timelapse_model_start_var = tk.StringVar()
+        self.timelapse_model_end_var = tk.StringVar()
         
         self.title("タイムラプス作成")
         self.geometry("500x870")
@@ -249,6 +251,28 @@ class TimelapseDragDropWindow(Toplevel):
         self.timelapse_annotation_reference_label.pack(side=tk.LEFT, padx=(8, 0))
         self._toggle_timelapse_annotation_settings()
 
+        model_frame = ttk.LabelFrame(
+            main_frame, text="高精度プレートソルブモデル（任意）", padding=10
+        )
+        model_frame.pack(fill=tk.X, pady=(0, 10))
+        ttk.Label(
+            model_frame,
+            text="このタイムラプス入力の指定時間だけを使って、固定カメラモデルを作成できます。",
+            foreground="gray", wraplength=450,
+        ).pack(anchor=tk.W, pady=(0, 5))
+        model_range = ttk.Frame(model_frame)
+        model_range.pack(fill=tk.X)
+        ttk.Label(model_range, text="開始:").pack(side=tk.LEFT)
+        ttk.Entry(model_range, textvariable=self.timelapse_model_start_var, width=18).pack(side=tk.LEFT, padx=(4, 8))
+        ttk.Label(model_range, text="終了:").pack(side=tk.LEFT)
+        ttk.Entry(model_range, textvariable=self.timelapse_model_end_var, width=18).pack(side=tk.LEFT, padx=4)
+        ttk.Label(model_frame, text="動画は秒または時:分、フォルダは日時または時:分。空欄は全範囲。", foreground="gray").pack(anchor=tk.W, pady=(3, 5))
+        ttk.Button(
+            model_frame,
+            text="この入力からモデルを作成",
+            command=self._start_camera_model_from_timelapse,
+        ).pack(anchor=tk.W)
+
         meteor_frame = ttk.LabelFrame(main_frame, text="流星検出動画", padding=10)
         meteor_frame.pack(fill=tk.X, pady=(0, 10))
         ttk.Checkbutton(
@@ -322,6 +346,22 @@ class TimelapseDragDropWindow(Toplevel):
         self.timelapse_scroll_canvas.itemconfigure(
             self._timelapse_scroll_window, width=event.width
         )
+
+    def _start_camera_model_from_timelapse(self):
+        if not self.dropped_paths:
+            messagebox.showwarning("高精度モデル", "先に動画またはフォルダを追加してください。", parent=self)
+            return
+        # A dropped folder is the most precise representation of a time range.
+        # For several dropped files, use their common parent so minute-based
+        # RTSP layouts remain selectable by the same builder.
+        if len(self.dropped_paths) == 1:
+            source = self.dropped_paths[0]
+        else:
+            source = os.path.commonpath([os.path.abspath(path) for path in self.dropped_paths])
+        self.parent.camera_model_source_var.set(source)
+        self.parent.camera_model_start_var.set(self.timelapse_model_start_var.get().strip())
+        self.parent.camera_model_end_var.set(self.timelapse_model_end_var.get().strip())
+        self.parent.start_camera_model_build()
 
     def _scroll_timelapse_window(self, event):
         # macOS emits MouseWheel delta; X11 uses Button-4/5.  Do not scroll

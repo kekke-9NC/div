@@ -29,6 +29,19 @@ import noise_twin
 import temporal_mean
 
 
+def _pixel_to_world_for_annotation(path: str, x: float, y: float):
+    """Read either a FITS WCS or the registered fixed-camera JSON model."""
+    if str(path).lower().endswith(".json"):
+        import local_wideangle_astrometry
+        _metadata, model = local_wideangle_astrometry._load_calibration(path)
+        ra, dec = model.pixel_to_world_values(float(x), float(y))
+        return float(np.asarray(ra)), float(np.asarray(dec))
+    with fits.open(path) as hdul:
+        wcs = WCS(hdul[0].header, relax=True, fix=False)
+        sky = wcs.pixel_to_world(x, y)
+        return float(sky.ra.deg), float(sky.dec.deg)
+
+
 def _open_video_capture(source: str, decoder_threads: int = 2) -> cv2.VideoCapture:
     """Open a capture without letting FFmpeg create a CPU-sized pool.
 
@@ -1251,12 +1264,10 @@ def create_line_video_clips(
                                         ra_start_str, dec_start_str, ra_end_str, dec_end_str = "N/A", "N/A", "N/A", "N/A"
                                         if effective_use_plate_solve and global_wcs_info.get('wcs_file'):
                                             try:
-                                                with fits.open(global_wcs_info['wcs_file']) as hdul:
-                                                    wcs = WCS(hdul[0].header, relax=True, fix=False)
-                                                    sky_coord_start = wcs.pixel_to_world(x1, y1)
-                                                    sky_coord_end = wcs.pixel_to_world(x2, y2)
-                                                    ra_start_str, dec_start_str = f"{sky_coord_start.ra.deg:.6f}", f"{sky_coord_start.dec.deg:.6f}"
-                                                    ra_end_str, dec_end_str = f"{sky_coord_end.ra.deg:.6f}", f"{sky_coord_end.dec.deg:.6f}"
+                                                ra_start, dec_start = _pixel_to_world_for_annotation(global_wcs_info['wcs_file'], x1, y1)
+                                                ra_end, dec_end = _pixel_to_world_for_annotation(global_wcs_info['wcs_file'], x2, y2)
+                                                ra_start_str, dec_start_str = f"{ra_start:.6f}", f"{dec_start:.6f}"
+                                                ra_end_str, dec_end_str = f"{ra_end:.6f}", f"{dec_end:.6f}"
                                             except Exception as e_wcs_read:
                                                 print(f"情報ファイル作成中のWCS読み込み/変換エラー: {e_wcs_read}")
                                     
@@ -1835,12 +1846,10 @@ def create_line_video_clips(
                             ra_start_str, dec_start_str, ra_end_str, dec_end_str = "N/A", "N/A", "N/A", "N/A"
                             if effective_use_plate_solve and global_wcs_info.get('wcs_file'):
                                 try:
-                                    with fits.open(global_wcs_info['wcs_file']) as hdul:
-                                        wcs = WCS(hdul[0].header, relax=True, fix=False)
-                                        sky_coord_start = wcs.pixel_to_world(x1, y1)
-                                        sky_coord_end = wcs.pixel_to_world(x2, y2)
-                                        ra_start_str, dec_start_str = f"{sky_coord_start.ra.deg:.6f}", f"{sky_coord_start.dec.deg:.6f}"
-                                        ra_end_str, dec_end_str = f"{sky_coord_end.ra.deg:.6f}", f"{sky_coord_end.dec.deg:.6f}"
+                                    ra_start, dec_start = _pixel_to_world_for_annotation(global_wcs_info['wcs_file'], x1, y1)
+                                    ra_end, dec_end = _pixel_to_world_for_annotation(global_wcs_info['wcs_file'], x2, y2)
+                                    ra_start_str, dec_start_str = f"{ra_start:.6f}", f"{dec_start:.6f}"
+                                    ra_end_str, dec_end_str = f"{ra_end:.6f}", f"{dec_end:.6f}"
                                 except Exception as e_wcs_read:
                                     print(f"情報ファイル作成中のWCS読み込み/変換エラー: {e_wcs_read}")
 

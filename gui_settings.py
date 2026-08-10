@@ -430,6 +430,32 @@ class SettingsMixin:
         self.btn_select_plate_solve_video.pack(side=tk.LEFT, padx=(5,0))
         self.btn_run_plate_solve = ttk.Button(ps_frame, text="実行", command=self.start_plate_solve)
         self.btn_run_plate_solve.pack(side=tk.LEFT, padx=(5,0))
+
+        model_lf = ttk.LabelFrame(lf_astro, text="高精度固定カメラモデル（作成・自動更新）")
+        model_lf.pack(fill=tk.X, pady=(8, 2))
+        model_source = ttk.Frame(model_lf); model_source.pack(fill=tk.X, pady=2)
+        ttk.Label(model_source, text="対象動画/RTSPフォルダ:").pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Entry(model_source, textvariable=self.camera_model_source_var, state="readonly").pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(model_source, text="動画", command=self.select_camera_model_video).pack(side=tk.LEFT, padx=(5, 0))
+        ttk.Button(model_source, text="フォルダ", command=self.select_camera_model_folder).pack(side=tk.LEFT, padx=(3, 0))
+        model_range = ttk.Frame(model_lf); model_range.pack(fill=tk.X, pady=2)
+        ttk.Label(model_range, text="時間範囲:").pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Entry(model_range, textvariable=self.camera_model_start_var, width=20).pack(side=tk.LEFT)
+        ttk.Label(model_range, text=" ～ ").pack(side=tk.LEFT)
+        ttk.Entry(model_range, textvariable=self.camera_model_end_var, width=20).pack(side=tk.LEFT)
+        ttk.Label(model_range, text="(動画は秒/時:分、フォルダは日時または時:分)").pack(side=tk.LEFT, padx=(6, 0))
+        model_options = ttk.Frame(model_lf); model_options.pack(fill=tk.X, pady=2)
+        ttk.Label(model_options, text="雲量しきい値:").pack(side=tk.LEFT)
+        ttk.Entry(model_options, textvariable=self.camera_model_cloud_threshold_var, width=7).pack(side=tk.LEFT, padx=(3, 10))
+        ttk.Label(model_options, text="監視間隔(秒):").pack(side=tk.LEFT)
+        ttk.Entry(model_options, textvariable=self.camera_model_interval_var, width=7).pack(side=tk.LEFT, padx=(3, 10))
+        ttk.Checkbutton(model_options, text="作成前に雲量判定（10%未満）", variable=self.camera_model_cloud_filter_var).pack(side=tk.LEFT)
+        model_actions = ttk.Frame(model_lf); model_actions.pack(fill=tk.X, pady=2)
+        self.btn_build_camera_model = ttk.Button(model_actions, text="選択範囲からモデル作成", command=self.start_camera_model_build)
+        self.btn_build_camera_model.pack(side=tk.LEFT)
+        self.btn_toggle_camera_model_monitor = ttk.Button(model_actions, text="RTSP自動監視を開始", command=self.toggle_camera_model_monitor)
+        self.btn_toggle_camera_model_monitor.pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Label(model_lf, textvariable=self.camera_model_status_var, foreground=UI_CYAN).pack(anchor=tk.W, pady=(2, 3))
         
         ps_wcs_frame = ttk.Frame(lf_astro); ps_wcs_frame.pack(fill=tk.X, pady=2)
         ttk.Label(ps_wcs_frame, text="既存WCSファイル:").pack(side=tk.LEFT, padx=(0,5))
@@ -1489,6 +1515,12 @@ class SettingsMixin:
                 'size_percent': self.full_video_timestamp_size_var.get(),
             },
             'plate_solve_wcs_path': self.plate_solve_wcs_path_var.get(), 'plate_solve_video_path': self.plate_solve_video_path_var.get(),
+            'camera_model_source': self.camera_model_source_var.get(),
+            'camera_model_start': self.camera_model_start_var.get(),
+            'camera_model_end': self.camera_model_end_var.get(),
+            'camera_model_cloud_threshold': self.camera_model_cloud_threshold_var.get(),
+            'camera_model_interval': self.camera_model_interval_var.get(),
+            'camera_model_cloud_filter': self.camera_model_cloud_filter_var.get(),
             'use_plate_solve': self.use_plate_solve_var.get(), 'apply_mask': self.apply_mask_var.get(),
             'mask_path_or_status': self.mask_path_var.get(), 'concurrency': self.concurrency_var.get(),
             'interval': self.interval_var.get(), 'duration': self.duration_var.get(),
@@ -1688,6 +1720,12 @@ class SettingsMixin:
 
             self.plate_solve_wcs_path_var.set(settings.get('plate_solve_wcs_path', ''))
             self.plate_solve_video_path_var.set(settings.get('plate_solve_video_path', ''))
+            self.camera_model_source_var.set(settings.get('camera_model_source', ''))
+            self.camera_model_start_var.set(settings.get('camera_model_start', ''))
+            self.camera_model_end_var.set(settings.get('camera_model_end', ''))
+            self.camera_model_cloud_threshold_var.set(str(settings.get('camera_model_cloud_threshold', '0.10')))
+            self.camera_model_interval_var.set(str(settings.get('camera_model_interval', '60')))
+            self.camera_model_cloud_filter_var.set(bool(settings.get('camera_model_cloud_filter', True)))
             self.use_plate_solve_var.set(settings.get('use_plate_solve', True))
             # Annotation now defaults to the on-device wide-angle solver even
             # for settings files created by older API-only app versions.
