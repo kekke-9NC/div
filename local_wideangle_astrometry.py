@@ -32,6 +32,8 @@ from astropy import units as u
 from astropy.wcs import WCS
 from astropy.wcs.utils import fit_wcs_from_points
 
+from camera_plate_model import FixedCameraPlateModel, MODEL_TYPE as CAMERA_MODEL_TYPE
+
 
 # v2 uses a match-count-aware SIP order.  The previous fixed high-order fit
 # could overfit sparse matches and bend constellation lines near the rim.
@@ -39,7 +41,7 @@ ALGORITHM_VERSION = "local-wideangle-sip-v2"
 SIDEREAL_DAY_SECONDS = 86164.0905
 _DATE_DIR = re.compile(r"^(?:19|20)\d{6}$")
 _cache_lock = threading.RLock()
-_loaded_calibrations: Dict[str, Tuple[float, Dict[str, Any], WCS]] = {}
+_loaded_calibrations: Dict[str, Tuple[float, Dict[str, Any], Any]] = {}
 _forward_grid_cache: Dict[Tuple[int, int, int], Dict[str, Any]] = {}
 _constellation_lines: Optional[Tuple[np.ndarray, ...]] = None
 
@@ -158,6 +160,45 @@ def _calibration_paths(
         "validation": night / f"calibration_validation{suffix}.jpg",
         "index_cache": root / "indexes",
     }
+
+
+def _registered_camera_model(
+    source_path: str,
+    width: int,
+    height: int,
+    cache_root: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Return a reusable fixed-camera model registered for this source root."""
+    root = Path(cache_root).expanduser().resolve() if cache_root else _default_cache_root()
+    _date, camera = _night_identity(source_path, width, height)
+    for path in sorted((root / "camera_models").glob("*/camera_model.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if payload.get("model_type") != CAMERA_MODEL_TYPE:
+                continue
+            if not payload.get("enabled", False):
+                continue
+            if int(payload.get("width", 0)) != width or int(payload.get("height", 0)) != height:
+                continue
+            if camera not in payload.get("camera_aliases", []):
+                continue
+            valid_dates = payload.get("valid_dates")
+            if valid_dates and _date not in valid_dates:
+                continue
+            wcs_path = Path(payload["wcs_path"]).expanduser()
+            if not wcs_path.exists():
+                continue
+            reference = datetime.fromisoformat(str(payload["reference_datetime"]).replace("Z", "+00:00"))
+            return {
+                "wcs_file": str(wcs_path),
+                "calibration_path": str(path),
+                "plate_solve_datetime": reference,
+                "job_id": "local-wideangle-camera-model",
+                **payload,
+            }
+        except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+            continue
+    return None
 
 
 def _video_sample_stack(
@@ -346,7 +387,7 @@ def _persist_calibration(
         "diagnostic_path": str(paths["diagnostic"]),
         "reference_path": str(paths["reference"]),
         "validation_path": str(paths["validation"]),
-        "solver": "local-astrometry-net-tycho2-sip5",
+        "solver": "local-astrometry-net-tycho2-sip-adaptive",
         "external_api_used": False,
         **{key: solve_result[key] for key in (
             "center_ra_deg", "center_dec_deg", "scale_arcsec_per_pixel", "logodds",
@@ -565,14 +606,14 @@ def _solve_samples(
     )
     _emit(
         progress_callback,
-        f"ローカル広角較正成功: SIP5 / HFOV約"
+        f"ローカル広角較正成功: SIP{payload.get('sip_order', '?')} / HFOV約"
         f"{payload.get('scale_arcsec_per_pixel', 0) * width / 3600:.1f}°",
     )
     return {
         "wcs_file": str(paths["wcs"]),
         "calibration_path": str(paths["metadata"]),
         "plate_solve_datetime": date_obs,
-        "job_id": "local-wideangle-sip5",
+        "job_id": "local-wideangle-sip-adaptive",
         **payload,
     }
 
@@ -594,6 +635,11 @@ def solve_video_local(
         probe.release()
     if width <= 0 or height <= 0:
         raise IOError(f"動画の解像度を読めません: {video_path}")
+    if not force:
+        camera_model = _registered_camera_model(video_path, width, height, cache_root)
+        if camera_model is not None:
+            _emit(progress_callback, "このカメラ専用の広角モデルを再利用します")
+            return camera_model
     paths = _calibration_paths(video_path, width, height, cache_root)
     if not force and paths["metadata"].exists() and paths["wcs"].exists():
         payload = json.loads(paths["metadata"].read_text(encoding="utf-8"))
@@ -726,6 +772,13 @@ def solve_image_local(
     if image is None:
         raise IOError(f"画像を読み込めません: {image_path}")
     identity = source_path or image_path
+    if not force:
+        camera_model = _registered_camera_model(
+            identity, image.shape[1], image.shape[0], cache_root
+        )
+        if camera_model is not None:
+            _emit(progress_callback, "このカメラ専用の広角モデルを再利用します")
+            return camera_model
     return _solve_samples(
         image, None, identity, _capture_datetime(identity), cache_root, progress_callback
     )
@@ -758,7 +811,7 @@ def _resolve_calibration_path(calibration_path: Optional[str]) -> Path:
     return path
 
 
-def _load_calibration(calibration_path: Optional[str]) -> Tuple[Dict[str, Any], WCS]:
+def _load_calibration(calibration_path: Optional[str]) -> Tuple[Dict[str, Any], Any]:
     path = _resolve_calibration_path(calibration_path)
     stamp = path.stat().st_mtime
     key = str(path)
@@ -794,6 +847,11 @@ def _load_calibration(calibration_path: Optional[str]) -> Tuple[Dict[str, Any], 
                     continue
         else:
             metadata = json.loads(path.read_text(encoding="utf-8"))
+            if metadata.get("model_type") == CAMERA_MODEL_TYPE:
+                model = FixedCameraPlateModel(metadata)
+                metadata.setdefault("calibration_path", str(path))
+                _loaded_calibrations[key] = (stamp, metadata, model)
+                return metadata, model
             wcs_path = Path(metadata["wcs_path"]).expanduser()
             if not wcs_path.is_absolute():
                 wcs_path = path.parent / wcs_path
@@ -831,10 +889,34 @@ def _forward_grid_model(wcs: WCS, metadata: Dict[str, Any], width: int, height: 
     x_output = x_cal * width / calibration_width
     y_output = y_cal * height / calibration_height
     support_hull = metadata.get("sip_support_hull")
+    support_grid = metadata.get("support_grid")
     support_output = np.full((height, width), 255, dtype=np.uint8)
     range_ra = np.asarray(unwrapped_ra)
     range_dec = np.asarray(dec)
-    if support_hull and len(support_hull) >= 3:
+    if support_grid:
+        grid_values = np.asarray(support_grid, dtype=np.uint8)
+        if grid_values.ndim != 2 or not grid_values.size:
+            raise ValueError("support_grid must be a non-empty 2D array")
+        support = np.zeros((calibration_height, calibration_width), dtype=np.uint8)
+        grid_rows, grid_columns = grid_values.shape
+        for row in range(grid_rows):
+            for column in range(grid_columns):
+                if not grid_values[row, column]:
+                    continue
+                left = round(column * calibration_width / grid_columns)
+                right = round((column + 1) * calibration_width / grid_columns)
+                top = round(row * calibration_height / grid_rows)
+                bottom = round((row + 1) * calibration_height / grid_rows)
+                support[top:bottom, left:right] = 255
+        sample_x = np.clip(np.rint(mesh_x).astype(int), 0, calibration_width - 1)
+        sample_y = np.clip(np.rint(mesh_y).astype(int), 0, calibration_height - 1)
+        unsupported = support[sample_y, sample_x] == 0
+        range_ra = np.ma.array(unwrapped_ra, mask=unsupported).compressed()
+        range_dec = np.ma.array(dec, mask=unsupported).compressed()
+        support_output = cv2.resize(
+            support, (width, height), interpolation=cv2.INTER_NEAREST
+        )
+    elif support_hull and len(support_hull) >= 3:
         support = np.zeros((calibration_height, calibration_width), dtype=np.uint8)
         hull = np.rint(np.asarray(support_hull, dtype=float)).astype(np.int32)
         cv2.fillConvexPoly(support, hull, 255)
@@ -995,9 +1077,11 @@ def _project_sky_with_forward_wcs(
 
 def _draw_constellation_lines(
     output: np.ndarray,
-    wcs: WCS,
+    wcs: Any,
     delta_ra: float,
     support_mask: np.ndarray,
+    anchor_points: Optional[np.ndarray] = None,
+    anchor_tolerance_px: float = 5.0,
 ) -> None:
     """Project visible constellation line segments into the current frame."""
     height, width = output.shape[:2]
@@ -1031,6 +1115,16 @@ def _draw_constellation_lines(
             support_mask[rounded[valid_indices, 1], rounded[valid_indices, 0]] > 0
         )
     usable &= in_support
+    if anchor_points is not None and len(anchor_points):
+        anchors = np.asarray(anchor_points, dtype=float).reshape(-1, 2)
+        finite_anchors = anchors[np.isfinite(anchors).all(axis=1)]
+        if len(finite_anchors):
+            distances = np.linalg.norm(
+                points[:, np.newaxis, :] - finite_anchors[np.newaxis, :, :], axis=2
+            )
+            usable &= np.min(distances, axis=1) <= float(anchor_tolerance_px)
+        else:
+            usable[:] = False
     offset = 0
     for length in lengths:
         line_points = rounded[offset:offset + length]
@@ -1074,10 +1168,13 @@ def annotate_frame(
         target = target.replace(tzinfo=None)
     delta_ra = ((target - reference).total_seconds() / SIDEREAL_DAY_SECONDS) * 360.0
     detected_stars: List[List[float]] = []
-    if draw_detected_stars:
+    verify_constellations = bool(
+        draw_constellations and metadata.get("verified_constellation_only", False)
+    )
+    if draw_detected_stars or verify_constellations:
         detection_gray = cv2.cvtColor(output, cv2.COLOR_BGR2GRAY)
         detected_stars, _diagnostic, _reference = _extract_stars(
-            detection_gray, maximum_stars=400, exclude_lower_region=False,
+            detection_gray, maximum_stars=1000, exclude_lower_region=False,
             build_diagnostic=False,
         )
     grid_color = (90, 210, 255)
@@ -1103,7 +1200,11 @@ def annotate_frame(
                     label=f"Dec {dec_value:+d}°",
                 )
     if draw_constellations and grid is not None:
-        _draw_constellation_lines(grid_layer, wcs, delta_ra, grid["support_mask"])
+        _draw_constellation_lines(
+            grid_layer, wcs, delta_ra, grid["support_mask"],
+            anchor_points=np.asarray(detected_stars, dtype=float) if verify_constellations else None,
+            anchor_tolerance_px=float(metadata.get("constellation_anchor_tolerance_px", 5.0)),
+        )
     if grid is not None:
         support = grid["support_mask"] > 0
         output[support] = grid_layer[support]
@@ -1118,7 +1219,9 @@ def annotate_frame(
                     marker_thickness, cv2.LINE_AA,
                 )
     sip_order = metadata.get("sip_order")
-    model_name = f"LOCAL SIP{sip_order}" if sip_order else "LOCAL SIP"
+    model_name = metadata.get("model_label")
+    if not model_name:
+        model_name = f"LOCAL SIP{sip_order}" if sip_order else "LOCAL SIP"
     status = f"{model_name}  {target:%Y-%m-%d %H:%M:%S}"
     cv2.rectangle(output, (8, 8), (8 + max(270, len(status) * 9), 34), (0, 0, 0), -1)
     cv2.putText(output, status, (14, 27), cv2.FONT_HERSHEY_SIMPLEX,

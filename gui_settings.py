@@ -439,7 +439,7 @@ class SettingsMixin:
         # Plate solve mode selection (local vs API)
         ps_mode_frame = ttk.Frame(lf_astro); ps_mode_frame.pack(fill=tk.X, pady=2)
         ttk.Label(ps_mode_frame, text="ソルバー:").pack(side=tk.LEFT, padx=(0,5))
-        ttk.Radiobutton(ps_mode_frame, text="ローカル広角 SIP5 (推奨・API不使用)", variable=self.plate_solve_mode_var, value="local").pack(side=tk.LEFT, padx=5)
+        ttk.Radiobutton(ps_mode_frame, text="ローカル広角 SIP・自動次数 (推奨・API不使用)", variable=self.plate_solve_mode_var, value="local").pack(side=tk.LEFT, padx=5)
         ttk.Radiobutton(ps_mode_frame, text="API (Astrometry.net)", variable=self.plate_solve_mode_var, value="api").pack(side=tk.LEFT, padx=5)
 
         # Astrometry.net API key input
