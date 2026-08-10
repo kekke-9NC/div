@@ -1,8 +1,8 @@
-"""Compute sunrise/sunset and astronomical twilight times for a given location/date.
+"""Compute sunrise/sunset and twilight times for a given location/date.
 
 This implements the NOAA sunrise/sunset algorithm (approximate) and returns
-local naive datetimes for sunrise, sunset, astronomical dawn (start) and
-astronomical dusk (end). Timezone is approximated by longitude (offset hours = round(lon/15)).
+local naive datetimes for sunrise, sunset, civil/astronomical dawn and dusk.
+Timezone is approximated by longitude (offset hours = round(lon/15)).
 
 The outputs are naive datetimes in the local timezone (no tzinfo).
 """
@@ -94,7 +94,7 @@ def _utc_hours_to_local_datetime(utc_hours: float, when: date, tz_offset_hours: 
 
 
 def get_sun_times(lat: float, lon: float, when: Optional[date] = None, tz_offset_hours: Optional[int] = None) -> Dict[str, Optional[datetime]]:
-    """Return a dict with keys: sunrise, sunset, astro_dawn, astro_dusk.
+    """Return sunrise, sunset, civil twilight, and astronomical twilight.
 
     Each value is a naive datetime in local time (tzinfo=None) or None if not applicable.
     tz_offset_hours: if None, approximate timezone as round(lon/15).
@@ -104,7 +104,14 @@ def get_sun_times(lat: float, lon: float, when: Optional[date] = None, tz_offset
     if tz_offset_hours is None:
         tz_offset_hours = int(round(lon / 15.0))
 
-    results: Dict[str, Optional[datetime]] = {'sunrise': None, 'sunset': None, 'astro_dawn': None, 'astro_dusk': None}
+    results: Dict[str, Optional[datetime]] = {
+        'sunrise': None,
+        'sunset': None,
+        'civil_dawn': None,
+        'civil_dusk': None,
+        'astro_dawn': None,
+        'astro_dusk': None,
+    }
 
     # official sunrise/sunset uses zenith 90.833 degrees
     sunrise_utc = _calc_time_utc(True, lat, lon, 90.833, when)
@@ -114,6 +121,16 @@ def get_sun_times(lat: float, lon: float, when: Optional[date] = None, tz_offset
         results['sunrise'] = _utc_hours_to_local_datetime(sunrise_utc, when, tz_offset_hours)
     if sunset_utc is not None:
         results['sunset'] = _utc_hours_to_local_datetime(sunset_utc, when, tz_offset_hours)
+
+    # civil twilight: zenith 96 degrees (sun 6° below horizon).
+    # Its evening end/morning start is a practical automatic approximation for
+    # when the first bright stars become visible or disappear.
+    civil_dawn_utc = _calc_time_utc(True, lat, lon, 96.0, when)
+    civil_dusk_utc = _calc_time_utc(False, lat, lon, 96.0, when)
+    if civil_dawn_utc is not None:
+        results['civil_dawn'] = _utc_hours_to_local_datetime(civil_dawn_utc, when, tz_offset_hours)
+    if civil_dusk_utc is not None:
+        results['civil_dusk'] = _utc_hours_to_local_datetime(civil_dusk_utc, when, tz_offset_hours)
 
     # astronomical twilight: zenith 108 degrees (sun 18° below horizon)
     astro_dawn_utc = _calc_time_utc(True, lat, lon, 108.0, when)
@@ -135,6 +152,8 @@ def pretty_print(lat: float, lon: float, when: Optional[date] = None, tz_offset_
 
     print(f"  Sunrise:          {fmt('sunrise')}")
     print(f"  Sunset:           {fmt('sunset')}")
+    print(f"  Civil dawn:       {fmt('civil_dawn')}")
+    print(f"  Civil dusk:       {fmt('civil_dusk')}")
     print(f"  Astronomical dawn:{fmt('astro_dawn')}")
     print(f"  Astronomical dusk:{fmt('astro_dusk')}")
 
@@ -170,3 +189,21 @@ def compute_night_period(lat: float, lon: float, when: Optional[date] = None) ->
     end = midpoint(tomorrow_times.get('sunrise'), tomorrow_times.get('astro_dawn'))
 
     return {'start': start, 'end': end}
+
+
+def compute_star_visibility_period(lat: float, lon: float, when: Optional[date] = None) -> Dict[str, Optional[datetime]]:
+    """Compute the approximate period in which bright stars can be seen.
+
+    The evening civil dusk (sun 6° below the horizon) is used as the start,
+    and the next morning's civil dawn as the end. Actual visibility also varies
+    with cloud, haze, moonlight, and nearby artificial light.
+    """
+    if when is None:
+        when = date.today()
+
+    today_times = get_sun_times(lat, lon, when=when)
+    tomorrow_times = get_sun_times(lat, lon, when=when + timedelta(days=1))
+    return {
+        'start': today_times.get('civil_dusk'),
+        'end': tomorrow_times.get('civil_dawn'),
+    }

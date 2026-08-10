@@ -443,7 +443,7 @@ class App(
         self.custom_model_paths = []
         self.ai_vlm_backend_var = tk.StringVar(value=getattr(config, "DEFAULT_AI_VLM_BACKEND", "local_qwen3_vl_4b"))
         self.lm_studio_vlm_url_var = tk.StringVar(value=getattr(config, "DEFAULT_LM_STUDIO_VLM_URL", "http://localhost:1234/v1"))
-        self.lm_studio_vlm_model_var = tk.StringVar(value=getattr(config, "DEFAULT_LM_STUDIO_VLM_MODEL_ID", "qwen3.5-2b"))
+        self.lm_studio_vlm_model_var = tk.StringVar(value=getattr(config, "DEFAULT_LM_STUDIO_VLM_MODEL_ID", "qwen/qwen3-vl-4b"))
         self.lm_studio_vlm_api_key_var = tk.StringVar(value="")
         self.ai_vlm_status_var = tk.StringVar(value="")
         self._last_ai_vlm_backend = self.ai_vlm_backend_var.get()

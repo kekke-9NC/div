@@ -1756,7 +1756,7 @@ class SettingsMixin:
                 saved_ai_backend = getattr(config, "AI_VLM_BACKEND_LM_STUDIO_QWEN35_2B", "lmstudio_qwen3_5_2b")
             self.ai_vlm_backend_var.set(saved_ai_backend)
             self.lm_studio_vlm_url_var.set(settings.get('lm_studio_vlm_url', getattr(config, "DEFAULT_LM_STUDIO_VLM_URL", "http://localhost:1234/v1")))
-            self.lm_studio_vlm_model_var.set(settings.get('lm_studio_vlm_model_id', getattr(config, "DEFAULT_LM_STUDIO_VLM_MODEL_ID", "qwen3.5-2b")))
+            self.lm_studio_vlm_model_var.set(settings.get('lm_studio_vlm_model_id', getattr(config, "DEFAULT_LM_STUDIO_VLM_MODEL_ID", "qwen/qwen3-vl-4b")))
             self.lm_studio_vlm_api_key_var.set("")
             self.update_lm_studio_vlm_visibility()
             self.apply_ai_model_settings(show_message=False)

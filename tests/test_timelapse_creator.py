@@ -199,6 +199,23 @@ class TimelapseCreatorTests(unittest.TestCase):
 
         self.assertEqual(videos, [str(complete)])
 
+    def test_folder_scan_recursively_discovers_nested_rtsp_segments(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory, "20260808")
+            first = root / "22" / "05.mp4"
+            second = root / "23" / "00.mp4"
+            image = root / "23" / "preview.jpg"
+            first.parent.mkdir(parents=True)
+            second.parent.mkdir(parents=True)
+            first.touch()
+            second.touch()
+            image.touch()
+
+            images, videos = timelapse_creator.get_files_from_path(str(root))
+
+        self.assertEqual(images, [str(image)])
+        self.assertEqual(videos, [str(first), str(second)])
+
     def test_explicit_recorder_temp_video_is_excluded(self):
         with tempfile.TemporaryDirectory() as directory:
             unfinished = Path(directory, "09_temp_1783620548963395000.mp4")
@@ -593,6 +610,80 @@ class TimelapseCreatorTests(unittest.TestCase):
             ffmpeg_popen.call_args.kwargs["stderr"],
             timelapse_creator.subprocess.PIPE,
         )
+
+    def test_meteor_insertions_use_same_python_sample_schedule_as_base_video(self):
+        frame = timelapse_creator.np.zeros((16, 16, 3), dtype=timelapse_creator.np.uint8)
+        frame_time = datetime(2026, 7, 10, 1, 0, 0)
+        loader = mock.MagicMock()
+        loader.load_frame.return_value = frame.copy()
+        loader.timestamp_for_index.return_value = frame_time
+
+        mean_cache = mock.MagicMock()
+        mean_cache.full_preload_enabled = False
+        mean_cache.enabled = True
+        mean_cache._retain_all_frames = False
+        mean_cache.mean_for_index.side_effect = [frame.copy(), frame.copy()]
+
+        stdin = mock.MagicMock()
+        stdin.closed = False
+        proc = mock.MagicMock(stdin=stdin)
+        proc.poll.return_value = 0
+        meteor_event = {
+            "clip_path": "meteor_full.mp4",
+            "output_frame": 1,
+            "center": (8.0, 8.0),
+            "detection_time": frame_time,
+        }
+
+        with (
+            mock.patch.object(
+                timelapse_creator, "get_files_from_path", return_value=([], ["input.mp4"])
+            ),
+            mock.patch.object(
+                timelapse_creator,
+                "count_total_frames",
+                return_value=(2, [("input.mp4", 0, 2)]),
+            ),
+            mock.patch.object(
+                timelapse_creator, "calculate_sample_indices", return_value=[0, 1]
+            ),
+            mock.patch.object(timelapse_creator, "FrameLoader", return_value=loader),
+            mock.patch.object(
+                timelapse_creator, "TemporalMeanFrameCache", return_value=mean_cache
+            ),
+            mock.patch.object(
+                timelapse_creator, "_discover_meteor_insertions",
+                return_value=[meteor_event],
+            ),
+            mock.patch.object(
+                timelapse_creator, "_insert_meteor_clips", return_value=True
+            ) as insert_meteors,
+            mock.patch.object(
+                timelapse_creator, "_create_video_timelapse_fast"
+            ) as fast_path,
+            mock.patch.object(
+                timelapse_creator, "_select_h264_encoder", return_value=("test", [], "test")
+            ),
+            mock.patch.object(
+                timelapse_creator.subprocess, "Popen", return_value=proc
+            ),
+            mock.patch.object(
+                timelapse_creator, "_finish_ffmpeg_process", return_value=(0, b"")
+            ),
+        ):
+            result = timelapse_creator.create_timelapse(
+                ["input.mp4"],
+                "output.mp4",
+                timestamp_settings={"enabled": False},
+                temporal_mean_radius_frames=0,
+                meteor_insert_settings={"enabled": True, "meteor_folder": "/tmp/meteor"},
+            )
+
+        self.assertTrue(result)
+        fast_path.assert_not_called()
+        self.assertEqual(stdin.write.call_count, 2)
+        insert_meteors.assert_called_once()
+        self.assertEqual(insert_meteors.call_args.args[1], [meteor_event])
 
     def test_annotate_pipeline_writes_completed_frames_in_sample_order(self):
         indices = [10, 20, 30, 40, 50]

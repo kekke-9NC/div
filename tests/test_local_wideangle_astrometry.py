@@ -81,6 +81,31 @@ class LocalWideangleAstrometryTests(unittest.TestCase):
             self.assertEqual(output.shape, frame.shape)
             self.assertGreater(np.count_nonzero(output), 300)
 
+    def test_bare_wcs_recovers_sibling_support_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            wcs_path = root / "wideangle_sip.wcs"
+            header = _tan_wcs(320, 180).to_header(relax=True)
+            header["IMAGEW"] = 320
+            header["IMAGEH"] = 180
+            header["DATE-OBS"] = "2026-07-10T01:00:00"
+            header["CALTYPE"] = "LOCAL-SIP"
+            fits.PrimaryHDU(header=header).writeto(wcs_path)
+            support_hull = [[40, 30], [280, 30], [280, 150], [40, 150]]
+            metadata_path = root / "calibration.json"
+            metadata_path.write_text(json.dumps({
+                "wcs_path": str(wcs_path),
+                "reference_datetime": "2026-07-10T01:00:00",
+                "width": 320,
+                "height": 180,
+                "sip_support_hull": support_hull,
+            }), encoding="utf-8")
+
+            metadata, _wcs = local_astro._load_calibration(str(wcs_path))
+
+            self.assertEqual(metadata["sip_support_hull"], support_hull)
+            self.assertTrue(Path(metadata["calibration_path"]).samefile(metadata_path))
+
     def test_annotation_can_draw_constellation_lines(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

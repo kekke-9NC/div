@@ -24,7 +24,6 @@ from datetime import datetime, timedelta
 from collections import OrderedDict
 from typing import List, Optional, Callable, Sequence, Tuple, Dict
 import subprocess
-import glob
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 import threading
 import config
@@ -648,7 +647,10 @@ def is_nvenc_available() -> bool:
 
 def get_files_from_path(path: str) -> Tuple[List[str], List[str]]:
     """
-    パスから画像ファイルと動画ファイルのリストを取得する。
+    パスから画像ファイルと動画ファイルのリストを再帰的に取得する。
+
+    RTSP録画は ``YYYYMMDD/HH/MM.mp4`` の階層で保存されるため、日付
+    フォルダを指定した場合も、その配下の時間フォルダまで収集する。
     """
     images = []
     videos = []
@@ -660,23 +662,14 @@ def get_files_from_path(path: str) -> Tuple[List[str], List[str]]:
         elif ext in VIDEO_EXTENSIONS and not _is_unfinished_video(path):
             videos.append(path)
     elif os.path.isdir(path):
-        for ext in IMAGE_EXTENSIONS:
-            pattern = os.path.join(path, f'*{ext}')
-            images.extend(glob.glob(pattern, recursive=False))
-            pattern_upper = os.path.join(path, f'*{ext.upper()}')
-            images.extend(glob.glob(pattern_upper, recursive=False))
-
-        for ext in VIDEO_EXTENSIONS:
-            pattern = os.path.join(path, f'*{ext}')
-            videos.extend(
-                item for item in glob.glob(pattern, recursive=False)
-                if not _is_unfinished_video(item)
-            )
-            pattern_upper = os.path.join(path, f'*{ext.upper()}')
-            videos.extend(
-                item for item in glob.glob(pattern_upper, recursive=False)
-                if not _is_unfinished_video(item)
-            )
+        for root, _directories, filenames in os.walk(path):
+            for filename in filenames:
+                item = os.path.join(root, filename)
+                ext = Path(filename).suffix.lower()
+                if ext in IMAGE_EXTENSIONS:
+                    images.append(item)
+                elif ext in VIDEO_EXTENSIONS and not _is_unfinished_video(item):
+                    videos.append(item)
 
     images = sorted(list(set(images)))
     videos = sorted(list(set(videos)))
@@ -2045,7 +2038,23 @@ def create_timelapse(
     # Keep decode, temporal averaging, sampling, masking, timestamp overlay and
     # encode in one FFmpeg graph so all CPU cores and the native GPU encoder can
     # work concurrently without copying full frames through Python.
-    if all_videos and not all_images and local_annotator is None:
+    # Meteor positions are calculated from ``sample_indices`` and therefore
+    # must be inserted into a base video produced from that exact Python frame
+    # schedule.  The native FFmpeg path reconstructs the schedule independently
+    # with a select/tmix graph.  With long, multi-segment RTSP nights that graph
+    # can still produce the requested frame count while its effective source
+    # positions diverge from ``sample_indices`` (for example, frame 383 in the
+    # base represented 22:00 while the insertion schedule represented 22:36).
+    # That failure is silent because duration and frame-count probes both pass.
+    # Keep the fast path when there is nothing to insert, but use the shared
+    # FrameLoader/TemporalMeanFrameCache schedule whenever meteor events exist.
+    use_fast_video_path = (
+        bool(all_videos)
+        and not all_images
+        and local_annotator is None
+        and not meteor_events
+    )
+    if use_fast_video_path:
         fast_result = _create_video_timelapse_fast(
             all_videos,
             output_path,
@@ -2063,11 +2072,6 @@ def create_timelapse(
             loader.cleanup()
             del first_frame
             gc.collect()
-            if meteor_events and not _insert_meteor_clips(
-                output_path, meteor_events, target_size, len(sample_indices), progress_callback,
-                annotation_settings=annotation_settings,
-            ):
-                return False
             return True
         if fast_result is False:
             _report_progress(
@@ -2088,6 +2092,11 @@ def create_timelapse(
         _report_progress(
             progress_callback,
             "ローカル星空注釈を各フレームへ描画するため、Python注釈処理を使用します",
+        )
+    elif all_videos and not all_images and meteor_events:
+        _report_progress(
+            progress_callback,
+            "流星の実時刻と採用フレームを一致させるため、時刻同期処理を使用します",
         )
 
     if progress_callback:

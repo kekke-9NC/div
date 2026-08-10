@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import json
 from pathlib import Path
 
 import cv2
@@ -70,6 +71,80 @@ class MeteorAnnotationTests(unittest.TestCase):
             self.assertGreater(len(red_y), 100)
             self.assertGreater(len(blue_y), 100)
             self.assertLess(float(np.median(red_y)), float(np.median(blue_y)))
+
+    def test_local_sip_annotation_uses_distortion_aware_renderer(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_path = root / "local_composite.png"
+            self.assertTrue(cv2.imwrite(
+                str(source_path), np.zeros((120, 160, 3), dtype=np.uint8)
+            ))
+            wcs = WCS(naxis=2)
+            wcs.wcs.crpix = [80, 60]
+            wcs.wcs.cdelt = [-0.1, 0.1]
+            wcs.wcs.crval = [230.0, 52.0]
+            wcs.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+            header = wcs.to_header()
+            header["CALTYPE"] = "LOCAL-SIP"
+            wcs_path = root / "wideangle_sip.wcs"
+            fits.PrimaryHDU(header=header).writeto(wcs_path)
+            (root / "calibration.json").write_text(json.dumps({
+                "wcs_path": str(wcs_path),
+                "reference_datetime": "2026-07-10T01:00:00",
+                "width": 160,
+                "height": 120,
+                "sip_support_hull": [[20, 20], [140, 20], [140, 100], [20, 100]],
+            }), encoding="utf-8")
+            expected = str(root / "local_annotated.png")
+
+            with mock.patch.object(
+                astrometry, "_annotate_local_wideangle_image", return_value=expected
+            ) as local_renderer:
+                actual = astrometry.annotate_image_with_wcs(
+                    str(source_path), {"wcs_file": str(wcs_path)}, timestamp=None
+                )
+
+            self.assertEqual(actual, expected)
+            local_renderer.assert_called_once()
+
+    def test_local_sip_does_not_report_coordinates_outside_support(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_path = root / "local_composite.png"
+            self.assertTrue(cv2.imwrite(
+                str(source_path), np.zeros((120, 160, 3), dtype=np.uint8)
+            ))
+            wcs = WCS(naxis=2)
+            wcs.wcs.crpix = [80, 60]
+            wcs.wcs.cdelt = [-0.1, 0.1]
+            wcs.wcs.crval = [230.0, 52.0]
+            wcs.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+            header = wcs.to_header()
+            header["CALTYPE"] = "LOCAL-SIP"
+            wcs_path = root / "wideangle_sip.wcs"
+            fits.PrimaryHDU(header=header).writeto(wcs_path)
+            calibration_path = root / "calibration.json"
+            calibration_path.write_text(json.dumps({
+                "wcs_path": str(wcs_path),
+                "reference_datetime": "2026-07-10T01:00:00",
+                "width": 160,
+                "height": 120,
+                "sip_support_hull": [[60, 40], [100, 40], [100, 80], [60, 80]],
+            }), encoding="utf-8")
+
+            with mock.patch.object(
+                astrometry.cv2, "putText", wraps=cv2.putText
+            ) as put_text:
+                astrometry._annotate_local_wideangle_image(
+                    str(source_path),
+                    {"wcs_file": str(wcs_path), "calibration_path": str(calibration_path)},
+                    [(5.0, 110.0)], None, None, False, None,
+                )
+
+            labels = [call.args[1] for call in put_text.call_args_list]
+            self.assertIn("RA/Dec unavailable", labels)
+            self.assertIn("outside calibrated area", labels)
+            self.assertFalse(any(label.startswith("RA: ") for label in labels))
 
     def test_vertical_wcs_conversion_preserves_sip_sky_coordinates(self):
         height = 180

@@ -318,7 +318,7 @@ class SourceMixin:
         ttk.Checkbutton(rtsp_time_row1, text="時間帯を指定して録画する", variable=self.rtsp_time_limit_var, command=self.toggle_rtsp_time_limit_frame).pack(side=tk.LEFT, anchor=tk.W)
         self.btn_rtsp_auto_time = ttk.Button(
             rtsp_time_row1,
-            text="日没・日出から設定",
+            text="星が見える時間から設定",
             style="Quiet.TButton",
             command=self.fetch_current_location_rtsp,
         )
@@ -339,6 +339,12 @@ class SourceMixin:
         ttk.Spinbox(rtsp_end_frame, from_=0, to=23, width=3, textvariable=self.rtsp_end_hour_var, format="%02.0f").pack(side=tk.LEFT)
         ttk.Label(rtsp_end_frame, text=":").pack(side=tk.LEFT)
         ttk.Spinbox(rtsp_end_frame, from_=0, to=59, width=3, textvariable=self.rtsp_end_min_var, format="%02.0f").pack(side=tk.LEFT)
+
+        ttk.Label(
+            self.rtsp_time_limit_detail_frame,
+            text="晴天時に明るい星が見え始める頃から、明け方に見えなくなる頃までを目安にします。",
+            style="Hint.TLabel",
+        ).pack(anchor=tk.W, pady=(4, 0))
         
         # 録画時間外でも解析は継続する旨の説明
         ttk.Label(self.rtsp_time_limit_detail_frame, text="録画時間外でも、すでに保存済みの動画の解析は継続します。", style="Hint.TLabel").pack(anchor=tk.W, pady=(4,0))
@@ -1086,12 +1092,12 @@ atomcam2で利用する場合は、GitHubで公開されている
             self.rtsp_time_limit_detail_frame.pack_forget()
 
     def fetch_current_location_rtsp(self):
-        """Fetch current location and auto-set RTSP recording time based on sunset/sunrise."""
+        """Auto-set RTSP recording for the approximate bright-star visibility period."""
         if self.btn_rtsp_auto_time.instate([tk.DISABLED]):
             return
 
         self.btn_rtsp_auto_time.config(state=tk.DISABLED, text="時刻を取得中...")
-        self.append_log("RTSP時間設定: 現在地と日没・日出時刻を取得しています...")
+        self.append_log("RTSP時間設定: 現在地と星が見える時間帯を計算しています...")
         result_queue = queue.Queue()
 
         def poll_result():
@@ -1104,7 +1110,7 @@ atomcam2で利用する場合は、GitHubで公開されている
             kind = result[0]
             if kind == "error":
                 error_message = result[1]
-                self.btn_rtsp_auto_time.config(state=tk.NORMAL, text="日没・日出から設定")
+                self.btn_rtsp_auto_time.config(state=tk.NORMAL, text="星が見える時間から設定")
                 self.append_log(f"RTSP時間設定失敗: {error_message}")
                 messagebox.showerror("時刻自動設定", f"時刻を自動設定できませんでした:\n{error_message}")
                 return
@@ -1120,7 +1126,7 @@ atomcam2で利用する場合は、GitHubで公開されている
 
             def restore_button_text():
                 if self.btn_rtsp_auto_time.winfo_exists():
-                    self.btn_rtsp_auto_time.config(text="日没・日出から設定")
+                    self.btn_rtsp_auto_time.config(text="星が見える時間から設定")
 
             self.after(1200, restore_button_text)
 
@@ -1140,11 +1146,11 @@ atomcam2で利用する場合は、GitHubで公開されている
             lat, lon = 35.0, 135.0
 
         try:
-            period = sun_times.compute_night_period(lat, lon)
+            period = sun_times.compute_star_visibility_period(lat, lon)
             start_dt = period.get('start')
             end_dt = period.get('end')
             if start_dt is None or end_dt is None:
-                raise RuntimeError("現在地の日没・日出時刻を計算できませんでした。")
+                raise RuntimeError("現在地の星が見える時間帯を計算できませんでした。")
 
             result_queue.put((
                 "done",

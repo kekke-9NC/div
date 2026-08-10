@@ -623,6 +623,100 @@ def _draw_meteor_marker(
     cv2.rectangle(canvas, (left, top), (right, bottom), marker_color, thickness, cv2.LINE_AA)
     return canvas.astype(np.float32) / 255.0 if normalized else canvas
 
+
+def _annotate_local_wideangle_image(
+    image_path: str,
+    wcs_info: Dict,
+    line_centers: Optional[List[Tuple[float, float]]],
+    detection_datetime: Optional[datetime],
+    timestamp: Optional[str],
+    flip_vertically: bool,
+    detected_line: Optional[Tuple[Tuple[int, int], Tuple[int, int]]],
+) -> Optional[str]:
+    """Render a local SIP calibration without extrapolating past verified stars."""
+    import local_wideangle_astrometry
+
+    frame = cv2.imread(image_path, cv2.IMREAD_COLOR)
+    if frame is None:
+        raise IOError(f"画像を読み込めません: {image_path}")
+    calibration_path = wcs_info.get("calibration_path") or wcs_info["wcs_file"]
+    metadata, local_wcs = local_wideangle_astrometry._load_calibration(calibration_path)
+    reference_value = metadata.get("reference_datetime") or wcs_info.get("plate_solve_datetime")
+    if isinstance(reference_value, datetime):
+        reference_datetime = reference_value
+    else:
+        reference_datetime = datetime.fromisoformat(str(reference_value).replace("Z", "+00:00"))
+    target_datetime = detection_datetime or reference_datetime
+    if reference_datetime.tzinfo is not None and target_datetime.tzinfo is None:
+        target_datetime = target_datetime.replace(tzinfo=reference_datetime.tzinfo)
+    elif reference_datetime.tzinfo is None and target_datetime.tzinfo is not None:
+        target_datetime = target_datetime.replace(tzinfo=None)
+    output = local_wideangle_astrometry.annotate_frame(
+        frame,
+        target_datetime,
+        calibration_path=calibration_path,
+        draw_grid=True,
+        draw_constellations=bool(wcs_info.get("draw_constellations", False)),
+    )
+    support_mask = local_wideangle_astrometry._forward_grid_model(
+        local_wcs, metadata, output.shape[1], output.shape[0]
+    )["support_mask"]
+    if detected_line:
+        rgb = cv2.cvtColor(output, cv2.COLOR_BGR2RGB)
+        output = cv2.cvtColor(_draw_meteor_marker(rgb, detected_line), cv2.COLOR_RGB2BGR)
+    if line_centers:
+        for x, y in line_centers:
+            pixel_x, pixel_y = int(round(x)), int(round(y))
+            supported = (
+                0 <= pixel_x < output.shape[1]
+                and 0 <= pixel_y < output.shape[0]
+                and support_mask[pixel_y, pixel_x] > 0
+            )
+            if supported:
+                sky = local_wcs.pixel_to_world(float(x), float(y))
+                sky = get_adjusted_skycoord_for_rotation(
+                    sky, reference_datetime, target_datetime
+                )
+                labels = (
+                    f"RA: {sky.ra.to_string(unit=u.hourangle, sep=':', precision=2)}",
+                    f"Dec: {sky.dec.to_string(unit=u.deg, sep=':', precision=2, alwayssign=True)}",
+                )
+                label_color = (80, 255, 80)
+            else:
+                # Do not present an extrapolated edge coordinate as measured.
+                labels = ("RA/Dec unavailable", "outside calibrated area")
+                label_color = (80, 190, 255)
+            anchor_x = int(np.clip(round(x), 5, output.shape[1] - 5))
+            anchor_y = int(np.clip(round(y) - 30, 36, output.shape[0] - 12))
+            for index, label in enumerate(labels):
+                text_y = anchor_y + index * 22
+                (text_width, text_height), _ = cv2.getTextSize(
+                    label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1
+                )
+                left = int(np.clip(anchor_x - text_width // 2 - 5, 0, output.shape[1] - 1))
+                right = int(np.clip(left + text_width + 10, 0, output.shape[1] - 1))
+                cv2.rectangle(output, (left, text_y - text_height - 5), (right, text_y + 4), (0, 0, 0), -1)
+                cv2.putText(output, label, (left + 5, text_y), cv2.FONT_HERSHEY_SIMPLEX,
+                            0.55, label_color, 1, cv2.LINE_AA)
+    if timestamp:
+        (text_width, text_height), _ = cv2.getTextSize(
+            timestamp, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2
+        )
+        x = max(8, (output.shape[1] - text_width) // 2)
+        y = output.shape[0] - 24
+        cv2.rectangle(output, (x - 8, y - text_height - 7), (x + text_width + 8, y + 7), (0, 0, 0), -1)
+        cv2.putText(output, timestamp, (x, y), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.7, (255, 255, 255), 2, cv2.LINE_AA)
+    if flip_vertically:
+        output = cv2.flip(output, 0)
+    base, _ = os.path.splitext(image_path)
+    if base.endswith('_composite'):
+        base = base[:-len('_composite')]
+    annotated_image_path = f"{base}_annotated.png"
+    if not cv2.imwrite(annotated_image_path, output, [cv2.IMWRITE_PNG_COMPRESSION, 3]):
+        raise IOError(f"注釈付き画像を保存できません: {annotated_image_path}")
+    return annotated_image_path
+
 def annotate_image_with_wcs(
     image_path: str,
     wcs_info: Dict,
@@ -666,8 +760,18 @@ def annotate_image_with_wcs(
     fig = None
     try:
         if cancel_flag and cancel_flag.is_set(): return None
-        
+
         wcs_file_path = wcs_info['wcs_file']
+        with fits.open(wcs_file_path) as hdul:
+            calibration_type = hdul[0].header.get("CALTYPE")
+        if (
+            calibration_type == "LOCAL-SIP"
+            or str(wcs_info.get("job_id", "")).startswith("local-wideangle")
+        ):
+            return _annotate_local_wideangle_image(
+                image_path, wcs_info, line_centers, detection_datetime, timestamp,
+                flip_vertically, detected_line,
+            )
         image_data = plt.imread(image_path)
         if detected_line:
             image_data = _draw_meteor_marker(image_data, detected_line)

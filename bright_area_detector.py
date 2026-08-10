@@ -49,7 +49,7 @@ AI_BACKEND_LOCAL = getattr(app_config, "AI_VLM_BACKEND_LOCAL_QWEN3_VL_4B", "loca
 AI_BACKEND_LM_STUDIO = getattr(app_config, "AI_VLM_BACKEND_LM_STUDIO_QWEN35_2B", "lmstudio_qwen3_5_2b")
 DEFAULT_AI_BACKEND = getattr(app_config, "DEFAULT_AI_VLM_BACKEND", AI_BACKEND_LOCAL)
 DEFAULT_LM_STUDIO_URL = getattr(app_config, "DEFAULT_LM_STUDIO_VLM_URL", "http://localhost:1234/v1")
-DEFAULT_LM_STUDIO_MODEL_ID = getattr(app_config, "DEFAULT_LM_STUDIO_VLM_MODEL_ID", "qwen3.5-2b")
+DEFAULT_LM_STUDIO_MODEL_ID = getattr(app_config, "DEFAULT_LM_STUDIO_VLM_MODEL_ID", "qwen/qwen3-vl-4b")
 DEFAULT_LM_STUDIO_API_KEY = getattr(app_config, "DEFAULT_LM_STUDIO_VLM_API_KEY", "lm-studio")
 
 _model = None
@@ -352,11 +352,39 @@ def load_lm_studio_selected_model() -> str:
 
     unload_local_model()
     selected_loaded = _lm_studio_loaded_instance_ids(_lm_studio_model_id)
+    other_loaded = [
+        instance_id
+        for instance_id in _lm_studio_loaded_instance_ids()
+        if instance_id not in selected_loaded
+    ]
+    if other_loaded:
+        _unload_lm_studio_instances(other_loaded)
 
     if selected_loaded:
+        if len(selected_loaded) > 1:
+            _unload_lm_studio_instances(selected_loaded[1:])
+        if len(_lm_studio_loaded_instance_ids()) != 1:
+            raise RuntimeError(
+                "LM Studioモデルを1つだけロードできませんでした。"
+                f" ロード状態: {_lm_studio_loaded_instance_ids()}"
+            )
         return f"Loaded: {_lm_studio_model_id}"
     _lm_studio_runtime_request("POST", "/api/v1/models/load", {"model": _lm_studio_model_id}, timeout=180)
     _lm_studio_connection_cache_key = None
+
+    selected_loaded = _lm_studio_loaded_instance_ids(_lm_studio_model_id)
+    other_loaded = [
+        instance_id
+        for instance_id in _lm_studio_loaded_instance_ids()
+        if instance_id not in selected_loaded
+    ]
+    if other_loaded:
+        _unload_lm_studio_instances(other_loaded)
+    if len(selected_loaded) != 1 or len(_lm_studio_loaded_instance_ids()) != 1:
+        raise RuntimeError(
+            "LM Studioモデルを1つだけロードできませんでした。"
+            f" ロード状態: {_lm_studio_loaded_instance_ids()}"
+        )
     return f"Loaded: {_lm_studio_model_id}"
 
 
@@ -383,6 +411,8 @@ def _call_lm_studio_chat(
     status_callback: Optional[Callable[[str], None]] = None,
     stream_callback: Optional[Callable[[str], None]] = None,
     max_tokens: int = 512,
+    temperature: float = 0.1,
+    top_p: float = 0.9,
 ) -> str:
     if status_callback:
         status_callback(f"LM Studioへ送信中: {_lm_studio_model_id}")
@@ -390,8 +420,8 @@ def _call_lm_studio_chat(
     payload = {
         "model": _lm_studio_model_id,
         "messages": messages,
-        "temperature": 0.1,
-        "top_p": 0.9,
+        "temperature": temperature,
+        "top_p": top_p,
         "max_tokens": max_tokens,
         "stream": bool(stream_callback),
     }
@@ -464,6 +494,31 @@ STRICT_BOX_SYSTEM_PROMPT = (
     "You are a strict visual bounding-box detector. "
     "Return only the requested coordinates in the exact text format. "
     "Do not explain, do not use JSON, and do not use Markdown."
+)
+
+QWEN3_VL_4B_MODEL_IDS = {
+    "qwen/qwen3-vl-4b",
+    "qwen/qwen3-vl-4b@4bit",
+}
+
+QWEN3_VL_4B_METEOR_PROMPT = (
+    "Analyze this fixed-camera night-sky maximum composite as an astronomical "
+    "streak localizer. Find the short continuous linear meteor trail. Do not "
+    "select individual stars, broad glow, clouds, trees, sensor noise, or dotted "
+    "aircraft/satellite tracks. Return the smallest practical axis-aligned box "
+    "that contains the complete trail. Use normalized 0..1000 coordinates: "
+    "left=x1, top=y1, right=x2, bottom=y2. Reply with only NONE or "
+    "(x1,y1,x2,y2), using digits in place of the names."
+)
+
+# Start with the benchmark-winning deterministic settings.  Only when the
+# response cannot be parsed as a detection do later attempts add a little
+# sampling freedom and a larger output budget.  Three entries means three
+# total attempts, not three retries after the first request.
+LM_STUDIO_DETECTION_ATTEMPTS = (
+    {"temperature": 0.0, "top_p": 1.0, "max_tokens": 128},
+    {"temperature": 0.1, "top_p": 0.95, "max_tokens": 192},
+    {"temperature": 0.2, "top_p": 0.9, "max_tokens": 256},
 )
 
 
@@ -791,7 +846,10 @@ def _call_vlm(
     user_prompt: str, 
     image: np.ndarray, 
     status_callback: Optional[Callable[[str], None]] = None,
-    stream_callback: Optional[Callable[[str], None]] = None
+    stream_callback: Optional[Callable[[str], None]] = None,
+    temperature: float = 0.1,
+    top_p: float = 0.9,
+    max_tokens: int = 128,
 ) -> str:
     """VLMを呼び出してテキスト応答を取得"""
     if _ai_backend == AI_BACKEND_LM_STUDIO:
@@ -806,7 +864,14 @@ def _call_vlm(
                 ],
             },
         ]
-        return _call_lm_studio_chat(messages, status_callback, stream_callback, max_tokens=128)
+        return _call_lm_studio_chat(
+            messages,
+            status_callback,
+            stream_callback,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            top_p=top_p,
+        )
 
     from transformers import TextIteratorStreamer
     from qwen_vl_utils import process_vision_info
@@ -1075,6 +1140,68 @@ def _parse_boxes(text: str) -> List[Tuple[int, int, int, int]]:
     return boxes
 
 
+def _is_lm_studio_qwen3_vl_4b() -> bool:
+    model_id = (_lm_studio_model_id or "").strip().lower()
+    return _ai_backend == AI_BACKEND_LM_STUDIO and model_id in QWEN3_VL_4B_MODEL_IDS
+
+
+def _meteor_detection_prompt() -> str:
+    if _is_lm_studio_qwen3_vl_4b():
+        return QWEN3_VL_4B_METEOR_PROMPT
+    return _strict_box_user_prompt(
+        "meteors, shooting stars, or linear meteor-like light streaks",
+        "moon, stars, planets, streetlights, clouds, static bright areas, aircraft, satellites, and noise",
+    )
+
+
+def _detect_meteor_boxes_with_retries(
+    image: np.ndarray,
+    log: Callable[[str], None],
+) -> Tuple[List[Tuple[int, int, int, int]], str]:
+    """Detect meteor boxes, making at most three LM Studio requests."""
+    attempts = (
+        LM_STUDIO_DETECTION_ATTEMPTS
+        if _ai_backend == AI_BACKEND_LM_STUDIO
+        else ({"temperature": 0.1, "top_p": 0.9, "max_tokens": 128},)
+    )
+    prompt = _meteor_detection_prompt()
+    last_text = ""
+
+    for attempt_number, generation in enumerate(attempts, start=1):
+        if attempt_number > 1:
+            log(
+                "流星を検出できなかったため再試行します "
+                f"({attempt_number}/{len(attempts)}: "
+                f"temperature={generation['temperature']}, "
+                f"top_p={generation['top_p']}, "
+                f"max_tokens={generation['max_tokens']})"
+            )
+        try:
+            last_text = _call_vlm(
+                STRICT_BOX_SYSTEM_PROMPT,
+                prompt,
+                image,
+                temperature=generation["temperature"],
+                top_p=generation["top_p"],
+                max_tokens=generation["max_tokens"],
+            )
+        except Exception as exc:
+            if attempt_number >= len(attempts):
+                raise
+            log(f"VLM呼び出しに失敗したため再試行します: {exc}")
+            continue
+
+        boxes = _parse_boxes(last_text)
+        log(
+            f"VLM応答 ({attempt_number}/{len(attempts)}): "
+            + (f"{last_text[:100]}..." if len(last_text) > 100 else last_text)
+        )
+        if boxes:
+            return boxes, last_text
+
+    return [], last_text
+
+
 def create_mask_from_boxes(
     image_shape: Tuple[int, int],
     boxes: List[Tuple[int, int, int, int]],
@@ -1323,19 +1450,11 @@ def detect_meteors_with_boxes(
     log("モデル準備OK。流星の検出を実行中...")
     
     try:
-        system_prompt = STRICT_BOX_SYSTEM_PROMPT
-        user_prompt = _strict_box_user_prompt(
-            "meteors, shooting stars, or linear meteor-like light streaks",
-            "moon, stars, planets, streetlights, clouds, static bright areas, aircraft, satellites, and noise",
-        )
-
-        result_text = _call_vlm(system_prompt, user_prompt, image)
-        log(f"VLM応答: {result_text[:100]}..." if len(result_text) > 100 else f"VLM応答: {result_text}")
-
-        boxes = _parse_boxes(result_text)
+        boxes, _result_text = _detect_meteor_boxes_with_retries(image, log)
         
         if not boxes:
-            log("流星は検出されませんでした。")
+            attempt_count = len(LM_STUDIO_DETECTION_ATTEMPTS) if _ai_backend == AI_BACKEND_LM_STUDIO else 1
+            log(f"{attempt_count}回試行しましたが、流星は検出されませんでした。")
             return None
         
         log(f"{len(boxes)}個の流星を検出しました。")

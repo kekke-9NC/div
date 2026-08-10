@@ -20,6 +20,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import warnings
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import cv2
@@ -354,6 +355,12 @@ def _persist_calibration(
             "sip_support_hull", "validation_path",
         ) if key in solve_result},
     }
+    support_hull = solve_result.get("sip_support_hull")
+    if support_hull and len(support_hull) >= 3:
+        hull = np.asarray(support_hull, dtype=np.float32)
+        payload["sip_support_fraction"] = float(
+            cv2.contourArea(hull) / max(1.0, float(width * height))
+        )
     if reference_frame_index is not None:
         payload["reference_frame_index"] = int(reference_frame_index)
     temporary = paths["metadata"].with_suffix(".json.tmp")
@@ -762,6 +769,29 @@ def _load_calibration(calibration_path: Optional[str]) -> Tuple[Dict[str, Any], 
         if path.suffix.lower() in {".wcs", ".fits", ".fit"}:
             wcs_path = path
             metadata = {"wcs_path": str(path)}
+            # A bare WCS does not contain the convex hull of verified detector
+            # matches.  Recover the sibling metadata when possible so callers
+            # cannot accidentally extrapolate a wide-angle SIP polynomial over
+            # uncalibrated image edges.
+            candidates: List[Path] = []
+            if path.stem.startswith("wideangle_sip"):
+                suffix = path.stem[len("wideangle_sip"):]
+                candidates.append(path.with_name(f"calibration{suffix}.json"))
+            candidates.extend(sorted(path.parent.glob("calibration*.json")))
+            for candidate in dict.fromkeys(candidates):
+                if not candidate.exists():
+                    continue
+                try:
+                    candidate_metadata = json.loads(candidate.read_text(encoding="utf-8"))
+                    candidate_wcs = Path(candidate_metadata.get("wcs_path", "")).expanduser()
+                    if not candidate_wcs.is_absolute():
+                        candidate_wcs = candidate.parent / candidate_wcs
+                    if candidate_wcs.resolve() == path.resolve():
+                        metadata = candidate_metadata
+                        metadata.setdefault("calibration_path", str(candidate))
+                        break
+                except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                    continue
         else:
             metadata = json.loads(path.read_text(encoding="utf-8"))
             wcs_path = Path(metadata["wcs_path"]).expanduser()
@@ -775,6 +805,8 @@ def _load_calibration(calibration_path: Optional[str]) -> Tuple[Dict[str, Any], 
         metadata.setdefault("reference_datetime", header.get("DATE-OBS"))
         metadata.setdefault("width", int(header.get("IMAGEW", 1920)))
         metadata.setdefault("height", int(header.get("IMAGEH", 1080)))
+        if wcs.sip is not None:
+            metadata.setdefault("sip_order", int(wcs.sip.a_order))
         _loaded_calibrations[key] = (stamp, metadata, wcs)
         return metadata, wcs
 
@@ -910,7 +942,15 @@ def _project_sky_with_forward_wcs(
     ra = np.asarray(ra, dtype=float)
     dec = np.asarray(dec, dtype=float)
     try:
-        x, y = wcs.world_to_pixel_values(ra, dec)
+        # Astropy's inverse SIP iteration is only an initial estimate here.  A
+        # forward-only wide-angle fit can legitimately report NoConvergence at
+        # the rim; the Newton loop below re-evaluates the calibrated forward
+        # transform and decides which points are actually usable.
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore", message=r".*WCS\.all_world2pix.*failed to converge.*"
+            )
+            x, y = wcs.world_to_pixel_values(ra, dec)
     except Exception:
         return np.zeros_like(ra), np.zeros_like(dec), np.zeros_like(ra, dtype=bool)
     x, y = np.asarray(x, dtype=float), np.asarray(y, dtype=float)
@@ -972,9 +1012,14 @@ def _draw_constellation_lines(
     ra = (coordinates[:, 0] - delta_ra) % 360.0
     x, y, usable = _project_sky_with_forward_wcs(wcs, ra, coordinates[:, 1])
     points = np.column_stack((x, y))
-    rounded = np.rint(points).astype(np.int32, copy=False)
+    finite_points = np.isfinite(points).all(axis=1)
+    usable &= finite_points
     usable &= (points[:, 0] >= 0) & (points[:, 0] < width)
     usable &= (points[:, 1] >= 0) & (points[:, 1] < height)
+    rounded = np.zeros(points.shape, dtype=np.int32)
+    visible_indices = np.flatnonzero(usable)
+    if len(visible_indices):
+        rounded[visible_indices] = np.rint(points[visible_indices]).astype(np.int32)
     # A coordinate such as y=1079.6 is mathematically inside a 1080px frame,
     # but rounds to 1080 and must not index the support mask.
     usable &= (rounded[:, 0] >= 0) & (rounded[:, 0] < width)
@@ -1072,7 +1117,9 @@ def annotate_frame(
                     output, center, marker_radius, (80, 255, 120),
                     marker_thickness, cv2.LINE_AA,
                 )
-    status = f"LOCAL SIP5  {target:%Y-%m-%d %H:%M:%S}"
+    sip_order = metadata.get("sip_order")
+    model_name = f"LOCAL SIP{sip_order}" if sip_order else "LOCAL SIP"
+    status = f"{model_name}  {target:%Y-%m-%d %H:%M:%S}"
     cv2.rectangle(output, (8, 8), (8 + max(270, len(status) * 9), 34), (0, 0, 0), -1)
     cv2.putText(output, status, (14, 27), cv2.FONT_HERSHEY_SIMPLEX,
                 0.50, (235, 245, 255), 1, cv2.LINE_AA)

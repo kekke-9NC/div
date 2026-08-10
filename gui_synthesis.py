@@ -351,13 +351,6 @@ class SynthesisMixin:
                                     progress_callback=None,
                                 )
                                 boxes = res[1] if res else []
-                                if not boxes:
-                                    detection_events.put(("log", f"未検出のため再検出します (1/1): {os.path.basename(vp)}"))
-                                    retry_res = bright_area_detector.detect_meteors_with_boxes(
-                                        composite_img,
-                                        progress_callback=None,
-                                    )
-                                    boxes = retry_res[1] if retry_res else []
                                 return data['filename'], data['temp_path'], boxes
                             finally:
                                 del composite_img
