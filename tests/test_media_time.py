@@ -59,7 +59,7 @@ class MediaTimeTests(unittest.TestCase):
                     return_value=(expected, "ファイル作成時刻", "a.mp4"),
                 ):
             output = timelapse_creator.get_default_output_path(["input"])
-        self.assertEqual("20260710230039.mp4", os.path.basename(output))
+        self.assertEqual("20260710230039_timelapse.mp4", os.path.basename(output))
 
 
 if __name__ == "__main__":

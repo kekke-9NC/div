@@ -2338,7 +2338,7 @@ def create_timelapse(
 
 
 def get_default_output_path(input_paths: Optional[Sequence[str]] = None) -> str:
-    """Return YYYYMMDDHHMMSS.mp4 based on the first input's creation time."""
+    """Return YYYYMMDDHHMMSS_timelapse.mp4 based on the first input's creation time."""
     downloads_path = os.path.join(os.path.expanduser("~"), "Downloads")
 
     if not os.path.exists(downloads_path):
@@ -2352,6 +2352,6 @@ def get_default_output_path(input_paths: Optional[Sequence[str]] = None) -> str:
     media_files = sorted(set(media_files))
     start_time, _source, _path = media_time.first_media_start_time(media_files)
     start_time = start_time or datetime.now()
-    filename = f"{start_time.strftime('%Y%m%d%H%M%S')}.mp4"
+    filename = f"{start_time.strftime('%Y%m%d%H%M%S')}_timelapse.mp4"
 
     return os.path.join(downloads_path, filename)
