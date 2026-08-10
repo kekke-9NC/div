@@ -28,7 +28,9 @@ class TimelapseDragDropWindow(Toplevel):
         self.timelapse_annotation_calibration_var = tk.StringVar(
             value=getattr(config, "TIMELAPSE_ANNOTATION_CALIBRATION_PATH", "") or ""
         )
-        self.timelapse_constellations_var = tk.BooleanVar(value=False)
+        self.timelapse_constellations_var = tk.BooleanVar(
+            value=getattr(config, "TIMELAPSE_CONSTELLATIONS_ENABLED", True)
+        )
         self.timelapse_grid_var = tk.BooleanVar(value=True)
         self.timelapse_detected_stars_var = tk.BooleanVar(value=False)
         self.timelapse_annotation_reference_sample_var = tk.IntVar(value=0)

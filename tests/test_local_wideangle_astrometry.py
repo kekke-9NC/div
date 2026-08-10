@@ -106,6 +106,31 @@ class LocalWideangleAstrometryTests(unittest.TestCase):
             self.assertEqual(metadata["sip_support_hull"], support_hull)
             self.assertTrue(Path(metadata["calibration_path"]).samefile(metadata_path))
 
+    def test_fixed_camera_model_preserves_its_fitted_sidereal_epoch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            wcs_path = root / "wideangle_sip.wcs"
+            header = _tan_wcs(320, 180).to_header(relax=True)
+            header["IMAGEW"] = 320
+            header["IMAGEH"] = 180
+            header["DATE-OBS"] = "2026-08-09T04:00:00"
+            fits.PrimaryHDU(header=header).writeto(wcs_path)
+            model_path = root / "camera_model.json"
+            model_path.write_text(json.dumps({
+                "model_type": "fixed-camera-stg-poly",
+                "width": 320,
+                "height": 180,
+                "polynomial_degree": 0,
+                "stg_parameters": [0.0, 0.0, 0.0, 4.605170186, 4.605170186, 160.0, 90.0],
+                "correction_coefficients": [[0.0, 0.0]],
+                "wcs_path": str(wcs_path),
+                "reference_datetime": "2026-08-07T19:59:15.469000",
+            }), encoding="utf-8")
+
+            metadata, _model = local_astro._load_calibration(str(model_path))
+
+            self.assertEqual(metadata["reference_datetime"], "2026-08-07T19:59:15.469000")
+
     def test_annotation_can_draw_constellation_lines(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

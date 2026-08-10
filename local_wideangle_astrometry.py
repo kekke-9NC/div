@@ -176,6 +176,11 @@ def _registered_camera_model(
             payload = json.loads(path.read_text(encoding="utf-8"))
             if payload.get("model_type") != CAMERA_MODEL_TYPE:
                 continue
+            # Older experimental builder output did not record a model
+            # revision and could reuse a stale registered orientation.  Keep
+            # it out of automatic selection; explicit paths remain supported.
+            if not payload.get("algorithm_version") and not payload.get("model_revision"):
+                continue
             if not payload.get("enabled", False):
                 continue
             if int(payload.get("width", 0)) != width or int(payload.get("height", 0)) != height:
@@ -853,6 +858,10 @@ def _load_calibration(calibration_path: Optional[str]) -> Tuple[Dict[str, Any], 
         else:
             metadata = json.loads(path.read_text(encoding="utf-8"))
             if metadata.get("model_type") == CAMERA_MODEL_TYPE:
+                # The model's reference epoch is part of its fitted camera
+                # orientation.  Do not replace it with the WCS DATE-OBS here:
+                # validated fixed-camera models may intentionally encode a
+                # different epoch after applying a sidereal rotation.
                 model = FixedCameraPlateModel(metadata)
                 metadata.setdefault("calibration_path", str(path))
                 _loaded_calibrations[key] = (stamp, metadata, model)
@@ -1090,7 +1099,9 @@ def _draw_constellation_lines(
 ) -> None:
     """Project visible constellation line segments into the current frame."""
     height, width = output.shape[:2]
-    color = (255, 175, 80)
+    # Keep the constellation sticks visually distinct from the yellow sky
+    # grid.  A dark halo also keeps them readable over clouds and bright stars.
+    color = (255, 150, 60)
     lines = _load_constellation_lines()
     if not lines:
         return
@@ -1143,9 +1154,13 @@ def _draw_constellation_lines(
             while end < len(line_points) and line_usable[end]:
                 end += 1
             if end - start >= 2:
+                polyline = line_points[start:end].reshape(-1, 1, 2)
+                thickness = max(1, round(min(width, height) / 720.0))
                 cv2.polylines(
-                    output, [line_points[start:end].reshape(-1, 1, 2)],
-                    False, color, 1, cv2.LINE_AA,
+                    output, [polyline], False, (0, 0, 0), thickness + 2, cv2.LINE_AA,
+                )
+                cv2.polylines(
+                    output, [polyline], False, color, thickness, cv2.LINE_AA,
                 )
             start = end + 1
 
@@ -1173,8 +1188,13 @@ def annotate_frame(
         target = target.replace(tzinfo=None)
     delta_ra = ((target - reference).total_seconds() / SIDEREAL_DAY_SECONDS) * 360.0
     detected_stars: List[List[float]] = []
+    # The fixed camera model has already been fitted against detected stars.
+    # Requiring every constellation endpoint to be rediscovered in each output
+    # frame makes the overlay disappear as soon as a cloud hides one star.
+    # Keep the old anchor check available only as an explicit opt-in for
+    # experimental calibrations.
     verify_constellations = bool(
-        draw_constellations and metadata.get("verified_constellation_only", False)
+        draw_constellations and metadata.get("constellation_anchor_filter", False)
     )
     if draw_detected_stars or verify_constellations:
         detection_gray = cv2.cvtColor(output, cv2.COLOR_BGR2GRAY)

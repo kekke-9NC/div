@@ -499,7 +499,7 @@ class TimelapseCreatorTests(unittest.TestCase):
     def test_annotation_settings_default_to_grid_without_other_overlays(self):
         settings = timelapse_creator._normalize_annotation_settings({"enabled": True})
         self.assertTrue(settings["draw_grid"])
-        self.assertFalse(settings["draw_constellations"])
+        self.assertTrue(settings["draw_constellations"])
         self.assertFalse(settings["draw_detected_stars"])
 
     def test_annotation_path_applies_fixed_pattern_before_annotation(self):
@@ -537,7 +537,9 @@ class TimelapseCreatorTests(unittest.TestCase):
         stdin.closed = False
         proc = mock.MagicMock(stdin=stdin)
         proc.poll.return_value = 0
-        annotator = mock.Mock(side_effect=lambda image, _time, calibration_path=None: image + 1)
+        annotator = mock.Mock(
+            side_effect=lambda image, _time, calibration_path=None, **_kwargs: image + 1
+        )
 
         with (
             mock.patch.object(

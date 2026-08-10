@@ -94,6 +94,9 @@ LOCAL_SOLVER_ENABLED = True
 LOCAL_SOLVER_INDEX_DIR = "/usr/share/astrometry/data"  # WSL内のインデックスファイルパス
 TIMELAPSE_LOCAL_ANNOTATION_ENABLED = False
 TIMELAPSE_ANNOTATION_CALIBRATION_PATH = ""
+# The local calibration is already tied to the camera's star solution, so
+# constellation sticks are a useful default whenever local annotation is on.
+TIMELAPSE_CONSTELLATIONS_ENABLED = True
 
 # --- 天体カタログ関連 ---
 VIZIER_STAR_MAG_LIMIT = 3 # Vizierから取得して画像に表示する星の最大等級 (floatでも可)

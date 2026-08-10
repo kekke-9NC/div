@@ -365,6 +365,11 @@ def build_camera_model(
         solver = solver or local_astrometry.solve_video_local
         start_seconds = _duration_seconds(request.start)
         end_seconds = _duration_seconds(request.end)
+        # Building a camera model is an explicit recalibration request.  Do
+        # not let solve_video_local silently return a previously registered
+        # model from another night/source; that can carry an old DATE-OBS and
+        # rotate every constellation by many degrees.
+        force_initial_solve = True
         if len(videos) == 1 and start_seconds is not None:
             cap = cv2.VideoCapture(seed)
             fps = float(cap.get(cv2.CAP_PROP_FPS)) if cap.isOpened() else 0.0
@@ -377,18 +382,20 @@ def build_camera_model(
                     frame_index = min(max(0, frame_index), frame_count - 1)
                 _emit(progress_callback, f"指定秒数の基準フレームでソルブ: {chosen_seconds:.2f}s")
                 calibration = local_astrometry.solve_video_frame_local(
-                    seed, frame_index, cache_root=request.cache_root, force=request.force_initial_solve,
+                    seed, frame_index, cache_root=request.cache_root, force=force_initial_solve,
                     progress_callback=progress_callback,
                 )
             else:
-                calibration = solver(seed, cache_root=request.cache_root, force=request.force_initial_solve, progress_callback=progress_callback)
+                calibration = solver(seed, cache_root=request.cache_root, force=force_initial_solve, progress_callback=progress_callback)
         else:
-            calibration = solver(seed, cache_root=request.cache_root, force=request.force_initial_solve, progress_callback=progress_callback)
+            calibration = solver(seed, cache_root=request.cache_root, force=force_initial_solve, progress_callback=progress_callback)
         wcs_path = Path(calibration["wcs_file"]).expanduser().resolve()
         with fits.open(wcs_path) as hdul:
-            wcs = WCS(hdul[0].header.copy(), relax=True, fix=False)
-            width = int(calibration.get("width") or hdul[0].header.get("IMAGEW"))
-            height = int(calibration.get("height") or hdul[0].header.get("IMAGEH"))
+            header = hdul[0].header.copy()
+            wcs = WCS(header, relax=True, fix=False)
+            width = int(calibration.get("width") or header.get("IMAGEW"))
+            height = int(calibration.get("height") or header.get("IMAGEH"))
+            wcs_reference_datetime = header.get("DATE-OBS")
         if width <= 0 or height <= 0:
             raise RuntimeError("WCSの画像サイズが不正です")
         _emit(progress_callback, "WCSを固定カメラ投影へ変換中...")
@@ -400,7 +407,9 @@ def build_camera_model(
             support_fraction = float(np.mean(support_array > 0)) if support_array.size else 0.0
         else:
             support, support_fraction = _support_grid(width, height, support_source)
-        reference_datetime = calibration.get("reference_datetime")
+        # DATE-OBS belongs to the WCS that was actually used for this model.
+        # Prefer it over metadata returned by a reused/legacy solver result.
+        reference_datetime = wcs_reference_datetime or calibration.get("reference_datetime")
         if isinstance(reference_datetime, datetime):
             reference_datetime = reference_datetime.isoformat()
         if not reference_datetime:
@@ -432,6 +441,8 @@ def build_camera_model(
             "support_fraction": support_fraction,
             "support_grid": support,
             "model_label": "AUTO FIXED CAMERA" if enabled else "AUTO FIXED CAMERA (CANDIDATE)",
+            "model_revision": "camera-model-builder-v2",
+            "reference_datetime_source": "wcs:DATE-OBS" if wcs_reference_datetime else "solver-or-source",
             "verified_constellation_only": bool(enabled),
             "constellation_anchor_tolerance_px": 5.0,
             "source_videos": clear_videos,

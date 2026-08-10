@@ -63,6 +63,7 @@ def test_build_registers_model_and_filters_cloudy_source(tmp_path):
 
     def fake_solver(path, **kwargs):
         seen["path"] = path
+        seen["kwargs"] = kwargs
         return {
             "wcs_file": wcs_path,
             "calibration_path": "fake-calibration.json",
@@ -84,6 +85,37 @@ def test_build_registers_model_and_filters_cloudy_source(tmp_path):
     payload = json.loads(Path(result.model_path).read_text())
     assert payload["model_type"] == "fixed-camera-stg-poly"
     assert payload["support_fraction"] == 1.0
+    assert seen["kwargs"]["force"] is True
+
+
+def test_build_prefers_wcs_observation_time_over_stale_solver_metadata(tmp_path):
+    video = tmp_path / "20260809_040000.mp4"
+    video.write_bytes(b"placeholder")
+    wcs_path = tmp_path / "seed.wcs"
+    _simple_wcs(wcs_path)
+    with fits.open(wcs_path, mode="update") as hdul:
+        hdul[0].header["DATE-OBS"] = "2026-08-09T04:00:00"
+
+    def fake_solver(path, **kwargs):
+        return {
+            "wcs_file": str(wcs_path),
+            "calibration_path": "fake-calibration.json",
+            "reference_datetime": "2026-08-07T19:59:15.469000",
+            "width": 320,
+            "height": 180,
+            "sip_support_hull": [[0, 0], [319, 0], [319, 179], [0, 179]],
+        }
+
+    classifier = lambda frame, **kwargs: CloudClassification(0.05, "test", 1.0)
+    request = CameraModelBuildRequest(
+        source=str(video), cache_root=str(tmp_path / "cache"),
+    )
+    with mock.patch("camera_model_builder._read_probe_frame", return_value=np.zeros((180, 320, 3), np.uint8)):
+        result = build_camera_model(request, classifier=classifier, solver=fake_solver)
+
+    assert result.success
+    payload = json.loads(Path(result.model_path).read_text())
+    assert payload["reference_datetime"] == "2026-08-09T04:00:00"
 
 
 def test_select_video_paths_supports_clock_ranges(tmp_path):

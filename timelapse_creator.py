@@ -113,7 +113,12 @@ def _normalize_annotation_settings(annotation_settings: Optional[Dict]) -> Dict:
         ),
         "calibration_path": calibration_path,
         "draw_grid": bool(settings.get("draw_grid", True)),
-        "draw_constellations": bool(settings.get("draw_constellations", False)),
+        "draw_constellations": bool(
+            settings.get(
+                "draw_constellations",
+                getattr(config, "TIMELAPSE_CONSTELLATIONS_ENABLED", True),
+            )
+        ),
         "draw_detected_stars": bool(settings.get("draw_detected_stars", False)),
         "reference_sample_index": reference_sample_index,
         "reference_selected": bool(settings.get("reference_selected", False)),
