@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import base64
 from dataclasses import dataclass, asdict
-import io
 import json
 import re
 from typing import Any, Callable, Optional
@@ -28,6 +27,9 @@ class CloudClassification:
     confidence: float
     raw_text: str = ""
     error: str = ""
+    sky_visibility: str = "unknown"
+    blocked_fraction: float = 0.0
+    reason: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -88,37 +90,67 @@ def _heuristic_cloud_fraction(image: np.ndarray) -> CloudClassification:
     return CloudClassification(fraction, "heuristic", confidence)
 
 
-def _parse_fraction(text: str) -> Optional[float]:
-    value = (text or "").strip()
-    candidates = []
+def _extract_json_payload(text: str) -> dict[str, Any]:
+    value = (text or "").strip().replace("```json", "").replace("```", "").strip()
     try:
         payload = json.loads(value)
         if isinstance(payload, dict):
-            for key in ("cloud_fraction", "cloud_cover", "cloud_amount", "fraction"):
-                if key in payload:
-                    candidates.append(payload[key])
-                    break
+            return payload
     except (TypeError, ValueError, json.JSONDecodeError):
         pass
-    match = re.search(r"(?:cloud[_ -]?(?:fraction|cover|amount)|fraction)\s*[=:：]\s*([0-9]+(?:\.[0-9]+)?)\s*(%|割)?", value, re.I)
-    if match:
-        candidates.append(match.group(1) + (match.group(2) or ""))
-    for item in candidates:
+    # Qwen sometimes adds one short sentence before/after an otherwise valid
+    # object.  Parse the first balanced-looking JSON object as a fallback.
+    start, end = value.find("{"), value.rfind("}")
+    if start >= 0 and end > start:
         try:
-            raw = str(item).strip().lower()
-            if raw.endswith("%"):
-                number = float(raw[:-1]) / 100.0
-            elif raw.endswith("割"):
-                number = float(raw[:-1]) / 10.0
-            else:
-                number = float(raw)
-                if number > 1.0:
-                    number /= 100.0
-            if 0.0 <= number <= 1.0:
-                return number
-        except (TypeError, ValueError):
-            continue
+            payload = json.loads(value[start:end + 1])
+            if isinstance(payload, dict):
+                return payload
+        except (TypeError, ValueError, json.JSONDecodeError):
+            pass
+    return {}
+
+
+def _coerce_unit_interval(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        raw = str(value).strip().lower()
+        if raw.endswith("%"):
+            number = float(raw[:-1]) / 100.0
+        elif raw.endswith("割"):
+            number = float(raw[:-1]) / 10.0
+        else:
+            number = float(raw)
+            if number > 1.0:
+                number /= 100.0
+        return float(number) if 0.0 <= number <= 1.0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_fraction(text: str) -> Optional[float]:
+    value = (text or "").strip()
+    payload = _extract_json_payload(value)
+    for key in ("cloud_fraction", "cloud_cover", "cloud_amount", "fraction"):
+        if key in payload:
+            parsed = _coerce_unit_interval(payload[key])
+            if parsed is not None:
+                return parsed
+    match = re.search(r"[\"']?(?:cloud[_ -]?(?:fraction|cover|amount)|fraction)[\"']?\s*[=:：]\s*[\"']?([0-9]+(?:\.[0-9]+)?)[\"']?\s*(%|割)?", value, re.I)
+    if match:
+        return _coerce_unit_interval(match.group(1) + (match.group(2) or ""))
     return None
+
+
+def _parse_confidence(text: str) -> float:
+    payload = _extract_json_payload(text)
+    parsed = _coerce_unit_interval(payload.get("confidence"))
+    if parsed is not None:
+        return parsed
+    match = re.search(r"[\"']?confidence[\"']?\s*[=:：]\s*[\"']?([0-9]+(?:\.[0-9]+)?)[\"']?", text or "", re.I)
+    parsed = _coerce_unit_interval(match.group(1)) if match else None
+    return float(parsed if parsed is not None else 0.75)
 
 
 def _classify_with_openai_compatible(
@@ -133,18 +165,38 @@ def _classify_with_openai_compatible(
     if status_callback:
         status_callback(f"雲量判定中: {model_id}")
     endpoint = _normalize_base_url(url) + "/chat/completions"
+    system_prompt = (
+        "You are a conservative meteorological night-sky assessor for one fixed "
+        "1920x1080 ultra-wide camera. The lens has strong distortion. Your job is "
+        "only to estimate the fraction of usable sky obscured by opaque or "
+        "translucent clouds. Do not identify meteors or stars. "
+        "Ignore individual stars, star trails, sensor hot pixels, JPEG noise, "
+        "vignetting, broad exposure gradients, lens dirt, the lens hood, buildings, "
+        "trees and artificial lights. Treat a broad soft gray/white structure that "
+        "hides stars as cloud. Use the visible upper sky and exclude roughly the "
+        "lowest 14 percent of the image and any non-sky obstruction. "
+        "Mentally divide the usable sky into an 8 by 6 grid, judge each cell, and "
+        "average the clear/partly-cloudy/overcast cells by area. Thin clouds count "
+        "when they noticeably reduce star visibility. If uncertain, round the cloud "
+        "fraction upward: this is a safety gate for astrometric calibration. "
+        "A value below 0.10 is allowed only when at least 90 percent of usable sky "
+        "is convincingly clear. Return one JSON object only; no markdown and no "
+        "extra prose."
+    )
     prompt = (
-        "You classify cloud cover in a fixed wide-angle night-sky camera image. "
-        "Ignore stars, the lens hood, buildings, trees and artificial lights. "
-        "Return JSON only with cloud_fraction (0.0 to 1.0), confidence (0.0 to 1.0), "
-        "and one short reason. cloud_fraction means the fraction of usable sky "
-        "covered by opaque or translucent clouds."
+        "Analyze this current camera frame. Return exactly this schema: "
+        '{"cloud_fraction":0.00,"confidence":0.00,"sky_visibility":"clear|mixed|overcast",'
+        '"blocked_fraction":0.00,"reason":"short reason"}. '
+        "cloud_fraction and blocked_fraction must be numbers from 0.0 to 1.0."
     )
     payload = {
         "model": model_id or "qwen/qwen3-vl-4b",
         "temperature": 0.0,
-        "max_tokens": 180,
+        "max_tokens": 220,
         "messages": [{
+            "role": "system",
+            "content": system_prompt,
+        }, {
             "role": "user",
             "content": [
                 {"type": "text", "text": prompt},
@@ -165,11 +217,15 @@ def _classify_with_openai_compatible(
     fraction = _parse_fraction(text)
     if fraction is None:
         raise ValueError(f"VLM response did not contain cloud_fraction: {text[:240]}")
-    confidence_match = re.search(r"confidence\s*[=:：]\s*([0-9]+(?:\.[0-9]+)?)", text, re.I)
-    confidence = float(confidence_match.group(1)) if confidence_match else 0.75
-    if confidence > 1.0:
-        confidence /= 100.0
-    return CloudClassification(float(fraction), "qwen-vlm", float(np.clip(confidence, 0.0, 1.0)), text)
+    payload_data = _extract_json_payload(text)
+    confidence = _parse_confidence(text)
+    blocked = _coerce_unit_interval(payload_data.get("blocked_fraction")) or 0.0
+    visibility = str(payload_data.get("sky_visibility", "unknown")).strip().lower() or "unknown"
+    reason = str(payload_data.get("reason", "")).strip()[:240]
+    return CloudClassification(
+        float(fraction), "qwen-vlm", float(np.clip(confidence, 0.0, 1.0)), text,
+        sky_visibility=visibility, blocked_fraction=blocked, reason=reason,
+    )
 
 
 def classify_cloud_fraction(

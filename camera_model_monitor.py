@@ -188,6 +188,9 @@ class RTSPCameraModelMonitor:
         )
         self.last_classification = result
         self._emit(f"RTSP雲量判定: {result.cloud_fraction * 100:.1f}% ({result.source})")
+        if result.source == "qwen-vlm" and (result.error or result.confidence < 0.60):
+            self._emit("Qwenの判定信頼度が不足しているため、自動モデル作成を見送ります")
+            return None
         if result.cloud_fraction >= self.cloud_threshold:
             self._emit("雲量条件未達。次の監視まで待機します")
             return None

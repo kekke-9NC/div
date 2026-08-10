@@ -24,4 +24,21 @@ def test_qwen_openai_compatible_response_is_parsed():
         )
     assert result.source == "qwen-vlm"
     assert result.cloud_fraction == 0.07
+    assert result.confidence == 0.91
     post.assert_called_once()
+
+
+def test_qwen_json_with_markdown_fence_is_parsed():
+    response = mock.Mock()
+    response.raise_for_status.return_value = None
+    response.json.return_value = {
+        "choices": [{"message": {"content": '```json\n{"cloud_fraction": "12%", "confidence": 88, "sky_visibility": "mixed"}\n```'}}]
+    }
+    with mock.patch("cloud_coverage.requests.post", return_value=response):
+        result = classify_cloud_fraction(
+            np.zeros((60, 100, 3), dtype=np.uint8), backend="lmstudio",
+            lm_studio_url="http://localhost:1234/v1", lm_studio_model_id="qwen/qwen3-vl-4b",
+        )
+    assert result.cloud_fraction == 0.12
+    assert result.confidence == 0.88
+    assert result.sky_visibility == "mixed"
