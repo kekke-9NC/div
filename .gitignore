@@ -71,5 +71,12 @@ diff.txt
 build/
 dist/
 
+# Benchmark results and scripts
+meteor_vlm_benchmark.py
+meteor_vlm_benchmark_results/
+meteor_vlm_benchmark_results_remaining/
+tests/test_bright_area_detector_retries.py
+tests/test_sun_times.py
+
 README.md
 .conda/
