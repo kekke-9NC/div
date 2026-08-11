@@ -564,6 +564,7 @@ def draw_radiant_sphere(report: RadiantReport, figure=None):
         "ORI": "#C58BFF", "GEM": "#5DE2A5", "SPO": "#C5CFDD",
     }
     plotted_labels = set()
+    shower_handles = []
     for result in report.supported_results:
         start, end, radiant = _extension_vectors(result)
         color = colors.get(result.shower_code, "#C5CFDD")
@@ -578,6 +579,13 @@ def draw_radiant_sphere(report: RadiantReport, figure=None):
             axis.scatter([radiant[0]], [radiant[1]], [radiant[2]], color=color, s=48, depthshade=False)
             if result.shower_code not in plotted_labels:
                 axis.text(radiant[0] * 1.08, radiant[1] * 1.08, radiant[2] * 1.08, result.shower_code, color=color, fontsize=9)
+                shower_handles.append(
+                    Line2D(
+                        [0], [0], marker="o", linestyle="None", color=color,
+                        markerfacecolor=color, markeredgecolor=color,
+                        label=f"{result.shower_code} {result.shower_name}",
+                    )
+                )
                 plotted_labels.add(result.shower_code)
         else:
             axis.scatter([start[0]], [start[1]], [start[2]], color="#C5CFDD", s=20, depthshade=False)
@@ -598,6 +606,7 @@ def draw_radiant_sphere(report: RadiantReport, figure=None):
     axis.view_init(elev=22, azim=-58)
     handles = [Line2D([0], [0], color="#F4F7FC", linewidth=2.4, label="実際の流星経路")]
     handles.append(Line2D([0], [0], color="#F4F7FC", linewidth=1.4, linestyle="--", label="放射点までの延長"))
+    handles.extend(shower_handles)
     axis.legend(
         handles=handles,
         loc="upper left",
