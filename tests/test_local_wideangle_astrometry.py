@@ -304,6 +304,53 @@ class LocalWideangleAstrometryTests(unittest.TestCase):
         np.testing.assert_allclose(y, [20.0, 20.0], atol=0.05)
         self.assertTrue(valid.all())
 
+    def test_fixed_camera_constellation_projection_uses_forward_model_only(self):
+        class ForwardOnlyFixedModel(local_astro.FixedCameraPlateModel):
+            def __init__(self):
+                pass
+
+            def world_to_pixel_values(self, ra, dec):
+                return np.asarray(ra, dtype=float) + 100.0, np.asarray(dec, dtype=float)
+
+            def pixel_to_world_values(self, _x, _y):
+                raise AssertionError("fixed-camera constellation projection used inverse")
+
+        x, y, valid = local_astro._project_sky_with_forward_wcs(
+            ForwardOnlyFixedModel(), np.asarray([10.0, 11.0]), np.asarray([20.0, 20.0])
+        )
+        np.testing.assert_allclose(x, [110.0, 111.0])
+        np.testing.assert_allclose(y, [20.0, 20.0])
+        self.assertTrue(valid.all())
+
+    def test_constellation_boundary_draws_visible_run_when_endpoint_is_outside(self):
+        output = np.zeros((180, 320, 3), dtype=np.uint8)
+        support = np.full((180, 320), 255, dtype=np.uint8)
+        with mock.patch.object(
+            local_astro,
+            "_constellation_lines",
+            (np.asarray([[10.0, 20.0], [12.0, 20.0]]),),
+        ), mock.patch.object(
+            local_astro,
+            "_project_sky_with_forward_wcs",
+            return_value=(
+                np.asarray([-40.0, 120.0]),
+                np.asarray([90.0, 90.0]),
+                np.asarray([True, True]),
+            ),
+        ), mock.patch.object(
+            local_astro,
+            "_project_constellation_samples",
+            return_value=(
+                np.asarray([-40.0, 20.0, 80.0]),
+                np.asarray([90.0, 90.0, 90.0]),
+                np.asarray([True, True, True]),
+            ),
+        ):
+            local_astro._draw_constellation_lines(
+                output, object(), 0.0, support
+            )
+        self.assertGreater(np.count_nonzero(output), 0)
+
     def test_catalog_bootstrap_fits_real_sip_coefficients(self):
         width, height = 640, 360
         base = _tan_wcs(width, height)

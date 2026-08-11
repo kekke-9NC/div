@@ -1032,7 +1032,7 @@ def _load_constellation_lines() -> Tuple[np.ndarray, ...]:
 
 
 def _project_sky_with_forward_wcs(
-    wcs: WCS,
+    wcs: Any,
     ra: np.ndarray,
     dec: np.ndarray,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -1046,6 +1046,17 @@ def _project_sky_with_forward_wcs(
     """
     ra = np.asarray(ra, dtype=float)
     dec = np.asarray(dec, dtype=float)
+    if isinstance(wcs, FixedCameraPlateModel):
+        # The fixed-camera model is itself the authoritative forward
+        # projection.  Its inverse is only an approximate numerical helper
+        # near the ultra-wide rim, so sending these points through the SIP
+        # Newton refinement below can move them onto a different branch.
+        try:
+            x, y = wcs.world_to_pixel_values(ra, dec)
+        except Exception:
+            return np.zeros_like(ra), np.zeros_like(dec), np.zeros_like(ra, dtype=bool)
+        x, y = np.asarray(x, dtype=float), np.asarray(y, dtype=float)
+        return x, y, np.isfinite(x) & np.isfinite(y)
     try:
         # Astropy's inverse SIP iteration is only an initial estimate here.  A
         # forward-only wide-angle fit can legitimately report NoConvergence at
@@ -1329,10 +1340,9 @@ def _draw_constellation_lines(
     lines = _load_constellation_lines()
     if not lines:
         return
-    # A constellation edge is a connection between two catalog stars.  Do
-    # not draw a floating fragment whose two catalog endpoints are outside
-    # the calibrated view; that is the main source of apparently unrelated
-    # lines entering from an image edge.
+    # A constellation edge is a connection between two catalog stars.  Keep
+    # endpoint projection separate from the visibility test: a star can be
+    # outside the frame while the connecting edge is still partly visible.
     lengths = [len(line) for line in lines]
     coordinates = np.concatenate(lines, axis=0)
     ra = (coordinates[:, 0] - delta_ra) % 360.0
@@ -1344,23 +1354,10 @@ def _draw_constellation_lines(
     draw_points = vertex_points + pixel_shift
     usable &= np.isfinite(vertex_points).all(axis=1)
     usable &= np.isfinite(draw_points).all(axis=1)
-    usable &= (draw_points[:, 0] >= 0) & (draw_points[:, 0] < width)
-    usable &= (draw_points[:, 1] >= 0) & (draw_points[:, 1] < height)
-    rounded = np.zeros(draw_points.shape, dtype=np.int32)
-    visible_indices = np.flatnonzero(usable)
-    if len(visible_indices):
-        rounded[visible_indices] = np.rint(draw_points[visible_indices]).astype(np.int32)
-    # A coordinate such as y=1079.6 is mathematically inside a 1080px frame,
-    # but rounds to 1080 and must not index the support mask.
-    usable &= (rounded[:, 0] >= 0) & (rounded[:, 0] < width)
-    usable &= (rounded[:, 1] >= 0) & (rounded[:, 1] < height)
-    in_support = np.zeros(len(rounded), dtype=bool)
-    valid_indices = np.flatnonzero(usable)
-    if len(valid_indices):
-        in_support[valid_indices] = (
-            support_mask[rounded[valid_indices, 1], rounded[valid_indices, 0]] > 0
-        )
-    usable &= in_support
+    # Keep finite projected endpoints for optional anchor matching, but do
+    # not require them to be inside the output.  Boundary clipping is done
+    # on densely sampled sky segments below.
+    anchor_usable = usable.copy()
     if anchor_points is not None and len(anchor_points):
         anchors = np.asarray(anchor_points, dtype=float).reshape(-1, 2)
         finite_anchors = anchors[np.isfinite(anchors).all(axis=1)]
@@ -1368,9 +1365,9 @@ def _draw_constellation_lines(
             distances = np.linalg.norm(
                 draw_points[:, np.newaxis, :] - finite_anchors[np.newaxis, :, :], axis=2
             )
-            usable &= np.min(distances, axis=1) <= float(anchor_tolerance_px)
+            anchor_usable &= np.min(distances, axis=1) <= float(anchor_tolerance_px)
         else:
-            usable[:] = False
+            anchor_usable[:] = False
     max_pixel_step = max(
         96.0, min(width, height) * _CONSTELLATION_MAX_PIXEL_STEP_FACTOR
     )
@@ -1378,20 +1375,51 @@ def _draw_constellation_lines(
     thickness = max(1, round(min(width, height) / 720.0))
     for line, length in zip(lines, lengths):
         for index in range(length - 1):
-            if not (usable[offset + index] and usable[offset + index + 1]):
+            if not (anchor_usable[offset + index] and anchor_usable[offset + index + 1]):
                 continue
-            if not _constellation_segment_is_safe(
-                wcs, line[index:index + 2], delta_ra, support_mask,
-                width, height, max_pixel_step, tuple(pixel_shift),
-            ):
-                continue
-            polyline = rounded[offset + index:offset + index + 2].reshape(-1, 1, 2)
-            cv2.polylines(
-                output, [polyline], False, (0, 0, 0), thickness + 2, cv2.LINE_AA,
+            sampled = _sample_constellation_line(line[index:index + 2])
+            segment_ra = (sampled[:, 0] - delta_ra) % 360.0
+            sample_x, sample_y, sample_usable = _project_constellation_samples(
+                wcs, segment_ra, sampled[:, 1]
             )
-            cv2.polylines(
-                output, [polyline], False, color, thickness, cv2.LINE_AA,
+            sample_points = np.column_stack((sample_x, sample_y))
+            sample_points += pixel_shift
+            sample_usable &= np.isfinite(sample_points).all(axis=1)
+            sample_usable &= (
+                (sample_points[:, 0] >= 0) & (sample_points[:, 0] < width)
+                & (sample_points[:, 1] >= 0) & (sample_points[:, 1] < height)
             )
+            rounded_samples = np.zeros(sample_points.shape, dtype=np.int32)
+            visible_indices = np.flatnonzero(sample_usable)
+            if len(visible_indices):
+                rounded_samples[visible_indices] = np.rint(
+                    sample_points[visible_indices]
+                ).astype(np.int32)
+            # A coordinate such as y=1079.6 is mathematically inside a
+            # 1080px frame, but rounds to 1080 and must not index the mask.
+            sample_usable &= (
+                (rounded_samples[:, 0] >= 0) & (rounded_samples[:, 0] < width)
+                & (rounded_samples[:, 1] >= 0) & (rounded_samples[:, 1] < height)
+            )
+            visible_indices = np.flatnonzero(sample_usable)
+            if len(visible_indices):
+                sample_usable[visible_indices] = support_mask[
+                    rounded_samples[visible_indices, 1],
+                    rounded_samples[visible_indices, 0],
+                ] > 0
+            runs = _constellation_polyline_runs(
+                sample_points, sample_usable, max_pixel_step
+            )
+            for run in runs:
+                polyline = np.rint(run).astype(np.int32).reshape(-1, 1, 2)
+                if len(polyline) < 2:
+                    continue
+                cv2.polylines(
+                    output, [polyline], False, (0, 0, 0), thickness + 2, cv2.LINE_AA,
+                )
+                cv2.polylines(
+                    output, [polyline], False, color, thickness, cv2.LINE_AA,
+                )
         offset += length
 
 
