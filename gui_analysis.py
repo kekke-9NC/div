@@ -1,5 +1,7 @@
 from gui_common import *
 import media_time
+import camera_model_catalog
+import meteor_radiant_analysis as mra
 from datetime import timedelta
 
 UI_BG = ui_theme.COLORS["content_raised"]
@@ -117,6 +119,40 @@ class AnalysisMixin:
         ttk.Button(btn_frame, text="選択項目を削除", command=self.remove_selected_analysis).pack(side=tk.LEFT, padx=2)
         ttk.Button(btn_frame, text="すべて削除", command=self.remove_all_analysis).pack(side=tk.LEFT, padx=2)
 
+        # The model is selected in the app, not through Finder.  The detail
+        # line makes the validated coverage and reference night visible before
+        # the user starts the high-precision radiant calculation.
+        radiant_model_tools = ttk.LabelFrame(frame, text="高精度・放射点解析")
+        radiant_model_tools.pack(fill=tk.X, pady=(2, 8))
+        radiant_model_grid = ttk.Frame(radiant_model_tools)
+        radiant_model_grid.pack(fill=tk.X, padx=8, pady=8)
+        radiant_model_grid.columnconfigure(1, weight=1)
+        ttk.Label(radiant_model_grid, text="プレートソルブモデル").grid(
+            row=0, column=0, sticky=tk.W, padx=(0, 8), pady=(0, 4)
+        )
+        self.analysis_radiant_model_var = tk.StringVar(value="自動選択（撮影日の高精度モデル）")
+        self.analysis_radiant_model_path_var = tk.StringVar(value="")
+        self.analysis_radiant_model_info_var = tk.StringVar(
+            value="撮影動画と同じカメラの登録済みモデルを自動選択します"
+        )
+        self.analysis_radiant_model_choices = {}
+        self.analysis_radiant_models = []
+        self.analysis_radiant_model_combo = ttk.Combobox(
+            radiant_model_grid,
+            textvariable=self.analysis_radiant_model_var,
+            state="readonly",
+        )
+        self.analysis_radiant_model_combo.grid(row=0, column=1, sticky=tk.EW, pady=(0, 4))
+        self.analysis_radiant_model_combo.bind("<<ComboboxSelected>>", self._on_analysis_radiant_model_selected)
+        ttk.Label(
+            radiant_model_grid,
+            textvariable=self.analysis_radiant_model_info_var,
+            style="GlassMuted.TLabel",
+            wraplength=600,
+            justify=tk.LEFT,
+        ).grid(row=1, column=0, columnspan=2, sticky=tk.W)
+        self._refresh_analysis_radiant_models()
+
         action_frame = ttk.Frame(frame)
         action_frame.pack(fill=tk.X, pady=8)
         action_frame.columnconfigure(0, weight=1, uniform="analysis_actions")
@@ -130,9 +166,14 @@ class AnalysisMixin:
         trajectory_grid.columnconfigure(1, weight=1, uniform="trajectory")
         self.btn_analysis_start = ttk.Button(
             trajectory_grid,
-            text="解析を開始",
+            text="旧形式の軌道表示",
             command=self.start_analysis,
             style="Gray.TButton",
+        )
+        self.btn_radiant_analysis = ttk.Button(
+            trajectory_grid,
+            text="高精度放射点解析",
+            command=self.start_radiant_analysis,
         )
         add_point_button = ttk.Button(
             trajectory_grid,
@@ -178,6 +219,7 @@ class AnalysisMixin:
         )
         trajectory_buttons = (
             self.btn_analysis_start,
+            self.btn_radiant_analysis,
             add_point_button,
             manage_point_button,
             self.btn_long_exposure,
@@ -874,6 +916,240 @@ class AnalysisMixin:
         except Exception as e:
             error_msg = f"予期せぬエラー: {e}"
             event_queue.put(("error", error_msg))
+
+    def _refresh_analysis_radiant_models(self):
+        """Populate the human-readable high-precision model selector."""
+        models = camera_model_catalog.discover_camera_models()
+        self.analysis_radiant_models = models
+        self.analysis_radiant_model_choices = {}
+        values = ["自動選択（撮影日の高精度モデル）"]
+        for model in models:
+            display = model["display_name"]
+            if display in self.analysis_radiant_model_choices:
+                display = f"{display} [{len(values)}]"
+            values.append(display)
+            self.analysis_radiant_model_choices[display] = model
+        self.analysis_radiant_model_combo.configure(values=values)
+
+        preferred_path = ""
+        try:
+            preferred_path = str(self.plate_solve_model_path_var.get() or "")
+        except (AttributeError, tk.TclError):
+            pass
+        selected = next((model for model in models if model["path"] == preferred_path), None)
+        if selected:
+            self.analysis_radiant_model_var.set(selected["display_name"])
+            self._on_analysis_radiant_model_selected()
+        else:
+            self.analysis_radiant_model_var.set(values[0])
+            self.analysis_radiant_model_path_var.set("")
+            self.analysis_radiant_model_info_var.set(
+                "撮影動画と同じカメラの登録済みモデルを、撮影日・解像度・被覆率から自動選択します"
+                if models else "登録済みモデルが見つかりません。先に高精度カメラ補正を作成してください"
+            )
+
+    def _on_analysis_radiant_model_selected(self, _event=None):
+        display = self.analysis_radiant_model_var.get()
+        model = self.analysis_radiant_model_choices.get(display)
+        if model is None:
+            self.analysis_radiant_model_path_var.set("")
+            self.analysis_radiant_model_info_var.set(
+                "撮影動画と同じカメラの登録済みモデルを、撮影日・解像度・被覆率から自動選択します"
+            )
+            return
+        self.analysis_radiant_model_path_var.set(model["path"])
+        self.analysis_radiant_model_info_var.set(camera_model_catalog.format_model_details(model))
+
+    def _radiant_analysis_worker(self, files, model_path, event_queue):
+        try:
+            report = mra.analyze_info_files(
+                files,
+                model_path=model_path or None,
+                progress_callback=lambda message: event_queue.put(("progress", message)),
+            )
+            event_queue.put(("success", report))
+        except Exception as exc:
+            event_queue.put(("error", str(exc)))
+
+    def start_radiant_analysis(self):
+        """Run the high-precision support-aware radiant analysis in a worker."""
+        if not self.check_admin_password():
+            return
+        if not self.analysis_files:
+            messagebox.showwarning("情報", "解析するinfo.txtを追加してください。")
+            return
+
+        files = list(self.analysis_files)
+        model_path = str(self.analysis_radiant_model_path_var.get() or "")
+        win = Toplevel(self)
+        win.title("高精度・流星放射点解析")
+        win.geometry("1280x820")
+        win.minsize(980, 640)
+        self.analysis_radiant_window = win
+        self.analysis_radiant_report = None
+
+        header = ttk.Frame(win)
+        header.pack(fill=tk.X, padx=14, pady=(12, 6))
+        ttk.Label(header, text="流星放射点解析", style="PageTitle.TLabel").pack(side=tk.LEFT)
+        status_var = tk.StringVar(value=f"{len(files)}件を準備中…")
+        ttk.Label(header, textvariable=status_var, style="GlassMuted.TLabel").pack(side=tk.RIGHT)
+
+        content = ttk.Panedwindow(win, orient=tk.HORIZONTAL)
+        content.pack(fill=tk.BOTH, expand=True, padx=14, pady=(0, 10))
+        plot_frame = ttk.Frame(content)
+        summary_frame = ttk.Frame(content, padding=(10, 0, 0, 0))
+        content.add(plot_frame, weight=4)
+        content.add(summary_frame, weight=3)
+        ttk.Label(
+            plot_frame,
+            text="実線 = 検出された流星経路 / 破線 = 判定した放射点方向",
+            style="GlassMuted.TLabel",
+        ).pack(anchor=tk.W, pady=(0, 4))
+        progress_label = ttk.Label(plot_frame, text="高精度モデルで天球座標へ変換しています…")
+        progress_label.pack(anchor=tk.W, pady=(0, 4))
+        result_host = ttk.Frame(plot_frame)
+        result_host.pack(fill=tk.BOTH, expand=True)
+        summary_title = ttk.Label(summary_frame, text="解析結果", style="PageTitle.TLabel")
+        summary_title.pack(anchor=tk.W, pady=(0, 6))
+        summary_text = tk.StringVar(value="解析中…")
+        ttk.Label(summary_frame, textvariable=summary_text, style="GlassMuted.TLabel", wraplength=360, justify=tk.LEFT).pack(
+            anchor=tk.W, fill=tk.X, pady=(0, 8)
+        )
+        tree = ttk.Treeview(
+            summary_frame,
+            columns=("file", "shower", "angle", "confidence"),
+            show="headings",
+            height=16,
+        )
+        tree.heading("file", text="ファイル")
+        tree.heading("shower", text="放射点候補")
+        tree.heading("angle", text="角距離")
+        tree.heading("confidence", text="判定")
+        tree.column("file", width=175, anchor=tk.W)
+        tree.column("shower", width=135, anchor=tk.W)
+        tree.column("angle", width=70, anchor=tk.E)
+        tree.column("confidence", width=90, anchor=tk.W)
+        tree.pack(fill=tk.BOTH, expand=True)
+        detail_text = tk.Text(
+            summary_frame,
+            height=7,
+            wrap=tk.WORD,
+            background=UI_FIELD,
+            foreground=UI_TEXT,
+            relief=tk.FLAT,
+            borderwidth=0,
+        )
+        detail_text.pack(fill=tk.X, pady=(8, 0))
+        detail_text.configure(state=tk.DISABLED)
+
+        footer = ttk.Frame(win)
+        footer.pack(fill=tk.X, padx=14, pady=(0, 12))
+        save_button = ttk.Button(footer, text="解析結果をPNG保存", state=tk.DISABLED)
+        save_button.pack(side=tk.LEFT)
+        ttk.Button(footer, text="閉じる", command=win.destroy).pack(side=tk.RIGHT)
+
+        event_queue = queue.Queue()
+        self.btn_radiant_analysis.configure(state=tk.DISABLED)
+        worker = threading.Thread(
+            target=self._radiant_analysis_worker,
+            args=(files, model_path, event_queue),
+            daemon=True,
+        )
+        self.analysis_radiant_thread = worker
+        worker.start()
+
+        def show_report(report):
+            self.analysis_radiant_report = report
+            status_var.set("解析完了")
+            progress_label.configure(text="表示内容を確認できます。流星線分は有効領域内のみ描画しています。")
+            summary_text.set(
+                f"モデル: {report.model_label}\n"
+                f"有効領域内: {len(report.supported_results)}件 / 読み込み: {len(report.results) + len(report.skipped)}件\n"
+                f"除外: {len(report.skipped)}件"
+            )
+            for result in report.results:
+                angle = f"{result.radiant_distance_deg:.1f}°" if result.radiant_distance_deg is not None else "—"
+                tree.insert(
+                    "",
+                    tk.END,
+                    values=(os.path.basename(result.info_path), f"{result.shower_code} {result.shower_name}", angle, result.confidence),
+                )
+            details = []
+            for result in report.results:
+                details.append(f"{os.path.basename(result.info_path)}: {result.note}")
+            for path, reason in report.skipped:
+                details.append(f"除外 {os.path.basename(path)}: {reason}")
+            detail_text.configure(state=tk.NORMAL)
+            detail_text.delete("1.0", tk.END)
+            detail_text.insert("1.0", "\n".join(details) or "詳細はありません")
+            detail_text.configure(state=tk.DISABLED)
+            try:
+                from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+                from matplotlib.figure import Figure
+
+                figure = Figure(figsize=(8, 7), facecolor="#0B0F18")
+                mra.draw_radiant_sphere(report, figure=figure)
+                figure_canvas = FigureCanvasTkAgg(figure, master=result_host)
+                figure_canvas.draw()
+                figure_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+                self.analysis_radiant_figure = figure
+                self.analysis_radiant_canvas = figure_canvas
+
+                def save_plot():
+                    output = filedialog.asksaveasfilename(
+                        title="放射点解析を保存",
+                        initialfile="radiant_analysis.png",
+                        defaultextension=".png",
+                        filetypes=(("PNG画像", "*.png"), ("すべてのファイル", "*.*")),
+                    )
+                    if output:
+                        mra.save_radiant_report_plot(report, output)
+                        self.append_log(f"放射点解析を保存: {output}")
+
+                save_button.configure(state=tk.NORMAL, command=save_plot)
+            except Exception as exc:
+                progress_label.configure(text=f"球面表示に失敗しました: {exc}")
+                self.append_log(f"放射点解析の描画エラー: {exc}")
+
+        def poll():
+            try:
+                if not win.winfo_exists():
+                    self.analysis_radiant_thread = None
+                    self.btn_radiant_analysis.configure(state=tk.NORMAL)
+                    return
+            except tk.TclError:
+                self.analysis_radiant_thread = None
+                self.btn_radiant_analysis.configure(state=tk.NORMAL)
+                return
+            finished = False
+            try:
+                while True:
+                    event_type, payload = event_queue.get_nowait()
+                    if event_type == "progress":
+                        progress_label.configure(text=payload)
+                    elif event_type == "success":
+                        show_report(payload)
+                        finished = True
+                    elif event_type == "error":
+                        status_var.set("解析失敗")
+                        progress_label.configure(text=f"解析に失敗しました: {payload}")
+                        self.append_log(f"放射点解析エラー: {payload}")
+                        messagebox.showerror("放射点解析エラー", payload, parent=win)
+                        finished = True
+            except queue.Empty:
+                pass
+            if finished:
+                self.analysis_radiant_thread = None
+                self.btn_radiant_analysis.configure(state=tk.NORMAL)
+            elif worker.is_alive() or not event_queue.empty():
+                self.after(80, poll)
+            else:
+                status_var.set("解析失敗")
+                progress_label.configure(text="解析処理が予期せず終了しました。ログを確認してください。")
+                self.analysis_radiant_thread = None
+                self.btn_radiant_analysis.configure(state=tk.NORMAL)
+
+        self.after(80, poll)
 
     def start_analysis(self):
         if not self.check_admin_password():

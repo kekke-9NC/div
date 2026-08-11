@@ -1277,6 +1277,12 @@ def create_line_video_clips(
                                             f.write(f"Frame Range (Clip): {adjusted_start_frame} - {adjusted_end_frame}\n")
                                             f.write(f"Meteor Probability: {probability:.6f}\n")
                                             f.write(f"Detected Line Center (px): ({cx:.2f}, {cy:.2f})\n")
+                                            f.write(f"Detected Line Start (px): ({x1:.2f}, {y1:.2f})\n")
+                                            f.write(f"Detected Line End (px): ({x2:.2f}, {y2:.2f})\n")
+                                            if effective_use_plate_solve and global_wcs_info:
+                                                model_label = global_wcs_info.get("model_label") or global_wcs_info.get("model_path")
+                                                if model_label:
+                                                    f.write(f"Plate Solve Model: {model_label}\n")
                                             if denoise_metrics is not None:
                                                 f.write(f"Denoise Noise Sigma Before: {denoise_metrics['before_sigma']:.4f}\n")
                                                 f.write(f"Denoise Noise Sigma After: {denoise_metrics['after_sigma']:.4f}\n")
@@ -1859,6 +1865,12 @@ def create_line_video_clips(
                                 f.write(f"Frame Range (Clip): {adjusted_start_frame} - {adjusted_end_frame}\n")
                                 f.write(f"Meteor Probability: {probability:.6f}\n")
                                 f.write(f"Detected Line Center (px): ({cx:.2f}, {cy:.2f})\n")
+                                f.write(f"Detected Line Start (px): ({x1:.2f}, {y1:.2f})\n")
+                                f.write(f"Detected Line End (px): ({x2:.2f}, {y2:.2f})\n")
+                                if effective_use_plate_solve and global_wcs_info:
+                                    model_label = global_wcs_info.get("model_label") or global_wcs_info.get("model_path")
+                                    if model_label:
+                                        f.write(f"Plate Solve Model: {model_label}\n")
                                 if denoise_metrics is not None:
                                     f.write(f"Denoise Noise Sigma Before: {denoise_metrics['before_sigma']:.4f}\n")
                                     f.write(f"Denoise Noise Sigma After: {denoise_metrics['after_sigma']:.4f}\n")

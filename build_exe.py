@@ -79,6 +79,7 @@ hidden_imports = [
     "long_exposure_map",
     "distortion_correction",
     "meteor_angle_analysis",
+    "meteor_radiant_analysis",
     "lighten_blend_video",
     "lighten_blend_image",
     "timelapse_creator",
