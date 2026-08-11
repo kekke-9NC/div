@@ -867,6 +867,38 @@ def _load_calibration(calibration_path: Optional[str]) -> Tuple[Dict[str, Any], 
         else:
             metadata = json.loads(path.read_text(encoding="utf-8"))
             if metadata.get("model_type") == CAMERA_MODEL_TYPE:
+                # Fixed-camera models created before the catalog-star handoff
+                # contain the fitted projection but not the catalog used to
+                # establish it.  Recover that auditable catalog from the
+                # sibling calibration JSON so per-frame alignment can still
+                # correct the small residual left by temporal averaging.
+                model_wcs = Path(str(metadata.get("wcs_path", ""))).expanduser()
+                if not model_wcs.is_absolute():
+                    model_wcs = path.parent / model_wcs
+                candidates: List[Path] = []
+                if model_wcs.name.startswith("wideangle_sip"):
+                    suffix = model_wcs.stem[len("wideangle_sip"):]
+                    candidates.append(model_wcs.with_name(f"calibration{suffix}.json"))
+                candidates.extend(sorted(model_wcs.parent.glob("calibration*.json")))
+                for candidate in dict.fromkeys(candidates):
+                    if not candidate.exists():
+                        continue
+                    try:
+                        candidate_metadata = json.loads(candidate.read_text(encoding="utf-8"))
+                        candidate_wcs = Path(str(candidate_metadata.get("wcs_path", ""))).expanduser()
+                        if not candidate_wcs.is_absolute():
+                            candidate_wcs = candidate.parent / candidate_wcs
+                        if candidate_wcs.resolve() != model_wcs.resolve():
+                            continue
+                        for key in (
+                            "catalog_stars", "sip_residual_median_px", "sip_residual_p95_px",
+                            "sip_match_count", "center_ra_deg", "center_dec_deg",
+                        ):
+                            if key not in metadata and key in candidate_metadata:
+                                metadata[key] = candidate_metadata[key]
+                        break
+                    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                        continue
                 # The model's reference epoch is part of its fitted camera
                 # orientation.  Do not replace it with the WCS DATE-OBS here:
                 # validated fixed-camera models may intentionally encode a
@@ -1487,7 +1519,10 @@ def annotate_frame(
     )
     align_constellations = bool(
         draw_constellations
-        and metadata.get("constellation_star_alignment", False)
+        and metadata.get(
+            "constellation_star_alignment",
+            metadata.get("verified_constellation_only", False),
+        )
         and metadata.get("catalog_stars")
     )
     if draw_detected_stars or verify_constellations or align_constellations:

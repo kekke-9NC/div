@@ -1,5 +1,6 @@
 from gui_common import *
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import camera_model_catalog
 
 
 class TimelapseDragDropWindow(Toplevel):
@@ -28,6 +29,15 @@ class TimelapseDragDropWindow(Toplevel):
         self.timelapse_annotation_calibration_var = tk.StringVar(
             value=getattr(config, "TIMELAPSE_ANNOTATION_CALIBRATION_PATH", "") or ""
         )
+        self.timelapse_annotation_model_var = tk.StringVar(
+            value="自動選択（当日適合モデル）"
+        )
+        self.timelapse_annotation_model_path_var = tk.StringVar()
+        self.timelapse_annotation_model_info_var = tk.StringVar(
+            value="モデル未選択（当日の日付・カメラに合うモデルを自動選択）"
+        )
+        self.timelapse_annotation_model_entries = []
+        self.timelapse_annotation_model_by_display = {}
         self.timelapse_constellations_var = tk.BooleanVar(
             value=getattr(config, "TIMELAPSE_CONSTELLATIONS_ENABLED", True)
         )
@@ -225,7 +235,7 @@ class TimelapseDragDropWindow(Toplevel):
         self._update_timelapse_annotation_overlay_summary()
         calibration_row = ttk.Frame(annotation_frame)
         calibration_row.pack(fill=tk.X)
-        ttk.Label(calibration_row, text="較正ファイル（任意）:").pack(side=tk.LEFT)
+        ttk.Label(calibration_row, text="旧形式WCS/手動較正（任意）:").pack(side=tk.LEFT)
         self.timelapse_annotation_calibration_entry = ttk.Entry(
             calibration_row,
             textvariable=self.timelapse_annotation_calibration_var,
@@ -239,6 +249,37 @@ class TimelapseDragDropWindow(Toplevel):
             command=self._choose_timelapse_annotation_calibration,
         )
         self.timelapse_annotation_calibration_button.pack(side=tk.LEFT)
+        model_row = ttk.Frame(annotation_frame)
+        model_row.pack(fill=tk.X, pady=(5, 0))
+        ttk.Label(model_row, text="固定カメラモデル:").pack(side=tk.LEFT)
+        self.timelapse_annotation_model_combo = ttk.Combobox(
+            model_row,
+            textvariable=self.timelapse_annotation_model_var,
+            state="readonly",
+            width=42,
+        )
+        self.timelapse_annotation_model_combo.pack(
+            side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5)
+        )
+        self.timelapse_annotation_model_combo.bind(
+            "<<ComboboxSelected>>", self._on_timelapse_annotation_model_selected
+        )
+        ttk.Button(
+            model_row, text="一覧更新", command=self._refresh_timelapse_annotation_models
+        ).pack(side=tk.LEFT)
+        ttk.Label(
+            annotation_frame,
+            textvariable=self.timelapse_annotation_model_info_var,
+            foreground=UI_CYAN,
+            wraplength=450,
+            justify=tk.LEFT,
+        ).pack(anchor=tk.W, pady=(2, 0))
+        ttk.Label(
+            annotation_frame,
+            text="モデルを選ぶと、このタイムラプスの較正にそのモデルを使用します。",
+            foreground="gray",
+        ).pack(anchor=tk.W, pady=(1, 4))
+        self._refresh_timelapse_annotation_models()
         reference_row = ttk.Frame(annotation_frame)
         reference_row.pack(fill=tk.X, pady=(5, 0))
         self.timelapse_annotation_reference_button = ttk.Button(
@@ -349,6 +390,61 @@ class TimelapseDragDropWindow(Toplevel):
             self._timelapse_scroll_window, width=event.width
         )
 
+    def _refresh_timelapse_annotation_models(self):
+        try:
+            models = camera_model_catalog.discover_camera_models()
+        except Exception as exc:
+            models = []
+            self.log_callback(f"固定カメラモデル一覧の取得に失敗しました: {exc}")
+        self.timelapse_annotation_model_entries = models
+        self.timelapse_annotation_model_by_display = {
+            item["display_name"]: item for item in models
+        }
+        auto_label = "自動選択（当日適合モデル）"
+        values = [auto_label] + [item["display_name"] for item in models]
+        self.timelapse_annotation_model_combo.configure(values=values)
+        parent_path = ""
+        parent_var = getattr(self.parent, "plate_solve_model_path_var", None)
+        if parent_var is not None:
+            parent_path = parent_var.get().strip()
+        selected_path = self.timelapse_annotation_model_path_var.get().strip() or parent_path
+        selected = next(
+            (item for item in models if os.path.abspath(item["path"]) == os.path.abspath(selected_path)),
+            None,
+        ) if selected_path else None
+        if selected is not None:
+            self.timelapse_annotation_model_path_var.set(selected["path"])
+            self.timelapse_annotation_model_var.set(selected["display_name"])
+        elif self.timelapse_annotation_model_var.get() not in values:
+            self.timelapse_annotation_model_var.set(auto_label)
+        self._update_timelapse_annotation_model_info()
+
+    def _selected_timelapse_annotation_model(self):
+        return self.timelapse_annotation_model_by_display.get(
+            self.timelapse_annotation_model_var.get().strip()
+        )
+
+    def _update_timelapse_annotation_model_info(self):
+        selected = self._selected_timelapse_annotation_model()
+        self.timelapse_annotation_model_info_var.set(
+            camera_model_catalog.format_model_details(selected)
+        )
+
+    def _on_timelapse_annotation_model_selected(self, _event=None):
+        selected = self._selected_timelapse_annotation_model()
+        self._update_timelapse_annotation_model_info()
+        if selected is None:
+            previous = self.timelapse_annotation_model_path_var.get().strip()
+            self.timelapse_annotation_model_path_var.set("")
+            if previous and os.path.abspath(self.timelapse_annotation_calibration_var.get().strip()) == os.path.abspath(previous):
+                self.timelapse_annotation_calibration_var.set("")
+            return
+        self.timelapse_annotation_model_path_var.set(selected["path"])
+        # The downstream timelapse creator already accepts one calibration
+        # path.  Keep the selected model and legacy manual field synchronized
+        # so the chosen model is used without another file dialog.
+        self.timelapse_annotation_calibration_var.set(selected["path"])
+
     def _start_camera_model_from_timelapse(self):
         if not self.dropped_paths:
             messagebox.showwarning("高精度モデル", "先に動画またはフォルダを追加してください。", parent=self)
@@ -389,6 +485,9 @@ class TimelapseDragDropWindow(Toplevel):
         state = tk.NORMAL if self.timelapse_annotation_enabled_var.get() else tk.DISABLED
         self.timelapse_annotation_calibration_entry.config(state=state)
         self.timelapse_annotation_calibration_button.config(state=state)
+        self.timelapse_annotation_model_combo.config(
+            state="readonly" if state == tk.NORMAL else "disabled"
+        )
         self.timelapse_annotation_overlay_button.config(state=state)
         reference_state = state
         if state == tk.NORMAL and not self.dropped_paths:

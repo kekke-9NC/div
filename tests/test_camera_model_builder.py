@@ -71,6 +71,7 @@ def test_build_registers_model_and_filters_cloudy_source(tmp_path):
             "width": 320,
             "height": 180,
             "sip_support_hull": [[0, 0], [319, 0], [319, 179], [0, 179]],
+            "catalog_stars": [{"ra_deg": 120.0, "dec_deg": 35.0}],
         }
 
     classifier = lambda frame, **kwargs: CloudClassification(0.05, "test", 1.0)
@@ -85,6 +86,8 @@ def test_build_registers_model_and_filters_cloudy_source(tmp_path):
     payload = json.loads(Path(result.model_path).read_text())
     assert payload["model_type"] == "fixed-camera-stg-poly"
     assert payload["support_fraction"] == 1.0
+    assert payload["catalog_stars"] == [{"ra_deg": 120.0, "dec_deg": 35.0}]
+    assert payload["constellation_star_alignment"] is True
     assert seen["kwargs"]["force"] is True
 
 

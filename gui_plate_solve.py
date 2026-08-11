@@ -1,9 +1,105 @@
 from gui_common import *
 from camera_model_builder import CameraModelBuildRequest, build_camera_model
 from camera_model_monitor import RTSPCameraModelMonitor
+import camera_model_catalog
 
 
 class PlateSolveMixin:
+    _AUTO_CAMERA_MODEL_LABEL = "自動選択（当日適合モデル）"
+
+    def _refresh_plate_solve_model_choices(self):
+        """Refresh the in-app fixed-camera model selector."""
+        try:
+            models = camera_model_catalog.discover_camera_models()
+        except Exception as exc:
+            models = []
+            logger = getattr(self, "append_log", None)
+            if callable(logger):
+                logger(f"固定カメラモデル一覧の取得に失敗しました: {exc}")
+        self.plate_solve_model_entries = models
+        self.plate_solve_model_by_display = {
+            item["display_name"]: item for item in models
+        }
+        values = [self._AUTO_CAMERA_MODEL_LABEL] + [
+            item["display_name"] for item in models
+        ]
+        combo = getattr(self, "cmb_plate_solve_model", None)
+        if combo is not None:
+            combo.configure(values=values)
+        selected_path = self.plate_solve_model_path_var.get().strip()
+        selected = next(
+            (item for item in models if os.path.abspath(item["path"]) == os.path.abspath(selected_path)),
+            None,
+        ) if selected_path else None
+        if selected is not None:
+            self.plate_solve_model_var.set(selected["display_name"])
+        elif self.plate_solve_model_var.get() not in values:
+            self.plate_solve_model_var.set(self._AUTO_CAMERA_MODEL_LABEL)
+        self._update_plate_solve_model_info()
+
+    def _selected_plate_solve_model(self):
+        value = self.plate_solve_model_var.get().strip()
+        if value == self._AUTO_CAMERA_MODEL_LABEL:
+            return None
+        return getattr(self, "plate_solve_model_by_display", {}).get(value)
+
+    def _update_plate_solve_model_info(self):
+        selected = self._selected_plate_solve_model()
+        try:
+            self.plate_solve_model_info_var.set(
+                camera_model_catalog.format_model_details(selected)
+            )
+        except Exception:
+            self.plate_solve_model_info_var.set("モデル情報を読み込めません")
+
+    def on_plate_solve_model_selected(self, _event=None):
+        """Apply the model chosen in the combobox without opening Finder."""
+        selected = self._selected_plate_solve_model()
+        self._update_plate_solve_model_info()
+        if selected is None:
+            self.plate_solve_model_path_var.set("")
+            # Do not discard a manually loaded WCS unless it was a model that
+            # this selector had applied previously.
+            current = self.global_wcs_info or {}
+            if current.get("job_id") == "local-wideangle-camera-model":
+                self.global_wcs_info = None
+                self.plate_solve_wcs_path_var.set("")
+                self.plate_solve_status_var.set("プレートソルブ: 当日適合モデルを自動選択")
+            self.update_start_button_state()
+            return
+        self._apply_plate_solve_model(selected)
+
+    def _apply_plate_solve_model(self, selected):
+        try:
+            import local_wideangle_astrometry
+            metadata, _model = local_wideangle_astrometry._load_calibration(selected["path"])
+            reference_value = metadata.get("reference_datetime")
+            reference = (
+                datetime.fromisoformat(str(reference_value).replace("Z", "+00:00"))
+                if reference_value else datetime.now()
+            )
+            self.plate_solve_model_path_var.set(selected["path"])
+            self.plate_solve_wcs_path_var.set(selected["path"])
+            self.global_wcs_info = {
+                "wcs_file": selected["path"],
+                "calibration_path": selected["path"],
+                "model_path": selected["path"],
+                "plate_solve_datetime": reference,
+                "job_id": "local-wideangle-camera-model",
+                "model_label": selected["model_label"],
+                "support_fraction": selected["support_fraction"],
+                "reference_night": selected["reference_night"],
+            }
+            self.plate_solve_status_var.set(
+                f"プレートソルブ: {selected['model_label']}を適用"
+            )
+            self.update_start_button_state()
+        except Exception as exc:
+            self.plate_solve_status_var.set("プレートソルブ: モデル適用失敗")
+            self._show_plate_solve_message(
+                "showerror", "固定カメラモデル", f"モデルを適用できませんでした:\n{exc}"
+            )
+
     def _handle_camera_model_status(self, text: str):
         try:
             self.camera_model_status_var.set(str(text or ""))
@@ -231,6 +327,16 @@ class PlateSolveMixin:
                         f"高精度モデル: 登録済み（被覆率 {result.support_fraction * 100:.0f}% / "
                         f"p95 {result.residual_p95_px:.2f}px）"
                     )
+                    self.plate_solve_model_path_var.set(result.model_path)
+                    self._refresh_plate_solve_model_choices()
+                    selected = next(
+                        (item for item in self.plate_solve_model_entries
+                         if os.path.abspath(item["path"]) == os.path.abspath(result.model_path)),
+                        None,
+                    )
+                    if selected is not None:
+                        self.plate_solve_model_var.set(selected["display_name"])
+                        self._update_plate_solve_model_info()
                     self.plate_solve_wcs_path_var.set(result.model_path)
                     self.plate_solve_status_var.set("プレートソルブ: 高精度固定カメラモデルを適用")
                     self.global_wcs_info = {

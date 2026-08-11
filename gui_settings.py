@@ -431,6 +431,40 @@ class SettingsMixin:
         self.btn_run_plate_solve = ttk.Button(ps_frame, text="実行", command=self.start_plate_solve)
         self.btn_run_plate_solve.pack(side=tk.LEFT, padx=(5,0))
 
+        selected_model_lf = ttk.LabelFrame(lf_astro, text="使用する固定カメラ・プレートソルブモデル")
+        selected_model_lf.pack(fill=tk.X, pady=(6, 2))
+        selected_model_row = ttk.Frame(selected_model_lf)
+        selected_model_row.pack(fill=tk.X, pady=(3, 1))
+        ttk.Label(selected_model_row, text="モデル:").pack(side=tk.LEFT, padx=(0, 6))
+        self.cmb_plate_solve_model = ttk.Combobox(
+            selected_model_row,
+            textvariable=self.plate_solve_model_var,
+            state="readonly",
+            width=74,
+        )
+        self.cmb_plate_solve_model.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.cmb_plate_solve_model.bind(
+            "<<ComboboxSelected>>", self.on_plate_solve_model_selected
+        )
+        ttk.Button(
+            selected_model_row, text="一覧更新", command=self._refresh_plate_solve_model_choices
+        ).pack(side=tk.LEFT, padx=(5, 0))
+        selected_model_info = ttk.Label(
+            selected_model_lf,
+            textvariable=self.plate_solve_model_info_var,
+            foreground=UI_CYAN,
+            wraplength=1120,
+            justify=tk.LEFT,
+        )
+        selected_model_info.pack(fill=tk.X, padx=(5, 5), pady=(1, 2))
+        ttk.Label(
+            selected_model_lf,
+            text="選択すると直ちに適用されます。被覆率はモデルが安全に較正できる画面割合、基準夜はモデル作成時の観測夜です。",
+            foreground=UI_MUTED,
+            wraplength=1120,
+            justify=tk.LEFT,
+        ).pack(anchor=tk.W, padx=(5, 5), pady=(0, 4))
+
         model_lf = ttk.LabelFrame(lf_astro, text="高精度固定カメラモデル（作成・自動更新）")
         model_lf.pack(fill=tk.X, pady=(8, 2))
         model_source = ttk.Frame(model_lf); model_source.pack(fill=tk.X, pady=2)
@@ -469,6 +503,7 @@ class SettingsMixin:
         self.bind_camera_model_input_hover(
             model_status_row, self.camera_model_status_label, self.camera_model_progress_label
         )
+        self._refresh_plate_solve_model_choices()
         ttk.Label(
             model_lf,
             text=f"利用量ログ: {os.path.basename(config.AI_USAGE_LOG_PATH)}（入力/出力トークン・経過時間）",
@@ -1533,6 +1568,7 @@ class SettingsMixin:
                 'size_percent': self.full_video_timestamp_size_var.get(),
             },
             'plate_solve_wcs_path': self.plate_solve_wcs_path_var.get(), 'plate_solve_video_path': self.plate_solve_video_path_var.get(),
+            'plate_solve_model_path': self.plate_solve_model_path_var.get(),
             'camera_model_source': self.camera_model_source_var.get(),
             'camera_model_start': self.camera_model_start_var.get(),
             'camera_model_end': self.camera_model_end_var.get(),
@@ -1738,6 +1774,7 @@ class SettingsMixin:
 
             self.plate_solve_wcs_path_var.set(settings.get('plate_solve_wcs_path', ''))
             self.plate_solve_video_path_var.set(settings.get('plate_solve_video_path', ''))
+            self.plate_solve_model_path_var.set(settings.get('plate_solve_model_path', ''))
             self.camera_model_source_var.set(settings.get('camera_model_source', ''))
             self.camera_model_start_var.set(settings.get('camera_model_start', ''))
             self.camera_model_end_var.set(settings.get('camera_model_end', ''))

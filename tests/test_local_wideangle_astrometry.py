@@ -115,6 +115,12 @@ class LocalWideangleAstrometryTests(unittest.TestCase):
             header["IMAGEH"] = 180
             header["DATE-OBS"] = "2026-08-09T04:00:00"
             fits.PrimaryHDU(header=header).writeto(wcs_path)
+            calibration_path = root / "calibration.json"
+            calibration_path.write_text(json.dumps({
+                "wcs_path": str(wcs_path),
+                "catalog_stars": [{"ra_deg": 12.0, "dec_deg": 34.0}],
+                "sip_residual_p95_px": 2.5,
+            }), encoding="utf-8")
             model_path = root / "camera_model.json"
             model_path.write_text(json.dumps({
                 "model_type": "fixed-camera-stg-poly",
@@ -130,6 +136,7 @@ class LocalWideangleAstrometryTests(unittest.TestCase):
             metadata, _model = local_astro._load_calibration(str(model_path))
 
             self.assertEqual(metadata["reference_datetime"], "2026-08-07T19:59:15.469000")
+            self.assertEqual(metadata["catalog_stars"][0]["ra_deg"], 12.0)
 
     def test_annotation_can_draw_constellation_lines(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -173,17 +180,23 @@ class LocalWideangleAstrometryTests(unittest.TestCase):
                 "width": 320, "height": 180, "center_ra_deg": 230.0,
                 "sip_support_hull": [[5, 5], [315, 5], [315, 175], [5, 175]],
                 "verified_constellation_only": True,
+                "catalog_stars": [{"ra_deg": 230.0, "dec_deg": 52.0}],
             }), encoding="utf-8")
             with mock.patch.object(
                 local_astro, "_extract_stars",
                 return_value=([[10.0, 10.0]], None, None),
-            ), mock.patch.object(local_astro, "_draw_constellation_lines") as draw:
+            ), mock.patch.object(local_astro, "_draw_constellation_lines") as draw, \
+                mock.patch.object(
+                    local_astro, "_estimate_constellation_pixel_offset",
+                    return_value=(0.0, 0.0),
+                ) as align:
                 local_astro.annotate_frame(
                     np.zeros((180, 320, 3), dtype=np.uint8),
                     datetime(2026, 7, 10, 1, 0), str(metadata_path),
                     draw_constellations=True,
                 )
             self.assertIsNotNone(draw.call_args.kwargs["anchor_points"])
+            align.assert_called_once()
 
     def test_detected_star_mode_draws_hollow_markers_from_frame_pixels(self):
         with tempfile.TemporaryDirectory() as directory:

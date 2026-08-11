@@ -464,6 +464,12 @@ def build_camera_model(
             "reference_datetime_source": "wcs:DATE-OBS" if wcs_reference_datetime else "solver-or-source",
             "verified_constellation_only": bool(enabled),
             "constellation_anchor_tolerance_px": 5.0,
+            # Keep the stars that established the WCS with the reusable model.
+            # Annotated temporal-mean frames can shift a few pixels, so the
+            # renderer uses these catalog anchors to estimate a small per-frame
+            # translation before validating constellation endpoints.
+            "catalog_stars": calibration.get("catalog_stars", []),
+            "constellation_star_alignment": bool(enabled),
             "source_videos": clear_videos,
             "cloud_threshold": float(request.cloud_threshold),
             "fit_stats": fit_stats,
