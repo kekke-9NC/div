@@ -16,6 +16,7 @@ import json
 import os
 from pathlib import Path
 import re
+import time
 from typing import Any, Callable, Iterable, Optional, Sequence
 
 import cv2
@@ -28,6 +29,7 @@ from scipy.spatial.transform import Rotation
 import local_wideangle_astrometry as local_astrometry
 from camera_plate_model import FixedCameraPlateModel, MODEL_TYPE
 from cloud_coverage import CloudClassification, classify_cloud_fraction
+from usage_metrics import record_usage
 
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".ts"}
@@ -67,6 +69,10 @@ class CameraModelBuildResult:
     selected_videos: list[str] = field(default_factory=list)
     cloud_reports: list[dict[str, Any]] = field(default_factory=list)
     error: str = ""
+    elapsed_seconds: float = 0.0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    total_tokens: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -82,6 +88,10 @@ class CameraModelBuildResult:
             "selected_videos": self.selected_videos,
             "cloud_reports": self.cloud_reports,
             "error": self.error,
+            "elapsed_seconds": self.elapsed_seconds,
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "total_tokens": self.total_tokens,
         }
 
 
@@ -338,11 +348,14 @@ def build_camera_model(
     solver: Optional[Callable[..., dict[str, Any]]] = None,
 ) -> CameraModelBuildResult:
     """Build a candidate model and register it only after validation."""
+    started = time.perf_counter()
+    videos: list[str] = []
+    clear_videos: list[str] = []
+    cloud_reports: list[dict[str, Any]] = []
+    result: Optional[CameraModelBuildResult] = None
     try:
         videos = select_video_paths(request.source, request.start, request.end, request.maximum_videos)
         _emit(progress_callback, f"モデル作成対象を {len(videos)} 本選択しました")
-        cloud_reports: list[dict[str, Any]] = []
-        clear_videos: list[str] = []
         classifier = classifier or classify_cloud_fraction
         for path in videos:
             frame = _read_probe_frame(path)
@@ -399,7 +412,13 @@ def build_camera_model(
         if width <= 0 or height <= 0:
             raise RuntimeError("WCSの画像サイズが不正です")
         _emit(progress_callback, "WCSを固定カメラ投影へ変換中...")
-        payload, fit_stats = _fit_model_from_wcs(wcs, width, height)
+        # A SIP4 WCS sampled from a clear 2am segment benefits from one extra
+        # camera-model term when the solve has enough verified stars.  Keep
+        # the conservative degree-4 fallback for sparse/legacy calibrations;
+        # the extra degree is only used for the high-precision path and does
+        # not alter the WCS itself.
+        model_degree = 5 if int(calibration.get("sip_match_count", 0) or 0) >= 45 else 4
+        payload, fit_stats = _fit_model_from_wcs(wcs, width, height, degree=model_degree)
         support_source = calibration.get("sip_support_hull")
         if not support_source and calibration.get("support_grid"):
             support = calibration["support_grid"]
@@ -461,12 +480,41 @@ def build_camera_model(
         _write_json_atomic(model_path, payload)
         _write_json_atomic(report_path, report)
         _emit(progress_callback, f"固定カメラモデルを登録しました: {model_path}")
-        return CameraModelBuildResult(
+        result = CameraModelBuildResult(
             True, str(model_path), str(calibration.get("calibration_path", "")), str(report_path),
             bool(enabled), bool(target_met), support_fraction,
             fit_stats["residual_median_px"], fit_stats["residual_p95_px"],
             videos, cloud_reports,
         )
+        return result
     except Exception as exc:
         _emit(progress_callback, f"高精度モデル作成失敗: {exc}")
-        return CameraModelBuildResult(False, selected_videos=[], error=f"{type(exc).__name__}: {exc}")
+        result = CameraModelBuildResult(False, selected_videos=[], error=f"{type(exc).__name__}: {exc}")
+        return result
+    finally:
+        elapsed = time.perf_counter() - started
+        input_tokens = sum(max(0, int(report.get("input_tokens", 0) or 0)) for report in cloud_reports)
+        output_tokens = sum(max(0, int(report.get("output_tokens", 0) or 0)) for report in cloud_reports)
+        total_tokens = sum(max(0, int(report.get("total_tokens", 0) or 0)) for report in cloud_reports)
+        if result is not None:
+            result.elapsed_seconds = elapsed
+            result.input_tokens = input_tokens
+            result.output_tokens = output_tokens
+            result.total_tokens = total_tokens or input_tokens + output_tokens
+        record_usage(
+            "camera_model_build",
+            elapsed_seconds=elapsed,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            total_tokens=total_tokens or input_tokens + output_tokens,
+            status=("success" if result is not None and result.success else "error"),
+            source=request.source,
+            model=request.lm_studio_model_id,
+            error=(result.error if result is not None else ""),
+            metadata={
+                "selected_videos": len(videos),
+                "clear_videos": len(clear_videos),
+                "backend": request.backend,
+                "report_path": result.report_path if result is not None else "",
+            },
+        )

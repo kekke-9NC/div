@@ -323,6 +323,18 @@ class ProcessingMixin:
                     except Exception:
                         pass
                     continue
+                if isinstance(value, dict) and "camera_model_progress" in value:
+                    try:
+                        self._handle_camera_model_progress(value["camera_model_progress"])
+                    except Exception:
+                        pass
+                    continue
+                if isinstance(value, dict) and "camera_model_status" in value:
+                    try:
+                        self._handle_camera_model_status(value["camera_model_status"])
+                    except Exception:
+                        pass
+                    continue
                 if isinstance(value, tuple) and len(value) == 2:
                     current, total = value
                     if total > 0:

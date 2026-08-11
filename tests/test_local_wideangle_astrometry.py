@@ -255,6 +255,39 @@ class LocalWideangleAstrometryTests(unittest.TestCase):
             local_astro._draw_constellation_lines(output, BorderWCS(), 0.0, support)
         self.assertEqual(np.count_nonzero(output), 0)
 
+    def test_constellation_line_interpolation_handles_ra_wrap(self):
+        sampled = local_astro._sample_constellation_line(
+            np.asarray([[179.0, 10.0], [-179.0, 10.0]])
+        )
+        self.assertGreater(len(sampled), 2)
+        self.assertLess(float(np.max(np.abs(np.diff(sampled[:, 0])))), 2.0)
+
+    def test_constellation_projection_does_not_bridge_large_projected_gap(self):
+        points = np.asarray([[10.0, 10.0], [250.0, 10.0], [260.0, 20.0]])
+        runs = list(local_astro._constellation_polyline_runs(
+            points, np.asarray([True, True, True]), max_pixel_step=100.0
+        ))
+        self.assertEqual(len(runs), 1)
+        np.testing.assert_array_equal(runs[0], points[1:])
+
+    def test_constellation_segment_rejects_unsafe_interior_without_drawing_samples(self):
+        support = np.full((180, 320), 255, dtype=np.uint8)
+        with mock.patch.object(
+            local_astro,
+            "_project_constellation_samples",
+            return_value=(
+                np.asarray([50.0, 1000.0, 60.0]),
+                np.asarray([90.0, 90.0, 90.0]),
+                np.asarray([True, True, True]),
+            ),
+        ) as project:
+            safe = local_astro._constellation_segment_is_safe(
+                object(), np.asarray([[10.0, 20.0], [11.0, 20.0]]),
+                0.0, support, 320, 180, 100.0,
+            )
+        self.assertFalse(safe)
+        project.assert_called_once()
+
     def test_constellation_projection_refines_inaccurate_inverse_sip_estimate(self):
         class ForwardOnlyWCS:
             def world_to_pixel_values(self, ra, dec):

@@ -45,6 +45,15 @@ _loaded_calibrations: Dict[str, Tuple[float, Dict[str, Any], Any]] = {}
 _forward_grid_cache: Dict[Tuple[int, int, int], Dict[str, Any]] = {}
 _constellation_lines: Optional[Tuple[np.ndarray, ...]] = None
 
+# Sparse sky stick figures are unsafe to connect directly in an ultra-wide
+# projection.  Sample their sky paths densely, then reject gaps caused by the
+# calibrated-area boundary or a projection branch.
+_CONSTELLATION_MAX_ANGULAR_STEP_DEG = 0.5
+_CONSTELLATION_MAX_PIXEL_STEP_FACTOR = 0.20
+_CONSTELLATION_ALIGNMENT_MAX_MAG = 4.8
+_CONSTELLATION_ALIGNMENT_MATCH_RADIUS_PX = 8.0
+_CONSTELLATION_ALIGNMENT_MIN_MATCHES = 4
+
 
 class CalibrationNotFoundError(RuntimeError):
     pass
@@ -1089,6 +1098,220 @@ def _project_sky_with_forward_wcs(
     return x, y, valid & np.isfinite(x) & np.isfinite(y)
 
 
+def _estimate_constellation_pixel_offset(
+    detected_stars: Sequence[Sequence[float]],
+    metadata: Dict[str, Any],
+    wcs: WCS,
+    delta_ra: float,
+    support_mask: np.ndarray,
+    width: int,
+    height: int,
+) -> Tuple[float, float]:
+    """Estimate the current image-to-WCS residual from bright catalog stars.
+
+    The SIP model is fixed for the night, but a wide-angle fit can retain a
+    small, position-dependent residual.  Matching only bright catalog stars
+    in the current frame lets the constellation sticks follow the actual
+    stellar image without allowing arbitrary faint detections to move them.
+    The result is deliberately a translation: higher-order changes belong in
+    the calibration model, not in a per-frame display adjustment.
+    """
+    catalog = metadata.get("catalog_stars") or []
+    if len(catalog) < _CONSTELLATION_ALIGNMENT_MIN_MATCHES:
+        return 0.0, 0.0
+    observed = np.asarray(detected_stars, dtype=float).reshape(-1, 2)
+    if len(observed) < _CONSTELLATION_ALIGNMENT_MIN_MATCHES:
+        return 0.0, 0.0
+    observed = observed[np.isfinite(observed).all(axis=1)]
+    if len(observed) < _CONSTELLATION_ALIGNMENT_MIN_MATCHES:
+        return 0.0, 0.0
+
+    selected = []
+    for star in catalog:
+        try:
+            magnitude = float((star.get("metadata") or {}).get("MAG", np.inf))
+            ra_value = float(star["ra_deg"])
+            dec_value = float(star["dec_deg"])
+        except (AttributeError, KeyError, TypeError, ValueError):
+            continue
+        if np.isfinite(magnitude) and magnitude <= _CONSTELLATION_ALIGNMENT_MAX_MAG:
+            selected.append((ra_value, dec_value))
+    if len(selected) < _CONSTELLATION_ALIGNMENT_MIN_MATCHES:
+        return 0.0, 0.0
+
+    sky_ra = np.asarray([(ra - delta_ra) % 360.0 for ra, _dec in selected])
+    sky_dec = np.asarray([dec for _ra, dec in selected])
+    predicted_x, predicted_y, valid = _project_sky_with_forward_wcs(
+        wcs, sky_ra, sky_dec
+    )
+    predicted = np.column_stack((predicted_x, predicted_y))
+    valid &= np.isfinite(predicted).all(axis=1)
+    valid &= (predicted[:, 0] >= 0) & (predicted[:, 0] < width)
+    valid &= (predicted[:, 1] >= 0) & (predicted[:, 1] < height)
+    safe_predicted = np.nan_to_num(predicted, nan=0.0, posinf=0.0, neginf=0.0)
+    rounded = np.rint(np.clip(safe_predicted, 0, [width - 1, height - 1])).astype(int)
+    valid &= support_mask[rounded[:, 1], rounded[:, 0]] > 0
+    if np.count_nonzero(valid) < _CONSTELLATION_ALIGNMENT_MIN_MATCHES:
+        return 0.0, 0.0
+    predicted = predicted[valid]
+
+    distances = np.linalg.norm(
+        predicted[:, np.newaxis, :] - observed[np.newaxis, :, :], axis=2
+    )
+    nearest_observed = np.argmin(distances, axis=1)
+    nearest_predicted = np.argmin(distances, axis=0)
+    residuals = []
+    for predicted_index, observed_index in enumerate(nearest_observed):
+        if nearest_predicted[observed_index] != predicted_index:
+            continue
+        if distances[predicted_index, observed_index] > _CONSTELLATION_ALIGNMENT_MATCH_RADIUS_PX:
+            continue
+        residuals.append(observed[observed_index] - predicted[predicted_index])
+    residuals = np.asarray(residuals, dtype=float).reshape(-1, 2)
+    if len(residuals) < _CONSTELLATION_ALIGNMENT_MIN_MATCHES:
+        return 0.0, 0.0
+
+    center = np.median(residuals, axis=0)
+    for _ in range(2):
+        distances_from_center = np.linalg.norm(residuals - center, axis=1)
+        mad = float(np.median(np.abs(distances_from_center - np.median(distances_from_center))))
+        keep = distances_from_center <= max(2.5, float(np.median(distances_from_center)) + 3.0 * 1.4826 * mad)
+        if np.count_nonzero(keep) < _CONSTELLATION_ALIGNMENT_MIN_MATCHES:
+            break
+        center = np.median(residuals[keep], axis=0)
+    center = np.clip(center, -6.0, 6.0)
+    return float(center[0]), float(center[1])
+
+
+def _sample_constellation_line(
+    line: np.ndarray,
+    max_angular_step_deg: float = _CONSTELLATION_MAX_ANGULAR_STEP_DEG,
+) -> np.ndarray:
+    """Densely interpolate a sky polyline along great-circle segments."""
+    coordinates = np.asarray(line, dtype=float)
+    if coordinates.ndim != 2 or coordinates.shape[0] < 2:
+        return coordinates.reshape(-1, 2)
+    ra = np.deg2rad(coordinates[:, 0])
+    dec = np.deg2rad(coordinates[:, 1])
+    vectors = np.column_stack((
+        np.cos(dec) * np.cos(ra),
+        np.cos(dec) * np.sin(ra),
+        np.sin(dec),
+    ))
+    sampled: List[np.ndarray] = [coordinates[0]]
+    step = max(float(max_angular_step_deg), 1e-3)
+    for start_vector, end_vector in zip(vectors[:-1], vectors[1:]):
+        omega = float(np.arccos(np.clip(np.dot(start_vector, end_vector), -1.0, 1.0)))
+        count = max(1, int(np.ceil(np.rad2deg(omega) / step)))
+        if omega < 1e-10:
+            segment_vectors = np.repeat(start_vector[np.newaxis, :], count + 1, axis=0)
+        else:
+            fractions = np.linspace(0.0, 1.0, count + 1)[:, np.newaxis]
+            denominator = np.sin(omega)
+            if abs(denominator) < 1e-8:
+                # Constellation edges are not antipodal, but this fallback
+                # keeps malformed optional data from producing NaNs.
+                segment_vectors = (1.0 - fractions) * start_vector + fractions * end_vector
+                norms = np.linalg.norm(segment_vectors, axis=1, keepdims=True)
+                segment_vectors = np.divide(
+                    segment_vectors, norms, out=segment_vectors,
+                    where=norms > 1e-12,
+                )
+            else:
+                segment_vectors = (
+                    np.sin((1.0 - fractions) * omega) / denominator * start_vector
+                    + np.sin(fractions * omega) / denominator * end_vector
+                )
+        segment_ra = np.rad2deg(np.arctan2(segment_vectors[:, 1], segment_vectors[:, 0])) % 360.0
+        segment_dec = np.rad2deg(np.arcsin(np.clip(segment_vectors[:, 2], -1.0, 1.0)))
+        sampled.extend(np.column_stack((segment_ra, segment_dec))[1:])
+    return np.asarray(sampled, dtype=float)
+
+
+def _constellation_polyline_runs(
+    points: np.ndarray,
+    usable: np.ndarray,
+    max_pixel_step: float,
+) -> Iterable[np.ndarray]:
+    """Yield only continuous projected runs that are safe to draw."""
+    points = np.asarray(points, dtype=float)
+    usable = np.asarray(usable, dtype=bool)
+    if len(points) < 2:
+        return
+    gaps = np.hypot(np.diff(points[:, 0]), np.diff(points[:, 1]))
+    start = 0
+    while start < len(points) - 1:
+        while start < len(points) - 1 and not (
+            usable[start] and usable[start + 1] and gaps[start] <= max_pixel_step
+        ):
+            start += 1
+        if start >= len(points) - 1:
+            break
+        end = start + 1
+        while end < len(points) and usable[end] and gaps[end - 1] <= max_pixel_step:
+            end += 1
+        if end - start >= 2:
+            yield points[start:end]
+        start = end
+
+
+def _project_constellation_samples(
+    wcs: Any,
+    ra: np.ndarray,
+    dec: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Project dense safety samples without broadening the endpoint mask."""
+    if isinstance(wcs, FixedCameraPlateModel):
+        try:
+            x, y = wcs.world_to_pixel_values(ra, dec)
+        except Exception:
+            return np.zeros_like(ra), np.zeros_like(dec), np.zeros_like(ra, dtype=bool)
+        x, y = np.asarray(x, dtype=float), np.asarray(y, dtype=float)
+        return x, y, np.isfinite(x) & np.isfinite(y)
+    return _project_sky_with_forward_wcs(wcs, ra, dec)
+
+
+def _constellation_segment_is_safe(
+    wcs: Any,
+    sky_segment: np.ndarray,
+    delta_ra: float,
+    support_mask: np.ndarray,
+    width: int,
+    height: int,
+    max_pixel_step: float,
+    pixel_offset: Tuple[float, float] = (0.0, 0.0),
+) -> bool:
+    """Check a segment's interior without drawing extra sampled strokes."""
+    sampled = _sample_constellation_line(sky_segment)
+    segment_ra = (sampled[:, 0] - delta_ra) % 360.0
+    x, y, usable = _project_constellation_samples(wcs, segment_ra, sampled[:, 1])
+    points = np.column_stack((x, y))
+    points += np.asarray(pixel_offset, dtype=float)
+    usable &= np.isfinite(points).all(axis=1)
+    usable &= (points[:, 0] >= 0) & (points[:, 0] < width)
+    usable &= (points[:, 1] >= 0) & (points[:, 1] < height)
+    rounded = np.zeros(points.shape, dtype=np.int32)
+    indices = np.flatnonzero(usable)
+    if len(indices):
+        rounded[indices] = np.rint(points[indices]).astype(np.int32)
+    usable &= (
+        (rounded[:, 0] >= 0) & (rounded[:, 0] < width)
+        & (rounded[:, 1] >= 0) & (rounded[:, 1] < height)
+    )
+    indices = np.flatnonzero(usable)
+    if len(indices):
+        usable[indices] = support_mask[
+            rounded[indices, 1], rounded[indices, 0]
+        ] > 0
+    if not np.all(usable):
+        return False
+    if len(points) > 1:
+        gaps = np.hypot(np.diff(points[:, 0]), np.diff(points[:, 1]))
+        if np.any(~np.isfinite(gaps)) or np.any(gaps > max_pixel_step):
+            return False
+    return True
+
+
 def _draw_constellation_lines(
     output: np.ndarray,
     wcs: Any,
@@ -1096,6 +1319,7 @@ def _draw_constellation_lines(
     support_mask: np.ndarray,
     anchor_points: Optional[np.ndarray] = None,
     anchor_tolerance_px: float = 5.0,
+    pixel_offset: Tuple[float, float] = (0.0, 0.0),
 ) -> None:
     """Project visible constellation line segments into the current frame."""
     height, width = output.shape[:2]
@@ -1105,21 +1329,27 @@ def _draw_constellation_lines(
     lines = _load_constellation_lines()
     if not lines:
         return
-    # Project all constellation vertices together.  A SIP forward evaluation
-    # is expensive, while one vectorized Newton solve covers every line.
+    # A constellation edge is a connection between two catalog stars.  Do
+    # not draw a floating fragment whose two catalog endpoints are outside
+    # the calibrated view; that is the main source of apparently unrelated
+    # lines entering from an image edge.
     lengths = [len(line) for line in lines]
     coordinates = np.concatenate(lines, axis=0)
     ra = (coordinates[:, 0] - delta_ra) % 360.0
     x, y, usable = _project_sky_with_forward_wcs(wcs, ra, coordinates[:, 1])
-    points = np.column_stack((x, y))
-    finite_points = np.isfinite(points).all(axis=1)
-    usable &= finite_points
-    usable &= (points[:, 0] >= 0) & (points[:, 0] < width)
-    usable &= (points[:, 1] >= 0) & (points[:, 1] < height)
-    rounded = np.zeros(points.shape, dtype=np.int32)
+    vertex_points = np.column_stack((x, y))
+    pixel_shift = np.asarray(pixel_offset, dtype=float)
+    if pixel_shift.shape != (2,) or not np.isfinite(pixel_shift).all():
+        pixel_shift = np.zeros(2, dtype=float)
+    draw_points = vertex_points + pixel_shift
+    usable &= np.isfinite(vertex_points).all(axis=1)
+    usable &= np.isfinite(draw_points).all(axis=1)
+    usable &= (draw_points[:, 0] >= 0) & (draw_points[:, 0] < width)
+    usable &= (draw_points[:, 1] >= 0) & (draw_points[:, 1] < height)
+    rounded = np.zeros(draw_points.shape, dtype=np.int32)
     visible_indices = np.flatnonzero(usable)
     if len(visible_indices):
-        rounded[visible_indices] = np.rint(points[visible_indices]).astype(np.int32)
+        rounded[visible_indices] = np.rint(draw_points[visible_indices]).astype(np.int32)
     # A coordinate such as y=1079.6 is mathematically inside a 1080px frame,
     # but rounds to 1080 and must not index the support mask.
     usable &= (rounded[:, 0] >= 0) & (rounded[:, 0] < width)
@@ -1136,33 +1366,33 @@ def _draw_constellation_lines(
         finite_anchors = anchors[np.isfinite(anchors).all(axis=1)]
         if len(finite_anchors):
             distances = np.linalg.norm(
-                points[:, np.newaxis, :] - finite_anchors[np.newaxis, :, :], axis=2
+                draw_points[:, np.newaxis, :] - finite_anchors[np.newaxis, :, :], axis=2
             )
             usable &= np.min(distances, axis=1) <= float(anchor_tolerance_px)
         else:
             usable[:] = False
+    max_pixel_step = max(
+        96.0, min(width, height) * _CONSTELLATION_MAX_PIXEL_STEP_FACTOR
+    )
     offset = 0
-    for length in lengths:
-        line_points = rounded[offset:offset + length]
-        line_usable = usable[offset:offset + length]
+    thickness = max(1, round(min(width, height) / 720.0))
+    for line, length in zip(lines, lengths):
+        for index in range(length - 1):
+            if not (usable[offset + index] and usable[offset + index + 1]):
+                continue
+            if not _constellation_segment_is_safe(
+                wcs, line[index:index + 2], delta_ra, support_mask,
+                width, height, max_pixel_step, tuple(pixel_shift),
+            ):
+                continue
+            polyline = rounded[offset + index:offset + index + 2].reshape(-1, 1, 2)
+            cv2.polylines(
+                output, [polyline], False, (0, 0, 0), thickness + 2, cv2.LINE_AA,
+            )
+            cv2.polylines(
+                output, [polyline], False, color, thickness, cv2.LINE_AA,
+            )
         offset += length
-        start = 0
-        while start < len(line_points):
-            while start < len(line_points) and not line_usable[start]:
-                start += 1
-            end = start
-            while end < len(line_points) and line_usable[end]:
-                end += 1
-            if end - start >= 2:
-                polyline = line_points[start:end].reshape(-1, 1, 2)
-                thickness = max(1, round(min(width, height) / 720.0))
-                cv2.polylines(
-                    output, [polyline], False, (0, 0, 0), thickness + 2, cv2.LINE_AA,
-                )
-                cv2.polylines(
-                    output, [polyline], False, color, thickness, cv2.LINE_AA,
-                )
-            start = end + 1
 
 
 def annotate_frame(
@@ -1196,7 +1426,10 @@ def annotate_frame(
     verify_constellations = bool(
         draw_constellations and metadata.get("constellation_anchor_filter", False)
     )
-    if draw_detected_stars or verify_constellations:
+    align_constellations = bool(
+        draw_constellations and metadata.get("constellation_star_alignment", True)
+    )
+    if draw_detected_stars or verify_constellations or align_constellations:
         detection_gray = cv2.cvtColor(output, cv2.COLOR_BGR2GRAY)
         detected_stars, _diagnostic, _reference = _extract_stars(
             detection_gray, maximum_stars=1000, exclude_lower_region=False,
@@ -1225,10 +1458,17 @@ def annotate_frame(
                     label=f"Dec {dec_value:+d}°",
                 )
     if draw_constellations and grid is not None:
+        constellation_offset = (0.0, 0.0)
+        if align_constellations:
+            constellation_offset = _estimate_constellation_pixel_offset(
+                detected_stars, metadata, wcs, delta_ra, grid["support_mask"],
+                width, height,
+            )
         _draw_constellation_lines(
             grid_layer, wcs, delta_ra, grid["support_mask"],
             anchor_points=np.asarray(detected_stars, dtype=float) if verify_constellations else None,
             anchor_tolerance_px=float(metadata.get("constellation_anchor_tolerance_px", 5.0)),
+            pixel_offset=constellation_offset,
         )
     if grid is not None:
         support = grid["support_mask"] > 0

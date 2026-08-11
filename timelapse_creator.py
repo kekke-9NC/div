@@ -416,7 +416,21 @@ def _run_annotate_pipeline(
 
 
 def _source_created_datetime(path: str) -> datetime:
-    """Return filesystem creation time, falling back to media path metadata."""
+    """Return the capture time used by the timelapse annotations.
+
+    RTSP archive segments are written several seconds after their capture
+    minute starts.  Their filesystem birth time therefore describes when the
+    file was closed/created, not when the first frame was exposed.  The local
+    wide-angle WCS is keyed to the recorder path (``YYYYMMDD/HH/MM.mp4``), so
+    using birth time here shifts the celestial overlay by a few pixels.  Keep
+    the path timestamp authoritative for the app's RTSP archive while
+    preserving the existing media-time fallback for ordinary videos.
+    """
+    source_path = Path(path)
+    if any(parent.name.lower() == "rtsp" for parent in source_path.parents):
+        path_timestamp = getattr(media_time, "_path_time", lambda _path: None)(path)
+        if path_timestamp is not None:
+            return path_timestamp
     timestamp, _source = media_time.get_media_start_time(path)
     return timestamp or datetime.now()
 

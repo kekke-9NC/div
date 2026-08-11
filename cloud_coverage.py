@@ -13,11 +13,14 @@ import base64
 from dataclasses import dataclass, asdict
 import json
 import re
+import time
 from typing import Any, Callable, Optional
 
 import cv2
 import numpy as np
 import requests
+
+from usage_metrics import record_usage
 
 
 @dataclass(frozen=True)
@@ -30,6 +33,10 @@ class CloudClassification:
     sky_visibility: str = "unknown"
     blocked_fraction: float = 0.0
     reason: str = ""
+    input_tokens: int = 0
+    output_tokens: int = 0
+    total_tokens: int = 0
+    elapsed_seconds: float = 0.0
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -162,6 +169,7 @@ def _classify_with_openai_compatible(
     timeout: float = 45.0,
     status_callback: Optional[Callable[[str], None]] = None,
 ) -> CloudClassification:
+    started = time.perf_counter()
     if status_callback:
         status_callback(f"雲量判定中: {model_id}")
     endpoint = _normalize_base_url(url) + "/chat/completions"
@@ -210,6 +218,10 @@ def _classify_with_openai_compatible(
     response = requests.post(endpoint, json=payload, headers=headers, timeout=timeout)
     response.raise_for_status()
     body = response.json()
+    usage = body.get("usage") or {}
+    input_tokens = int(usage.get("prompt_tokens", usage.get("input_tokens", 0)) or 0)
+    output_tokens = int(usage.get("completion_tokens", usage.get("output_tokens", 0)) or 0)
+    total_tokens = int(usage.get("total_tokens", input_tokens + output_tokens) or 0)
     text = body["choices"][0]["message"]["content"]
     if isinstance(text, list):
         text = " ".join(str(part.get("text", part)) for part in text)
@@ -225,6 +237,8 @@ def _classify_with_openai_compatible(
     return CloudClassification(
         float(fraction), "qwen-vlm", float(np.clip(confidence, 0.0, 1.0)), text,
         sky_visibility=visibility, blocked_fraction=blocked, reason=reason,
+        input_tokens=input_tokens, output_tokens=output_tokens,
+        total_tokens=total_tokens, elapsed_seconds=time.perf_counter() - started,
     )
 
 
@@ -239,20 +253,55 @@ def classify_cloud_fraction(
     status_callback: Optional[Callable[[str], None]] = None,
 ) -> CloudClassification:
     """Classify one frame, falling back to the deterministic estimator."""
+    started = time.perf_counter()
     use_vlm = str(backend or "").lower() in {
         "lmstudio_qwen3_5_2b", "lmstudio", "qwen", "qwen3_vl_4b", "local_qwen3_vl_4b"
     }
     if use_vlm and lm_studio_url and lm_studio_model_id:
         try:
-            return _classify_with_openai_compatible(
+            result = _classify_with_openai_compatible(
                 image, url=lm_studio_url, model_id=lm_studio_model_id,
                 api_key=lm_studio_api_key, timeout=timeout,
                 status_callback=status_callback,
             )
+            record_usage(
+                "cloud_classification",
+                elapsed_seconds=result.elapsed_seconds or (time.perf_counter() - started),
+                input_tokens=result.input_tokens,
+                output_tokens=result.output_tokens,
+                total_tokens=result.total_tokens,
+                source=result.source,
+                model=lm_studio_model_id,
+                metadata={"backend": backend},
+            )
+            return result
         except Exception as exc:
             fallback = _heuristic_cloud_fraction(image)
-            return CloudClassification(
+            result = CloudClassification(
                 fallback.cloud_fraction, fallback.source, fallback.confidence,
                 error=f"VLM unavailable: {exc}",
+                elapsed_seconds=time.perf_counter() - started,
             )
-    return _heuristic_cloud_fraction(image)
+            record_usage(
+                "cloud_classification",
+                elapsed_seconds=result.elapsed_seconds,
+                status="fallback",
+                source=result.source,
+                model=lm_studio_model_id,
+                error=result.error,
+                metadata={"backend": backend},
+            )
+            return result
+    result = _heuristic_cloud_fraction(image)
+    elapsed = time.perf_counter() - started
+    result = CloudClassification(
+        **{**result.as_dict(), "elapsed_seconds": elapsed}
+    )
+    record_usage(
+        "cloud_classification",
+        elapsed_seconds=elapsed,
+        source=result.source,
+        model=lm_studio_model_id,
+        metadata={"backend": backend},
+    )
+    return result

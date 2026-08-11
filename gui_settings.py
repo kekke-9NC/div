@@ -455,7 +455,25 @@ class SettingsMixin:
         self.btn_build_camera_model.pack(side=tk.LEFT)
         self.btn_toggle_camera_model_monitor = ttk.Button(model_actions, text="RTSP自動監視を開始", command=self.toggle_camera_model_monitor)
         self.btn_toggle_camera_model_monitor.pack(side=tk.LEFT, padx=(6, 0))
-        ttk.Label(model_lf, textvariable=self.camera_model_status_var, foreground=UI_CYAN).pack(anchor=tk.W, pady=(2, 3))
+        model_status_row = ttk.Frame(model_lf)
+        model_status_row.pack(fill=tk.X, pady=(2, 3))
+        self.camera_model_status_label = ttk.Label(
+            model_status_row, textvariable=self.camera_model_status_var, foreground=UI_CYAN
+        )
+        self.camera_model_status_label.pack(side=tk.LEFT, anchor=tk.W)
+        self.camera_model_progress_label = ttk.Label(
+            model_status_row, textvariable=self.camera_model_progress_var, foreground=UI_CYAN,
+            anchor=tk.E,
+        )
+        self.camera_model_progress_label.pack(side=tk.RIGHT, anchor=tk.E)
+        self.bind_camera_model_input_hover(
+            model_status_row, self.camera_model_status_label, self.camera_model_progress_label
+        )
+        ttk.Label(
+            model_lf,
+            text=f"利用量ログ: {os.path.basename(config.AI_USAGE_LOG_PATH)}（入力/出力トークン・経過時間）",
+            foreground=UI_MUTED,
+        ).pack(anchor=tk.W, pady=(0, 3))
         
         ps_wcs_frame = ttk.Frame(lf_astro); ps_wcs_frame.pack(fill=tk.X, pady=2)
         ttk.Label(ps_wcs_frame, text="既存WCSファイル:").pack(side=tk.LEFT, padx=(0,5))

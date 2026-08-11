@@ -15,6 +15,18 @@ from astropy.wcs import WCS
 
 
 class TimelapseCreatorTests(unittest.TestCase):
+    def test_rtsp_timelapse_timestamp_uses_capture_path_over_birth_time(self):
+        path = "/archive/rtsp/20260811/01/39.mp4"
+        birth_time = datetime(2026, 8, 11, 1, 39, 15)
+        with mock.patch.object(
+            timelapse_creator.media_time,
+            "get_media_start_time",
+            return_value=(birth_time, "ファイル作成時刻"),
+        ):
+            timestamp = timelapse_creator._source_created_datetime(path)
+
+        self.assertEqual(timestamp, datetime(2026, 8, 11, 1, 39, 0))
+
     def test_discovers_all_meteor_full_clips_in_sampled_time_range(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -73,6 +73,8 @@ DEFAULT_METEOR_SAVE_PATH = os.path.join(EXE_DIR, "meteor")
 DEFAULT_NOT_METEOR_SAVE_PATH = os.path.join(EXE_DIR, "not_meteor")
 TEMP_CLIP_DIR = os.path.join(EXE_DIR, "temp_clips")
 LIGHTEN_BLEND_CACHE_DIR = os.path.join(EXE_DIR, "lighten_blend_cache")
+CAMERA_MODEL_MONITOR_PREVIEW_PATH = os.path.join(TEMP_CLIP_DIR, "camera_model_monitor_input.jpg")
+AI_USAGE_LOG_PATH = os.path.join(EXE_DIR, "ai_usage.jsonl")
 VIDEO_FOURCC = 'avc1'
 
 # --- Astrometry.net 関連 ---

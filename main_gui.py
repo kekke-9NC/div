@@ -419,6 +419,12 @@ class App(
         self.camera_model_interval_var = tk.StringVar(value="60")
         self.camera_model_cloud_filter_var = tk.BooleanVar(value=True)
         self.camera_model_status_var = tk.StringVar(value="高精度モデル: 未実行")
+        self.camera_model_progress_var = tk.StringVar(value="")
+        self.camera_model_input_image_path = ""
+        self.camera_model_input_image_info = {}
+        self._camera_model_hover_popup = None
+        self._camera_model_hover_photo = None
+        self._camera_model_hover_close_job = None
         self.camera_model_monitor = None
         self.use_plate_solve_var = tk.BooleanVar(value=True)
         self.concurrency_var = tk.StringVar(value=str(config.DEFAULT_CONCURRENCY))
@@ -868,6 +874,7 @@ class App(
                     pass
             self.append_log("設定を保存しています...")
             self._hide_summary_preview()
+            self._hide_camera_model_hover()
             self.close_rtsp_live_preview()
             self.close_camera_control()
             monitor = getattr(self, "camera_model_monitor", None)

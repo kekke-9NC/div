@@ -51,6 +51,7 @@ custom_coordinates.json
 
 # Logs
 *.log
+ai_usage.jsonl
 
 # Backup folders
 app_itiji/

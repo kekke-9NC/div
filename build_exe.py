@@ -71,6 +71,7 @@ hidden_imports = [
     "camera_model_builder",
     "camera_model_monitor",
     "cloud_coverage",
+    "usage_metrics",
     "local_wideangle_astrometry",
     "location_utils",
     "sun_times",

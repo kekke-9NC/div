@@ -42,6 +42,7 @@ class RTSPCameraModelMonitor:
         classifier: Optional[Callable[..., CloudClassification]] = None,
         builder: Optional[Callable[..., CameraModelBuildResult]] = None,
         status_callback: Optional[Callable[[str], None]] = None,
+        progress_callback: Optional[Callable[[dict[str, Any]], None]] = None,
     ):
         self.rtsp_url = rtsp_url
         self.save_root = save_root
@@ -56,10 +57,13 @@ class RTSPCameraModelMonitor:
         self.classifier = classifier or classify_cloud_fraction
         self.builder = builder or build_camera_model
         self.status_callback = status_callback
+        self.progress_callback = progress_callback
         self.stop_event = threading.Event()
         self.thread: Optional[threading.Thread] = None
         self.last_classification: Optional[CloudClassification] = None
         self.last_build_result: Optional[CameraModelBuildResult] = None
+        self.last_input_image_path = ""
+        self.last_input_image_at = ""
         self._last_build_signature = ""
         self._busy = threading.Lock()
 
@@ -69,6 +73,55 @@ class RTSPCameraModelMonitor:
                 self.status_callback(message)
             except Exception:
                 pass
+
+    def _emit_progress(self, percent: int, phase: str, message: str = "") -> None:
+        if not self.progress_callback:
+            return
+        payload = {
+            "percent": max(0, min(100, int(percent))),
+            "phase": str(phase),
+            "message": str(message),
+            "input_image_path": self.last_input_image_path,
+            "input_image_at": self.last_input_image_at,
+        }
+        if self.last_classification is not None:
+            try:
+                payload["classification"] = self.last_classification.as_dict()
+            except Exception:
+                pass
+        try:
+            self.progress_callback(payload)
+        except Exception:
+            pass
+
+    def _save_probe_frame(self, frame: np.ndarray) -> str:
+        """Persist the exact image sent to the cloud classifier.
+
+        A same-directory temporary file plus replace keeps the hover preview
+        readable even while the next monitoring cycle is writing it.
+        """
+        if not isinstance(frame, np.ndarray) or frame.size == 0:
+            return ""
+        target = Path(config.CAMERA_MODEL_MONITOR_PREVIEW_PATH)
+        temporary = target.with_name(target.stem + ".tmp" + target.suffix)
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if not cv2.imwrite(str(temporary), frame):
+                return ""
+            os.replace(temporary, target)
+            return str(target)
+        except (OSError, cv2.error):
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
+            return ""
+
+    def _remember_input_frame(self, frame: np.ndarray) -> None:
+        if not isinstance(frame, np.ndarray) or frame.size == 0:
+            return
+        self.last_input_image_path = self._save_probe_frame(frame)
+        self.last_input_image_at = datetime.now().astimezone().isoformat()
 
     def _probe_frame(self) -> Optional[np.ndarray]:
         cap = utils.create_rtsp_capture(self.rtsp_url)
@@ -85,7 +138,9 @@ class RTSPCameraModelMonitor:
             if not frames:
                 return None
             # A median of a few probes suppresses a transient meteor/light.
-            return np.median(np.stack(frames), axis=0).astype(np.uint8)
+            frame = np.median(np.stack(frames), axis=0).astype(np.uint8)
+            self._remember_input_frame(frame)
+            return frame
         finally:
             cap.release()
 
@@ -146,10 +201,14 @@ class RTSPCameraModelMonitor:
                 segments = self._recent_segments()
                 self._emit(f"RTSP保存セグメントが少ないため短時間サンプルを保存しました: {Path(fallback).name}")
         if len(segments) < self.minimum_clear_segments:
+            readiness = round(30 + 50 * len(segments) / max(1, self.minimum_clear_segments))
+            self._emit_progress(readiness, "waiting_segments")
             self._emit(f"高精度モデル待機中: RTSP保存済みセグメント {len(segments)}/{self.minimum_clear_segments}")
             return None
+        self._emit_progress(80, "ready", "必要なRTSPセグメントが揃いました")
         signature = "|".join(segments)
         if signature == self._last_build_signature:
+            self._emit_progress(80, "waiting_segments", "同じセグメントは作成済みです")
             self._emit("高精度モデル監視: 同じセグメントは作成済みです")
             return None
         stamps = [datetime.fromtimestamp(Path(path).stat().st_mtime) for path in segments]
@@ -168,30 +227,55 @@ class RTSPCameraModelMonitor:
             maximum_videos=max(len(segments), self.minimum_clear_segments),
         )
         self._emit("雲量条件を満たしました。高精度プレートソルブモデルを作成します")
-        result = self.builder(request, progress_callback=self._emit, classifier=self.classifier)
+        build_progress = 80
+
+        def on_build_progress(message: str) -> None:
+            nonlocal build_progress
+            build_progress = min(95, build_progress + 1)
+            self._emit(str(message))
+            self._emit_progress(build_progress, "building", str(message))
+
+        def classify_build_frame(frame: np.ndarray, **kwargs) -> CloudClassification:
+            # The builder's own probe image is the actual image used for its
+            # cloud gate. Keep the hover preview aligned with that input too.
+            self._remember_input_frame(frame)
+            return self.classifier(frame, **kwargs)
+
+        self._emit_progress(82, "building", "高精度プレートソルブモデルを作成中")
+        result = self.builder(request, progress_callback=on_build_progress, classifier=classify_build_frame)
         self.last_build_result = result
         self._last_build_signature = signature
         if result.success and result.enabled:
+            self._emit_progress(100, "completed", "高精度モデル作成完了")
             self._emit(f"RTSP自動モデル作成完了: {result.model_path}")
         elif result.success:
+            self._emit_progress(100, "candidate", "候補モデルを保存しました")
             self._emit(f"RTSP自動モデル候補を保存しました（未適用）: {result.report_path}")
+        else:
+            self._emit_progress(0, "error", result.error)
         return result
 
     def run_once(self) -> Optional[CameraModelBuildResult]:
+        self._emit_progress(5, "probing", "RTSP入力画像を取得中")
         frame = self._probe_frame()
         if frame is None:
+            self._emit_progress(0, "error", "RTSPプローブを取得できません")
             self._emit("高精度モデル監視: RTSPプローブを取得できません")
             return None
+        self._emit_progress(15, "classifying", "入力画像の雲量を判定中")
         result = self.classifier(
             frame, backend=self.backend, lm_studio_url=self.lm_studio_url,
             lm_studio_model_id=self.lm_studio_model_id, lm_studio_api_key=self.lm_studio_api_key,
         )
         self.last_classification = result
+        self._emit_progress(30, "classified", "入力画像の雲量判定が完了しました")
         self._emit(f"RTSP雲量判定: {result.cloud_fraction * 100:.1f}% ({result.source})")
         if result.source == "qwen-vlm" and (result.error or result.confidence < 0.60):
+            self._emit_progress(20, "waiting_clear", "判定信頼度が不足しています")
             self._emit("Qwenの判定信頼度が不足しているため、自動モデル作成を見送ります")
             return None
         if result.cloud_fraction >= self.cloud_threshold:
+            self._emit_progress(20, "waiting_clear", "雲量条件未達です")
             self._emit("雲量条件未達。次の監視まで待機します")
             return None
         if not self._busy.acquire(blocking=False):

@@ -4,6 +4,110 @@ from camera_model_monitor import RTSPCameraModelMonitor
 
 
 class PlateSolveMixin:
+    def _handle_camera_model_status(self, text: str):
+        try:
+            self.camera_model_status_var.set(str(text or ""))
+        except tk.TclError:
+            pass
+
+    def _handle_camera_model_progress(self, payload):
+        """Apply an automatic camera-model progress event on the Tk thread."""
+        if not isinstance(payload, dict):
+            return
+        percent = max(0, min(100, int(payload.get("percent", 0) or 0)))
+        self.camera_model_progress_var.set(f"自動作成: {percent}%")
+        image_path = str(payload.get("input_image_path", "") or "")
+        if image_path:
+            self.camera_model_input_image_path = image_path
+        classification = payload.get("classification")
+        if isinstance(classification, dict):
+            self.camera_model_input_image_info = dict(classification)
+        if payload.get("input_image_at"):
+            self.camera_model_input_image_info["input_image_at"] = payload["input_image_at"]
+
+    def _queue_camera_model_progress(self, payload):
+        try:
+            self.progress_queue.put((None, {"camera_model_progress": dict(payload)}))
+        except Exception:
+            pass
+
+    def bind_camera_model_input_hover(self, *widgets):
+        for widget in widgets:
+            widget.bind("<Enter>", self._camera_model_hover_enter, add="+")
+            widget.bind("<Leave>", self._camera_model_schedule_hover_close, add="+")
+
+    def _camera_model_cancel_hover_close(self, _event=None):
+        if self._camera_model_hover_close_job is not None:
+            try:
+                self.after_cancel(self._camera_model_hover_close_job)
+            except (tk.TclError, ValueError):
+                pass
+            self._camera_model_hover_close_job = None
+
+    def _camera_model_schedule_hover_close(self, _event=None):
+        self._camera_model_cancel_hover_close()
+        self._camera_model_hover_close_job = self.after(220, self._hide_camera_model_hover)
+
+    def _camera_model_hover_enter(self, _event=None):
+        self._camera_model_cancel_hover_close()
+        if self._camera_model_hover_popup is not None:
+            return
+        image_path = getattr(self, "camera_model_input_image_path", "")
+        if not image_path or not os.path.isfile(image_path):
+            return
+        try:
+            image = Image.open(image_path).convert("RGB")
+            image.thumbnail((720, 405), Image.Resampling.LANCZOS)
+            photo = ImageTk.PhotoImage(image)
+        except (OSError, ValueError):
+            return
+
+        popup = Toplevel(self)
+        popup.title("自動監視の入力画像")
+        popup.transient(self)
+        popup.configure(background=ui_theme.COLORS["content"])
+        popup.protocol("WM_DELETE_WINDOW", self._hide_camera_model_hover)
+        image_label = ttk.Label(popup, image=photo)
+        image_label.pack(padx=10, pady=(10, 6))
+        info = getattr(self, "camera_model_input_image_info", {}) or {}
+        cloud_fraction = info.get("cloud_fraction")
+        if cloud_fraction is not None:
+            try:
+                cloud_text = f"雲量判定: {float(cloud_fraction) * 100:.1f}%"
+            except (TypeError, ValueError):
+                cloud_text = "雲量判定: -"
+        else:
+            cloud_text = "雲量判定: -"
+        source_text = str(info.get("source", ""))
+        timestamp = str(info.get("input_image_at", ""))
+        caption = f"実入力画像  /  {cloud_text}"
+        if source_text:
+            caption += f"  /  {source_text}"
+        if timestamp:
+            caption += f"  /  {timestamp.replace('T', ' ')[:19]}"
+        ttk.Label(popup, text=caption).pack(padx=10, pady=(0, 10))
+        popup.bind("<Enter>", self._camera_model_cancel_hover_close, add="+")
+        popup.bind("<Leave>", self._camera_model_schedule_hover_close, add="+")
+        image_label.bind("<Enter>", self._camera_model_cancel_hover_close, add="+")
+        image_label.bind("<Leave>", self._camera_model_schedule_hover_close, add="+")
+        popup.update_idletasks()
+        x = self.winfo_pointerx() + 14
+        y = self.winfo_pointery() + 14
+        popup.geometry(f"+{x}+{y}")
+        self._camera_model_hover_popup = popup
+        self._camera_model_hover_photo = photo
+
+    def _hide_camera_model_hover(self):
+        self._camera_model_cancel_hover_close()
+        popup = self._camera_model_hover_popup
+        self._camera_model_hover_popup = None
+        self._camera_model_hover_photo = None
+        if popup is not None:
+            try:
+                popup.destroy()
+            except tk.TclError:
+                pass
+
     def _handle_plate_solve_ui(self, payload):
         """Apply one plate-solve UI event; called only by the Tk poller."""
         action = payload.get("action")
@@ -71,17 +175,12 @@ class PlateSolveMixin:
             self.camera_model_source_var.set(folder)
 
     def _set_camera_model_status(self, text: str):
-        def apply():
-            try:
-                self.camera_model_status_var.set(text)
-            except tk.TclError:
-                pass
         if threading.current_thread() is threading.main_thread():
-            apply()
+            self._handle_camera_model_status(text)
         else:
             try:
-                self.after(0, apply)
-            except tk.TclError:
+                self.progress_queue.put((None, {"camera_model_status": str(text)}))
+            except Exception:
                 pass
 
     def _camera_model_request(self) -> CameraModelBuildRequest:
@@ -173,6 +272,7 @@ class PlateSolveMixin:
             monitor.stop()
             self.camera_model_monitor = None
             self.btn_toggle_camera_model_monitor.configure(text="RTSP自動監視を開始")
+            self.camera_model_progress_var.set("")
             self._set_camera_model_status("高精度モデル: RTSP自動監視を停止")
             return
         selected_indices = [i for i in self.rtsp_selected_indices if 0 <= i < len(self.rtsp_urls)]
@@ -191,10 +291,12 @@ class PlateSolveMixin:
             backend=self.ai_vlm_backend_var.get(), lm_studio_url=self.lm_studio_vlm_url_var.get(),
             lm_studio_model_id=self.lm_studio_vlm_model_var.get(), lm_studio_api_key=self.lm_studio_vlm_api_key_var.get(),
             status_callback=self._set_camera_model_status,
+            progress_callback=self._queue_camera_model_progress,
         )
         self.camera_model_monitor = monitor
         monitor.start()
         self.btn_toggle_camera_model_monitor.configure(text="RTSP自動監視を停止")
+        self.camera_model_progress_var.set("自動作成: 0%")
         self._set_camera_model_status(f"高精度モデル: RTSPを{interval}秒間隔で監視中")
 
     def select_plate_solve_wcs_file(self):
