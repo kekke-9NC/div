@@ -485,7 +485,7 @@ def build_camera_model(
         }
         _write_json_atomic(model_path, payload)
         _write_json_atomic(report_path, report)
-        _emit(progress_callback, f"固定カメラモデルを登録しました: {model_path}")
+        _emit(progress_callback, f"カメラ補正データを登録しました: {model_path}")
         result = CameraModelBuildResult(
             True, str(model_path), str(calibration.get("calibration_path", "")), str(report_path),
             bool(enabled), bool(target_met), support_fraction,

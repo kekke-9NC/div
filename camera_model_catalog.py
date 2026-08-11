@@ -155,13 +155,13 @@ def discover_camera_models(cache_root: Optional[str] = None) -> List[Dict[str, A
 def format_model_details(model: Optional[Dict[str, Any]]) -> str:
     """Build a compact detail string for the model selector."""
     if not model:
-        return "モデル未選択（当日の日付・カメラに合うモデルを自動選択）"
+        return "未選択（撮影日に合うカメラ補正データを自動選択）"
     quality = model.get("quality_p95_px")
     quality_text = f" / p95誤差 {quality:.2f}px" if quality is not None else ""
     dates = ", ".join(str(value) for value in model.get("valid_dates", []) if str(value).strip())
     valid_text = f" / 適用夜 {dates}" if dates and dates != model.get("reference_night") else ""
     return (
-        f"{model['model_label']} | {model['width']}×{model['height']} | "
+        f"カメラ補正データ: {model['model_label']} | {model['width']}×{model['height']} | "
         f"画面被覆率 {model['support_percent']:.0f}% | 基準夜 {model['reference_night']} "
         f"/ 投影基準時刻 {model['reference_datetime']}{valid_text}{quality_text}"
     )

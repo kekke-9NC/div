@@ -465,7 +465,7 @@ class SettingsMixin:
             justify=tk.LEFT,
         ).pack(anchor=tk.W, padx=(5, 5), pady=(0, 4))
 
-        model_lf = ttk.LabelFrame(lf_astro, text="高精度固定カメラモデル（作成・自動更新）")
+        model_lf = ttk.LabelFrame(lf_astro, text="高精度カメラ補正データ（作成・自動更新）")
         model_lf.pack(fill=tk.X, pady=(8, 2))
         model_source = ttk.Frame(model_lf); model_source.pack(fill=tk.X, pady=2)
         ttk.Label(model_source, text="対象動画/RTSPフォルダ:").pack(side=tk.LEFT, padx=(0, 5))

@@ -30,11 +30,11 @@ class TimelapseDragDropWindow(Toplevel):
             value=getattr(config, "TIMELAPSE_ANNOTATION_CALIBRATION_PATH", "") or ""
         )
         self.timelapse_annotation_model_var = tk.StringVar(
-            value="自動選択（当日適合モデル）"
+            value="自動選択（撮影日に合う補正データ）"
         )
         self.timelapse_annotation_model_path_var = tk.StringVar()
         self.timelapse_annotation_model_info_var = tk.StringVar(
-            value="モデル未選択（当日の日付・カメラに合うモデルを自動選択）"
+            value="未選択（撮影日に合うカメラ補正データを自動選択）"
         )
         self.timelapse_annotation_model_entries = []
         self.timelapse_annotation_model_by_display = {}
@@ -56,7 +56,10 @@ class TimelapseDragDropWindow(Toplevel):
         self.timelapse_model_end_var = tk.StringVar()
         
         self.title("タイムラプス作成")
-        self.geometry("500x870")
+        # Keep the model description readable while allowing the content to
+        # scroll on smaller displays.
+        self.geometry("620x860")
+        self.minsize(520, 620)
         self.resizable(True, True)
         
         self.setup_ui()
@@ -67,10 +70,13 @@ class TimelapseDragDropWindow(Toplevel):
     def setup_ui(self):
         # Keep every control reachable on smaller displays.  The contents are
         # embedded in a canvas rather than making individual sections scroll.
-        scroll_host = ttk.Frame(self)
+        scroll_host = ttk.Frame(self, style="Content.TFrame")
         scroll_host.pack(fill=tk.BOTH, expand=True)
         self.timelapse_scroll_canvas = tk.Canvas(
-            scroll_host, highlightthickness=0, borderwidth=0
+            scroll_host,
+            background=ui_theme.COLORS["content"],
+            highlightthickness=0,
+            borderwidth=0,
         )
         scrollbar = ttk.Scrollbar(
             scroll_host, orient=tk.VERTICAL,
@@ -79,7 +85,13 @@ class TimelapseDragDropWindow(Toplevel):
         self.timelapse_scroll_canvas.configure(yscrollcommand=scrollbar.set)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.timelapse_scroll_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        main_frame = ttk.Frame(self, padding=15)
+        # The scrollable frame must be a canvas child.  Making it a toplevel
+        # child causes an incomplete scroll region on macOS.
+        main_frame = ttk.Frame(
+            self.timelapse_scroll_canvas,
+            padding=(18, 16, 18, 22),
+            style="Content.TFrame",
+        )
         self._timelapse_scroll_window = self.timelapse_scroll_canvas.create_window(
             (0, 0), window=main_frame, anchor=tk.NW
         )
@@ -88,6 +100,22 @@ class TimelapseDragDropWindow(Toplevel):
         self.bind("<MouseWheel>", self._scroll_timelapse_window, add="+")
         self.bind("<Button-4>", self._scroll_timelapse_window, add="+")
         self.bind("<Button-5>", self._scroll_timelapse_window, add="+")
+
+        hero = ttk.Frame(main_frame, style="Glass.TFrame", padding=(16, 13))
+        hero.pack(fill=tk.X, pady=(0, 12))
+        ttk.Label(
+            hero,
+            text="観測の流れを、ひとつの動画に",
+            style="Glass.TLabel",
+            font=("SF Pro Display", 16, "bold"),
+        ).pack(anchor=tk.W)
+        ttk.Label(
+            hero,
+            text="素材を追加して、見た目と星空の補正を選ぶだけで作成できます。\n"
+                 "下の設定はスクロールできます。2本指スクロールにも対応しています。",
+            style="GlassMuted.TLabel",
+            justify=tk.LEFT,
+        ).pack(anchor=tk.W, pady=(4, 0))
         
         drop_frame = ttk.LabelFrame(main_frame, text="ファイル / フォルダ", padding=10)
         drop_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
@@ -208,20 +236,22 @@ class TimelapseDragDropWindow(Toplevel):
 
         annotation_frame = ttk.LabelFrame(
             main_frame,
-            text="ローカル広角星空注釈",
-            padding=10,
+            text="星空オーバーレイ（グリッド・星座線）",
+            style="Section.TLabelframe",
         )
         annotation_frame.pack(fill=tk.X, pady=(0, 10))
         ttk.Checkbutton(
             annotation_frame,
-            text="ローカル星空注釈を有効化（外部API不使用）",
+            text="星空オーバーレイを有効にする（外部APIなし）",
             variable=self.timelapse_annotation_enabled_var,
             command=self._toggle_timelapse_annotation_settings,
         ).pack(anchor=tk.W)
         ttk.Label(
             annotation_frame,
-            text="当晩の広角歪み・向きを自動較正します。初回は通常より時間がかかります。",
-            foreground="gray",
+            text="このカメラ用の補正データで、レンズの歪みと星の位置を合わせます。\n"
+                 "初回の作成は通常より時間がかかります。",
+            style="GlassMuted.TLabel",
+            justify=tk.LEFT,
         ).pack(anchor=tk.W, pady=(2, 4))
         overlay_row = ttk.Frame(annotation_frame)
         overlay_row.pack(fill=tk.X, pady=(0, 4))
@@ -233,25 +263,9 @@ class TimelapseDragDropWindow(Toplevel):
         self.timelapse_annotation_overlay_label = ttk.Label(overlay_row, foreground="gray")
         self.timelapse_annotation_overlay_label.pack(side=tk.LEFT, padx=(8, 0))
         self._update_timelapse_annotation_overlay_summary()
-        calibration_row = ttk.Frame(annotation_frame)
-        calibration_row.pack(fill=tk.X)
-        ttk.Label(calibration_row, text="旧形式WCS/手動較正（任意）:").pack(side=tk.LEFT)
-        self.timelapse_annotation_calibration_entry = ttk.Entry(
-            calibration_row,
-            textvariable=self.timelapse_annotation_calibration_var,
-        )
-        self.timelapse_annotation_calibration_entry.pack(
-            side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5)
-        )
-        self.timelapse_annotation_calibration_button = ttk.Button(
-            calibration_row,
-            text="選択",
-            command=self._choose_timelapse_annotation_calibration,
-        )
-        self.timelapse_annotation_calibration_button.pack(side=tk.LEFT)
         model_row = ttk.Frame(annotation_frame)
         model_row.pack(fill=tk.X, pady=(5, 0))
-        ttk.Label(model_row, text="固定カメラモデル:").pack(side=tk.LEFT)
+        ttk.Label(model_row, text="このカメラ用補正データ:").pack(side=tk.LEFT)
         self.timelapse_annotation_model_combo = ttk.Combobox(
             model_row,
             textvariable=self.timelapse_annotation_model_var,
@@ -270,15 +284,40 @@ class TimelapseDragDropWindow(Toplevel):
         ttk.Label(
             annotation_frame,
             textvariable=self.timelapse_annotation_model_info_var,
-            foreground=UI_CYAN,
-            wraplength=450,
+            style="Hint.TLabel",
+            wraplength=520,
             justify=tk.LEFT,
         ).pack(anchor=tk.W, pady=(2, 0))
         ttk.Label(
             annotation_frame,
-            text="モデルを選ぶと、このタイムラプスの較正にそのモデルを使用します。",
-            foreground="gray",
+            text="補正データとは、このカメラのレンズの歪み・向き・星の配置を記録したものです。\n"
+                 "選択したデータで、動画内の星座線を同じ空の位置に揃えます。",
+            style="GlassMuted.TLabel",
+            justify=tk.LEFT,
         ).pack(anchor=tk.W, pady=(1, 4))
+
+        # Keep the legacy file picker below the in-app selector.  It remains
+        # available for older WCS files but is intentionally de-emphasized.
+        calibration_row = ttk.Frame(annotation_frame, style="Glass.TFrame")
+        calibration_row.pack(fill=tk.X, pady=(2, 0))
+        ttk.Label(
+            calibration_row,
+            text="旧形式の補正ファイル（互換用・通常は不要）:",
+            style="GlassMuted.TLabel",
+        ).pack(side=tk.LEFT)
+        self.timelapse_annotation_calibration_entry = ttk.Entry(
+            calibration_row,
+            textvariable=self.timelapse_annotation_calibration_var,
+        )
+        self.timelapse_annotation_calibration_entry.pack(
+            side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5)
+        )
+        self.timelapse_annotation_calibration_button = ttk.Button(
+            calibration_row,
+            text="参照",
+            command=self._choose_timelapse_annotation_calibration,
+        )
+        self.timelapse_annotation_calibration_button.pack(side=tk.LEFT)
         self._refresh_timelapse_annotation_models()
         reference_row = ttk.Frame(annotation_frame)
         reference_row.pack(fill=tk.X, pady=(5, 0))
@@ -295,13 +334,16 @@ class TimelapseDragDropWindow(Toplevel):
         self._toggle_timelapse_annotation_settings()
 
         model_frame = ttk.LabelFrame(
-            main_frame, text="高精度プレートソルブモデル（任意）", padding=10
+            main_frame,
+            text="このカメラ用補正データを作る（任意）",
+            style="Section.TLabelframe",
         )
         model_frame.pack(fill=tk.X, pady=(0, 10))
         ttk.Label(
             model_frame,
-            text="このタイムラプス入力の指定時間だけを使って、固定カメラモデルを作成できます。",
-            foreground="gray", wraplength=450,
+            text="指定した時間帯の動画から、レンズの歪みと星の位置を学習して登録します。\n"
+                 "登録後は、上の補正データ欄からいつでも呼び出せます。",
+            style="GlassMuted.TLabel", wraplength=520,
         ).pack(anchor=tk.W, pady=(0, 5))
         model_range = ttk.Frame(model_frame)
         model_range.pack(fill=tk.X)
@@ -364,7 +406,7 @@ class TimelapseDragDropWindow(Toplevel):
         preset_frame = ttk.Frame(mean_frame)
         preset_frame.pack(anchor=tk.W, pady=(6, 0))
         ttk.Label(preset_frame, text="プリセット:").pack(side=tk.LEFT)
-        for label, radius in (("なし", 0), ("軽め", 5), ("標準", 15), ("強め", 50)):
+        for label, radius in (("なし", 0), ("軽め", 5), ("標準", 15), ("強め（今回と同じ）", 50)):
             ttk.Button(
                 preset_frame,
                 text=label,
@@ -374,33 +416,60 @@ class TimelapseDragDropWindow(Toplevel):
         self.temporal_mean_spin.bind("<Return>", lambda _event: self._update_temporal_mean_summary())
         self._update_temporal_mean_summary()
         
-        btn_frame = ttk.Frame(main_frame)
-        btn_frame.pack(fill=tk.X)
-        
-        ttk.Button(btn_frame, text="作成開始", command=self.start_creation).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_frame, text="キャンセル", command=self.destroy).pack(side=tk.LEFT, padx=5)
+        # Keep the primary actions outside the scrollable canvas so they are
+        # always available, even when the content is taller than the display.
+        footer = ttk.Frame(self, style="GlassStrong.TFrame", padding=(15, 9))
+        footer.pack(side=tk.BOTTOM, fill=tk.X)
+        ttk.Label(
+            footer,
+            text="設定を確認したら作成開始",
+            style="GlassMuted.TLabel",
+        ).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Button(
+            footer,
+            text="キャンセル",
+            style="Quiet.TButton",
+            command=self.destroy,
+        ).pack(side=tk.RIGHT, padx=(6, 0))
+        ttk.Button(
+            footer,
+            text="タイムラプスを作成",
+            style="Primary.TButton",
+            command=self.start_creation,
+        ).pack(side=tk.RIGHT)
+
+        self._bind_timelapse_scroll_widgets(main_frame)
+        self.after_idle(self._update_timelapse_scroll_region)
 
     def _update_timelapse_scroll_region(self, _event=None):
-        self.timelapse_scroll_canvas.configure(
-            scrollregion=self.timelapse_scroll_canvas.bbox("all")
-        )
+        region = self.timelapse_scroll_canvas.bbox("all")
+        if region:
+            self.timelapse_scroll_canvas.configure(scrollregion=region)
 
     def _resize_timelapse_scroll_content(self, event):
         self.timelapse_scroll_canvas.itemconfigure(
-            self._timelapse_scroll_window, width=event.width
+            self._timelapse_scroll_window, width=max(1, event.width)
         )
+        self.after_idle(self._update_timelapse_scroll_region)
+
+    def _bind_timelapse_scroll_widgets(self, widget):
+        """Make wheel scrolling work over labels, fields, and list widgets."""
+        for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            widget.bind(sequence, self._scroll_timelapse_window, add="+")
+        for child in widget.winfo_children():
+            self._bind_timelapse_scroll_widgets(child)
 
     def _refresh_timelapse_annotation_models(self):
         try:
             models = camera_model_catalog.discover_camera_models()
         except Exception as exc:
             models = []
-            self.log_callback(f"固定カメラモデル一覧の取得に失敗しました: {exc}")
+            self.log_callback(f"カメラ補正データ一覧の取得に失敗しました: {exc}")
         self.timelapse_annotation_model_entries = models
         self.timelapse_annotation_model_by_display = {
             item["display_name"]: item for item in models
         }
-        auto_label = "自動選択（当日適合モデル）"
+        auto_label = "自動選択（撮影日に合う補正データ）"
         values = [auto_label] + [item["display_name"] for item in models]
         self.timelapse_annotation_model_combo.configure(values=values)
         parent_path = ""
@@ -464,8 +533,9 @@ class TimelapseDragDropWindow(Toplevel):
     def _scroll_timelapse_window(self, event):
         # macOS emits MouseWheel delta; X11 uses Button-4/5.  Do not scroll
         # when the dialog content fits entirely in the current viewport.
-        region = self.timelapse_scroll_canvas.bbox("all")
-        if not region or region[3] <= self.timelapse_scroll_canvas.winfo_height():
+        canvas = self.timelapse_scroll_canvas
+        region = canvas.bbox("all")
+        if not region or region[3] <= canvas.winfo_height():
             return
         if getattr(event, "num", None) == 4:
             amount = -1
@@ -473,8 +543,10 @@ class TimelapseDragDropWindow(Toplevel):
             amount = 1
         else:
             delta = getattr(event, "delta", 0)
+            if not delta:
+                return
             amount = -max(1, int(abs(delta) / 120)) if delta > 0 else max(1, int(abs(delta) / 120))
-        self.timelapse_scroll_canvas.yview_scroll(amount, "units")
+        canvas.yview_scroll(amount, "units")
 
     def _toggle_timelapse_timestamp_settings(self):
         state = tk.NORMAL if self.timelapse_timestamp_enabled_var.get() else tk.DISABLED

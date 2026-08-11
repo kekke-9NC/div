@@ -5,17 +5,17 @@ import camera_model_catalog
 
 
 class PlateSolveMixin:
-    _AUTO_CAMERA_MODEL_LABEL = "自動選択（当日適合モデル）"
+    _AUTO_CAMERA_MODEL_LABEL = "自動選択（撮影日に合う補正データ）"
 
     def _refresh_plate_solve_model_choices(self):
-        """Refresh the in-app fixed-camera model selector."""
+        """Refresh the in-app camera-correction selector."""
         try:
             models = camera_model_catalog.discover_camera_models()
         except Exception as exc:
             models = []
             logger = getattr(self, "append_log", None)
             if callable(logger):
-                logger(f"固定カメラモデル一覧の取得に失敗しました: {exc}")
+                logger(f"カメラ補正データ一覧の取得に失敗しました: {exc}")
         self.plate_solve_model_entries = models
         self.plate_solve_model_by_display = {
             item["display_name"]: item for item in models
@@ -64,7 +64,7 @@ class PlateSolveMixin:
             if current.get("job_id") == "local-wideangle-camera-model":
                 self.global_wcs_info = None
                 self.plate_solve_wcs_path_var.set("")
-                self.plate_solve_status_var.set("プレートソルブ: 当日適合モデルを自動選択")
+                self.plate_solve_status_var.set("プレートソルブ: 撮影日に合う補正データを自動選択")
             self.update_start_button_state()
             return
         self._apply_plate_solve_model(selected)
@@ -97,7 +97,7 @@ class PlateSolveMixin:
         except Exception as exc:
             self.plate_solve_status_var.set("プレートソルブ: モデル適用失敗")
             self._show_plate_solve_message(
-                "showerror", "固定カメラモデル", f"モデルを適用できませんでした:\n{exc}"
+                "showerror", "カメラ補正データ", f"補正データを適用できませんでした:\n{exc}"
             )
 
     def _handle_camera_model_status(self, text: str):
@@ -338,7 +338,7 @@ class PlateSolveMixin:
                         self.plate_solve_model_var.set(selected["display_name"])
                         self._update_plate_solve_model_info()
                     self.plate_solve_wcs_path_var.set(result.model_path)
-                    self.plate_solve_status_var.set("プレートソルブ: 高精度固定カメラモデルを適用")
+                    self.plate_solve_status_var.set("プレートソルブ: 高精度カメラ補正データを適用")
                     self.global_wcs_info = {
                         "wcs_file": result.model_path,
                         "calibration_path": result.model_path,
@@ -347,7 +347,7 @@ class PlateSolveMixin:
                     }
                     self.update_start_button_state()
                     if result.target_met:
-                        messagebox.showinfo("高精度モデル", "選択範囲から高精度固定カメラモデルを作成し、登録しました。", parent=self)
+                        messagebox.showinfo("高精度モデル", "選択範囲から高精度カメラ補正データを作成し、登録しました。", parent=self)
                     else:
                         messagebox.showwarning(
                             "高精度モデル",
@@ -406,7 +406,7 @@ class PlateSolveMixin:
         self._set_camera_model_status(f"高精度モデル: RTSPを{interval}秒間隔で監視中")
 
     def select_plate_solve_wcs_file(self):
-        file_path = filedialog.askopenfilename(title="既存のWCS/固定カメラモデルを選択", filetypes=[("WCS/FITS/モデル", "*.wcs *.fits *.fit *.json"), ("すべてのファイル", "*.*")])
+        file_path = filedialog.askopenfilename(title="既存のWCS/カメラ補正データを選択", filetypes=[("WCS/FITS/補正データ", "*.wcs *.fits *.fit *.json"), ("すべてのファイル", "*.*")])
         if file_path:
             try:
                 ps_datetime = None
@@ -415,7 +415,7 @@ class PlateSolveMixin:
                     import local_wideangle_astrometry
                     metadata, _model = local_wideangle_astrometry._load_calibration(file_path)
                     if metadata.get("model_type") != "fixed-camera-stg-poly":
-                        raise ValueError("固定カメラモデルJSONではありません。")
+                        raise ValueError("カメラ補正データJSONではありません。")
                     reference_value = metadata.get("reference_datetime")
                     if reference_value:
                         ps_datetime = datetime.fromisoformat(str(reference_value).replace("Z", "+00:00"))
@@ -430,7 +430,7 @@ class PlateSolveMixin:
                     self.plate_solve_status_var.set(
                         f"プレートソルブ: 高精度モデル適用 @ {(ps_datetime or datetime.now()).strftime('%H:%M')}"
                     )
-                    messagebox.showinfo("成功", "固定カメラモデルをロードしました。", parent=self)
+                    messagebox.showinfo("成功", "カメラ補正データを読み込みました。", parent=self)
                     self.update_start_button_state()
                     return
                 # まずWCSファイル(FITS)のヘッダーから'DATE-OBS'を読み込もうと試みる

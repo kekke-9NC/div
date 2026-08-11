@@ -419,9 +419,9 @@ class App(
         self.plate_solve_wcs_path_var = tk.StringVar()
         self.plate_solve_video_path_var = tk.StringVar()
         self.plate_solve_model_path_var = tk.StringVar()
-        self.plate_solve_model_var = tk.StringVar(value="自動選択（当日適合モデル）")
+        self.plate_solve_model_var = tk.StringVar(value="自動選択（撮影日に合う補正データ）")
         self.plate_solve_model_info_var = tk.StringVar(
-            value="モデル未選択（当日の日付・カメラに合うモデルを自動選択）"
+            value="未選択（撮影日に合うカメラ補正データを自動選択）"
         )
         self.plate_solve_status_var = tk.StringVar(value="プレートソルブ: 未実行")
         self.camera_model_source_var = tk.StringVar()
