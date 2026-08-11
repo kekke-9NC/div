@@ -1354,9 +1354,32 @@ def _draw_constellation_lines(
     draw_points = vertex_points + pixel_shift
     usable &= np.isfinite(vertex_points).all(axis=1)
     usable &= np.isfinite(draw_points).all(axis=1)
-    # Keep finite projected endpoints for optional anchor matching, but do
-    # not require them to be inside the output.  Boundary clipping is done
-    # on densely sampled sky segments below.
+    endpoint_visible = usable.copy()
+    endpoint_visible &= (
+        (draw_points[:, 0] >= 0) & (draw_points[:, 0] < width)
+        & (draw_points[:, 1] >= 0) & (draw_points[:, 1] < height)
+    )
+    rounded = np.zeros(draw_points.shape, dtype=np.int32)
+    visible_indices = np.flatnonzero(endpoint_visible)
+    if len(visible_indices):
+        rounded[visible_indices] = np.rint(
+            draw_points[visible_indices]
+        ).astype(np.int32)
+    # A coordinate such as y=1079.6 is mathematically inside a 1080px frame,
+    # but rounds to 1080 and must not index the support mask.
+    endpoint_visible &= (
+        (rounded[:, 0] >= 0) & (rounded[:, 0] < width)
+        & (rounded[:, 1] >= 0) & (rounded[:, 1] < height)
+    )
+    visible_indices = np.flatnonzero(endpoint_visible)
+    if len(visible_indices):
+        endpoint_visible[visible_indices] = support_mask[
+            rounded[visible_indices, 1], rounded[visible_indices, 0]
+        ] > 0
+    # Keep finite projected endpoints for optional anchor matching.  A line
+    # is admitted only when both catalog endpoints are in the calibrated
+    # image area; otherwise a curved projection can create a floating fragment
+    # from an unrelated constellation outside the camera's support.
     anchor_usable = usable.copy()
     if anchor_points is not None and len(anchor_points):
         anchors = np.asarray(anchor_points, dtype=float).reshape(-1, 2)
@@ -1375,7 +1398,12 @@ def _draw_constellation_lines(
     thickness = max(1, round(min(width, height) / 720.0))
     for line, length in zip(lines, lengths):
         for index in range(length - 1):
-            if not (anchor_usable[offset + index] and anchor_usable[offset + index + 1]):
+            if not (
+                endpoint_visible[offset + index]
+                and endpoint_visible[offset + index + 1]
+                and anchor_usable[offset + index]
+                and anchor_usable[offset + index + 1]
+            ):
                 continue
             sampled = _sample_constellation_line(line[index:index + 2])
             segment_ra = (sampled[:, 0] - delta_ra) % 360.0
@@ -1446,16 +1474,21 @@ def annotate_frame(
         target = target.replace(tzinfo=None)
     delta_ra = ((target - reference).total_seconds() / SIDEREAL_DAY_SECONDS) * 360.0
     detected_stars: List[List[float]] = []
-    # The fixed camera model has already been fitted against detected stars.
-    # Requiring every constellation endpoint to be rediscovered in each output
-    # frame makes the overlay disappear as soon as a cloud hides one star.
-    # Keep the old anchor check available only as an explicit opt-in for
-    # experimental calibrations.
+    # Validated fixed-camera models store this policy as
+    # ``verified_constellation_only``; newer builder output calls it
+    # ``constellation_anchor_filter``.  Honor both names so an older validated
+    # 80%-support model does not silently fall back to drawing every catalog
+    # line in the sky.
     verify_constellations = bool(
-        draw_constellations and metadata.get("constellation_anchor_filter", False)
+        draw_constellations and metadata.get(
+            "constellation_anchor_filter",
+            metadata.get("verified_constellation_only", False),
+        )
     )
     align_constellations = bool(
-        draw_constellations and metadata.get("constellation_star_alignment", True)
+        draw_constellations
+        and metadata.get("constellation_star_alignment", False)
+        and metadata.get("catalog_stars")
     )
     if draw_detected_stars or verify_constellations or align_constellations:
         detection_gray = cv2.cvtColor(output, cv2.COLOR_BGR2GRAY)

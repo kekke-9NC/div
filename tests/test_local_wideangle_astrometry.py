@@ -159,6 +159,32 @@ class LocalWideangleAstrometryTests(unittest.TestCase):
                 )
             self.assertGreater(np.count_nonzero(with_lines), np.count_nonzero(grid_only))
 
+    def test_legacy_verified_constellation_flag_enables_anchor_filter(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            wcs_path = root / "calibration.wcs"
+            header = _tan_wcs(320, 180).to_header(relax=True)
+            header["DATE-OBS"] = "2026-07-10T01:00:00"
+            fits.PrimaryHDU(header=header).writeto(wcs_path)
+            metadata_path = root / "calibration.json"
+            metadata_path.write_text(json.dumps({
+                "wcs_path": str(wcs_path),
+                "reference_datetime": "2026-07-10T01:00:00",
+                "width": 320, "height": 180, "center_ra_deg": 230.0,
+                "sip_support_hull": [[5, 5], [315, 5], [315, 175], [5, 175]],
+                "verified_constellation_only": True,
+            }), encoding="utf-8")
+            with mock.patch.object(
+                local_astro, "_extract_stars",
+                return_value=([[10.0, 10.0]], None, None),
+            ), mock.patch.object(local_astro, "_draw_constellation_lines") as draw:
+                local_astro.annotate_frame(
+                    np.zeros((180, 320, 3), dtype=np.uint8),
+                    datetime(2026, 7, 10, 1, 0), str(metadata_path),
+                    draw_constellations=True,
+                )
+            self.assertIsNotNone(draw.call_args.kwargs["anchor_points"])
+
     def test_detected_star_mode_draws_hollow_markers_from_frame_pixels(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -322,7 +348,7 @@ class LocalWideangleAstrometryTests(unittest.TestCase):
         np.testing.assert_allclose(y, [20.0, 20.0])
         self.assertTrue(valid.all())
 
-    def test_constellation_boundary_draws_visible_run_when_endpoint_is_outside(self):
+    def test_constellation_boundary_rejects_fragment_with_endpoint_outside(self):
         output = np.zeros((180, 320, 3), dtype=np.uint8)
         support = np.full((180, 320), 255, dtype=np.uint8)
         with mock.patch.object(
@@ -349,7 +375,7 @@ class LocalWideangleAstrometryTests(unittest.TestCase):
             local_astro._draw_constellation_lines(
                 output, object(), 0.0, support
             )
-        self.assertGreater(np.count_nonzero(output), 0)
+        self.assertEqual(np.count_nonzero(output), 0)
 
     def test_catalog_bootstrap_fits_real_sip_coefficients(self):
         width, height = 640, 360
