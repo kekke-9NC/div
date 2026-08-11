@@ -58,6 +58,44 @@ class LocalWideangleAstrometryTests(unittest.TestCase):
             decode.assert_not_called()
             self.assertEqual(result["job_id"], "local-wideangle-cache")
 
+    def test_registered_model_falls_back_to_best_same_camera_model_on_unseen_night(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = str(root / "20260811" / "02" / "21.mp4")
+            _date, camera = local_astro._night_identity(source, 640, 360)
+            models_root = root / "camera_models"
+            candidates = [
+                ("v3", "20260807", 0.42, 3.0),
+                ("v4", "20260809", 0.80, 1.8),
+            ]
+            for name, valid_date, support, p95 in candidates:
+                model_dir = models_root / name
+                model_dir.mkdir(parents=True)
+                wcs_path = model_dir / "model.wcs"
+                wcs_path.write_bytes(b"wcs")
+                (model_dir / "camera_model.json").write_text(json.dumps({
+                    "model_type": "fixed-camera-stg-poly",
+                    "algorithm_version": "camera-model-test",
+                    "enabled": True,
+                    "width": 640,
+                    "height": 360,
+                    "camera_aliases": [camera],
+                    "valid_dates": [valid_date],
+                    "support_fraction": support,
+                    "residual_p95_px": p95,
+                    "reference_datetime": f"{valid_date}T01:00:00",
+                    "wcs_path": str(wcs_path),
+                    "model_label": name,
+                }), encoding="utf-8")
+
+            with mock.patch.object(local_astro, "_open_video", return_value=_FakeCapture()), \
+                 mock.patch.object(local_astro, "_video_sample_stack") as decode:
+                result = local_astro.solve_video_local(source, cache_root=directory)
+
+            decode.assert_not_called()
+            self.assertEqual(result["model_label"], "v4")
+            self.assertFalse(result["_model_date_match"])
+
     def test_annotation_draws_forward_grid_without_inverse_sip(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

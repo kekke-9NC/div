@@ -177,9 +177,16 @@ def _registered_camera_model(
     height: int,
     cache_root: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Return a reusable fixed-camera model registered for this source root."""
+    """Return the best reusable model registered for this source root.
+
+    ``valid_dates`` records nights used for validation; it is not an expiry
+    date for a physically fixed camera.  Prefer an exact-night model, but
+    fall back to the highest-quality enabled model for the same camera and
+    resolution when a later night has no exact validation entry.
+    """
     root = Path(cache_root).expanduser().resolve() if cache_root else _default_cache_root()
     _date, camera = _night_identity(source_path, width, height)
+    candidates = []
     for path in sorted((root / "camera_models").glob("*/camera_model.json")):
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
@@ -197,22 +204,72 @@ def _registered_camera_model(
             if camera not in payload.get("camera_aliases", []):
                 continue
             valid_dates = payload.get("valid_dates")
-            if valid_dates and _date not in valid_dates:
-                continue
+            if isinstance(valid_dates, str):
+                valid_dates = [valid_dates]
+            normalized_dates = {str(value)[:10] for value in (valid_dates or [])}
+            exact_night = not normalized_dates or _date in normalized_dates
             wcs_path = Path(payload["wcs_path"]).expanduser()
             if not wcs_path.exists():
                 continue
             reference = datetime.fromisoformat(str(payload["reference_datetime"]).replace("Z", "+00:00"))
-            return {
-                "wcs_file": str(wcs_path),
-                "calibration_path": str(path),
-                "plate_solve_datetime": reference,
-                "job_id": "local-wideangle-camera-model",
-                **payload,
-            }
+            support = payload.get("support_fraction", payload.get("sip_support_fraction"))
+            if support is None:
+                validation = payload.get("support_grid_validation")
+                if isinstance(validation, dict) and validation.get("validated_fraction") is not None:
+                    support = validation.get("validated_fraction")
+            if support is None:
+                grid = payload.get("support_grid")
+                if isinstance(grid, dict):
+                    grid = grid.get("grid") or grid.get("values")
+                try:
+                    cells = [bool(cell) for row in grid for cell in row]
+                    support = sum(cells) / len(cells) if cells else 0.0
+                except (TypeError, ValueError):
+                    support = 0.0
+            try:
+                support = float(support)
+                support = support / 100.0 if support > 1.0 else support
+            except (TypeError, ValueError):
+                support = 0.0
+            fit_stats = payload.get("fit_stats") or {}
+            quality = payload.get("residual_p95_px", fit_stats.get("residual_p95_px", float("inf")))
+            try:
+                quality = float(quality)
+            except (TypeError, ValueError):
+                quality = float("inf")
+            candidates.append((
+                exact_night,
+                max(0.0, min(1.0, support)),
+                quality,
+                reference,
+                path,
+                wcs_path,
+                payload,
+            ))
         except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
             continue
-    return None
+    if not candidates:
+        return None
+
+    # Exact-night validation wins.  Within the same group, prefer broader
+    # coverage, lower residual error, and the newer reference model.
+    candidates.sort(
+        key=lambda item: (
+            not item[0],
+            -item[1],
+            item[2],
+            -item[3].timestamp(),
+        )
+    )
+    exact_night, _support, _quality, _reference, path, wcs_path, payload = candidates[0]
+    return {
+        "wcs_file": str(wcs_path),
+        "calibration_path": str(path),
+        "plate_solve_datetime": _reference,
+        "job_id": "local-wideangle-camera-model",
+        **payload,
+        "_model_date_match": bool(exact_night),
+    }
 
 
 def _video_sample_stack(
@@ -657,7 +714,23 @@ def solve_video_local(
     if not force:
         camera_model = _registered_camera_model(video_path, width, height, cache_root)
         if camera_model is not None:
-            _emit(progress_callback, "このカメラ専用の広角モデルを再利用します")
+            model_label = str(camera_model.get("model_label") or "登録済み補正データ")
+            support = camera_model.get("support_fraction", camera_model.get("sip_support_fraction"))
+            try:
+                support_text = f" / 被覆率 {float(support) * 100:.0f}%" if support is not None else ""
+            except (TypeError, ValueError):
+                support_text = ""
+            if camera_model.get("_model_date_match", True):
+                _emit(
+                    progress_callback,
+                    f"このカメラ専用の広角補正データを再利用します: {model_label}{support_text}",
+                )
+            else:
+                _emit(
+                    progress_callback,
+                    f"同じカメラ・解像度の登録済み補正データを再利用します: {model_label}{support_text} "
+                    "（基準夜が異なるため、新規星図照合は行いません）",
+                )
             return camera_model
     paths = _calibration_paths(video_path, width, height, cache_root)
     if not force and paths["metadata"].exists() and paths["wcs"].exists():
