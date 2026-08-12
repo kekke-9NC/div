@@ -9,7 +9,7 @@ views used by the analysis workflow:
 * camera-plane overlay
 * rectangular RA/Dec map
 * radiant-density heatmap
-* horizon polar plot
+* RA/Dec polar plot
 * cumulative time animation
 
 All functions accept the same :class:`RadiantReport` as the existing sphere
@@ -484,74 +484,26 @@ def draw_density_heatmap(report: analysis.RadiantReport, figure=None):
     return figure, axis
 
 
-def _altaz_points(result: analysis.RadiantResult, latitude_deg: float, longitude_deg: float):
-    if result.detection_time is None:
-        return None
-    radec = [result.start_radec, result.end_radec]
-    if result.radiant_radec is not None:
-        radec.append(result.radiant_radec)
-    return _altaz_radec_curve(
-        np.asarray([item[0] for item in radec], dtype=float),
-        np.asarray([item[1] for item in radec], dtype=float),
-        result.detection_time,
-        latitude_deg,
-        longitude_deg,
-    )
+def _radec_polar_points(ra_deg: Sequence[float], dec_deg: Sequence[float]) -> Tuple[np.ndarray, np.ndarray]:
+    """Convert fixed equatorial coordinates to an NCP-centered polar plot.
+
+    The radial coordinate is co-declination (90° - Dec): the north celestial
+    pole is at the center and the south celestial pole is at the outer rim.
+    RA is unwrapped along each sampled path so a path crossing 0h remains a
+    short continuous curve instead of being joined across the whole plot.
+    """
+    ra = np.asarray(ra_deg, dtype=float).reshape(-1)
+    dec = np.asarray(dec_deg, dtype=float).reshape(-1)
+    return np.unwrap(np.deg2rad(ra)), 90.0 - dec
 
 
-def _altaz_radec_curve(
-    ra_deg: Sequence[float],
-    dec_deg: Sequence[float],
-    detection_time: datetime,
-    latitude_deg: float,
-    longitude_deg: float,
-):
-    from astropy.coordinates import AltAz, EarthLocation, SkyCoord
-    from astropy.time import Time
-    from astropy.utils import iers
-    import astropy.units as u
-
-    # A visualization must remain reproducible offline.  Astropy otherwise
-    # attempts to download a fresh IERS table on the first AltAz transform.
-    iers.conf.auto_download = False
-    iers.conf.auto_max_age = None
-    iers.conf.iers_degraded_accuracy = "warn"
-    obstime = Time(detection_time)
-    location = EarthLocation.from_geodetic(lon=longitude_deg * u.deg, lat=latitude_deg * u.deg)
-    coords = SkyCoord(
-        ra=np.asarray(ra_deg, dtype=float) * u.deg,
-        dec=np.asarray(dec_deg, dtype=float) * u.deg,
-        frame="icrs",
-    )
-    altaz = coords.transform_to(AltAz(obstime=obstime, location=location))
-    return np.asarray(altaz.az.rad), np.asarray(altaz.alt.deg)
+def _radec_polar_result_path(result: analysis.RadiantResult, count: int = 96) -> Tuple[np.ndarray, np.ndarray]:
+    ra, dec = _path_radec(result, count=count)
+    return _radec_polar_points(ra, dec)
 
 
-def _visible_polar_chunks(az_rad: Sequence[float], alt_deg: Sequence[float]) -> List[Tuple[np.ndarray, np.ndarray]]:
-    """Return continuous above-horizon sections without azimuth wrap jumps."""
-    az = np.unwrap(np.asarray(az_rad, dtype=float).reshape(-1))
-    alt = np.asarray(alt_deg, dtype=float).reshape(-1)
-    visible = np.isfinite(az) & np.isfinite(alt) & (alt >= 0.0) & (alt <= 90.0)
-    chunks: List[Tuple[np.ndarray, np.ndarray]] = []
-    start: Optional[int] = None
-    for index, is_visible in enumerate(visible):
-        if is_visible and start is None:
-            start = index
-        if (not is_visible or index == len(visible) - 1) and start is not None:
-            end = index + 1 if is_visible and index == len(visible) - 1 else index
-            if end - start >= 2:
-                chunks.append((az[start:end], 90.0 - alt[start:end]))
-            start = None
-    return chunks
-
-
-def draw_horizon_polar(
-    report: analysis.RadiantReport,
-    figure=None,
-    latitude_deg: float = DEFAULT_LATITUDE_DEG,
-    longitude_deg: float = DEFAULT_LONGITUDE_DEG,
-):
-    """Draw the sky as seen from the observer: zenith at the center."""
+def draw_radec_polar(report: analysis.RadiantReport, figure=None):
+    """Draw fixed RA/Dec on a polar chart centered on the north celestial pole."""
     from matplotlib.figure import Figure
 
     if figure is None:
@@ -560,54 +512,53 @@ def draw_horizon_polar(
     font = _font()
     axis = figure.add_subplot(111, projection="polar", facecolor=BACKGROUND)
     axis.set_title(
-        f"地平座標・極座標図 | 中心=天頂 / 外周=地平線 | 緯度 {latitude_deg:.1f}° / 経度 {longitude_deg:.1f}°",
+        "RA-Dec極座標図 | 中心=北天極 / 外周=南天極 | 時刻によらない天球基準",
         color=TEXT,
         pad=24,
         fontproperties=font,
     )
     axis.set_theta_zero_location("N")
-    axis.set_theta_direction(-1)
-    # radius is zenith distance: 0° must be at the center and 90° at the
-    # horizon.  Reversing these limits makes the plot look upside-down and
-    # places low-altitude events close to the center.
-    axis.set_rlim(0, 90)
-    axis.set_yticks(np.arange(10, 91, 10))
-    axis.set_yticklabels([f"{value}°" for value in np.arange(10, 91, 10)])
+    # Astronomical charts conventionally increase RA toward the left.
+    axis.set_theta_direction(1)
+    axis.set_rlim(0, 180)
+    declinations = np.arange(60, -91, -30)
+    radii = 90.0 - declinations
+    axis.set_yticks(radii)
+    axis.set_yticklabels([f"{value:+.0f}°" for value in declinations])
+    ra_ticks = np.arange(0, 360, 30)
+    axis.set_xticks(np.deg2rad(ra_ticks))
+    axis.set_xticklabels([f"{int(value / 15):d}h" for value in ra_ticks])
     axis.set_rlabel_position(225)
     axis.tick_params(colors=MUTED, labelsize=8)
     axis.grid(color="#53657E", alpha=0.35)
     for result in report.supported_results:
-        if result.detection_time is None:
-            continue
         color = _color(result)
-        path_ra, path_dec = _path_radec(result, count=96)
-        path_az, path_alt = _altaz_radec_curve(
-            path_ra, path_dec, result.detection_time, latitude_deg, longitude_deg
-        )
-        for theta, radius in _visible_polar_chunks(path_az, path_alt):
-            axis.plot(theta, radius, color=color, linewidth=1.5, alpha=0.8)
+        path_theta, path_radius = _radec_polar_result_path(result, count=96)
+        axis.plot(path_theta, path_radius, color=color, linewidth=1.5, alpha=0.8)
 
         extension = _extension_radec(result, count=128)
         if extension is not None:
             ext_ra, ext_dec = extension
-            ext_az, ext_alt = _altaz_radec_curve(
-                ext_ra, ext_dec, result.detection_time, latitude_deg, longitude_deg
+            ext_theta, ext_radius = _radec_polar_points(ext_ra, ext_dec)
+            axis.plot(ext_theta, ext_radius, color=color, linewidth=1.0, linestyle="--", alpha=0.8)
+            radiant_theta, radiant_radius = _radec_polar_points(
+                [result.radiant_radec[0]], [result.radiant_radec[1]]
             )
-            for theta, radius in _visible_polar_chunks(ext_az, ext_alt):
-                axis.plot(theta, radius, color=color, linewidth=1.0, linestyle="--", alpha=0.8)
-
-            radiant_az, radiant_alt = _altaz_radec_curve(
-                np.asarray([result.radiant_radec[0]]),
-                np.asarray([result.radiant_radec[1]]),
-                result.detection_time,
-                latitude_deg,
-                longitude_deg,
-            )
-            if len(radiant_alt) and np.isfinite(radiant_alt[0]) and 0.0 <= radiant_alt[0] <= 90.0:
-                axis.scatter([radiant_az[0]], [90.0 - radiant_alt[0]], color=color, s=22)
+            axis.scatter(radiant_theta, radiant_radius, color=color, s=22)
     axis.legend(handles=_legend_handles(report.supported_results), loc="lower right", bbox_to_anchor=(0.98, 0.02), facecolor=PANEL, edgecolor="#415875", labelcolor=TEXT, prop=font, fontsize=8)
     figure.subplots_adjust(top=0.86, bottom=0.07, left=0.08, right=0.92)
     return figure, axis
+
+
+def draw_horizon_polar(
+    report: analysis.RadiantReport,
+    figure=None,
+    latitude_deg: float = DEFAULT_LATITUDE_DEG,
+    longitude_deg: float = DEFAULT_LONGITUDE_DEG,
+):
+    """Backward-compatible name for the fixed RA/Dec polar visualization."""
+    del latitude_deg, longitude_deg
+    return draw_radec_polar(report, figure=figure)
 
 
 def save_sphere_rotation_gif(

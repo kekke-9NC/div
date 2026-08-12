@@ -87,23 +87,21 @@ def test_camera_extension_projects_a_sampled_sky_curve():
     assert float(np.ptp(slopes)) > 1e-4
 
 
-def test_visible_polar_chunks_unwrap_azimuth_and_remove_below_horizon():
-    chunks = visualizations._visible_polar_chunks(
-        np.deg2rad([350.0, 355.0, 0.0, 5.0, 10.0, 20.0]),
-        [30.0, 20.0, 10.0, -5.0, 5.0, 15.0],
+def test_radec_polar_points_use_north_pole_center():
+    theta, radius = visualizations._radec_polar_points(
+        [0.0, 90.0, 180.0, 270.0],
+        [90.0, 60.0, 0.0, -30.0],
     )
 
-    assert len(chunks) == 2
-    assert all(len(theta) == len(radius) for theta, radius in chunks)
-    assert np.all(np.asarray(chunks[0][0]) > np.deg2rad(300.0))
-    assert np.all(np.asarray(chunks[1][1]) <= 90.0)
+    assert np.allclose(radius, [0.0, 30.0, 90.0, 120.0])
+    assert np.allclose(theta, np.deg2rad([0.0, 90.0, 180.0, 270.0]))
 
 
-def test_horizon_plot_has_zenith_at_center():
+def test_radec_polar_plot_has_north_pole_at_center():
     figure = Figure(figsize=(8, 8))
     _figure, axis = visualizations.draw_horizon_polar(_report(), figure=figure)
 
-    assert axis.get_rmax() == 90.0
+    assert axis.get_rmax() == 180.0
     assert axis.get_rmin() == 0.0
 
 
