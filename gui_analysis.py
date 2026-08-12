@@ -1153,6 +1153,16 @@ class AnalysisMixin:
             selected = filedialog.askopenfilenames(title="解析するinfo.txtを追加", filetypes=(("info.txt", "*.txt"), ("すべてのファイル", "*.*")))
             self._radiant_analysis_menu_add_files(selected, tree)
 
+        def add_folder():
+            directory = filedialog.askdirectory(title="放射点解析用のinfo.txtフォルダを選択")
+            if not directory:
+                return
+            selected = sorted(str(path) for path in Path(directory).glob("*_info.txt"))
+            if not selected:
+                messagebox.showinfo("対象ファイルなし", "選択したフォルダに *_info.txt がありません。", parent=win)
+                return
+            self._radiant_analysis_menu_add_files(selected, tree)
+
         def remove_files():
             selected = tree.selection()
             for item_id in reversed(selected):
@@ -1165,6 +1175,7 @@ class AnalysisMixin:
         input_buttons = ttk.Frame(input_frame)
         input_buttons.grid(row=2, column=0, columnspan=2, sticky=tk.EW, pady=(8, 0))
         ttk.Button(input_buttons, text="ファイルを追加", command=add_files).pack(side=tk.LEFT)
+        ttk.Button(input_buttons, text="フォルダを追加", command=add_folder).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(input_buttons, text="選択を削除", command=remove_files, style="Gray.TButton").pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(input_buttons, text="すべて削除", command=clear_files, style="Gray.TButton").pack(side=tk.LEFT, padx=(8, 0))
 
@@ -1338,10 +1349,17 @@ class AnalysisMixin:
             self.analysis_radiant_report = report
             status_var.set("解析完了")
             progress_label.configure(text="表示内容を確認できます。流星線分は有効領域内のみ描画しています。")
+            motion_count = sum(result.line_source == "info.txt:motion" for result in report.results)
+            direction_rejected = sum(
+                result.line_source == "info.txt:motion"
+                and "始点側の放射点候補がありません" in result.note
+                for result in report.results
+            )
             summary_text.set(
                 f"モデル: {report.model_label}\n"
                 f"有効領域内: {len(report.supported_results)}件 / 読み込み: {len(report.results) + len(report.skipped)}件\n"
-                f"除外: {len(report.skipped)}件\n\n"
+                f"除外: {len(report.skipped)}件\n"
+                f"時間順方向を適用: {motion_count}件 / 始点側条件で未分類: {direction_rejected}件\n\n"
                 "流星群別（有効領域内）\n"
                 + "\n".join(
                     f"{code}  {next((item.shower_name for item in report.supported_results if item.shower_code == code), '未分類')}: {count}件"
@@ -1564,9 +1582,6 @@ class AnalysisMixin:
         display_vars = {
             "show_sphere_surface": boolean(True),
             "show_meteor_paths": boolean(True),
-            "show_radiant_extensions": boolean(True),
-            "show_radiant_points": boolean(True),
-            "show_radiant_labels": boolean(True),
             "show_coordinate_grid": boolean(True),
             "show_coordinate_labels": boolean(True),
             "show_x_axis": boolean(True),
@@ -1577,16 +1592,12 @@ class AnalysisMixin:
             "show_title": boolean(True),
             "show_legend": boolean(True),
             "legend_path": boolean(True),
-            "legend_extension": boolean(True),
         }
         display_frame = ttk.LabelFrame(settings, text="表示するデータ", padding=10)
         display_frame.pack(fill=tk.X, pady=(0, 8))
         display_items = (
             ("show_sphere_surface", "球面の表面"),
             ("show_meteor_paths", "実際の流星経路"),
-            ("show_radiant_extensions", "放射点までの延長線"),
-            ("show_radiant_points", "放射点マーカー"),
-            ("show_radiant_labels", "放射点コード（PERなど）"),
             ("show_coordinate_grid", "RA/Decグリッド"),
             ("show_coordinate_labels", "RA/Decラベル"),
             ("show_title", "タイトル"),
@@ -1627,12 +1638,15 @@ class AnalysisMixin:
         ttk.Checkbutton(legend_frame, text="実線の説明", variable=display_vars["legend_path"]).grid(
             row=1, column=0, sticky=tk.W
         )
-        ttk.Checkbutton(legend_frame, text="破線の説明", variable=display_vars["legend_extension"]).grid(
-            row=1, column=1, sticky=tk.W
-        )
         ttk.Label(legend_frame, text="流星群の凡例", style="GlassMuted.TLabel").grid(
             row=2, column=0, columnspan=2, sticky=tk.W, pady=(7, 2)
         )
+        ttk.Label(
+            legend_frame,
+            text="チェック済みの流星群だけ放射点までの破線を表示。チェックを外した流星群はSPO（未分類）の灰色実線で表示",
+            style="GlassMuted.TLabel",
+            wraplength=430,
+        ).grid(row=3, column=0, columnspan=2, sticky=tk.W, pady=(0, 4))
         shower_vars = {}
         shower_names = {}
         for result in report.supported_results:
@@ -1640,7 +1654,7 @@ class AnalysisMixin:
             shower_names[result.shower_code] = result.shower_name
         shower_codes = list(shower_vars)
         legend_list = ttk.Frame(legend_frame)
-        legend_list.grid(row=3, column=0, columnspan=2, sticky=tk.EW)
+        legend_list.grid(row=4, column=0, columnspan=2, sticky=tk.EW)
         for index, code in enumerate(shower_codes):
             ttk.Checkbutton(
                 legend_list,
@@ -1707,6 +1721,7 @@ class AnalysisMixin:
             return mra.SphereRenderOptions(
                 **{key: value.get() for key, value in display_vars.items()},
                 legend_showers=selected_codes,
+                visible_shower_codes=selected_codes,
             )
 
         def update_preview():

@@ -32,6 +32,19 @@ def test_parse_pixel_line_prefers_time_ordered_motion_endpoints():
     )
 
 
+def test_resolve_analysis_video_uses_event_full_video_for_minimal_info(tmp_path):
+    info_path = tmp_path / "20260811_031824560_meteor_1_prob1.00_info.txt"
+    full_video = tmp_path / "20260811_031824560_meteor_1_prob1.00_full.mp4"
+    full_video.write_bytes(b"placeholder")
+
+    resolved = radiant._resolve_analysis_video(
+        str(info_path),
+        {"Source": str(tmp_path / "archived" / "03.mp4")},
+    )
+
+    assert resolved == str(full_video.resolve())
+
+
 def test_match_shower_accepts_active_perseids_geometry():
     radiant_vector = radiant.radec_to_unit_vector(48.0, 58.0)
     tangent = np.cross(radiant_vector, np.asarray((0.0, 0.0, 1.0)))
@@ -50,6 +63,33 @@ def test_match_shower_accepts_active_perseids_geometry():
     assert distance < 0.01
     assert side == "start"
     assert any(candidate.code == "PER" and candidate.active for candidate in candidates)
+
+
+def test_direction_required_rejects_radiant_on_late_endpoint_side():
+    radiant_vector = radiant.radec_to_unit_vector(48.0, 58.0)
+    tangent = np.cross(radiant_vector, np.asarray((0.0, 0.0, 1.0)))
+    tangent = tangent / np.linalg.norm(tangent)
+
+    def offset(angle):
+        angle = np.deg2rad(angle)
+        return radiant._normalize(np.cos(angle) * radiant_vector + np.sin(angle) * tangent)
+
+    early, late = offset(18.0), offset(38.0)
+    forward = radiant._match_shower(
+        early,
+        late,
+        datetime(2026, 8, 11),
+        require_radiant_at_start=True,
+    )
+    reversed_line = radiant._match_shower(
+        late,
+        early,
+        datetime(2026, 8, 11),
+        require_radiant_at_start=True,
+    )
+
+    assert forward[0] is not None and forward[0].code == "PER"
+    assert reversed_line[0] is None or reversed_line[0].code != "PER"
 
 
 def test_analyze_info_files_excludes_line_outside_support(monkeypatch, tmp_path):

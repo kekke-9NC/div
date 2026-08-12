@@ -150,6 +150,56 @@ def test_sphere_axis_ticks_and_frame_can_be_hidden():
     assert all(axis3d.line.get_color() == (0, 0, 0, 0) for axis3d in (axis.xaxis, axis.yaxis, axis.zaxis))
 
 
+def test_sphere_preview_turns_unchecked_shower_into_unclassified_path():
+    report = _report()
+    result = report.results[0]
+    display = analysis._display_result_for_options(result, ("SPO",))
+
+    assert display.shower_code == "SPO"
+    assert display.radiant_radec is None
+    assert result.shower_code == "PER"
+    assert result.radiant_radec is not None
+
+
+def test_sphere_preview_draws_extensions_only_for_checked_showers():
+    base_options = dict(
+        show_sphere_surface=False,
+        show_coordinate_grid=False,
+        show_coordinate_labels=False,
+        show_radiant_points=False,
+        show_radiant_labels=False,
+    )
+
+    checked_figure = Figure(figsize=(4, 3))
+    _figure, checked_axis = analysis.draw_radiant_sphere(
+        _report(),
+        figure=checked_figure,
+        options=analysis.SphereRenderOptions(
+            **base_options,
+            legend_showers=("PER", "SPO"),
+            visible_shower_codes=("PER", "SPO"),
+        ),
+    )
+    assert any(line.get_linestyle() == "--" for line in checked_axis.lines)
+    checked_labels = {text.get_text() for text in checked_axis.get_legend().get_texts()}
+    assert "放射点までの天球投影" in checked_labels
+
+    unchecked_figure = Figure(figsize=(4, 3))
+    _figure, unchecked_axis = analysis.draw_radiant_sphere(
+        _report(),
+        figure=unchecked_figure,
+        options=analysis.SphereRenderOptions(
+            **base_options,
+            legend_showers=("SPO",),
+            visible_shower_codes=("SPO",),
+        ),
+    )
+    assert all(line.get_linestyle() != "--" for line in unchecked_axis.lines)
+    unchecked_labels = {text.get_text() for text in unchecked_axis.get_legend().get_texts()}
+    assert any(label.startswith("SPO ") for label in unchecked_labels)
+    assert "放射点までの天球投影" not in unchecked_labels
+
+
 def test_configurable_sphere_png_is_written(tmp_path):
     output = Path(tmp_path) / "sphere.png"
     options = analysis.SphereRenderOptions(

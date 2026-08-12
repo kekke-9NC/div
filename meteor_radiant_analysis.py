@@ -9,7 +9,7 @@ render the result on a 3-D celestial sphere.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from collections import Counter
 import math
@@ -151,14 +151,16 @@ class SphereRenderOptions:
     These switches affect only the rendered artwork.  They never change the
     plate-solve result or shower classification stored in ``RadiantReport``.
     ``legend_showers`` is ``None`` for all shower entries, or a tuple of codes
-    selected by the export dialog.
+    selected by the export dialog. ``visible_shower_codes`` applies that same
+    selection to the display classification: hidden showers are rendered as
+    unclassified (SPO) paths instead of being removed.
     """
 
     show_sphere_surface: bool = True
     show_meteor_paths: bool = True
     show_radiant_extensions: bool = True
-    show_radiant_points: bool = True
-    show_radiant_labels: bool = True
+    show_radiant_points: bool = False
+    show_radiant_labels: bool = False
     show_coordinate_grid: bool = True
     show_coordinate_labels: bool = True
     show_x_axis: bool = True
@@ -171,6 +173,7 @@ class SphereRenderOptions:
     legend_path: bool = True
     legend_extension: bool = True
     legend_showers: Optional[Tuple[str, ...]] = None
+    visible_shower_codes: Optional[Tuple[str, ...]] = None
 
 
 def radec_to_unit_vector(ra_deg: float, dec_deg: float) -> np.ndarray:
@@ -342,6 +345,45 @@ def _data_source(data: Dict[str, str]) -> str:
     return str(data.get("Source", "")).strip()
 
 
+def _resolve_analysis_video(info_path: str, data: Dict[str, str]) -> str:
+    """Resolve a readable video associated with a minimal direction info file.
+
+    The migrated meteor info files intentionally retain only the source and
+    direction fields, so they no longer contain the detector's old
+    ``Saved Full_video Path`` entry.  Prefer the original source when it is
+    still present, then use any legacy saved-video fields, and finally look
+    beside ``*_info.txt`` for the event's saved full-size or cutout video.
+    """
+    candidates: List[str] = []
+
+    def add(value: Any) -> None:
+        text = str(value or "").strip()
+        if not text or text.upper() in {"N/A", "NONE", "UNKNOWN"}:
+            return
+        if text not in candidates:
+            candidates.append(text)
+
+    add(data.get("Source"))
+    for key in (
+        "Motion Analysis Video Path",
+        "Analysis Video Path",
+        "Saved Full_video Path",
+        "Saved Video Path",
+    ):
+        add(data.get(key))
+
+    info = Path(info_path)
+    if info.name.endswith("_info.txt"):
+        stem = info.name[: -len("_info.txt")]
+        add(str(info.with_name(f"{stem}_full.mp4")))
+        add(str(info.with_name(f"{stem}.mp4")))
+
+    for candidate in candidates:
+        if os.path.isfile(os.path.expanduser(candidate)):
+            return str(Path(candidate).expanduser().resolve())
+    return ""
+
+
 def _load_data(path: str) -> Dict[str, str]:
     import meteor_sky_viewer as viewer
 
@@ -357,10 +399,15 @@ def resolve_model_path(info_paths: Sequence[str], requested_path: Optional[str] 
     for path in info_paths:
         data = _load_data(path)
         source = _data_source(data)
-        size = _probe_size(source)
+        analysis_video = _resolve_analysis_video(path, data)
+        size = _probe_size(analysis_video)
         if size is None:
             continue
-        selected = local_wideangle_astrometry._registered_camera_model(source, *size)
+        # Keep the original Source path as the camera/night identity even if
+        # the file itself was archived.  Its date-folder structure is what
+        # lets automatic model selection find the correct camera model.
+        identity_source = source or analysis_video
+        selected = local_wideangle_astrometry._registered_camera_model(identity_source, *size)
         if selected and selected.get("calibration_path"):
             return str(selected["calibration_path"])
     return None
@@ -371,7 +418,16 @@ def _match_shower(
     end_vector: np.ndarray,
     moment: Optional[datetime],
     showers: Optional[Sequence[MeteorShower]] = None,
+    require_radiant_at_start: bool = False,
 ) -> Tuple[Optional[MeteorShower], Optional[np.ndarray], Optional[float], str, List[RadiantCandidate]]:
+    """Match a meteor line to an active shower candidate.
+
+    When the pixel endpoints are time-ordered, a meteor's apparent radiant
+    must lie behind the early endpoint: the meteor travels away from its
+    radiant.  Legacy unoriented lines keep the historical bidirectional
+    behavior, while direction-confirmed lines can require this physical
+    constraint explicitly.
+    """
     normal_raw = np.cross(start_vector, end_vector)
     normal_norm = float(np.linalg.norm(normal_raw))
     if normal_norm < 1e-8:
@@ -404,7 +460,23 @@ def _match_shower(
             distance, active, side, score,
         ))
     candidates.sort(key=lambda item: item.score)
-    best = candidates[0] if candidates else None
+    eligible = (
+        [item for item in candidates if item.side == "start"]
+        if require_radiant_at_start
+        else candidates
+    )
+    best = eligible[0] if eligible else None
+    if best is None:
+        # Keep the nearest candidate's side and angular distance in the audit
+        # trail even when direction rejects it as a physical radiant match.
+        rejected = candidates[0] if candidates else None
+        return (
+            None,
+            None,
+            rejected.angular_distance_deg if rejected else None,
+            rejected.side if rejected else "unknown",
+            candidates,
+        )
     shower = next((item for item in catalogue if item.code == best.code), None) if best else None
     if best is None or not best.active:
         return None, None, best.angular_distance_deg if best else None, best.side if best else "unknown", candidates
@@ -458,6 +530,7 @@ def analyze_info_files(
         try:
             data = _load_data(info_path)
             source = _data_source(data)
+            analysis_video = _resolve_analysis_video(info_path, data)
             motion_status = str(data.get("Motion Direction Status", "unknown")).strip().lower() or "unknown"
             motion_direction_angle = _read_float(
                 data, "Motion Direction Angle (image deg, +X right +Y down)"
@@ -468,9 +541,9 @@ def analyze_info_files(
                 skipped.append((info_path, "流星の始点・終点を取得できませんでした"))
                 continue
             start_pixel, end_pixel, line_source = line
-            if source not in size_cache:
-                size_cache[source] = _probe_size(source)
-            size = size_cache[source]
+            if analysis_video not in size_cache:
+                size_cache[analysis_video] = _probe_size(analysis_video)
+            size = size_cache[analysis_video]
             if size is None:
                 size = None
                 for key in ("Saved Composite Path", "Saved Full Diff Path", "Saved Annotated Path"):
@@ -491,7 +564,9 @@ def analyze_info_files(
                 scale_y = height / metadata_height
                 start_pixel = (start_pixel[0] * scale_x, start_pixel[1] * scale_y)
                 end_pixel = (end_pixel[0] * scale_x, end_pixel[1] * scale_y)
-            frame_time = _parse_iso_datetime(data.get("Detection Time (UTC)")) or _capture_datetime(source)
+            frame_time = _parse_iso_datetime(data.get("Detection Time (UTC)")) or _capture_datetime(
+                source or analysis_video
+            )
             if frame_time is None:
                 skipped.append((info_path, "検出時刻を取得できませんでした"))
                 continue
@@ -531,24 +606,30 @@ def analyze_info_files(
                 end_vector,
                 frame_time,
                 showers=showers,
+                require_radiant_at_start=(line_source == "info.txt:motion"),
             )
             if shower is None:
                 shower_code = "SPO"
                 shower_name = "未分類（散在流星または判定保留）"
                 confidence = "判定保留"
-                inactive = next((candidate for candidate in candidates if not candidate.active), None)
-                if inactive and inactive.angular_distance_deg <= 12.0:
+                if line_source == "info.txt:motion":
                     note = (
-                        f"幾何的に近い候補は{inactive.name}ですが、活動期間外のため採用しません"
+                        "時間順の運動方向と一致する、流星の始点側の放射点候補がありません"
                     )
                 else:
-                    note = "流星線分と活動中流星群の放射点が許容角内で一致しません"
+                    inactive = next((candidate for candidate in candidates if not candidate.active), None)
+                    if inactive and inactive.angular_distance_deg <= 12.0:
+                        note = (
+                            f"幾何的に近い候補は{inactive.name}ですが、活動期間外のため採用しません"
+                        )
+                    else:
+                        note = "流星線分と活動中流星群の放射点が許容角内で一致しません"
             else:
                 shower_code = shower.code
                 shower_name = shower.name
                 confidence = "高" if radiant_distance is not None and radiant_distance <= 6.0 else "候補"
                 if line_source == "info.txt:motion":
-                    direction_note = "時間順の運動方向を使用"
+                    direction_note = "時間順の運動方向を使用（放射点は始点側のみ採用）"
                 else:
                     direction_note = "旧形式のため運動方向は未確定"
                 note = f"放射点との角距離 {radiant_distance:.1f}° / {side}側延長。{direction_note}"
@@ -586,6 +667,30 @@ def _extension_vectors(result: RadiantResult) -> Tuple[np.ndarray, np.ndarray, O
     end = radec_to_unit_vector(*result.end_radec)
     radiant = radec_to_unit_vector(*result.radiant_radec) if result.radiant_radec else None
     return start, end, radiant
+
+
+def _display_result_for_options(
+    result: RadiantResult,
+    visible_shower_codes: Optional[Tuple[str, ...]],
+) -> RadiantResult:
+    """Return the display-only classification for a sphere preview.
+
+    The analysis report remains unchanged.  When the export dialog hides a
+    shower, its paths are deliberately rendered as unclassified (SPO) rather
+    than silently disappearing, so the preview reflects the checkbox state.
+    """
+    if visible_shower_codes is None or result.shower_code in visible_shower_codes:
+        return result
+    return replace(
+        result,
+        shower_code="SPO",
+        shower_name="未分類（表示対象外の流星群）",
+        radiant_radec=None,
+        radiant_distance_deg=None,
+        radiant_side="unknown",
+        confidence="判定保留",
+        note="表示設定で流星群のチェックが外れているため未分類として表示",
+    )
 
 
 def _japanese_font_properties():
@@ -658,7 +763,11 @@ def draw_radiant_sphere(
     plotted_labels = set()
     plotted_shower_labels = set()
     shower_handles = []
-    for result in report.supported_results:
+    display_results = [
+        _display_result_for_options(result, options.visible_shower_codes)
+        for result in report.supported_results
+    ]
+    for result in display_results:
         start, end, radiant = _extension_vectors(result)
         color = colors.get(result.shower_code, "#C5CFDD")
         path = slerp_vectors(start, end, 40)
@@ -687,21 +796,27 @@ def draw_radiant_sphere(
                 )
                 plotted_shower_labels.add(result.shower_code)
             if include_shower_legend and result.shower_code not in plotted_labels:
-                radiant_ra, radiant_dec = result.radiant_radec
                 shower_handles.append(
                     Line2D(
-                        [0], [0], marker="o", linestyle="None", color=color,
-                        markerfacecolor=color, markeredgecolor=color,
+                        [0], [0], color=color, linewidth=2.4,
                         label=(
                             f"{result.shower_code} {result.shower_name} | "
-                            f"RA {radiant_ra / 15.0:.2f}h / Dec {radiant_dec:+.1f}°"
+                            f"{result.radiant_radec[0] / 15.0:.2f}h / Dec {result.radiant_radec[1]:+.1f}°"
                         ),
                     )
                 )
                 plotted_labels.add(result.shower_code)
         else:
-            if options.show_radiant_points:
-                axis.scatter([start[0]], [start[1]], [start[2]], color="#C5CFDD", s=20, depthshade=False)
+            legend_codes = options.legend_showers
+            include_shower_legend = legend_codes is None or result.shower_code in legend_codes
+            if include_shower_legend and result.shower_code not in plotted_labels:
+                shower_handles.append(
+                    Line2D(
+                        [0], [0], color=color, linewidth=2.4,
+                        label=f"{result.shower_code} {result.shower_name}",
+                    )
+                )
+                plotted_labels.add(result.shower_code)
 
     total_inputs = len(report.results) + len(report.skipped)
     if options.show_title:
@@ -759,7 +874,10 @@ def draw_radiant_sphere(
         handles = []
         if options.legend_path:
             handles.append(Line2D([0], [0], color="#F4F7FC", linewidth=2.4, label="実際の流星経路"))
-        if options.legend_extension:
+        has_radiant_extension = options.show_radiant_extensions and any(
+            result.radiant_radec is not None for result in display_results
+        )
+        if options.legend_extension and has_radiant_extension:
             handles.append(Line2D([0], [0], color="#F4F7FC", linewidth=1.4, linestyle="--", label="放射点までの天球投影"))
         handles.extend(shower_handles)
         if handles:
