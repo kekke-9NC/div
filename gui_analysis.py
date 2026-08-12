@@ -1288,7 +1288,7 @@ class AnalysisMixin:
         result_table_frame.pack(fill=tk.BOTH, expand=True)
         tree = ttk.Treeview(
             result_table_frame,
-            columns=("file", "shower", "radec", "angle", "confidence"),
+            columns=("file", "shower", "radec", "angle", "direction", "confidence"),
             show="headings",
             height=16,
             style="Radiant.Treeview",
@@ -1297,11 +1297,13 @@ class AnalysisMixin:
         tree.heading("shower", text="放射点候補")
         tree.heading("radec", text="RA / Dec")
         tree.heading("angle", text="角距離")
+        tree.heading("direction", text="運動方向")
         tree.heading("confidence", text="判定")
         tree.column("file", width=190, minwidth=140, anchor=tk.W, stretch=True)
         tree.column("shower", width=155, minwidth=120, anchor=tk.W, stretch=True)
         tree.column("radec", width=108, minwidth=95, anchor=tk.E, stretch=False)
         tree.column("angle", width=76, minwidth=68, anchor=tk.E, stretch=False)
+        tree.column("direction", width=88, minwidth=78, anchor=tk.E, stretch=False)
         tree.column("confidence", width=94, minwidth=82, anchor=tk.W, stretch=False)
 
         tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -1348,6 +1350,12 @@ class AnalysisMixin:
             )
             for index, result in enumerate(report.results):
                 angle = f"{result.radiant_distance_deg:.1f}°" if result.radiant_distance_deg is not None else "—"
+                direction = (
+                    f"{result.motion_direction_angle_deg:.1f}°"
+                    if result.motion_direction_angle_deg is not None
+                    and result.motion_status in {"high", "medium"}
+                    else "—"
+                )
                 tree.insert(
                     "",
                     tk.END,
@@ -1359,6 +1367,7 @@ class AnalysisMixin:
                             if result.radiant_radec else "—"
                         ),
                         angle,
+                        direction,
                         result.confidence,
                     ),
                     tags=("result_even" if index % 2 == 0 else "result_odd",),

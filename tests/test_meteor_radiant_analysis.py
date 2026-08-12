@@ -16,6 +16,22 @@ def test_parse_pixel_line_prefers_saved_endpoints():
     assert radiant.parse_pixel_line(data) == ((480.0, 380.0), (520.0, 420.0), "info.txt")
 
 
+def test_parse_pixel_line_prefers_time_ordered_motion_endpoints():
+    data = {
+        "Detected Line Start (px)": "(520.00, 420.00)",
+        "Detected Line End (px)": "(480.00, 380.00)",
+        "Motion Direction Status": "high",
+        "Motion Start (px)": "(480.00, 380.00)",
+        "Motion End (px)": "(520.00, 420.00)",
+    }
+
+    assert radiant.parse_pixel_line(data) == (
+        (480.0, 380.0),
+        (520.0, 420.0),
+        "info.txt:motion",
+    )
+
+
 def test_match_shower_accepts_active_perseids_geometry():
     radiant_vector = radiant.radec_to_unit_vector(48.0, 58.0)
     tangent = np.cross(radiant_vector, np.asarray((0.0, 0.0, 1.0)))

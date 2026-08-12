@@ -38,6 +38,16 @@ def analyze_angles(info_files, radiant_ra, radiant_dec, output_path):
             dec_start = msv.get_float(data, "Dec Start (deg)")
             ra_end = msv.get_float(data, "RA End (deg)")
             dec_end = msv.get_float(data, "Dec End (deg)")
+            motion_status = str(data.get("Motion Direction Status", "")).strip().lower()
+            if motion_status in {"high", "medium"}:
+                motion_values = (
+                    msv.get_float(data, "Motion RA Start (deg)"),
+                    msv.get_float(data, "Motion Dec Start (deg)"),
+                    msv.get_float(data, "Motion RA End (deg)"),
+                    msv.get_float(data, "Motion Dec End (deg)"),
+                )
+                if None not in motion_values:
+                    ra_start, dec_start, ra_end, dec_end = motion_values
 
             if None in (ra_start, dec_start, ra_end, dec_end):
                 errors += 1

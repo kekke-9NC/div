@@ -122,6 +122,9 @@ class RadiantResult:
     confidence: str = "判定保留"
     candidates: List[RadiantCandidate] = field(default_factory=list)
     note: str = ""
+    motion_status: str = "unknown"
+    motion_direction_angle_deg: Optional[float] = None
+    motion_speed_px_per_second: Optional[float] = None
 
 
 @dataclass
@@ -280,6 +283,15 @@ def _line_from_artifact(data: Dict[str, str], center: Tuple[float, float]) -> Op
 
 
 def parse_pixel_line(data: Dict[str, str]) -> Optional[Tuple[Tuple[float, float], Tuple[float, float], str]]:
+    # New detector outputs carry endpoints ordered by observation time.  Use
+    # them for radiant analysis; legacy Detected Line fields remain an
+    # unoriented Hough segment and are kept as the fallback.
+    motion_start = _parse_point(data.get("Motion Start (px)"))
+    motion_end = _parse_point(data.get("Motion End (px)"))
+    if motion_start is not None and motion_end is not None:
+        status = str(data.get("Motion Direction Status", "")).strip().lower()
+        if status in {"high", "medium"}:
+            return motion_start, motion_end, "info.txt:motion"
     start = _parse_point(data.get("Detected Line Start (px)"))
     end = _parse_point(data.get("Detected Line End (px)"))
     if start is not None and end is not None:
@@ -412,6 +424,14 @@ def _read_radec(data: Dict[str, str], prefix: str) -> Optional[Tuple[float, floa
         return None
 
 
+def _read_float(data: Dict[str, str], key: str) -> Optional[float]:
+    try:
+        value = float(data.get(key, "N/A"))
+        return value if math.isfinite(value) else None
+    except (TypeError, ValueError):
+        return None
+
+
 def analyze_info_files(
     info_paths: Sequence[str],
     model_path: Optional[str] = None,
@@ -438,6 +458,11 @@ def analyze_info_files(
         try:
             data = _load_data(info_path)
             source = _data_source(data)
+            motion_status = str(data.get("Motion Direction Status", "unknown")).strip().lower() or "unknown"
+            motion_direction_angle = _read_float(
+                data, "Motion Direction Angle (image deg, +X right +Y down)"
+            )
+            motion_speed = _read_float(data, "Motion Speed (px/s)")
             line = parse_pixel_line(data)
             if line is None:
                 skipped.append((info_path, "流星の始点・終点を取得できませんでした"))
@@ -522,10 +547,11 @@ def analyze_info_files(
                 shower_code = shower.code
                 shower_name = shower.name
                 confidence = "高" if radiant_distance is not None and radiant_distance <= 6.0 else "候補"
-                note = (
-                    f"放射点との角距離 {radiant_distance:.1f}° / {side}側延長。"
-                    "検出線の端点順は保存されていないため、運動方向は未確定"
-                )
+                if line_source == "info.txt:motion":
+                    direction_note = "時間順の運動方向を使用"
+                else:
+                    direction_note = "旧形式のため運動方向は未確定"
+                note = f"放射点との角距離 {radiant_distance:.1f}° / {side}側延長。{direction_note}"
             results.append(RadiantResult(
                 info_path=info_path,
                 source=source,
@@ -546,6 +572,9 @@ def analyze_info_files(
                 confidence=confidence,
                 candidates=candidates,
                 note=note,
+                motion_status=motion_status,
+                motion_direction_angle_deg=motion_direction_angle,
+                motion_speed_px_per_second=motion_speed,
             ))
         except Exception as exc:
             skipped.append((info_path, str(exc)))

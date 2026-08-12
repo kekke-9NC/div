@@ -27,6 +27,7 @@ import ml_training_data
 import automatic_video_mask
 import noise_twin
 import temporal_mean
+import meteor_direction
 
 
 def _pixel_to_world_for_annotation(path: str, x: float, y: float):
@@ -40,6 +41,77 @@ def _pixel_to_world_for_annotation(path: str, x: float, y: float):
         wcs = WCS(hdul[0].header, relax=True, fix=False)
         sky = wcs.pixel_to_world(x, y)
         return float(sky.ra.deg), float(sky.dec.deg)
+
+
+def _motion_world_coordinates(
+    estimate: meteor_direction.MotionEstimate,
+    wcs_path: Optional[str],
+) -> Tuple[str, str, str, str]:
+    """Convert ordered motion endpoints to sky coordinates when WCS is active."""
+    values = ("N/A", "N/A", "N/A", "N/A")
+    if not estimate.is_known or not wcs_path or estimate.start_pixel is None or estimate.end_pixel is None:
+        return values
+    try:
+        start_ra, start_dec = _pixel_to_world_for_annotation(
+            wcs_path, *estimate.start_pixel
+        )
+        end_ra, end_dec = _pixel_to_world_for_annotation(
+            wcs_path, *estimate.end_pixel
+        )
+        return (
+            f"{start_ra:.6f}",
+            f"{start_dec:.6f}",
+            f"{end_ra:.6f}",
+            f"{end_dec:.6f}",
+        )
+    except Exception as exc:
+        print(f"運動方向のWCS変換に失敗しました: {exc}")
+        return values
+
+
+def _write_motion_info(
+    handle,
+    estimate: meteor_direction.MotionEstimate,
+    world_coordinates: Optional[Tuple[str, str, str, str]] = None,
+) -> None:
+    """Write time-ordered meteor motion fields to an info.txt file."""
+    handle.write(f"Motion Direction Status: {estimate.status}\n")
+    handle.write(f"Motion Direction Method: {estimate.method}\n")
+    if estimate.start_pixel is not None and estimate.end_pixel is not None:
+        handle.write(
+            f"Motion Start (px): ({estimate.start_pixel[0]:.2f}, {estimate.start_pixel[1]:.2f})\n"
+        )
+        handle.write(
+            f"Motion End (px): ({estimate.end_pixel[0]:.2f}, {estimate.end_pixel[1]:.2f})\n"
+        )
+    if estimate.vector_px is not None:
+        handle.write(
+            f"Motion Vector (px): ({estimate.vector_px[0]:.4f}, {estimate.vector_px[1]:.4f})\n"
+        )
+    if estimate.start_frame is not None:
+        handle.write(f"Motion Start Frame: {estimate.start_frame}\n")
+    if estimate.end_frame is not None:
+        handle.write(f"Motion End Frame: {estimate.end_frame}\n")
+    if estimate.speed_px_per_second is not None:
+        handle.write(f"Motion Speed (px/s): {estimate.speed_px_per_second:.4f}\n")
+    if estimate.direction_angle_deg is not None:
+        handle.write(
+            "Motion Direction Angle (image deg, +X right +Y down): "
+            f"{estimate.direction_angle_deg:.4f}\n"
+        )
+    if estimate.displacement_fraction is not None:
+        handle.write(f"Motion Displacement Fraction: {estimate.displacement_fraction:.6f}\n")
+    if estimate.fit_r2 is not None:
+        handle.write(f"Motion Fit R2: {estimate.fit_r2:.6f}\n")
+    handle.write(f"Motion Active Frame Count: {estimate.active_frame_count}\n")
+    if estimate.note:
+        handle.write(f"Motion Direction Note: {estimate.note}\n")
+    if world_coordinates is not None:
+        ra_start, dec_start, ra_end, dec_end = world_coordinates
+        handle.write(f"Motion RA Start (deg): {ra_start}\n")
+        handle.write(f"Motion Dec Start (deg): {dec_start}\n")
+        handle.write(f"Motion RA End (deg): {ra_end}\n")
+        handle.write(f"Motion Dec End (deg): {dec_end}\n")
 
 
 def _open_video_capture(source: str, decoder_threads: int = 2) -> cv2.VideoCapture:
@@ -1067,6 +1139,21 @@ def create_line_video_clips(
                                         f"{enhancement_result.correction_strength:.3f}倍 + 21フレーム平均 "
                                         f"(時間ノイズ {enhancement_result.noise_reduction_percent:.1f}%低減)"
                                     )
+
+                                motion_frame_start = (
+                                    actual_start_final if is_rtsp else adjusted_start_frame
+                                )
+                                motion_estimate = meteor_direction.estimate_motion(
+                                    final_frames_for_clip,
+                                    ((x1, y1), (x2, y2)),
+                                    motion_frame_start,
+                                    frame_rate,
+                                )
+                                print(
+                                    "時間順方向推定: "
+                                    f"status={motion_estimate.status}, "
+                                    f"angle={motion_estimate.direction_angle_deg}"
+                                )
                             
                                 detection_counter += 1
                                 print(f"--- 検出確定 {detection_counter} (並列処理) ---")
@@ -1270,6 +1357,13 @@ def create_line_video_clips(
                                                 ra_end_str, dec_end_str = f"{ra_end:.6f}", f"{dec_end:.6f}"
                                             except Exception as e_wcs_read:
                                                 print(f"情報ファイル作成中のWCS読み込み/変換エラー: {e_wcs_read}")
+
+                                        motion_world_coordinates = _motion_world_coordinates(
+                                            motion_estimate,
+                                            global_wcs_info.get('wcs_file')
+                                            if effective_use_plate_solve and global_wcs_info
+                                            else None,
+                                        )
                                     
                                         with open(info_path, 'w', encoding='utf-8') as f:
                                             f.write(f"Source: {source}\n")
@@ -1302,6 +1396,7 @@ def create_line_video_clips(
                                             )
                                             f.write(f"RA Start (deg): {ra_start_str}\nDec Start (deg): {dec_start_str}\n")
                                             f.write(f"RA End (deg): {ra_end_str}\nDec End (deg): {dec_end_str}\n")
+                                            _write_motion_info(f, motion_estimate, motion_world_coordinates)
                                             for key, path in saved_paths.items(): f.write(f"Saved {key.capitalize()} Path: {path}\n")
                                     
                                         saved_paths['info'] = info_path
@@ -1655,6 +1750,21 @@ def create_line_video_clips(
                             f"(時間ノイズ {enhancement_result.noise_reduction_percent:.1f}%低減)"
                         )
 
+                    motion_frame_start = (
+                        actual_start_final if is_rtsp else adjusted_start_frame
+                    )
+                    motion_estimate = meteor_direction.estimate_motion(
+                        final_frames_for_clip,
+                        ((x1, y1), (x2, y2)),
+                        motion_frame_start,
+                        frame_rate,
+                    )
+                    print(
+                        "時間順方向推定: "
+                        f"status={motion_estimate.status}, "
+                        f"angle={motion_estimate.direction_angle_deg}"
+                    )
+
                     detection_counter += 1
                     print(f"--- 検出確定 {detection_counter} ---")
 
@@ -1859,6 +1969,13 @@ def create_line_video_clips(
                                 except Exception as e_wcs_read:
                                     print(f"情報ファイル作成中のWCS読み込み/変換エラー: {e_wcs_read}")
 
+                            motion_world_coordinates = _motion_world_coordinates(
+                                motion_estimate,
+                                global_wcs_info.get('wcs_file')
+                                if effective_use_plate_solve and global_wcs_info
+                                else None,
+                            )
+
                             with open(info_path, 'w', encoding='utf-8') as f:
                                 f.write(f"Source: {source}\n")
                                 f.write(f"Detection Time (UTC): {detection_datetime.isoformat()}Z\n")
@@ -1890,6 +2007,7 @@ def create_line_video_clips(
                                 )
                                 f.write(f"RA Start (deg): {ra_start_str}\nDec Start (deg): {dec_start_str}\n")
                                 f.write(f"RA End (deg): {ra_end_str}\nDec End (deg): {dec_end_str}\n")
+                                _write_motion_info(f, motion_estimate, motion_world_coordinates)
                                 for key, path in saved_paths.items(): f.write(f"Saved {key.capitalize()} Path: {path}\n")
 
                             saved_paths['info'] = info_path
