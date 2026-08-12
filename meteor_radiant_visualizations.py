@@ -143,7 +143,7 @@ def _legend_handles(results: Iterable[analysis.RadiantResult], line_labels: bool
     if line_labels:
         handles.extend([
             Line2D([0], [0], color=TEXT, linewidth=2.0, label="実際の流星経路"),
-            Line2D([0], [0], color=TEXT, linewidth=1.2, linestyle="--", label="放射点までの延長"),
+            Line2D([0], [0], color=TEXT, linewidth=1.2, linestyle="--", label="放射点までの天球投影"),
         ])
     seen = set()
     for result in results:
@@ -273,6 +273,92 @@ def _radiant_pixel(result: analysis.RadiantResult, metadata: Dict[str, Any], wcs
         return None
 
 
+def _camera_extension_pixel_chunks(
+    result: analysis.RadiantResult,
+    metadata: Dict[str, Any],
+    wcs: Any,
+    count: int = 64,
+) -> List[Tuple[np.ndarray, np.ndarray]]:
+    """Project the radiant-side great-circle extension into camera pixels.
+
+    The fixed-camera model is defined at a reference sidereal time, while the
+    radiant and detected endpoints are expressed at the event time.  Move all
+    sky coordinates into that reference frame first, interpolate on the unit
+    sphere, and only then apply the WCS.  This preserves the camera's
+    wide-angle distortion instead of replacing the projected path with one
+    straight pixel chord.
+
+    Matplotlib can clip finite points that are outside the image, but a broken
+    projection (or a non-finite WCS result) must not connect two unrelated
+    pieces.  Such gaps are returned as separate chunks.
+    """
+    if result.radiant_radec is None or result.detection_time is None:
+        return []
+    reference_value = metadata.get("reference_datetime")
+    reference = analysis._parse_iso_datetime(str(reference_value)) if reference_value else None
+    if reference is None:
+        return []
+
+    delta_ra = analysis._sidereal_delta_ra(reference, result.detection_time)
+
+    def model_radec(radec: Tuple[float, float]) -> Tuple[float, float]:
+        return ((float(radec[0]) - delta_ra) % 360.0, float(radec[1]))
+
+    radiant_model = model_radec(result.radiant_radec)
+    endpoint_radec = result.start_radec if result.radiant_side == "start" else result.end_radec
+    endpoint_model = model_radec(endpoint_radec)
+    radiant_vector = analysis.radec_to_unit_vector(*radiant_model)
+    endpoint_vector = analysis.radec_to_unit_vector(*endpoint_model)
+    first_vector, second_vector = (
+        (radiant_vector, endpoint_vector)
+        if result.radiant_side == "start"
+        else (endpoint_vector, radiant_vector)
+    )
+    points = analysis.slerp_vectors(
+        first_vector,
+        second_vector,
+        count,
+    )
+    ra, dec = _radec_from_vectors(points)
+    try:
+        x, y = wcs.world_to_pixel_values(ra, dec)
+    except Exception:
+        return []
+    x = np.asarray(x, dtype=float).reshape(-1)
+    y = np.asarray(y, dtype=float).reshape(-1)
+    finite = np.isfinite(x) & np.isfinite(y)
+    if not np.any(finite):
+        return []
+
+    # Split only at invalid samples or a projection jump.  Points outside the
+    # image are retained so Matplotlib can correctly clip a curve as it enters
+    # or leaves the camera frame.
+    chunks: List[Tuple[np.ndarray, np.ndarray]] = []
+    start = None
+    previous = None
+    width = float(metadata.get("width", getattr(wcs, "width", 1920)))
+    height = float(metadata.get("height", getattr(wcs, "height", 1080)))
+    jump_limit = 2.0 * max(width, height)
+    for index, valid in enumerate(finite):
+        if not valid:
+            if start is not None and index - start >= 2:
+                chunks.append((x[start:index], y[start:index]))
+            start = None
+            previous = None
+            continue
+        current = np.array([x[index], y[index]], dtype=float)
+        if start is None:
+            start = index
+        elif previous is not None and float(np.linalg.norm(current - previous)) > jump_limit:
+            if index - start >= 2:
+                chunks.append((x[start:index], y[start:index]))
+            start = index
+        previous = current
+    if start is not None and len(x) - start >= 2:
+        chunks.append((x[start:], y[start:]))
+    return chunks
+
+
 def draw_camera_overlay(
     report: analysis.RadiantReport,
     info_paths: Sequence[str],
@@ -315,8 +401,16 @@ def draw_camera_overlay(
         axis.plot([start[0], end[0]], [start[1], end[1]], color=color, linewidth=1.7, alpha=0.88)
         radiant = _radiant_pixel(result, metadata, wcs)
         if radiant is not None:
-            endpoint = start if result.radiant_side == "start" else end
-            axis.plot([endpoint[0], radiant[0]], [endpoint[1], radiant[1]], color=color, linewidth=1.0, linestyle="--", alpha=0.85)
+            for extension_x, extension_y in _camera_extension_pixel_chunks(result, metadata, wcs):
+                axis.plot(
+                    extension_x,
+                    extension_y,
+                    color=color,
+                    linewidth=1.0,
+                    linestyle="--",
+                    alpha=0.85,
+                    clip_on=True,
+                )
             axis.scatter([radiant[0]], [radiant[1]], color=color, s=30, edgecolors="#FFFFFF", linewidths=0.4, zorder=5)
     axis.set_xlim(0, width)
     axis.set_ylim(height, 0)

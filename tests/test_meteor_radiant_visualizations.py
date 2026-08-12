@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 
 import matplotlib
+import numpy as np
 
 matplotlib.use("Agg")
 from matplotlib.figure import Figure
@@ -55,3 +56,31 @@ def test_split_wrap_breaks_ra_seam():
 
     assert len(chunks) == 2
     assert all(len(lon) == 2 for lon, _lat in chunks)
+
+
+def test_camera_extension_projects_a_sampled_sky_curve():
+    class CurvedWcs:
+        width = 1920
+        height = 1080
+
+        @staticmethod
+        def world_to_pixel_values(ra, dec):
+            ra = np.asarray(ra, dtype=float)
+            dec = np.asarray(dec, dtype=float)
+            return 8.0 * ra + 0.02 * dec ** 2, 6.0 * dec + 0.015 * ra ** 2
+
+    result = _report().results[0]
+    chunks = visualizations._camera_extension_pixel_chunks(
+        result,
+        {"reference_datetime": result.detection_time.isoformat()},
+        CurvedWcs(),
+        count=32,
+    )
+
+    assert len(chunks) == 1
+    x, y = chunks[0]
+    assert len(x) == 32
+    assert np.all(np.isfinite(x))
+    assert np.all(np.isfinite(y))
+    slopes = np.diff(y) / np.maximum(np.abs(np.diff(x)), 1e-9)
+    assert float(np.ptp(slopes)) > 1e-4
