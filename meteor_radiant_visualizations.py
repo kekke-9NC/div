@@ -566,8 +566,18 @@ def save_sphere_rotation_gif(
     output_path: str,
     fps: int = 12,
     frames: int = 73,
+    width_px: int = 1200,
+    height_px: int = 960,
+    dpi: int = 100,
+    options: Optional[analysis.SphereRenderOptions] = None,
 ) -> str:
-    """Save one complete azimuth rotation of the 3-D radiant sphere."""
+    """Save one complete azimuth rotation of the 3-D radiant sphere.
+
+    Rendering happens in an Agg canvas, so callers can run this function in a
+    worker thread without touching Tk.  ``width_px`` and ``height_px`` are the
+    requested output dimensions; the figure size is derived from them and the
+    selected DPI.
+    """
     from matplotlib.animation import FuncAnimation, PillowWriter
     from matplotlib.backends.backend_agg import FigureCanvasAgg
     from matplotlib.figure import Figure
@@ -576,9 +586,15 @@ def save_sphere_rotation_gif(
     # and loops without a visible angular jump.
     frame_count = max(2, int(frames))
     frame_rate = max(1, int(fps))
-    figure = Figure(figsize=(10, 8), facecolor=BACKGROUND)
+    output_width = max(320, int(width_px))
+    output_height = max(240, int(height_px))
+    output_dpi = max(48, int(dpi))
+    figure = Figure(
+        figsize=(output_width / output_dpi, output_height / output_dpi),
+        facecolor=BACKGROUND,
+    )
     FigureCanvasAgg(figure)
-    _figure, axis = analysis.draw_radiant_sphere(report, figure=figure)
+    _figure, axis = analysis.draw_radiant_sphere(report, figure=figure, options=options)
     initial_azimuth = -58.0
 
     def update(frame_index: int):
@@ -593,12 +609,40 @@ def save_sphere_rotation_gif(
         interval=1000.0 / frame_rate,
         blit=False,
         repeat=False,
+        cache_frame_data=False,
     )
     animation.save(
         output_path,
         writer=PillowWriter(fps=frame_rate),
-        dpi=100,
+        dpi=output_dpi,
     )
+    figure.clear()
+    return output_path
+
+
+def save_sphere_png(
+    report: analysis.RadiantReport,
+    output_path: str,
+    width_px: int = 1600,
+    height_px: int = 1280,
+    dpi: int = 120,
+    options: Optional[analysis.SphereRenderOptions] = None,
+) -> str:
+    """Save a configurable still image of the radiant sphere."""
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.figure import Figure
+
+    output_width = max(320, int(width_px))
+    output_height = max(240, int(height_px))
+    output_dpi = max(48, int(dpi))
+    figure = Figure(
+        figsize=(output_width / output_dpi, output_height / output_dpi),
+        facecolor=BACKGROUND,
+    )
+    FigureCanvasAgg(figure)
+    draw = analysis.draw_radiant_sphere(report, figure=figure, options=options)
+    del draw
+    figure.canvas.print_figure(output_path, dpi=output_dpi, facecolor=figure.get_facecolor())
     figure.clear()
     return output_path
 

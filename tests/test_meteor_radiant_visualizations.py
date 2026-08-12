@@ -111,3 +111,23 @@ def test_sphere_rotation_gif_is_written(tmp_path):
 
     assert output.is_file()
     assert output.read_bytes()[:6] == b"GIF89a"
+
+
+def test_configurable_sphere_png_is_written(tmp_path):
+    output = Path(tmp_path) / "sphere.png"
+    options = analysis.SphereRenderOptions(
+        show_x_axis=False,
+        show_y_axis=False,
+        show_z_axis=True,
+        show_coordinate_grid=False,
+        legend_showers=("PER",),
+    )
+    visualizations.save_sphere_png(
+        _report(), str(output), width_px=320, height_px=240, dpi=60, options=options
+    )
+
+    from PIL import Image
+
+    assert output.is_file()
+    with Image.open(output) as image:
+        assert image.size == (320, 240)

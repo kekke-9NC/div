@@ -175,3 +175,22 @@ def test_radiant_sphere_is_labeled_in_equatorial_coordinates():
     assert "RA 0h" in labels
     assert "Dec +0°" in labels
     plt.close(figure)
+
+
+def test_report_exposes_supported_shower_counts():
+    result = radiant.RadiantResult(
+        info_path="a.txt",
+        source="test.mp4",
+        detection_time=datetime(2026, 8, 11),
+        start_pixel=(0.0, 0.0),
+        end_pixel=(1.0, 1.0),
+        start_radec=(0.0, 0.0),
+        end_radec=(1.0, 1.0),
+        line_source="test",
+        support_fraction=1.0,
+        fully_supported=True,
+        model_label="TEST",
+        shower_code="PER",
+    )
+    report = radiant.RadiantReport(model_path="", model_label="TEST", results=[result, result], skipped=[])
+    assert report.shower_counts == {"PER": 2}

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from collections import Counter
 import math
 import os
 import re
@@ -133,6 +134,38 @@ class RadiantReport:
     @property
     def supported_results(self) -> List[RadiantResult]:
         return [result for result in self.results if result.fully_supported]
+
+    @property
+    def shower_counts(self) -> Dict[str, int]:
+        """Return counts by shower code for supported analysis results."""
+        return dict(Counter(result.shower_code for result in self.supported_results))
+
+
+@dataclass(frozen=True)
+class SphereRenderOptions:
+    """Display-only options shared by the sphere PNG and rotation GIF.
+
+    These switches affect only the rendered artwork.  They never change the
+    plate-solve result or shower classification stored in ``RadiantReport``.
+    ``legend_showers`` is ``None`` for all shower entries, or a tuple of codes
+    selected by the export dialog.
+    """
+
+    show_sphere_surface: bool = True
+    show_meteor_paths: bool = True
+    show_radiant_extensions: bool = True
+    show_radiant_points: bool = True
+    show_radiant_labels: bool = True
+    show_coordinate_grid: bool = True
+    show_coordinate_labels: bool = True
+    show_x_axis: bool = True
+    show_y_axis: bool = True
+    show_z_axis: bool = True
+    show_title: bool = True
+    show_legend: bool = True
+    legend_path: bool = True
+    legend_extension: bool = True
+    legend_showers: Optional[Tuple[str, ...]] = None
 
 
 def radec_to_unit_vector(ra_deg: float, dec_deg: float) -> np.ndarray:
@@ -550,11 +583,16 @@ def _japanese_font_properties():
     return None
 
 
-def draw_radiant_sphere(report: RadiantReport, figure=None):
+def draw_radiant_sphere(
+    report: RadiantReport,
+    figure=None,
+    options: Optional[SphereRenderOptions] = None,
+):
     """Draw a 3-D celestial sphere; returns the Matplotlib figure and axes."""
     import matplotlib.pyplot as plt
     from matplotlib.lines import Line2D
 
+    options = options or SphereRenderOptions()
     japanese_font = _japanese_font_properties()
     if figure is None:
         figure = plt.figure(figsize=(10, 8), facecolor="#0B0F18")
@@ -568,32 +606,39 @@ def draw_radiant_sphere(report: RadiantReport, figure=None):
         pane.set_facecolor("#0B0F18")
         pane.set_edgecolor("#243650")
         pane.set_alpha(0.28)
-    u = np.linspace(0.0, 2.0 * np.pi, 72)
-    v = np.linspace(-0.5 * np.pi, 0.5 * np.pi, 36)
-    sphere_x = np.outer(np.cos(u), np.cos(v))
-    sphere_y = np.outer(np.sin(u), np.cos(v))
-    sphere_z = np.outer(np.ones_like(u), np.sin(v))
-    axis.plot_surface(sphere_x, sphere_y, sphere_z, color="#17243A", alpha=0.18, linewidth=0, shade=False)
+    if options.show_sphere_surface:
+        u = np.linspace(0.0, 2.0 * np.pi, 72)
+        v = np.linspace(-0.5 * np.pi, 0.5 * np.pi, 36)
+        sphere_x = np.outer(np.cos(u), np.cos(v))
+        sphere_y = np.outer(np.sin(u), np.cos(v))
+        sphere_z = np.outer(np.ones_like(u), np.sin(v))
+        axis.plot_surface(sphere_x, sphere_y, sphere_z, color="#17243A", alpha=0.18, linewidth=0, shade=False)
 
     colors = {
         "PER": "#70A7FF", "SDA": "#F5C76B", "CAP": "#FF9B71", "KCG": "#66D9EF",
         "ORI": "#C58BFF", "GEM": "#5DE2A5", "SPO": "#C5CFDD",
     }
     plotted_labels = set()
+    plotted_shower_labels = set()
     shower_handles = []
     for result in report.supported_results:
         start, end, radiant = _extension_vectors(result)
         color = colors.get(result.shower_code, "#C5CFDD")
         path = slerp_vectors(start, end, 40)
-        axis.plot(path[:, 0], path[:, 1], path[:, 2], color=color, linewidth=2.4, alpha=0.95)
+        if options.show_meteor_paths:
+            axis.plot(path[:, 0], path[:, 1], path[:, 2], color=color, linewidth=2.4, alpha=0.95)
         if radiant is not None:
             if result.radiant_side == "start":
                 extension = slerp_vectors(radiant, start, 36)
             else:
                 extension = slerp_vectors(end, radiant, 36)
-            axis.plot(extension[:, 0], extension[:, 1], extension[:, 2], color=color, linewidth=1.4, linestyle="--", alpha=0.85)
-            axis.scatter([radiant[0]], [radiant[1]], [radiant[2]], color=color, s=48, depthshade=False)
-            if result.shower_code not in plotted_labels:
+            if options.show_radiant_extensions:
+                axis.plot(extension[:, 0], extension[:, 1], extension[:, 2], color=color, linewidth=1.4, linestyle="--", alpha=0.85)
+            if options.show_radiant_points:
+                axis.scatter([radiant[0]], [radiant[1]], [radiant[2]], color=color, s=48, depthshade=False)
+            legend_codes = options.legend_showers
+            include_shower_legend = legend_codes is None or result.shower_code in legend_codes
+            if options.show_radiant_labels and result.shower_code not in plotted_shower_labels:
                 radiant_ra, radiant_dec = result.radiant_radec
                 axis.text(
                     radiant[0] * 1.08,
@@ -603,6 +648,9 @@ def draw_radiant_sphere(report: RadiantReport, figure=None):
                     color=color,
                     fontsize=9,
                 )
+                plotted_shower_labels.add(result.shower_code)
+            if include_shower_legend and result.shower_code not in plotted_labels:
+                radiant_ra, radiant_dec = result.radiant_radec
                 shower_handles.append(
                     Line2D(
                         [0], [0], marker="o", linestyle="None", color=color,
@@ -615,16 +663,30 @@ def draw_radiant_sphere(report: RadiantReport, figure=None):
                 )
                 plotted_labels.add(result.shower_code)
         else:
-            axis.scatter([start[0]], [start[1]], [start[2]], color="#C5CFDD", s=20, depthshade=False)
+            if options.show_radiant_points:
+                axis.scatter([start[0]], [start[1]], [start[2]], color="#C5CFDD", s=20, depthshade=False)
 
     total_inputs = len(report.results) + len(report.skipped)
-    axis.set_title(
-        f"放射点解析（RA/Dec基準） | 有効流星 {len(report.supported_results)} / 読込 {total_inputs} | {report.model_label}",
-        color="#F4F7FC", pad=18, fontproperties=japanese_font,
-    )
-    axis.set_xlabel("X", color="#A8B3C5")
-    axis.set_ylabel("Y", color="#A8B3C5")
-    axis.set_zlabel("Z", color="#A8B3C5")
+    if options.show_title:
+        axis.set_title(
+            f"放射点解析（RA/Dec基準） | 有効流星 {len(report.supported_results)} / 読込 {total_inputs} | {report.model_label}",
+            color="#F4F7FC", pad=18, fontproperties=japanese_font,
+        )
+    if options.show_x_axis:
+        axis.set_xlabel("X", color="#A8B3C5")
+    else:
+        axis.set_xlabel("")
+        axis.xaxis.set_visible(False)
+    if options.show_y_axis:
+        axis.set_ylabel("Y", color="#A8B3C5")
+    else:
+        axis.set_ylabel("")
+        axis.yaxis.set_visible(False)
+    if options.show_z_axis:
+        axis.set_zlabel("Z", color="#A8B3C5")
+    else:
+        axis.set_zlabel("")
+        axis.zaxis.set_visible(False)
     axis.tick_params(colors="#A8B3C5", labelsize=8)
     axis.set_box_aspect((1, 1, 1))
     axis.set_xlim(-1.08, 1.08)
@@ -634,27 +696,35 @@ def draw_radiant_sphere(report: RadiantReport, figure=None):
     # Add an equatorial-coordinate grid so the saved PNG is self-describing.
     # The plotted paths remain true 3-D great-circle paths; these labels are
     # only a coordinate reference and do not alter the analysis geometry.
-    for dec in (-60, -30, 0, 30, 60):
-        points = np.asarray([radec_to_unit_vector(ra, dec) for ra in np.linspace(0, 360, 181)])
-        axis.plot(points[:, 0], points[:, 1], points[:, 2], color="#53657E", alpha=0.22, linewidth=0.45)
-        label_vector = radec_to_unit_vector(2.0, dec)
-        axis.text(label_vector[0] * 1.08, label_vector[1] * 1.08, label_vector[2] * 1.08, f"Dec {dec:+d}°", color="#A8B3C5", fontsize=7)
-    for ra in range(0, 360, 30):
-        points = np.asarray([radec_to_unit_vector(ra, dec) for dec in np.linspace(-90, 90, 91)])
-        axis.plot(points[:, 0], points[:, 1], points[:, 2], color="#53657E", alpha=0.18, linewidth=0.45)
-        label_vector = radec_to_unit_vector(ra, 2.0)
-        axis.text(label_vector[0] * 1.08, label_vector[1] * 1.08, label_vector[2] * 1.08, f"RA {ra / 15:g}h", color="#A8B3C5", fontsize=7)
-    handles = [Line2D([0], [0], color="#F4F7FC", linewidth=2.4, label="実際の流星経路")]
-    handles.append(Line2D([0], [0], color="#F4F7FC", linewidth=1.4, linestyle="--", label="放射点までの天球投影"))
-    handles.extend(shower_handles)
-    axis.legend(
-        handles=handles,
-        loc="upper left",
-        facecolor="#141C2A",
-        edgecolor="#415875",
-        labelcolor="#F4F7FC",
-        prop=japanese_font,
-    )
+    if options.show_coordinate_grid:
+        for dec in (-60, -30, 0, 30, 60):
+            points = np.asarray([radec_to_unit_vector(ra, dec) for ra in np.linspace(0, 360, 181)])
+            axis.plot(points[:, 0], points[:, 1], points[:, 2], color="#53657E", alpha=0.22, linewidth=0.45)
+            if options.show_coordinate_labels:
+                label_vector = radec_to_unit_vector(2.0, dec)
+                axis.text(label_vector[0] * 1.08, label_vector[1] * 1.08, label_vector[2] * 1.08, f"Dec {dec:+d}°", color="#A8B3C5", fontsize=7)
+        for ra in range(0, 360, 30):
+            points = np.asarray([radec_to_unit_vector(ra, dec) for dec in np.linspace(-90, 90, 91)])
+            axis.plot(points[:, 0], points[:, 1], points[:, 2], color="#53657E", alpha=0.18, linewidth=0.45)
+            if options.show_coordinate_labels:
+                label_vector = radec_to_unit_vector(ra, 2.0)
+                axis.text(label_vector[0] * 1.08, label_vector[1] * 1.08, label_vector[2] * 1.08, f"RA {ra / 15:g}h", color="#A8B3C5", fontsize=7)
+    if options.show_legend:
+        handles = []
+        if options.legend_path:
+            handles.append(Line2D([0], [0], color="#F4F7FC", linewidth=2.4, label="実際の流星経路"))
+        if options.legend_extension:
+            handles.append(Line2D([0], [0], color="#F4F7FC", linewidth=1.4, linestyle="--", label="放射点までの天球投影"))
+        handles.extend(shower_handles)
+        if handles:
+            axis.legend(
+                handles=handles,
+                loc="upper left",
+                facecolor="#141C2A",
+                edgecolor="#415875",
+                labelcolor="#F4F7FC",
+                prop=japanese_font,
+            )
     figure.tight_layout()
     return figure, axis
 

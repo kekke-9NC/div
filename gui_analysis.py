@@ -1,4 +1,5 @@
 from gui_common import *
+import tempfile
 import media_time
 import camera_model_catalog
 import meteor_radiant_analysis as mra
@@ -1252,6 +1253,16 @@ class AnalysisMixin:
         status_var = tk.StringVar(value=f"{len(files)}件を準備中…")
         ttk.Label(header, textvariable=status_var, style="GlassMuted.TLabel").pack(side=tk.RIGHT)
 
+        # Keep export controls outside the resizable result area so they stay
+        # reachable even when the window is made shorter than its preferred size.
+        footer = ttk.Frame(win)
+        footer.pack(side=tk.BOTTOM, fill=tk.X, padx=14, pady=(0, 12))
+        save_button = ttk.Button(footer, text="球面PNG/GIFを保存…", state=tk.DISABLED)
+        save_button.pack(side=tk.LEFT)
+        save_all_button = ttk.Button(footer, text="全方式の描画を保存", state=tk.DISABLED)
+        save_all_button.pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Button(footer, text="閉じる", command=win.destroy).pack(side=tk.RIGHT)
+
         content = ttk.Panedwindow(win, orient=tk.HORIZONTAL)
         content.pack(fill=tk.BOTH, expand=True, padx=14, pady=(0, 10))
         plot_frame = ttk.Frame(content)
@@ -1311,14 +1322,6 @@ class AnalysisMixin:
         detail_text.pack(fill=tk.X, pady=(8, 0))
         detail_text.configure(state=tk.DISABLED)
 
-        footer = ttk.Frame(win)
-        footer.pack(fill=tk.X, padx=14, pady=(0, 12))
-        save_button = ttk.Button(footer, text="解析結果をPNG保存", state=tk.DISABLED)
-        save_button.pack(side=tk.LEFT)
-        save_all_button = ttk.Button(footer, text="全方式の描画を保存", state=tk.DISABLED)
-        save_all_button.pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Button(footer, text="閉じる", command=win.destroy).pack(side=tk.RIGHT)
-
         event_queue = queue.Queue()
         self.btn_radiant_analysis.configure(state=tk.DISABLED)
         worker = threading.Thread(
@@ -1336,7 +1339,12 @@ class AnalysisMixin:
             summary_text.set(
                 f"モデル: {report.model_label}\n"
                 f"有効領域内: {len(report.supported_results)}件 / 読み込み: {len(report.results) + len(report.skipped)}件\n"
-                f"除外: {len(report.skipped)}件"
+                f"除外: {len(report.skipped)}件\n\n"
+                "流星群別（有効領域内）\n"
+                + "\n".join(
+                    f"{code}  {next((item.shower_name for item in report.supported_results if item.shower_code == code), '未分類')}: {count}件"
+                    for code, count in sorted(report.shower_counts.items())
+                ) or "該当なし"
             )
             for index, result in enumerate(report.results):
                 angle = f"{result.radiant_distance_deg:.1f}°" if result.radiant_distance_deg is not None else "—"
@@ -1375,17 +1383,6 @@ class AnalysisMixin:
                 figure_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
                 self.analysis_radiant_figure = figure
                 self.analysis_radiant_canvas = figure_canvas
-
-                def save_plot():
-                    output = filedialog.asksaveasfilename(
-                        title="放射点解析を保存",
-                        initialfile="radiant_analysis.png",
-                        defaultextension=".png",
-                        filetypes=(("PNG画像", "*.png"), ("すべてのファイル", "*.*")),
-                    )
-                    if output:
-                        mra.save_radiant_report_plot(report, output)
-                        self.append_log(f"放射点解析を保存: {output}")
 
                 def save_all_visualizations():
                     directory = filedialog.askdirectory(
@@ -1444,7 +1441,15 @@ class AnalysisMixin:
 
                     self.after(100, poll_bundle)
 
-                save_button.configure(state=tk.NORMAL, command=save_plot)
+                save_button.configure(
+                    state=tk.NORMAL,
+                    command=lambda: self._open_sphere_export_dialog(
+                        report,
+                        files,
+                        win,
+                        progress_label,
+                    ),
+                )
                 save_all_button.configure(state=tk.NORMAL, command=save_all_visualizations)
             except Exception as exc:
                 progress_label.configure(text=f"球面表示に失敗しました: {exc}")
@@ -1489,6 +1494,337 @@ class AnalysisMixin:
                 self.btn_radiant_analysis.configure(state=tk.NORMAL)
 
         self.after(80, poll)
+
+    def _open_sphere_export_dialog(self, report, info_paths, parent, progress_label):
+        """Open the configurable sphere PNG/GIF export workspace."""
+        dialog = Toplevel(parent)
+        dialog.title("球面表示の保存設定")
+        dialog.geometry("1180x760")
+        dialog.minsize(900, 600)
+        dialog.transient(parent)
+
+        root = ttk.Frame(dialog, padding=14)
+        root.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(root, text="球面PNG / GIF の保存設定", style="PageTitle.TLabel").pack(anchor=tk.W)
+        ttk.Label(
+            root,
+            text="表示内容を選び、低解像度プレビューで確認してから保存できます。解析結果そのものは変更されません。",
+            style="GlassMuted.TLabel",
+        ).pack(anchor=tk.W, pady=(2, 10))
+
+        body = ttk.Panedwindow(root, orient=tk.HORIZONTAL)
+        body.pack(fill=tk.BOTH, expand=True)
+        settings_host = ttk.Frame(body, padding=(0, 0, 12, 0))
+        preview = ttk.Frame(body, padding=(12, 0, 0, 0))
+        body.add(settings_host, weight=2)
+        body.add(preview, weight=3)
+
+        settings_canvas = tk.Canvas(settings_host, background=UI_BG, highlightthickness=0)
+        settings_scroll = ttk.Scrollbar(settings_host, orient=tk.VERTICAL, command=settings_canvas.yview)
+        settings_canvas.configure(yscrollcommand=settings_scroll.set)
+        settings_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        settings_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        settings = ttk.Frame(settings_canvas)
+        settings_window = settings_canvas.create_window((0, 0), window=settings, anchor="nw")
+        settings.bind(
+            "<Configure>",
+            lambda _event: settings_canvas.configure(scrollregion=settings_canvas.bbox("all")),
+        )
+        settings_canvas.bind(
+            "<Configure>",
+            lambda event: settings_canvas.itemconfigure(settings_window, width=event.width),
+        )
+
+        def scroll_settings(event):
+            delta = getattr(event, "delta", 0)
+            if delta:
+                amount = -delta if abs(delta) < 120 else -int(delta / 120)
+            else:
+                amount = -1 if getattr(event, "num", None) == 4 else 1
+            settings_canvas.yview_scroll(amount, "units")
+            return "break"
+
+        for widget in (settings_canvas, settings):
+            widget.bind("<MouseWheel>", scroll_settings)
+            widget.bind("<Button-4>", scroll_settings)
+            widget.bind("<Button-5>", scroll_settings)
+
+        def boolean(default=True):
+            return tk.BooleanVar(value=default)
+
+        display_vars = {
+            "show_sphere_surface": boolean(True),
+            "show_meteor_paths": boolean(True),
+            "show_radiant_extensions": boolean(True),
+            "show_radiant_points": boolean(True),
+            "show_radiant_labels": boolean(True),
+            "show_coordinate_grid": boolean(True),
+            "show_coordinate_labels": boolean(True),
+            "show_x_axis": boolean(True),
+            "show_y_axis": boolean(True),
+            "show_z_axis": boolean(True),
+            "show_title": boolean(True),
+            "show_legend": boolean(True),
+            "legend_path": boolean(True),
+            "legend_extension": boolean(True),
+        }
+        display_frame = ttk.LabelFrame(settings, text="表示するデータ", padding=10)
+        display_frame.pack(fill=tk.X, pady=(0, 8))
+        display_items = (
+            ("show_sphere_surface", "球面の表面"),
+            ("show_meteor_paths", "実際の流星経路"),
+            ("show_radiant_extensions", "放射点までの延長線"),
+            ("show_radiant_points", "放射点マーカー"),
+            ("show_radiant_labels", "放射点コード（PERなど）"),
+            ("show_coordinate_grid", "RA/Decグリッド"),
+            ("show_coordinate_labels", "RA/Decラベル"),
+            ("show_title", "タイトル"),
+        )
+        for index, (key, label) in enumerate(display_items):
+            ttk.Checkbutton(display_frame, text=label, variable=display_vars[key]).grid(
+                row=index // 2, column=index % 2, sticky=tk.W, padx=(0, 12), pady=2
+            )
+        display_frame.columnconfigure(0, weight=1)
+        display_frame.columnconfigure(1, weight=1)
+
+        axis_frame = ttk.LabelFrame(settings, text="3D軸", padding=10)
+        axis_frame.pack(fill=tk.X, pady=(0, 8))
+        for column, key, label in (
+            (0, "show_x_axis", "X軸"),
+            (1, "show_y_axis", "Y軸"),
+            (2, "show_z_axis", "Z軸"),
+        ):
+            ttk.Checkbutton(axis_frame, text=label, variable=display_vars[key]).grid(
+                row=0, column=column, sticky=tk.W, padx=(0, 16)
+            )
+
+        legend_frame = ttk.LabelFrame(settings, text="凡例", padding=10)
+        legend_frame.pack(fill=tk.X, pady=(0, 8))
+        ttk.Checkbutton(legend_frame, text="凡例を表示", variable=display_vars["show_legend"]).grid(
+            row=0, column=0, columnspan=2, sticky=tk.W, pady=(0, 3)
+        )
+        ttk.Checkbutton(legend_frame, text="実線の説明", variable=display_vars["legend_path"]).grid(
+            row=1, column=0, sticky=tk.W
+        )
+        ttk.Checkbutton(legend_frame, text="破線の説明", variable=display_vars["legend_extension"]).grid(
+            row=1, column=1, sticky=tk.W
+        )
+        ttk.Label(legend_frame, text="流星群の凡例", style="GlassMuted.TLabel").grid(
+            row=2, column=0, columnspan=2, sticky=tk.W, pady=(7, 2)
+        )
+        shower_vars = {}
+        shower_names = {}
+        for result in report.supported_results:
+            shower_vars.setdefault(result.shower_code, boolean(True))
+            shower_names[result.shower_code] = result.shower_name
+        shower_codes = list(shower_vars)
+        legend_list = ttk.Frame(legend_frame)
+        legend_list.grid(row=3, column=0, columnspan=2, sticky=tk.EW)
+        for index, code in enumerate(shower_codes):
+            ttk.Checkbutton(
+                legend_list,
+                text=f"{code} {shower_names[code]}",
+                variable=shower_vars[code],
+            ).grid(row=index // 2, column=index % 2, sticky=tk.W, padx=(0, 10), pady=1)
+        legend_list.columnconfigure(0, weight=1)
+        legend_list.columnconfigure(1, weight=1)
+
+        export_frame = ttk.LabelFrame(settings, text="解像度・回転速度", padding=10)
+        export_frame.pack(fill=tk.X, pady=(0, 8))
+        resolution_var = tk.StringVar(value="1200 × 960")
+        resolution_values = ("800 × 640", "1200 × 960", "1600 × 1280", "1920 × 1536")
+        ttk.Label(export_frame, text="出力解像度").grid(row=0, column=0, sticky=tk.W, pady=3)
+        ttk.Combobox(
+            export_frame, textvariable=resolution_var, values=resolution_values,
+            state="readonly", width=16,
+        ).grid(row=0, column=1, sticky=tk.W, pady=3)
+        fps_var = tk.StringVar(value="12 fps")
+        ttk.Label(export_frame, text="GIFフレームレート").grid(row=1, column=0, sticky=tk.W, pady=3)
+        ttk.Combobox(
+            export_frame, textvariable=fps_var,
+            values=("6 fps", "10 fps", "12 fps", "15 fps", "20 fps"),
+            state="readonly", width=16,
+        ).grid(row=1, column=1, sticky=tk.W, pady=3)
+        speed_var = tk.StringVar(value="60 °/秒")
+        ttk.Label(export_frame, text="回転速度").grid(row=2, column=0, sticky=tk.W, pady=3)
+        ttk.Combobox(
+            export_frame, textvariable=speed_var,
+            values=("30 °/秒", "45 °/秒", "60 °/秒", "90 °/秒", "120 °/秒"),
+            state="readonly", width=16,
+        ).grid(row=2, column=1, sticky=tk.W, pady=3)
+        rotation_info = tk.StringVar(value="1回転 6秒 | 12 fpsなら73フレーム")
+        ttk.Label(export_frame, textvariable=rotation_info, style="GlassMuted.TLabel").grid(
+            row=3, column=0, columnspan=2, sticky=tk.W, pady=(3, 0)
+        )
+
+        def update_rotation_info(*_args):
+            try:
+                speed = float(speed_var.get().split()[0])
+                fps = int(fps_var.get().split()[0])
+                seconds = 360.0 / speed
+                frames = max(2, int(round(seconds * fps)) + 1)
+                rotation_info.set(f"1回転 {seconds:.1f}秒 | {fps} fpsなら{frames}フレーム")
+            except (ValueError, ZeroDivisionError):
+                rotation_info.set("")
+
+        speed_var.trace_add("write", update_rotation_info)
+        fps_var.trace_add("write", update_rotation_info)
+
+        preview_title = ttk.Label(preview, text="プレビュー（低解像度）", style="Section.TLabel")
+        preview_title.pack(anchor=tk.W)
+        preview_status = tk.StringVar(value="設定後に「プレビューを更新」を押してください")
+        ttk.Label(preview, textvariable=preview_status, style="GlassMuted.TLabel").pack(anchor=tk.W, pady=(2, 6))
+        preview_host = ttk.Frame(preview)
+        preview_host.pack(fill=tk.BOTH, expand=True)
+
+        def parse_dimensions():
+            width, height = resolution_var.get().replace("×", "x").split("x")
+            return int(width.strip()), int(height.strip())
+
+        def build_options():
+            selected_codes = tuple(code for code, value in shower_vars.items() if value.get())
+            return mra.SphereRenderOptions(
+                **{key: value.get() for key, value in display_vars.items()},
+                legend_showers=selected_codes,
+            )
+
+        def update_preview():
+            preview_status.set("低解像度プレビューを作成中…")
+            preview_button.configure(state=tk.DISABLED)
+            preview_queue = queue.Queue()
+            options = build_options()
+            temp_handle, temp_path = tempfile.mkstemp(prefix="radiant_preview_", suffix=".png")
+            os.close(temp_handle)
+
+            def preview_worker():
+                try:
+                    mrv.save_sphere_png(
+                        report,
+                        temp_path,
+                        width_px=640,
+                        height_px=512,
+                        dpi=72,
+                        options=options,
+                    )
+                    preview_queue.put((True, temp_path))
+                except Exception as exc:
+                    preview_queue.put((False, exc))
+
+            threading.Thread(target=preview_worker, daemon=True).start()
+
+            def poll_preview():
+                try:
+                    success, payload = preview_queue.get_nowait()
+                except queue.Empty:
+                    if dialog.winfo_exists():
+                        dialog.after(80, poll_preview)
+                    return
+                try:
+                    if success:
+                        for child in preview_host.winfo_children():
+                            child.destroy()
+                        with Image.open(payload) as source_image:
+                            image = source_image.convert("RGB")
+                        resampling = getattr(Image, "Resampling", Image)
+                        image.thumbnail((760, 600), resampling.LANCZOS)
+                        preview_image = ImageTk.PhotoImage(image)
+                        image_label = tk.Label(preview_host, image=preview_image, background=UI_BG)
+                        image_label.image = preview_image
+                        image_label.pack(fill=tk.BOTH, expand=True)
+                        preview_status.set("プレビュー完了（保存時は選択した解像度で出力）")
+                    else:
+                        preview_status.set(f"プレビューに失敗しました: {payload}")
+                except Exception as exc:
+                    preview_status.set(f"プレビュー表示に失敗しました: {exc}")
+                finally:
+                    try:
+                        os.unlink(temp_path)
+                    except OSError:
+                        pass
+                    preview_button.configure(state=tk.NORMAL)
+
+            dialog.after(80, poll_preview)
+
+        preview_button = ttk.Button(preview, text="プレビューを更新（低解像度）", command=update_preview)
+        preview_button.pack(anchor=tk.W, pady=(8, 0))
+
+        job_state = {"active": False}
+
+        def save_export(kind):
+            if job_state["active"]:
+                return
+            extension = ".png" if kind == "png" else ".gif"
+            output = filedialog.asksaveasfilename(
+                title="球面表示の保存先",
+                initialfile=f"radiant_analysis_sphere{extension}",
+                defaultextension=extension,
+                filetypes=(("PNG画像", "*.png"),) if kind == "png" else (("GIFアニメーション", "*.gif"),),
+                parent=dialog,
+            )
+            if not output:
+                return
+            width, height = parse_dimensions()
+            fps = int(fps_var.get().split()[0])
+            speed = float(speed_var.get().split()[0])
+            seconds = 360.0 / speed
+            frames = max(2, int(round(fps * seconds)) + 1)
+            options = build_options()
+            job_state["active"] = True
+            export_png_button.configure(state=tk.DISABLED)
+            export_gif_button.configure(state=tk.DISABLED)
+            preview_button.configure(state=tk.DISABLED)
+            preview_status.set("保存処理中…（M5 Pro向けのバックグラウンド処理）")
+            result_queue = queue.Queue()
+
+            def worker():
+                try:
+                    if kind == "png":
+                        path = mrv.save_sphere_png(
+                            report, output, width_px=width, height_px=height, dpi=120, options=options,
+                        )
+                    else:
+                        path = mrv.save_sphere_rotation_gif(
+                            report, output, fps=fps, frames=frames,
+                            width_px=width, height_px=height, dpi=100, options=options,
+                        )
+                    result_queue.put((True, path))
+                except Exception as exc:
+                    result_queue.put((False, exc))
+
+            threading.Thread(target=worker, daemon=True).start()
+
+            def poll_export():
+                try:
+                    success, payload = result_queue.get_nowait()
+                except queue.Empty:
+                    if dialog.winfo_exists():
+                        dialog.after(100, poll_export)
+                    return
+                job_state["active"] = False
+                export_png_button.configure(state=tk.NORMAL)
+                export_gif_button.configure(state=tk.NORMAL)
+                preview_button.configure(state=tk.NORMAL)
+                if success:
+                    preview_status.set(f"保存完了: {payload}")
+                    progress_label.configure(text=f"球面{kind.upper()}を保存しました: {payload}")
+                    self.append_log(f"球面{kind.upper()}を保存: {payload}")
+                    messagebox.showinfo("保存完了", f"保存しました。\n{payload}", parent=dialog)
+                else:
+                    preview_status.set(f"保存に失敗しました: {payload}")
+                    messagebox.showerror("保存エラー", str(payload), parent=dialog)
+
+            dialog.after(100, poll_export)
+
+        buttons = ttk.Frame(root)
+        buttons.pack(fill=tk.X, pady=(10, 0))
+        export_png_button = ttk.Button(buttons, text="PNGを保存", command=lambda: save_export("png"))
+        export_png_button.pack(side=tk.LEFT)
+        export_gif_button = ttk.Button(buttons, text="球面GIFを保存", command=lambda: save_export("gif"))
+        export_gif_button.pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Button(buttons, text="閉じる", command=dialog.destroy, style="Gray.TButton").pack(side=tk.RIGHT)
+
+        update_preview()
+        return dialog
 
     def start_analysis(self):
         if not self.check_admin_password():
