@@ -119,6 +119,8 @@ def test_sphere_rotation_gif_is_written(tmp_path):
             show_x_axis=False,
             show_y_axis=False,
             show_z_axis=True,
+            show_axis_ticks=False,
+            show_3d_frame=False,
             show_coordinate_grid=False,
             legend_showers=("PER",),
         ),
@@ -131,6 +133,21 @@ def test_sphere_rotation_gif_is_written(tmp_path):
     with Image.open(output) as image:
         assert image.size == (320, 240)
         assert getattr(image, "n_frames", 1) == 3
+
+
+def test_sphere_axis_ticks_and_frame_can_be_hidden():
+    figure = Figure(figsize=(4, 3))
+    _figure, axis = analysis.draw_radiant_sphere(
+        _report(),
+        figure=figure,
+        options=analysis.SphereRenderOptions(
+            show_axis_ticks=False,
+            show_3d_frame=False,
+        ),
+    )
+
+    assert all(len(axis3d.get_ticklocs()) == 0 for axis3d in (axis.xaxis, axis.yaxis, axis.zaxis))
+    assert all(axis3d.line.get_color() == (0, 0, 0, 0) for axis3d in (axis.xaxis, axis.yaxis, axis.zaxis))
 
 
 def test_configurable_sphere_png_is_written(tmp_path):

@@ -161,6 +161,8 @@ class SphereRenderOptions:
     show_x_axis: bool = True
     show_y_axis: bool = True
     show_z_axis: bool = True
+    show_axis_ticks: bool = True
+    show_3d_frame: bool = True
     show_title: bool = True
     show_legend: bool = True
     legend_path: bool = True
@@ -602,10 +604,16 @@ def draw_radiant_sphere(
     # dark application theme.  The sphere and celestial grid should carry the
     # visual hierarchy, with only a restrained coordinate frame behind them.
     axis.grid(False)
+    frame_color = "#243650" if options.show_3d_frame else (0, 0, 0, 0)
+    frame_alpha = 0.28 if options.show_3d_frame else 0.0
     for pane in (axis.xaxis.pane, axis.yaxis.pane, axis.zaxis.pane):
-        pane.set_facecolor("#0B0F18")
-        pane.set_edgecolor("#243650")
-        pane.set_alpha(0.28)
+        pane.set_facecolor("#0B0F18" if options.show_3d_frame else (0, 0, 0, 0))
+        pane.set_edgecolor(frame_color)
+        pane.set_alpha(frame_alpha)
+    for axis3d in (axis.xaxis, axis.yaxis, axis.zaxis):
+        axis_line = getattr(axis3d, "line", None)
+        if axis_line is not None:
+            axis_line.set_color(frame_color)
     if options.show_sphere_surface:
         u = np.linspace(0.0, 2.0 * np.pi, 72)
         v = np.linspace(-0.5 * np.pi, 0.5 * np.pi, 36)
@@ -687,7 +695,16 @@ def draw_radiant_sphere(
     else:
         axis.set_zlabel("")
         axis.zaxis.set_visible(False)
-    axis.tick_params(colors="#A8B3C5", labelsize=8)
+    if options.show_axis_ticks:
+        axis.tick_params(colors="#A8B3C5", labelsize=8)
+    else:
+        # ``tick_params`` alone leaves the 3-D tick locations and their
+        # numeric labels in place on some Matplotlib versions.  Removing the
+        # locations is reliable for both the PNG and every GIF frame, while
+        # keeping the optional X/Y/Z axis labels available.
+        for axis3d in (axis.xaxis, axis.yaxis, axis.zaxis):
+            axis3d.set_ticks([])
+        axis.tick_params(colors=(0, 0, 0, 0), labelsize=0, length=0, width=0)
     axis.set_box_aspect((1, 1, 1))
     axis.set_xlim(-1.08, 1.08)
     axis.set_ylim(-1.08, 1.08)

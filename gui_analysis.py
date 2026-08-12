@@ -1563,6 +1563,8 @@ class AnalysisMixin:
             "show_x_axis": boolean(True),
             "show_y_axis": boolean(True),
             "show_z_axis": boolean(True),
+            "show_axis_ticks": boolean(True),
+            "show_3d_frame": boolean(True),
             "show_title": boolean(True),
             "show_legend": boolean(True),
             "legend_path": boolean(True),
@@ -1597,6 +1599,16 @@ class AnalysisMixin:
             ttk.Checkbutton(axis_frame, text=label, variable=display_vars[key]).grid(
                 row=0, column=column, sticky=tk.W, padx=(0, 16)
             )
+        ttk.Checkbutton(
+            axis_frame,
+            text="目盛り・数値",
+            variable=display_vars["show_axis_ticks"],
+        ).grid(row=1, column=0, sticky=tk.W, padx=(0, 16), pady=(5, 0))
+        ttk.Checkbutton(
+            axis_frame,
+            text="3D枠線・背景面",
+            variable=display_vars["show_3d_frame"],
+        ).grid(row=1, column=1, columnspan=2, sticky=tk.W, padx=(0, 16), pady=(5, 0))
 
         legend_frame = ttk.LabelFrame(settings, text="凡例", padding=10)
         legend_frame.pack(fill=tk.X, pady=(0, 8))
