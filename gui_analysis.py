@@ -2,6 +2,7 @@ from gui_common import *
 import media_time
 import camera_model_catalog
 import meteor_radiant_analysis as mra
+import meteor_radiant_visualizations as mrv
 from datetime import timedelta
 
 UI_BG = ui_theme.COLORS["content_raised"]
@@ -1046,6 +1047,8 @@ class AnalysisMixin:
         footer.pack(fill=tk.X, padx=14, pady=(0, 12))
         save_button = ttk.Button(footer, text="解析結果をPNG保存", state=tk.DISABLED)
         save_button.pack(side=tk.LEFT)
+        save_all_button = ttk.Button(footer, text="全方式の描画を保存", state=tk.DISABLED)
+        save_all_button.pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(footer, text="閉じる", command=win.destroy).pack(side=tk.RIGHT)
 
         event_queue = queue.Queue()
@@ -1106,7 +1109,65 @@ class AnalysisMixin:
                         mra.save_radiant_report_plot(report, output)
                         self.append_log(f"放射点解析を保存: {output}")
 
+                def save_all_visualizations():
+                    directory = filedialog.askdirectory(
+                        title="全方式の放射点描画を保存するフォルダを選択",
+                        parent=win,
+                    )
+                    if not directory:
+                        return
+                    save_all_button.configure(state=tk.DISABLED)
+                    progress_label.configure(text="全方式の描画を作成しています…（完了まで数十秒かかる場合があります）")
+                    bundle_queue = queue.Queue()
+
+                    def bundle_worker():
+                        try:
+                            paths = mrv.save_visualization_bundle(
+                                report,
+                                files,
+                                directory,
+                                prefix="radiant_analysis",
+                            )
+                            bundle_queue.put(("success", paths))
+                        except Exception as exc:
+                            bundle_queue.put(("error", str(exc)))
+
+                    bundle_thread = threading.Thread(target=bundle_worker, daemon=True)
+                    bundle_thread.start()
+
+                    def poll_bundle():
+                        try:
+                            if not win.winfo_exists():
+                                return
+                        except tk.TclError:
+                            return
+                        try:
+                            event_type, payload = bundle_queue.get_nowait()
+                        except queue.Empty:
+                            if bundle_thread.is_alive():
+                                self.after(100, poll_bundle)
+                            else:
+                                save_all_button.configure(state=tk.NORMAL)
+                                progress_label.configure(text="全方式の描画処理が予期せず終了しました。")
+                            return
+                        save_all_button.configure(state=tk.NORMAL)
+                        if event_type == "success":
+                            progress_label.configure(text=f"全方式の描画を保存しました: {directory}")
+                            self.append_log(f"放射点解析の全方式描画を保存: {directory}")
+                            messagebox.showinfo(
+                                "保存完了",
+                                "球面・Aitoff・収束図・カメラ投影・RA-Dec・密度・極座標・時系列動画を保存しました。",
+                                parent=win,
+                            )
+                        else:
+                            progress_label.configure(text=f"全方式の描画に失敗しました: {payload}")
+                            self.append_log(f"全方式の放射点描画エラー: {payload}")
+                            messagebox.showerror("保存エラー", str(payload), parent=win)
+
+                    self.after(100, poll_bundle)
+
                 save_button.configure(state=tk.NORMAL, command=save_plot)
+                save_all_button.configure(state=tk.NORMAL, command=save_all_visualizations)
             except Exception as exc:
                 progress_label.configure(text=f"球面表示に失敗しました: {exc}")
                 self.append_log(f"放射点解析の描画エラー: {exc}")
