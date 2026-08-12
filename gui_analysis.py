@@ -16,7 +16,7 @@ UI_ACCENT = ui_theme.COLORS["accent"]
 
 class AnalysisMixin:
     def create_analysis_tab(self, parent):
-        """Create the '解析' tab where users can drop meteor info .txt files and run batch drawing."""
+        """Create the analysis tab with focused, on-demand analysis entry points."""
         # The tab is taller than many laptop displays.  Previously only the
         # file lists scrolled, leaving the video-concatenation controls below
         # the visible area with no way to reach them.
@@ -53,7 +53,15 @@ class AnalysisMixin:
 
         def on_analysis_tab_mousewheel(event):
             # Keep each file list's own scrollbar independent from the tab.
-            if is_descendant(event.widget, self.analysis_list_canvas) or is_descendant(event.widget, self.video_concat_list_canvas):
+            analysis_list_canvas = getattr(self, "analysis_list_canvas", None)
+            video_concat_list_canvas = getattr(self, "video_concat_list_canvas", None)
+            if (
+                analysis_list_canvas is not None
+                and is_descendant(event.widget, analysis_list_canvas)
+            ) or (
+                video_concat_list_canvas is not None
+                and is_descendant(event.widget, video_concat_list_canvas)
+            ):
                 return None
             if event.widget != self.analysis_tab_canvas and not is_descendant(event.widget, self.analysis_scrollable_frame):
                 return None
@@ -73,53 +81,6 @@ class AnalysisMixin:
 
         frame = ttk.Frame(self.analysis_scrollable_frame)
         frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-
-        lf = ttk.LabelFrame(frame, text="流星解析 (info.txt ドロップ)")
-        lf.pack(fill=tk.BOTH, expand=True, pady=5)
-
-        drop_label = ttk.Label(
-            lf,
-            text="流星の info.txt をここにドロップ",
-            style="DropZone.TLabel",
-        )
-        drop_label.pack(fill=tk.X, pady=5)
-        drop_label.drop_target_register(DND_FILES)
-        drop_label.dnd_bind('<<Drop>>', self.drop_analysis)
-
-        # Analysis list (styled)
-        analysis_list_container = ttk.Frame(lf)
-        analysis_list_container.pack(fill=tk.BOTH, expand=True, pady=5)
-        
-        self.analysis_list_canvas = tk.Canvas(analysis_list_container, bg=UI_FIELD, highlightthickness=0, height=100)
-        self.analysis_list_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        
-        scrollbar = ttk.Scrollbar(analysis_list_container, orient=tk.VERTICAL, command=self.analysis_list_canvas.yview)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self.analysis_list_canvas.configure(yscrollcommand=scrollbar.set)
-        
-        self.analysis_list_frame = tk.Frame(self.analysis_list_canvas, bg=UI_FIELD)
-        self.analysis_list_window = self.analysis_list_canvas.create_window((0, 0), window=self.analysis_list_frame, anchor="nw")
-        
-        def on_analysis_frame_configure(event):
-            self.analysis_list_canvas.configure(scrollregion=self.analysis_list_canvas.bbox("all"))
-        self.analysis_list_frame.bind("<Configure>", on_analysis_frame_configure)
-        
-        def on_analysis_canvas_configure(event):
-            self.analysis_list_canvas.itemconfig(self.analysis_list_window, width=event.width)
-        self.analysis_list_canvas.bind("<Configure>", on_analysis_canvas_configure)
-        
-        def on_analysis_mousewheel(event):
-            self.analysis_list_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-        self.analysis_list_canvas.bind("<MouseWheel>", on_analysis_mousewheel)
-        self.analysis_list_frame.bind("<MouseWheel>", on_analysis_mousewheel)
-        
-        self.analysis_item_frames = []
-        self.analysis_selected_indices = set()
-
-        btn_frame = ttk.Frame(lf)
-        btn_frame.pack(fill=tk.X, pady=(5,0))
-        ttk.Button(btn_frame, text="選択項目を削除", command=self.remove_selected_analysis).pack(side=tk.LEFT, padx=2)
-        ttk.Button(btn_frame, text="すべて削除", command=self.remove_all_analysis).pack(side=tk.LEFT, padx=2)
 
         # Radiant-analysis controls live in a focused, on-demand workspace.
         # Keep only the small entry point in the main analysis page so the
@@ -1232,8 +1193,6 @@ class AnalysisMixin:
         ttk.Button(footer, text="閉じる", command=close_menu, style="Gray.TButton").pack(side=tk.RIGHT)
         run_button = ttk.Button(footer, text="解析を開始", command=lambda: self._run_radiant_analysis_from_menu(win, tree))
         run_button.pack(side=tk.RIGHT, padx=(0, 8))
-        for path in tuple(self.analysis_files):
-            tree.insert("", tk.END, values=(os.path.basename(path), path))
         return win
 
     def _run_radiant_analysis_from_menu(self, menu, tree):

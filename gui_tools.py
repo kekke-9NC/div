@@ -642,8 +642,11 @@ class ToolsMixin:
         if not self.check_admin_password():
             return
 
-        if not self.analysis_files:
-            messagebox.showwarning("情報", "解析するファイルを追加してください。")
+        info_files = filedialog.askopenfilenames(
+            title="角度分布分析の対象ファイル",
+            filetypes=(("info.txt", "*.txt"), ("すべてのファイル", "*.*")),
+        )
+        if not info_files:
             return
 
         ra_str = simpledialog.askstring("放射点入力", "放射点の赤経 (RA) を度数 (deg) で入力してください:\n(例: 45.0)")
@@ -674,9 +677,9 @@ class ToolsMixin:
         def run_task():
             self.append_log("角度分布分析を開始します...")
             success, msg = meteor_angle_analysis.analyze_angles(
-                self.analysis_files, 
-                radiant_ra, 
-                radiant_dec, 
+                info_files,
+                radiant_ra,
+                radiant_dec,
                 output_path
             )
             if success:
