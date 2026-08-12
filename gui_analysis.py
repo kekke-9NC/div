@@ -1156,7 +1156,7 @@ class AnalysisMixin:
                             self.append_log(f"放射点解析の全方式描画を保存: {directory}")
                             messagebox.showinfo(
                                 "保存完了",
-                                "球面・Aitoff・収束図・カメラ投影・RA-Dec・密度・極座標・時系列動画を保存しました。",
+                                "球面・球面一回転GIF・Aitoff・収束図・カメラ投影・RA-Dec・密度・極座標・時系列動画を保存しました。",
                                 parent=win,
                             )
                         else:

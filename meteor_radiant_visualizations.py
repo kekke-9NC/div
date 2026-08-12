@@ -485,30 +485,64 @@ def draw_density_heatmap(report: analysis.RadiantReport, figure=None):
 
 
 def _altaz_points(result: analysis.RadiantResult, latitude_deg: float, longitude_deg: float):
+    if result.detection_time is None:
+        return None
+    radec = [result.start_radec, result.end_radec]
+    if result.radiant_radec is not None:
+        radec.append(result.radiant_radec)
+    return _altaz_radec_curve(
+        np.asarray([item[0] for item in radec], dtype=float),
+        np.asarray([item[1] for item in radec], dtype=float),
+        result.detection_time,
+        latitude_deg,
+        longitude_deg,
+    )
+
+
+def _altaz_radec_curve(
+    ra_deg: Sequence[float],
+    dec_deg: Sequence[float],
+    detection_time: datetime,
+    latitude_deg: float,
+    longitude_deg: float,
+):
     from astropy.coordinates import AltAz, EarthLocation, SkyCoord
     from astropy.time import Time
     from astropy.utils import iers
     import astropy.units as u
 
-    if result.detection_time is None:
-        return None
     # A visualization must remain reproducible offline.  Astropy otherwise
     # attempts to download a fresh IERS table on the first AltAz transform.
     iers.conf.auto_download = False
     iers.conf.auto_max_age = None
     iers.conf.iers_degraded_accuracy = "warn"
-    obstime = Time(result.detection_time)
+    obstime = Time(detection_time)
     location = EarthLocation.from_geodetic(lon=longitude_deg * u.deg, lat=latitude_deg * u.deg)
-    radec = [result.start_radec, result.end_radec]
-    if result.radiant_radec is not None:
-        radec.append(result.radiant_radec)
     coords = SkyCoord(
-        ra=[item[0] for item in radec] * u.deg,
-        dec=[item[1] for item in radec] * u.deg,
+        ra=np.asarray(ra_deg, dtype=float) * u.deg,
+        dec=np.asarray(dec_deg, dtype=float) * u.deg,
         frame="icrs",
     )
     altaz = coords.transform_to(AltAz(obstime=obstime, location=location))
     return np.asarray(altaz.az.rad), np.asarray(altaz.alt.deg)
+
+
+def _visible_polar_chunks(az_rad: Sequence[float], alt_deg: Sequence[float]) -> List[Tuple[np.ndarray, np.ndarray]]:
+    """Return continuous above-horizon sections without azimuth wrap jumps."""
+    az = np.unwrap(np.asarray(az_rad, dtype=float).reshape(-1))
+    alt = np.asarray(alt_deg, dtype=float).reshape(-1)
+    visible = np.isfinite(az) & np.isfinite(alt) & (alt >= 0.0) & (alt <= 90.0)
+    chunks: List[Tuple[np.ndarray, np.ndarray]] = []
+    start: Optional[int] = None
+    for index, is_visible in enumerate(visible):
+        if is_visible and start is None:
+            start = index
+        if (not is_visible or index == len(visible) - 1) and start is not None:
+            end = index + 1 if is_visible and index == len(visible) - 1 else index
+            if end - start >= 2:
+                chunks.append((az[start:end], 90.0 - alt[start:end]))
+            start = None
+    return chunks
 
 
 def draw_horizon_polar(
@@ -525,31 +559,97 @@ def draw_horizon_polar(
     figure.clear()
     font = _font()
     axis = figure.add_subplot(111, projection="polar", facecolor=BACKGROUND)
-    axis.set_title(f"地平座標・極座標図 | 緯度 {latitude_deg:.1f}° / 経度 {longitude_deg:.1f}°", color=TEXT, pad=24, fontproperties=font)
+    axis.set_title(
+        f"地平座標・極座標図 | 中心=天頂 / 外周=地平線 | 緯度 {latitude_deg:.1f}° / 経度 {longitude_deg:.1f}°",
+        color=TEXT,
+        pad=24,
+        fontproperties=font,
+    )
     axis.set_theta_zero_location("N")
     axis.set_theta_direction(-1)
-    axis.set_rlim(90, 0)
+    # radius is zenith distance: 0° must be at the center and 90° at the
+    # horizon.  Reversing these limits makes the plot look upside-down and
+    # places low-altitude events close to the center.
+    axis.set_rlim(0, 90)
+    axis.set_yticks(np.arange(10, 91, 10))
+    axis.set_yticklabels([f"{value}°" for value in np.arange(10, 91, 10)])
     axis.set_rlabel_position(225)
     axis.tick_params(colors=MUTED, labelsize=8)
     axis.grid(color="#53657E", alpha=0.35)
     for result in report.supported_results:
-        converted = _altaz_points(result, latitude_deg, longitude_deg)
-        if converted is None:
+        if result.detection_time is None:
             continue
-        az, alt = converted
-        radius = 90.0 - alt
         color = _color(result)
-        visible = (radius >= 0) & (radius <= 90)
-        if visible[0] and visible[1]:
-            axis.plot(az[:2], radius[:2], color=color, linewidth=1.5, alpha=0.8)
-        if len(radius) > 2 and visible[2]:
-            endpoint = 0 if result.radiant_side == "start" else 1
-            if visible[endpoint]:
-                axis.plot([az[endpoint], az[2]], [radius[endpoint], radius[2]], color=color, linewidth=1.0, linestyle="--", alpha=0.8)
-            axis.scatter([az[2]], [radius[2]], color=color, s=22)
+        path_ra, path_dec = _path_radec(result, count=96)
+        path_az, path_alt = _altaz_radec_curve(
+            path_ra, path_dec, result.detection_time, latitude_deg, longitude_deg
+        )
+        for theta, radius in _visible_polar_chunks(path_az, path_alt):
+            axis.plot(theta, radius, color=color, linewidth=1.5, alpha=0.8)
+
+        extension = _extension_radec(result, count=128)
+        if extension is not None:
+            ext_ra, ext_dec = extension
+            ext_az, ext_alt = _altaz_radec_curve(
+                ext_ra, ext_dec, result.detection_time, latitude_deg, longitude_deg
+            )
+            for theta, radius in _visible_polar_chunks(ext_az, ext_alt):
+                axis.plot(theta, radius, color=color, linewidth=1.0, linestyle="--", alpha=0.8)
+
+            radiant_az, radiant_alt = _altaz_radec_curve(
+                np.asarray([result.radiant_radec[0]]),
+                np.asarray([result.radiant_radec[1]]),
+                result.detection_time,
+                latitude_deg,
+                longitude_deg,
+            )
+            if len(radiant_alt) and np.isfinite(radiant_alt[0]) and 0.0 <= radiant_alt[0] <= 90.0:
+                axis.scatter([radiant_az[0]], [90.0 - radiant_alt[0]], color=color, s=22)
     axis.legend(handles=_legend_handles(report.supported_results), loc="lower right", bbox_to_anchor=(0.98, 0.02), facecolor=PANEL, edgecolor="#415875", labelcolor=TEXT, prop=font, fontsize=8)
     figure.subplots_adjust(top=0.86, bottom=0.07, left=0.08, right=0.92)
     return figure, axis
+
+
+def save_sphere_rotation_gif(
+    report: analysis.RadiantReport,
+    output_path: str,
+    fps: int = 12,
+    frames: int = 73,
+) -> str:
+    """Save one complete azimuth rotation of the 3-D radiant sphere."""
+    from matplotlib.animation import FuncAnimation, PillowWriter
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.figure import Figure
+
+    # Include both 0° and 360° so the saved GIF contains a complete rotation
+    # and loops without a visible angular jump.
+    frame_count = max(2, int(frames))
+    frame_rate = max(1, int(fps))
+    figure = Figure(figsize=(10, 8), facecolor=BACKGROUND)
+    FigureCanvasAgg(figure)
+    _figure, axis = analysis.draw_radiant_sphere(report, figure=figure)
+    initial_azimuth = -58.0
+
+    def update(frame_index: int):
+        azimuth = initial_azimuth + 360.0 * float(frame_index) / (frame_count - 1)
+        axis.view_init(elev=22, azim=azimuth)
+        return (axis,)
+
+    animation = FuncAnimation(
+        figure,
+        update,
+        frames=frame_count,
+        interval=1000.0 / frame_rate,
+        blit=False,
+        repeat=False,
+    )
+    animation.save(
+        output_path,
+        writer=PillowWriter(fps=frame_rate),
+        dpi=100,
+    )
+    figure.clear()
+    return output_path
 
 
 def save_figure(drawer, report: analysis.RadiantReport, output_path: str, *args, **kwargs) -> str:
@@ -642,6 +742,7 @@ def save_visualization_bundle(
     output.mkdir(parents=True, exist_ok=True)
     paths = {
         "sphere": str(output / f"{prefix}_sphere.png"),
+        "sphere_rotation_gif": str(output / f"{prefix}_sphere_rotation.gif"),
         "aitoff": str(output / f"{prefix}_aitoff.png"),
         "convergence": str(output / f"{prefix}_convergence.png"),
         "camera_overlay": str(output / f"{prefix}_camera_overlay.png"),
@@ -651,6 +752,7 @@ def save_visualization_bundle(
         "timeline": str(output / f"{prefix}_timeline.mp4"),
     }
     save_figure(analysis.draw_radiant_sphere, report, paths["sphere"], figsize=(10, 8))
+    save_sphere_rotation_gif(report, paths["sphere_rotation_gif"])
     save_figure(draw_aitoff_map, report, paths["aitoff"])
     save_figure(draw_convergence_map, report, paths["convergence"])
     save_figure(draw_camera_overlay, report, paths["camera_overlay"], info_paths)

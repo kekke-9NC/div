@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 
 import matplotlib
 import numpy as np
+from pathlib import Path
 
 matplotlib.use("Agg")
 from matplotlib.figure import Figure
@@ -84,3 +85,31 @@ def test_camera_extension_projects_a_sampled_sky_curve():
     assert np.all(np.isfinite(y))
     slopes = np.diff(y) / np.maximum(np.abs(np.diff(x)), 1e-9)
     assert float(np.ptp(slopes)) > 1e-4
+
+
+def test_visible_polar_chunks_unwrap_azimuth_and_remove_below_horizon():
+    chunks = visualizations._visible_polar_chunks(
+        np.deg2rad([350.0, 355.0, 0.0, 5.0, 10.0, 20.0]),
+        [30.0, 20.0, 10.0, -5.0, 5.0, 15.0],
+    )
+
+    assert len(chunks) == 2
+    assert all(len(theta) == len(radius) for theta, radius in chunks)
+    assert np.all(np.asarray(chunks[0][0]) > np.deg2rad(300.0))
+    assert np.all(np.asarray(chunks[1][1]) <= 90.0)
+
+
+def test_horizon_plot_has_zenith_at_center():
+    figure = Figure(figsize=(8, 8))
+    _figure, axis = visualizations.draw_horizon_polar(_report(), figure=figure)
+
+    assert axis.get_rmax() == 90.0
+    assert axis.get_rmin() == 0.0
+
+
+def test_sphere_rotation_gif_is_written(tmp_path):
+    output = Path(tmp_path) / "sphere_rotation.gif"
+    visualizations.save_sphere_rotation_gif(_report(), str(output), fps=4, frames=3)
+
+    assert output.is_file()
+    assert output.read_bytes()[:6] == b"GIF89a"
