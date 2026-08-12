@@ -1273,23 +1273,32 @@ class AnalysisMixin:
         ttk.Label(summary_frame, textvariable=summary_text, style="GlassMuted.TLabel", wraplength=360, justify=tk.LEFT).pack(
             anchor=tk.W, fill=tk.X, pady=(0, 8)
         )
+        result_table_frame = ttk.Frame(summary_frame)
+        result_table_frame.pack(fill=tk.BOTH, expand=True)
         tree = ttk.Treeview(
-            summary_frame,
+            result_table_frame,
             columns=("file", "shower", "radec", "angle", "confidence"),
             show="headings",
             height=16,
+            style="Radiant.Treeview",
         )
         tree.heading("file", text="ファイル")
         tree.heading("shower", text="放射点候補")
         tree.heading("radec", text="RA / Dec")
         tree.heading("angle", text="角距離")
         tree.heading("confidence", text="判定")
-        tree.column("file", width=175, anchor=tk.W)
-        tree.column("shower", width=135, anchor=tk.W)
-        tree.column("radec", width=105, anchor=tk.E)
-        tree.column("angle", width=70, anchor=tk.E)
-        tree.column("confidence", width=90, anchor=tk.W)
-        tree.pack(fill=tk.BOTH, expand=True)
+        tree.column("file", width=190, minwidth=140, anchor=tk.W, stretch=True)
+        tree.column("shower", width=155, minwidth=120, anchor=tk.W, stretch=True)
+        tree.column("radec", width=108, minwidth=95, anchor=tk.E, stretch=False)
+        tree.column("angle", width=76, minwidth=68, anchor=tk.E, stretch=False)
+        tree.column("confidence", width=94, minwidth=82, anchor=tk.W, stretch=False)
+
+        tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        tree_scroll = ttk.Scrollbar(result_table_frame, orient=tk.VERTICAL, command=tree.yview)
+        tree_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        tree.configure(yscrollcommand=tree_scroll.set)
+        tree.tag_configure("result_even", background=UI_FIELD, foreground=UI_TEXT)
+        tree.tag_configure("result_odd", background=ui_theme.COLORS["content_raised"], foreground=UI_TEXT)
         detail_text = tk.Text(
             summary_frame,
             height=7,
@@ -1329,7 +1338,7 @@ class AnalysisMixin:
                 f"有効領域内: {len(report.supported_results)}件 / 読み込み: {len(report.results) + len(report.skipped)}件\n"
                 f"除外: {len(report.skipped)}件"
             )
-            for result in report.results:
+            for index, result in enumerate(report.results):
                 angle = f"{result.radiant_distance_deg:.1f}°" if result.radiant_distance_deg is not None else "—"
                 tree.insert(
                     "",
@@ -1344,6 +1353,7 @@ class AnalysisMixin:
                         angle,
                         result.confidence,
                     ),
+                    tags=("result_even" if index % 2 == 0 else "result_odd",),
                 )
             details = []
             for result in report.results:
