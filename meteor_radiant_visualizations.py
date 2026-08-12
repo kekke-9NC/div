@@ -150,8 +150,10 @@ def _legend_handles(results: Iterable[analysis.RadiantResult], line_labels: bool
         if result.shower_code in seen or result.radiant_radec is None:
             continue
         handles.append(Line2D(
-            [0], [0], marker="o", linestyle="None", color=_color(result),
-            markerfacecolor=_color(result), label=f"{result.shower_code} {result.shower_name}",
+            [0], [0], marker="*", linestyle="None", color=_color(result),
+            markerfacecolor=_color(result), markeredgecolor="#FFFFFF",
+            markeredgewidth=0.5, markersize=9,
+            label=f"{result.shower_code} {result.shower_name}（★放射点）",
         ))
         seen.add(result.shower_code)
     return handles
@@ -168,7 +170,11 @@ def _plot_aitoff_result(axis, result: analysis.RadiantResult, linewidth: float =
         for lon, lat in _split_wrap(np.asarray([_lon_deg(value) for value in ext_ra]), ext_dec):
             axis.plot(np.deg2rad(lon), np.deg2rad(lat), color=color, linewidth=max(0.8, linewidth * 0.65), linestyle="--", alpha=alpha * 0.9)
         radiant_ra, radiant_dec = result.radiant_radec
-        axis.scatter(np.deg2rad(_lon_deg(radiant_ra)), np.deg2rad(radiant_dec), color=color, s=28, zorder=5)
+        axis.scatter(
+            np.deg2rad(_lon_deg(radiant_ra)), np.deg2rad(radiant_dec),
+            color=color, marker="*", s=100, edgecolors="#FFFFFF",
+            linewidths=0.6, zorder=5,
+        )
 
 
 def draw_aitoff_map(report: analysis.RadiantReport, figure=None):
@@ -411,7 +417,10 @@ def draw_camera_overlay(
                     alpha=0.85,
                     clip_on=True,
                 )
-            axis.scatter([radiant[0]], [radiant[1]], color=color, s=30, edgecolors="#FFFFFF", linewidths=0.4, zorder=5)
+            axis.scatter(
+                [radiant[0]], [radiant[1]], color=color, marker="*", s=100,
+                edgecolors="#FFFFFF", linewidths=0.6, zorder=5,
+            )
     axis.set_xlim(0, width)
     axis.set_ylim(height, 0)
     axis.set_xlabel("pixel X", color=MUTED)
@@ -436,7 +445,10 @@ def draw_radec_map(report: analysis.RadiantReport, figure=None):
         if extension is not None:
             ext_ra, ext_dec = extension
             axis.plot(ext_ra, ext_dec, color=color, linewidth=0.9, linestyle="--", alpha=0.75)
-            axis.scatter([result.radiant_radec[0]], [result.radiant_radec[1]], color=color, s=28)
+            axis.scatter(
+                [result.radiant_radec[0]], [result.radiant_radec[1]],
+                color=color, marker="*", s=100, edgecolors="#FFFFFF", linewidths=0.6,
+            )
     axis.set_xlim(360, 0)
     axis.set_ylim(-90, 90)
     axis.set_xlabel("Right Ascension (deg)", color=MUTED)
@@ -473,7 +485,11 @@ def draw_density_heatmap(report: analysis.RadiantReport, figure=None):
         for result in report.supported_results:
             if result.radiant_radec is None:
                 continue
-            axis.scatter([result.radiant_radec[0]], [result.radiant_radec[1]], color=_color(result), s=12, alpha=0.45)
+            axis.scatter(
+                [result.radiant_radec[0]], [result.radiant_radec[1]],
+                color=_color(result), marker="*", s=60, edgecolors="#FFFFFF",
+                linewidths=0.35, alpha=0.65,
+            )
     axis.set_xlim(360, 0)
     axis.set_ylim(-90, 90)
     axis.set_xlabel("Right Ascension (deg)", color=MUTED)
@@ -544,7 +560,10 @@ def draw_radec_polar(report: analysis.RadiantReport, figure=None):
             radiant_theta, radiant_radius = _radec_polar_points(
                 [result.radiant_radec[0]], [result.radiant_radec[1]]
             )
-            axis.scatter(radiant_theta, radiant_radius, color=color, s=22)
+            axis.scatter(
+                radiant_theta, radiant_radius, color=color, marker="*", s=90,
+                edgecolors="#FFFFFF", linewidths=0.5,
+            )
     axis.legend(handles=_legend_handles(report.supported_results), loc="lower right", bbox_to_anchor=(0.98, 0.02), facecolor=PANEL, edgecolor="#415875", labelcolor=TEXT, prop=font, fontsize=8)
     figure.subplots_adjust(top=0.86, bottom=0.07, left=0.08, right=0.92)
     return figure, axis
@@ -694,7 +713,10 @@ def save_timeline_animation(
             ext_artists = [axis.plot(x, y, color=color, linewidth=1.0, linestyle="--", alpha=0.8, visible=False)[0] for x, y in ext_data]
         extensions.append(ext_artists)
         if result.radiant_radec is not None:
-            marker = axis.scatter([], [], color=color, s=24, visible=False)
+            marker = axis.scatter(
+                [], [], color=color, marker="*", s=90,
+                edgecolors="#FFFFFF", linewidths=0.5, visible=False,
+            )
         else:
             marker = None
         markers.append(marker)

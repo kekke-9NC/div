@@ -200,6 +200,27 @@ def test_sphere_preview_draws_extensions_only_for_checked_showers():
     assert "放射点までの天球投影" not in unchecked_labels
 
 
+def test_sphere_preview_marks_radiant_with_star_and_legend_entry():
+    figure = Figure(figsize=(4, 3))
+    _figure, axis = analysis.draw_radiant_sphere(
+        _report(),
+        figure=figure,
+        options=analysis.SphereRenderOptions(
+            show_sphere_surface=False,
+            show_coordinate_grid=False,
+            show_coordinate_labels=False,
+            show_radiant_extensions=True,
+            show_radiant_points=True,
+            visible_shower_codes=("PER",),
+            legend_showers=("PER",),
+        ),
+    )
+
+    labels = {text.get_text() for text in axis.get_legend().get_texts()}
+    assert "★ 放射点" in labels
+    assert any(collection.get_paths() for collection in axis.collections)
+
+
 def test_configurable_sphere_png_is_written(tmp_path):
     output = Path(tmp_path) / "sphere.png"
     options = analysis.SphereRenderOptions(

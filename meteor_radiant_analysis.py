@@ -159,7 +159,7 @@ class SphereRenderOptions:
     show_sphere_surface: bool = True
     show_meteor_paths: bool = True
     show_radiant_extensions: bool = True
-    show_radiant_points: bool = False
+    show_radiant_points: bool = True
     show_radiant_labels: bool = False
     show_coordinate_grid: bool = True
     show_coordinate_labels: bool = True
@@ -781,7 +781,16 @@ def draw_radiant_sphere(
             if options.show_radiant_extensions:
                 axis.plot(extension[:, 0], extension[:, 1], extension[:, 2], color=color, linewidth=1.4, linestyle="--", alpha=0.85)
             if options.show_radiant_points:
-                axis.scatter([radiant[0]], [radiant[1]], [radiant[2]], color=color, s=48, depthshade=False)
+                axis.scatter(
+                    [radiant[0]], [radiant[1]], [radiant[2]],
+                    color=color,
+                    marker="*",
+                    s=140,
+                    edgecolors="#FFFFFF",
+                    linewidths=0.7,
+                    depthshade=False,
+                    zorder=6,
+                )
             legend_codes = options.legend_showers
             include_shower_legend = legend_codes is None or result.shower_code in legend_codes
             if options.show_radiant_labels and result.shower_code not in plotted_shower_labels:
@@ -877,8 +886,19 @@ def draw_radiant_sphere(
         has_radiant_extension = options.show_radiant_extensions and any(
             result.radiant_radec is not None for result in display_results
         )
+        has_radiant_point = options.show_radiant_points and any(
+            result.radiant_radec is not None for result in display_results
+        )
         if options.legend_extension and has_radiant_extension:
             handles.append(Line2D([0], [0], color="#F4F7FC", linewidth=1.4, linestyle="--", label="放射点までの天球投影"))
+        if has_radiant_point:
+            handles.append(
+                Line2D(
+                    [0], [0], marker="*", linestyle="None", color="#FFFFFF",
+                    markerfacecolor="#FFFFFF", markeredgecolor="#FFFFFF",
+                    markersize=10, label="★ 放射点",
+                )
+            )
         handles.extend(shower_handles)
         if handles:
             axis.legend(
