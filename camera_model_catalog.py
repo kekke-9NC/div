@@ -9,6 +9,7 @@ from __future__ import annotations
 from datetime import datetime
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -34,16 +35,24 @@ def _as_float(value: Any, default: float = 0.0) -> float:
     return result if result == result else default
 
 
+def _date_label(value: Any) -> str:
+    """Render compact model dates in a form a person can scan quickly."""
+    text = str(value).strip()
+    if re.fullmatch(r"\d{8}", text):
+        return f"{text[:4]}/{text[4:6]}/{text[6:]}"
+    return text[:10].replace("-", "/") if text else ""
+
+
 def _reference_night(metadata: Dict[str, Any]) -> str:
     valid_dates = metadata.get("valid_dates") or metadata.get("training_dates") or []
     if isinstance(valid_dates, str):
         valid_dates = [valid_dates]
-    dates = [str(item)[:10] for item in valid_dates if str(item).strip()]
+    dates = [_date_label(item) for item in valid_dates if str(item).strip()]
     if dates:
         return ", ".join(dates)
     reference = str(metadata.get("reference_datetime", "")).strip()
     if reference:
-        return reference[:10]
+        return _date_label(reference[:10])
     return "不明"
 
 

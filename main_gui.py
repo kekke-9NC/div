@@ -341,6 +341,32 @@ class App(
             foreground=[("readonly", c["text"])],
             selectforeground=[("readonly", c["text"])],
         )
+        style.configure(
+            "Radiant.Treeview",
+            background=c["field"],
+            fieldbackground=c["field"],
+            foreground=c["text"],
+            bordercolor=c["border"],
+            lightcolor=c["border"],
+            darkcolor=c["border"],
+            rowheight=28,
+            font=("SF Pro Text", 10),
+        )
+        style.configure(
+            "Radiant.Treeview.Heading",
+            background=c["glass_strong"],
+            foreground=c["text"],
+            bordercolor=c["border"],
+            lightcolor=c["border"],
+            darkcolor=c["border"],
+            font=("SF Pro Text", 10, "bold"),
+            padding=(8, 6),
+        )
+        style.map(
+            "Radiant.Treeview",
+            background=[("selected", c["selection"])],
+            foreground=[("selected", c["text"])],
+        )
 
         style.configure(
             "TCheckbutton",

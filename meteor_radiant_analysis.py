@@ -37,6 +37,7 @@ class MeteorShower:
     radiant_ra_deg: float
     radiant_dec_deg: float
     match_limit_deg: float = 12.0
+    category: str = "小流星群"
 
     def is_active(self, moment: datetime) -> bool:
         """Return whether the approximate activity window contains moment."""
@@ -56,22 +57,35 @@ class MeteorShower:
 # presented as a definitive orbit solution.  Values are intentionally kept in
 # one auditable table so a future IAU/IMO catalogue can replace them cleanly.
 METEOR_SHOWERS: Tuple[MeteorShower, ...] = (
-    MeteorShower("QUA", "しぶんぎ座流星群", (1, 1), (1, 4), (1, 12), 230.0, 49.0),
-    MeteorShower("LYR", "こと座流星群", (4, 14), (4, 22), (4, 30), 271.0, 34.0),
-    MeteorShower("ETA", "みずがめ座η流星群", (4, 19), (5, 6), (5, 28), 337.0, -1.0),
-    MeteorShower("SDA", "みずがめ座δ南流星群", (7, 12), (7, 30), (8, 23), 340.0, -16.0),
-    MeteorShower("CAP", "やぎ座α流星群", (7, 3), (7, 30), (8, 15), 307.0, -10.0),
-    MeteorShower("PER", "ペルセウス座流星群", (7, 17), (8, 12), (8, 24), 48.0, 58.0),
-    MeteorShower("KCG", "はくちょう座κ流星群", (8, 3), (8, 17), (8, 25), 286.0, 59.0),
-    MeteorShower("AUR", "ぎょしゃ座α流星群", (8, 25), (9, 1), (9, 10), 91.0, 39.0),
-    MeteorShower("SPE", "9月ペルセウス座ε流星群", (9, 5), (9, 9), (9, 21), 48.0, 40.0),
-    MeteorShower("DRA", "りゅう座流星群", (10, 6), (10, 8), (10, 10), 262.0, 54.0),
-    MeteorShower("ORI", "オリオン座流星群", (10, 2), (10, 21), (11, 7), 95.0, 16.0),
-    MeteorShower("STA", "おうし座南流星群", (10, 10), (11, 5), (11, 20), 52.0, 13.0),
-    MeteorShower("LEO", "しし座流星群", (11, 6), (11, 17), (11, 30), 152.0, 22.0),
-    MeteorShower("GEM", "ふたご座流星群", (12, 4), (12, 14), (12, 20), 112.0, 33.0),
-    MeteorShower("URS", "こぐま座流星群", (12, 17), (12, 22), (12, 26), 217.0, 76.0),
+    MeteorShower("QUA", "しぶんぎ座流星群", (12, 28), (1, 3), (1, 12), 230.0, 49.0, category="大流星群"),
+    MeteorShower("LYR", "こと座流星群", (4, 14), (4, 22), (4, 30), 271.0, 34.0, category="大流星群"),
+    MeteorShower("ETA", "みずがめ座η流星群", (4, 19), (5, 6), (5, 28), 337.0, -1.0, category="大流星群"),
+    MeteorShower("SDA", "みずがめ座δ南流星群", (7, 12), (7, 30), (8, 23), 340.0, -16.0, category="大流星群"),
+    MeteorShower("CAP", "やぎ座α流星群", (7, 3), (7, 30), (8, 15), 307.0, -10.0, category="小流星群"),
+    MeteorShower("PER", "ペルセウス座流星群", (7, 17), (8, 13), (8, 24), 48.0, 58.0, category="大流星群"),
+    MeteorShower("KCG", "はくちょう座κ流星群", (8, 3), (8, 17), (8, 28), 286.0, 59.0, category="小流星群"),
+    MeteorShower("AUR", "ぎょしゃ座α流星群", (8, 28), (9, 1), (9, 5), 91.0, 39.0, category="小流星群"),
+    MeteorShower("SPE", "9月ペルセウス座ε流星群", (9, 5), (9, 9), (9, 21), 48.0, 40.0, category="小流星群"),
+    MeteorShower("DRA", "りゅう座流星群", (10, 6), (10, 9), (10, 10), 263.0, 56.0, category="小流星群"),
+    MeteorShower("ORI", "オリオン座流星群", (10, 2), (10, 21), (11, 7), 95.0, 16.0, category="大流星群"),
+    MeteorShower("STA", "おうし座南流星群", (9, 20), (11, 5), (11, 20), 52.0, 15.0, category="小流星群"),
+    MeteorShower("LEO", "しし座流星群", (11, 6), (11, 17), (11, 30), 152.0, 22.0, category="大流星群"),
+    MeteorShower("GEM", "ふたご座流星群", (12, 4), (12, 14), (12, 20), 112.0, 33.0, category="大流星群"),
+    MeteorShower("URS", "こぐま座流星群", (12, 17), (12, 22), (12, 26), 217.0, 76.0, category="小流星群"),
 )
+
+
+def set_meteor_showers(showers: Sequence[MeteorShower]) -> None:
+    """Replace the active catalogue used for shower matching."""
+    global METEOR_SHOWERS
+    cleaned = tuple(showers)
+    if not cleaned:
+        raise ValueError("流星群カタログが空です")
+    METEOR_SHOWERS = cleaned
+
+
+def get_meteor_showers() -> Tuple[MeteorShower, ...]:
+    return METEOR_SHOWERS
 
 
 @dataclass
@@ -309,6 +323,7 @@ def _match_shower(
     start_vector: np.ndarray,
     end_vector: np.ndarray,
     moment: Optional[datetime],
+    showers: Optional[Sequence[MeteorShower]] = None,
 ) -> Tuple[Optional[MeteorShower], Optional[np.ndarray], Optional[float], str, List[RadiantCandidate]]:
     normal_raw = np.cross(start_vector, end_vector)
     normal_norm = float(np.linalg.norm(normal_raw))
@@ -317,8 +332,9 @@ def _match_shower(
     normal = normal_raw / normal_norm
     tangent = _normalize(end_vector - np.dot(start_vector, end_vector) * start_vector)
     theta = math.acos(float(np.clip(np.dot(start_vector, end_vector), -1.0, 1.0)))
+    catalogue = tuple(showers) if showers is not None else METEOR_SHOWERS
     candidates: List[RadiantCandidate] = []
-    for shower in METEOR_SHOWERS:
+    for shower in catalogue:
         radiant = shower.radiant_vector()
         distance = math.degrees(math.asin(min(1.0, abs(float(np.dot(normal, radiant))))))
         q = math.atan2(float(np.dot(radiant, tangent)), float(np.dot(radiant, start_vector)))
@@ -342,7 +358,7 @@ def _match_shower(
         ))
     candidates.sort(key=lambda item: item.score)
     best = candidates[0] if candidates else None
-    shower = next((item for item in METEOR_SHOWERS if item.code == best.code), None) if best else None
+    shower = next((item for item in catalogue if item.code == best.code), None) if best else None
     if best is None or not best.active:
         return None, None, best.angular_distance_deg if best else None, best.side if best else "unknown", candidates
     if best.angular_distance_deg > (shower.match_limit_deg if shower else 12.0) or best.side == "segment":
@@ -365,6 +381,7 @@ def analyze_info_files(
     info_paths: Sequence[str],
     model_path: Optional[str] = None,
     progress_callback: Optional[Any] = None,
+    showers: Optional[Sequence[MeteorShower]] = None,
 ) -> RadiantReport:
     """Analyze dropped info files against a fixed camera plate model."""
     if not info_paths:
@@ -449,7 +466,12 @@ def analyze_info_files(
             end_radec = ((float(end_ra) + delta_ra) % 360.0, float(end_dec))
             start_vector = radec_to_unit_vector(*start_radec)
             end_vector = radec_to_unit_vector(*end_radec)
-            shower, radiant, radiant_distance, side, candidates = _match_shower(start_vector, end_vector, frame_time)
+            shower, radiant, radiant_distance, side, candidates = _match_shower(
+                start_vector,
+                end_vector,
+                frame_time,
+                showers=showers,
+            )
             if shower is None:
                 shower_code = "SPO"
                 shower_name = "未分類（散在流星または判定保留）"
@@ -552,12 +574,6 @@ def draw_radiant_sphere(report: RadiantReport, figure=None):
     sphere_y = np.outer(np.sin(u), np.cos(v))
     sphere_z = np.outer(np.ones_like(u), np.sin(v))
     axis.plot_surface(sphere_x, sphere_y, sphere_z, color="#17243A", alpha=0.18, linewidth=0, shade=False)
-    for dec in range(-60, 61, 30):
-        points = np.asarray([radec_to_unit_vector(ra, dec) for ra in np.linspace(0, 360, 181)])
-        axis.plot(points[:, 0], points[:, 1], points[:, 2], color="#53657E", alpha=0.35, linewidth=0.55)
-    for ra in range(0, 360, 30):
-        points = np.asarray([radec_to_unit_vector(ra, dec) for dec in np.linspace(-90, 90, 91)])
-        axis.plot(points[:, 0], points[:, 1], points[:, 2], color="#53657E", alpha=0.3, linewidth=0.55)
 
     colors = {
         "PER": "#70A7FF", "SDA": "#F5C76B", "CAP": "#FF9B71", "KCG": "#66D9EF",
@@ -578,12 +594,23 @@ def draw_radiant_sphere(report: RadiantReport, figure=None):
             axis.plot(extension[:, 0], extension[:, 1], extension[:, 2], color=color, linewidth=1.4, linestyle="--", alpha=0.85)
             axis.scatter([radiant[0]], [radiant[1]], [radiant[2]], color=color, s=48, depthshade=False)
             if result.shower_code not in plotted_labels:
-                axis.text(radiant[0] * 1.08, radiant[1] * 1.08, radiant[2] * 1.08, result.shower_code, color=color, fontsize=9)
+                radiant_ra, radiant_dec = result.radiant_radec
+                axis.text(
+                    radiant[0] * 1.08,
+                    radiant[1] * 1.08,
+                    radiant[2] * 1.08,
+                    result.shower_code,
+                    color=color,
+                    fontsize=9,
+                )
                 shower_handles.append(
                     Line2D(
                         [0], [0], marker="o", linestyle="None", color=color,
                         markerfacecolor=color, markeredgecolor=color,
-                        label=f"{result.shower_code} {result.shower_name}",
+                        label=(
+                            f"{result.shower_code} {result.shower_name} | "
+                            f"RA {radiant_ra / 15.0:.2f}h / Dec {radiant_dec:+.1f}°"
+                        ),
                     )
                 )
                 plotted_labels.add(result.shower_code)
@@ -592,7 +619,7 @@ def draw_radiant_sphere(report: RadiantReport, figure=None):
 
     total_inputs = len(report.results) + len(report.skipped)
     axis.set_title(
-        f"放射点解析 | 有効流星 {len(report.supported_results)} / 読込 {total_inputs} | {report.model_label}",
+        f"放射点解析（RA/Dec基準） | 有効流星 {len(report.supported_results)} / 読込 {total_inputs} | {report.model_label}",
         color="#F4F7FC", pad=18, fontproperties=japanese_font,
     )
     axis.set_xlabel("X", color="#A8B3C5")
@@ -604,8 +631,21 @@ def draw_radiant_sphere(report: RadiantReport, figure=None):
     axis.set_ylim(-1.08, 1.08)
     axis.set_zlim(-1.08, 1.08)
     axis.view_init(elev=22, azim=-58)
+    # Add an equatorial-coordinate grid so the saved PNG is self-describing.
+    # The plotted paths remain true 3-D great-circle paths; these labels are
+    # only a coordinate reference and do not alter the analysis geometry.
+    for dec in (-60, -30, 0, 30, 60):
+        points = np.asarray([radec_to_unit_vector(ra, dec) for ra in np.linspace(0, 360, 181)])
+        axis.plot(points[:, 0], points[:, 1], points[:, 2], color="#53657E", alpha=0.22, linewidth=0.45)
+        label_vector = radec_to_unit_vector(2.0, dec)
+        axis.text(label_vector[0] * 1.08, label_vector[1] * 1.08, label_vector[2] * 1.08, f"Dec {dec:+d}°", color="#A8B3C5", fontsize=7)
+    for ra in range(0, 360, 30):
+        points = np.asarray([radec_to_unit_vector(ra, dec) for dec in np.linspace(-90, 90, 91)])
+        axis.plot(points[:, 0], points[:, 1], points[:, 2], color="#53657E", alpha=0.18, linewidth=0.45)
+        label_vector = radec_to_unit_vector(ra, 2.0)
+        axis.text(label_vector[0] * 1.08, label_vector[1] * 1.08, label_vector[2] * 1.08, f"RA {ra / 15:g}h", color="#A8B3C5", fontsize=7)
     handles = [Line2D([0], [0], color="#F4F7FC", linewidth=2.4, label="実際の流星経路")]
-    handles.append(Line2D([0], [0], color="#F4F7FC", linewidth=1.4, linestyle="--", label="放射点までの延長"))
+    handles.append(Line2D([0], [0], color="#F4F7FC", linewidth=1.4, linestyle="--", label="放射点までの天球投影"))
     handles.extend(shower_handles)
     axis.legend(
         handles=handles,

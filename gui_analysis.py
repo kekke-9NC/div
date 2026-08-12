@@ -3,6 +3,7 @@ import media_time
 import camera_model_catalog
 import meteor_radiant_analysis as mra
 import meteor_radiant_visualizations as mrv
+import meteor_shower_catalog as msc
 from datetime import timedelta
 
 UI_BG = ui_theme.COLORS["content_raised"]
@@ -120,17 +121,10 @@ class AnalysisMixin:
         ttk.Button(btn_frame, text="選択項目を削除", command=self.remove_selected_analysis).pack(side=tk.LEFT, padx=2)
         ttk.Button(btn_frame, text="すべて削除", command=self.remove_all_analysis).pack(side=tk.LEFT, padx=2)
 
-        # The model is selected in the app, not through Finder.  The detail
-        # line makes the validated coverage and reference night visible before
-        # the user starts the high-precision radiant calculation.
-        radiant_model_tools = ttk.LabelFrame(frame, text="高精度・放射点解析")
-        radiant_model_tools.pack(fill=tk.X, pady=(2, 8))
-        radiant_model_grid = ttk.Frame(radiant_model_tools)
-        radiant_model_grid.pack(fill=tk.X, padx=8, pady=8)
-        radiant_model_grid.columnconfigure(1, weight=1)
-        ttk.Label(radiant_model_grid, text="プレートソルブモデル").grid(
-            row=0, column=0, sticky=tk.W, padx=(0, 8), pady=(0, 4)
-        )
+        # Radiant-analysis controls live in a focused, on-demand workspace.
+        # Keep only the small entry point in the main analysis page so the
+        # user first sees the task they want to perform, not calibration
+        # implementation details.
         self.analysis_radiant_model_var = tk.StringVar(value="自動選択（撮影日の高精度モデル）")
         self.analysis_radiant_model_path_var = tk.StringVar(value="")
         self.analysis_radiant_model_info_var = tk.StringVar(
@@ -138,20 +132,8 @@ class AnalysisMixin:
         )
         self.analysis_radiant_model_choices = {}
         self.analysis_radiant_models = []
-        self.analysis_radiant_model_combo = ttk.Combobox(
-            radiant_model_grid,
-            textvariable=self.analysis_radiant_model_var,
-            state="readonly",
-        )
-        self.analysis_radiant_model_combo.grid(row=0, column=1, sticky=tk.EW, pady=(0, 4))
-        self.analysis_radiant_model_combo.bind("<<ComboboxSelected>>", self._on_analysis_radiant_model_selected)
-        ttk.Label(
-            radiant_model_grid,
-            textvariable=self.analysis_radiant_model_info_var,
-            style="GlassMuted.TLabel",
-            wraplength=600,
-            justify=tk.LEFT,
-        ).grid(row=1, column=0, columnspan=2, sticky=tk.W)
+        self.analysis_radiant_model_combo = None
+        self.analysis_radiant_showers = msc.load_catalogue()
         self._refresh_analysis_radiant_models()
 
         action_frame = ttk.Frame(frame)
@@ -159,68 +141,46 @@ class AnalysisMixin:
         action_frame.columnconfigure(0, weight=1, uniform="analysis_actions")
         action_frame.columnconfigure(1, weight=1, uniform="analysis_actions")
 
-        trajectory_tools = ttk.LabelFrame(action_frame, text="軌道・校正")
+        trajectory_tools = ttk.LabelFrame(action_frame, text="放射点解析")
         trajectory_tools.grid(row=0, column=0, sticky=tk.NSEW, padx=(0, 4), pady=(0, 8))
         trajectory_grid = ttk.Frame(trajectory_tools)
         trajectory_grid.pack(fill=tk.X)
-        trajectory_grid.columnconfigure(0, weight=1, uniform="trajectory")
-        trajectory_grid.columnconfigure(1, weight=1, uniform="trajectory")
-        self.btn_analysis_start = ttk.Button(
-            trajectory_grid,
-            text="旧形式の軌道表示",
-            command=self.start_analysis,
-            style="Gray.TButton",
-        )
+        trajectory_grid.columnconfigure(0, weight=1)
         self.btn_radiant_analysis = ttk.Button(
             trajectory_grid,
-            text="高精度放射点解析",
+            text="放射点解析",
             command=self.start_radiant_analysis,
         )
+        self.btn_radiant_analysis.grid(row=0, column=0, sticky=tk.EW, pady=3)
+
+        other_tools = ttk.LabelFrame(action_frame, text="その他の解析・校正")
+        other_tools.grid(row=1, column=0, columnspan=2, sticky=tk.NSEW, pady=(0, 8))
+        other_grid = ttk.Frame(other_tools)
+        other_grid.pack(fill=tk.X)
+        other_grid.columnconfigure(0, weight=1, uniform="other_analysis")
+        other_grid.columnconfigure(1, weight=1, uniform="other_analysis")
         add_point_button = ttk.Button(
-            trajectory_grid,
-            text="座標点を追加",
-            command=self.add_custom_point,
-            style="Gray.TButton",
+            other_grid, text="座標点を追加", command=self.add_custom_point, style="Gray.TButton"
         )
         manage_point_button = ttk.Button(
-            trajectory_grid,
-            text="座標点を管理",
-            command=self.manage_coordinates,
-            style="Gray.TButton",
+            other_grid, text="座標点を管理", command=self.manage_coordinates, style="Gray.TButton"
         )
         self.btn_long_exposure = ttk.Button(
-            trajectory_grid,
-            text="長時間輝線マップ",
-            command=self.create_long_exposure_map_callback,
-            style="Gray.TButton",
+            other_grid, text="長時間輝線マップ", command=self.create_long_exposure_map_callback, style="Gray.TButton"
         )
         self.btn_distortion = ttk.Button(
-            trajectory_grid,
-            text="ゆがみ補正",
-            command=self.apply_distortion_correction_callback,
-            style="Gray.TButton",
+            other_grid, text="ゆがみ補正", command=self.apply_distortion_correction_callback, style="Gray.TButton"
         )
         self.btn_distortion_selfcal = ttk.Button(
-            trajectory_grid,
-            text="夜間自己校正",
-            command=self.estimate_distortion_map_night_callback,
-            style="Gray.TButton"
+            other_grid, text="夜間自己校正", command=self.estimate_distortion_map_night_callback, style="Gray.TButton"
         )
         self.btn_distortion_map_view = ttk.Button(
-            trajectory_grid,
-            text="ゆがみマップ表示",
-            command=self.visualize_distortion_map_callback,
-            style="Gray.TButton"
+            other_grid, text="ゆがみマップ表示", command=self.visualize_distortion_map_callback, style="Gray.TButton"
         )
         self.btn_angle_analysis = ttk.Button(
-            trajectory_grid,
-            text="角度分布分析",
-            command=self.analyze_angles_callback,
-            style="Gray.TButton",
+            other_grid, text="角度分布分析", command=self.analyze_angles_callback, style="Gray.TButton"
         )
-        trajectory_buttons = (
-            self.btn_analysis_start,
-            self.btn_radiant_analysis,
+        other_buttons = (
             add_point_button,
             manage_point_button,
             self.btn_long_exposure,
@@ -229,7 +189,7 @@ class AnalysisMixin:
             self.btn_distortion_map_view,
             self.btn_angle_analysis,
         )
-        for index, button in enumerate(trajectory_buttons):
+        for index, button in enumerate(other_buttons):
             button.grid(
                 row=index // 2,
                 column=index % 2,
@@ -930,7 +890,13 @@ class AnalysisMixin:
                 display = f"{display} [{len(values)}]"
             values.append(display)
             self.analysis_radiant_model_choices[display] = model
-        self.analysis_radiant_model_combo.configure(values=values)
+        if self.analysis_radiant_model_combo is not None:
+            try:
+                self.analysis_radiant_model_combo.configure(values=values)
+            except tk.TclError:
+                # A menu can be closed by the window manager before a delayed
+                # model refresh runs.  Do not keep a dead Tk widget reference.
+                self.analysis_radiant_model_combo = None
 
         preferred_path = ""
         try:
@@ -961,29 +927,361 @@ class AnalysisMixin:
         self.analysis_radiant_model_path_var.set(model["path"])
         self.analysis_radiant_model_info_var.set(camera_model_catalog.format_model_details(model))
 
-    def _radiant_analysis_worker(self, files, model_path, event_queue):
+    def _radiant_catalogue_manager(self, parent=None):
+        """Open a focused editor for the built-in/user meteor-shower catalogue."""
+        win = Toplevel(parent or self)
+        win.title("流星群カタログ")
+        win.geometry("1080x680")
+        win.minsize(860, 560)
+        win.transient(parent or self)
+
+        root = ttk.Frame(win, padding=16)
+        root.pack(fill=tk.BOTH, expand=True)
+        header = ttk.Frame(root)
+        header.pack(fill=tk.X, pady=(0, 12))
+        ttk.Label(header, text="流星群カタログ", style="PageTitle.TLabel").pack(side=tk.LEFT)
+        ttk.Label(
+            header,
+            text="代表放射点・活動期間・許容角をapp内で管理できます（放射点は最大時の近似値）",
+            style="GlassMuted.TLabel",
+        ).pack(side=tk.LEFT, padx=(16, 0))
+
+        body = ttk.Panedwindow(root, orient=tk.HORIZONTAL)
+        body.pack(fill=tk.BOTH, expand=True)
+        list_frame = ttk.Frame(body, padding=(0, 0, 12, 0))
+        form_frame = ttk.LabelFrame(body, text="流星群の詳細", padding=14)
+        body.add(list_frame, weight=4)
+        body.add(form_frame, weight=3)
+
+        columns = ("category", "code", "name", "radec", "active", "limit")
+        tree = ttk.Treeview(list_frame, columns=columns, show="headings", selectmode="browse", style="Radiant.Treeview")
+        headings = {
+            "category": "分類", "code": "コード", "name": "名称", "radec": "RA / Dec",
+            "active": "活動期間", "limit": "許容角",
+        }
+        widths = {"category": 86, "code": 62, "name": 170, "radec": 110, "active": 135, "limit": 64}
+        for column in columns:
+            tree.heading(column, text=headings[column])
+            tree.column(column, width=widths[column], anchor=tk.W)
+        tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        tree_scroll = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=tree.yview)
+        tree_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        tree.configure(yscrollcommand=tree_scroll.set)
+
+        code_var = tk.StringVar()
+        name_var = tk.StringVar()
+        category_var = tk.StringVar(value="小流星群")
+        ra_var = tk.StringVar()
+        dec_var = tk.StringVar()
+        start_var = tk.StringVar(value="01/01")
+        peak_var = tk.StringVar(value="01/01")
+        end_var = tk.StringVar(value="01/12")
+        limit_var = tk.StringVar(value="12")
+
+        form_frame.columnconfigure(1, weight=1)
+        fields = (
+            ("コード", code_var), ("名称", name_var), ("分類", category_var),
+            ("RA (deg)", ra_var), ("Dec (deg)", dec_var), ("活動開始 MM/DD", start_var),
+            ("ピーク MM/DD", peak_var), ("活動終了 MM/DD", end_var), ("許容角 (deg)", limit_var),
+        )
+        for row, (label, variable) in enumerate(fields):
+            ttk.Label(form_frame, text=label).grid(row=row, column=0, sticky=tk.W, pady=5, padx=(0, 10))
+            if label == "分類":
+                widget = ttk.Combobox(form_frame, textvariable=variable, values=("大流星群", "小流星群", "その他"), state="readonly")
+            else:
+                widget = ttk.Entry(form_frame, textvariable=variable)
+            widget.grid(row=row, column=1, sticky=tk.EW, pady=5)
+
+        help_label = ttk.Label(
+            form_frame,
+            text="RAは0〜360°、Decは−90〜+90°。許容角は候補判定に使います。\n活動期間と放射点は日々変化するため、必要に応じて編集してください。",
+            style="GlassMuted.TLabel",
+            wraplength=300,
+            justify=tk.LEFT,
+        )
+        help_label.grid(row=len(fields), column=0, columnspan=2, sticky=tk.W, pady=(12, 18))
+
+        editing_code = {"value": None}
+
+        def clear_form():
+            editing_code["value"] = None
+            code_var.set("")
+            name_var.set("")
+            category_var.set("小流星群")
+            ra_var.set("")
+            dec_var.set("")
+            start_var.set("01/01")
+            peak_var.set("01/01")
+            end_var.set("01/12")
+            limit_var.set("12")
+            tree.selection_remove(tree.selection())
+
+        def parse_date(text):
+            parts = str(text).strip().split("/")
+            if len(parts) != 2:
+                raise ValueError("日付はMM/DD形式で入力してください")
+            month, day = int(parts[0]), int(parts[1])
+            if not 1 <= month <= 12 or not 1 <= day <= 31:
+                raise ValueError("日付が範囲外です")
+            return month, day
+
+        def fill_form(_event=None):
+            selected = tree.selection()
+            if not selected:
+                return
+            index = int(selected[0])
+            shower = self.analysis_radiant_showers[index]
+            editing_code["value"] = shower.code
+            code_var.set(shower.code)
+            name_var.set(shower.name)
+            category_var.set(shower.category)
+            ra_var.set(f"{shower.radiant_ra_deg:g}")
+            dec_var.set(f"{shower.radiant_dec_deg:g}")
+            start_var.set(msc.date_text(shower.active_start))
+            peak_var.set(msc.date_text(shower.peak))
+            end_var.set(msc.date_text(shower.active_end))
+            limit_var.set(f"{shower.match_limit_deg:g}")
+
+        def refresh_tree(select_code=None):
+            for item in tree.get_children():
+                tree.delete(item)
+            for index, shower in enumerate(self.analysis_radiant_showers):
+                item_id = tree.insert(
+                    "", tk.END, iid=str(index),
+                    values=(shower.category, shower.code, shower.name,
+                            f"{shower.radiant_ra_deg:.1f} / {shower.radiant_dec_deg:+.1f}",
+                            f"{msc.date_text(shower.active_start)}〜{msc.date_text(shower.active_end)}",
+                            f"{shower.match_limit_deg:.1f}°"),
+                )
+                if select_code and shower.code == select_code:
+                    tree.selection_set(item_id)
+                    tree.focus(item_id)
+            if select_code:
+                fill_form()
+
+        def save_form():
+            try:
+                record = {
+                    "code": code_var.get(), "name": name_var.get(), "category": category_var.get(),
+                    "radiant_ra_deg": float(ra_var.get()), "radiant_dec_deg": float(dec_var.get()),
+                    "active_start": parse_date(start_var.get()), "peak": parse_date(peak_var.get()),
+                    "active_end": parse_date(end_var.get()), "match_limit_deg": float(limit_var.get()),
+                }
+                if not -90.0 <= record["radiant_dec_deg"] <= 90.0:
+                    raise ValueError("Decは−90〜+90°で入力してください")
+                if not 0.0 < record["match_limit_deg"] <= 90.0:
+                    raise ValueError("許容角は0〜90°で入力してください")
+                shower = msc.record_to_shower(record)
+                old_code = editing_code["value"]
+                if old_code is None and any(item.code == shower.code for item in self.analysis_radiant_showers):
+                    raise ValueError("同じコードの流星群が既にあります")
+                if old_code is not None and shower.code != old_code and any(item.code == shower.code for item in self.analysis_radiant_showers):
+                    raise ValueError("同じコードの流星群が既にあります")
+                if old_code is None:
+                    updated_showers = [*self.analysis_radiant_showers, shower]
+                else:
+                    updated_showers = [shower if item.code == old_code else item for item in self.analysis_radiant_showers]
+                msc.save_catalogue(updated_showers)
+                self.analysis_radiant_showers = updated_showers
+                refresh_tree(shower.code)
+                self._set_radiant_catalogue_status()
+            except (TypeError, ValueError, OSError) as exc:
+                messagebox.showerror("カタログ入力エラー", str(exc), parent=win)
+
+        def delete_selected():
+            selected = tree.selection()
+            if not selected:
+                return
+            shower = self.analysis_radiant_showers[int(selected[0])]
+            if not messagebox.askyesno("流星群を削除", f"{shower.name}をカタログから削除しますか？", parent=win):
+                return
+            updated_showers = [
+                item for index, item in enumerate(self.analysis_radiant_showers)
+                if index != int(selected[0])
+            ]
+            if not updated_showers:
+                messagebox.showwarning("削除できません", "カタログを空にはできません。", parent=win)
+                return
+            msc.save_catalogue(updated_showers)
+            self.analysis_radiant_showers = updated_showers
+            clear_form()
+            refresh_tree()
+            self._set_radiant_catalogue_status()
+
+        tree.bind("<<TreeviewSelect>>", fill_form)
+        form_buttons = ttk.Frame(form_frame)
+        form_buttons.grid(row=len(fields) + 1, column=0, columnspan=2, sticky=tk.EW)
+        form_buttons.columnconfigure(0, weight=1)
+        form_buttons.columnconfigure(1, weight=1)
+        ttk.Button(form_buttons, text="新規", command=clear_form, style="Gray.TButton").grid(row=0, column=0, sticky=tk.EW, padx=(0, 4))
+        ttk.Button(form_buttons, text="保存", command=save_form).grid(row=0, column=1, sticky=tk.EW, padx=(4, 0))
+        ttk.Button(form_frame, text="選択した流星群を削除", command=delete_selected, style="Gray.TButton").grid(row=len(fields) + 2, column=0, columnspan=2, sticky=tk.EW, pady=(10, 0))
+
+        footer = ttk.Frame(root)
+        footer.pack(fill=tk.X, pady=(12, 0))
+        ttk.Label(footer, textvariable=self.analysis_radiant_catalogue_status_var, style="GlassMuted.TLabel").pack(side=tk.LEFT)
+        ttk.Button(footer, text="閉じる", command=win.destroy).pack(side=tk.RIGHT)
+        refresh_tree()
+        return win
+
+    def _set_radiant_catalogue_status(self):
+        if hasattr(self, "analysis_radiant_catalogue_status_var"):
+            self.analysis_radiant_catalogue_status_var.set(
+                f"{msc.catalogue_source_label()} | {len(self.analysis_radiant_showers)}件 | 編集内容は自動保存"
+            )
+
+    def _radiant_analysis_menu_add_files(self, files, tree):
+        added = 0
+        for path in files:
+            path = str(path).strip().strip("{}")
+            if not os.path.isfile(path) or not path.lower().endswith(".txt"):
+                continue
+            existing = {tree.item(item_id, "values")[1] for item_id in tree.get_children()}
+            if path not in existing:
+                tree.insert("", tk.END, values=(os.path.basename(path), path))
+                added += 1
+        return added
+
+    def _open_radiant_analysis_menu(self):
+        win = Toplevel(self)
+        win.title("放射点解析")
+        win.geometry("1120x780")
+        win.minsize(900, 620)
+        self.analysis_radiant_menu = win
+
+        def close_menu():
+            self.analysis_radiant_model_combo = None
+            if getattr(self, "analysis_radiant_menu", None) is win:
+                self.analysis_radiant_menu = None
+            try:
+                win.destroy()
+            except tk.TclError:
+                pass
+
+        win.protocol("WM_DELETE_WINDOW", close_menu)
+        root = ttk.Frame(win, padding=16)
+        root.pack(fill=tk.BOTH, expand=True)
+        header = ttk.Frame(root)
+        header.pack(fill=tk.X, pady=(0, 12))
+        ttk.Label(header, text="放射点解析", style="PageTitle.TLabel").pack(side=tk.LEFT)
+        ttk.Label(header, text="流星の経路を天球座標へ変換し、流星群候補を調べます", style="GlassMuted.TLabel").pack(side=tk.LEFT, padx=(16, 0))
+
+        body = ttk.Panedwindow(root, orient=tk.VERTICAL)
+        body.pack(fill=tk.BOTH, expand=True)
+        input_frame = ttk.LabelFrame(body, text="1 解析対象", padding=12)
+        setting_frame = ttk.LabelFrame(body, text="2 プレートソルブモデルと流星群カタログ", padding=12)
+        body.add(input_frame, weight=4)
+        body.add(setting_frame, weight=3)
+
+        input_frame.columnconfigure(0, weight=1)
+        drop = ttk.Label(input_frame, text="info.txtをここにドロップ、またはファイルを追加", style="DropZone.TLabel", anchor="center")
+        drop.grid(row=0, column=0, columnspan=2, sticky=tk.EW, pady=(0, 8), ipady=12)
+        tree = ttk.Treeview(input_frame, columns=("name", "path"), show="headings", height=6, style="Radiant.Treeview")
+        tree.heading("name", text="ファイル")
+        tree.heading("path", text="場所")
+        tree.column("name", width=250, anchor=tk.W)
+        tree.column("path", width=650, anchor=tk.W)
+        tree.grid(row=1, column=0, columnspan=2, sticky=tk.NSEW)
+        input_frame.rowconfigure(1, weight=1)
+        tree_scroll = ttk.Scrollbar(input_frame, orient=tk.VERTICAL, command=tree.yview)
+        tree_scroll.grid(row=1, column=2, sticky=tk.NS)
+        tree.configure(yscrollcommand=tree_scroll.set)
+
+        def add_files():
+            selected = filedialog.askopenfilenames(title="解析するinfo.txtを追加", filetypes=(("info.txt", "*.txt"), ("すべてのファイル", "*.*")))
+            self._radiant_analysis_menu_add_files(selected, tree)
+
+        def remove_files():
+            selected = tree.selection()
+            for item_id in reversed(selected):
+                tree.delete(item_id)
+
+        def clear_files():
+            for item_id in tree.get_children():
+                tree.delete(item_id)
+
+        input_buttons = ttk.Frame(input_frame)
+        input_buttons.grid(row=2, column=0, columnspan=2, sticky=tk.EW, pady=(8, 0))
+        ttk.Button(input_buttons, text="ファイルを追加", command=add_files).pack(side=tk.LEFT)
+        ttk.Button(input_buttons, text="選択を削除", command=remove_files, style="Gray.TButton").pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Button(input_buttons, text="すべて削除", command=clear_files, style="Gray.TButton").pack(side=tk.LEFT, padx=(8, 0))
+
+        def on_drop(event):
+            self._radiant_analysis_menu_add_files(self.splitlist(event.data), tree)
+        drop.drop_target_register(DND_FILES)
+        drop.dnd_bind("<<Drop>>", on_drop)
+
+        setting_frame.columnconfigure(1, weight=1)
+        ttk.Label(setting_frame, text="モデル").grid(row=0, column=0, sticky=tk.W, padx=(0, 10), pady=4)
+        self.analysis_radiant_model_combo = ttk.Combobox(setting_frame, textvariable=self.analysis_radiant_model_var, state="readonly")
+        self.analysis_radiant_model_combo.grid(row=0, column=1, sticky=tk.EW, pady=4)
+        self.analysis_radiant_model_combo.bind("<<ComboboxSelected>>", self._on_analysis_radiant_model_selected)
+        ttk.Label(setting_frame, textvariable=self.analysis_radiant_model_info_var, style="GlassMuted.TLabel", wraplength=850, justify=tk.LEFT).grid(row=1, column=0, columnspan=2, sticky=tk.W, pady=(0, 8))
+        self._refresh_analysis_radiant_models()
+        ttk.Label(setting_frame, text="カタログ").grid(row=2, column=0, sticky=tk.W, padx=(0, 10), pady=4)
+        self.analysis_radiant_catalogue_status_var = tk.StringVar()
+        self._set_radiant_catalogue_status()
+        ttk.Label(setting_frame, textvariable=self.analysis_radiant_catalogue_status_var, style="GlassMuted.TLabel").grid(row=2, column=1, sticky=tk.W, pady=4)
+        catalogue_buttons = ttk.Frame(setting_frame)
+        catalogue_buttons.grid(row=3, column=0, columnspan=2, sticky=tk.EW, pady=(4, 0))
+        ttk.Button(catalogue_buttons, text="流星群カタログを編集", command=lambda: self._radiant_catalogue_manager(win)).pack(side=tk.LEFT)
+        ttk.Label(catalogue_buttons, text="大流星群・小流星群を内蔵。解析時に全件を候補として使用します。", style="GlassMuted.TLabel").pack(side=tk.LEFT, padx=(12, 0))
+
+        footer = ttk.Frame(root)
+        footer.pack(fill=tk.X, pady=(12, 0))
+        ttk.Button(footer, text="閉じる", command=close_menu, style="Gray.TButton").pack(side=tk.RIGHT)
+        run_button = ttk.Button(footer, text="解析を開始", command=lambda: self._run_radiant_analysis_from_menu(win, tree))
+        run_button.pack(side=tk.RIGHT, padx=(0, 8))
+        for path in tuple(self.analysis_files):
+            tree.insert("", tk.END, values=(os.path.basename(path), path))
+        return win
+
+    def _run_radiant_analysis_from_menu(self, menu, tree):
+        files = [tree.item(item_id, "values")[1] for item_id in tree.get_children()]
+        if not files:
+            messagebox.showwarning("解析対象がありません", "info.txtを1件以上追加してください。", parent=menu)
+            return
+        if not self.check_admin_password():
+            return
+        self.analysis_radiant_model_combo = None
+        if getattr(self, "analysis_radiant_menu", None) is menu:
+            self.analysis_radiant_menu = None
+        menu.destroy()
+        self._run_radiant_analysis(
+            files,
+            str(self.analysis_radiant_model_path_var.get() or ""),
+            list(self.analysis_radiant_showers),
+            authenticated=True,
+        )
+
+    def start_radiant_analysis(self):
+        """Open the focused radiant-analysis workspace."""
+        self._open_radiant_analysis_menu()
+
+    def _radiant_analysis_worker(self, files, model_path, showers, event_queue):
         try:
             report = mra.analyze_info_files(
                 files,
                 model_path=model_path or None,
+                showers=showers,
                 progress_callback=lambda message: event_queue.put(("progress", message)),
             )
             event_queue.put(("success", report))
         except Exception as exc:
             event_queue.put(("error", str(exc)))
 
-    def start_radiant_analysis(self):
+    def _run_radiant_analysis(self, files, model_path, showers, authenticated=False):
         """Run the high-precision support-aware radiant analysis in a worker."""
-        if not self.check_admin_password():
+        if not authenticated and not self.check_admin_password():
             return
-        if not self.analysis_files:
+        if not files:
             messagebox.showwarning("情報", "解析するinfo.txtを追加してください。")
             return
 
-        files = list(self.analysis_files)
-        model_path = str(self.analysis_radiant_model_path_var.get() or "")
+        files = list(files)
+        model_path = str(model_path or "")
         win = Toplevel(self)
-        win.title("高精度・流星放射点解析")
+        win.title("放射点解析")
         win.geometry("1280x820")
         win.minsize(980, 640)
         self.analysis_radiant_window = win
@@ -1003,10 +1301,10 @@ class AnalysisMixin:
         content.add(summary_frame, weight=3)
         ttk.Label(
             plot_frame,
-            text="実線 = 検出された流星経路 / 破線 = 判定した放射点方向",
+            text="RA/Dec基準 | 実線 = 検出された流星経路 / 破線 = 放射点までの天球投影",
             style="GlassMuted.TLabel",
         ).pack(anchor=tk.W, pady=(0, 4))
-        progress_label = ttk.Label(plot_frame, text="高精度モデルで天球座標へ変換しています…")
+        progress_label = ttk.Label(plot_frame, text="高精度モデルで天球座標（RA/Dec）へ変換しています…")
         progress_label.pack(anchor=tk.W, pady=(0, 4))
         result_host = ttk.Frame(plot_frame)
         result_host.pack(fill=tk.BOTH, expand=True)
@@ -1018,16 +1316,18 @@ class AnalysisMixin:
         )
         tree = ttk.Treeview(
             summary_frame,
-            columns=("file", "shower", "angle", "confidence"),
+            columns=("file", "shower", "radec", "angle", "confidence"),
             show="headings",
             height=16,
         )
         tree.heading("file", text="ファイル")
         tree.heading("shower", text="放射点候補")
+        tree.heading("radec", text="RA / Dec")
         tree.heading("angle", text="角距離")
         tree.heading("confidence", text="判定")
         tree.column("file", width=175, anchor=tk.W)
         tree.column("shower", width=135, anchor=tk.W)
+        tree.column("radec", width=105, anchor=tk.E)
         tree.column("angle", width=70, anchor=tk.E)
         tree.column("confidence", width=90, anchor=tk.W)
         tree.pack(fill=tk.BOTH, expand=True)
@@ -1055,7 +1355,7 @@ class AnalysisMixin:
         self.btn_radiant_analysis.configure(state=tk.DISABLED)
         worker = threading.Thread(
             target=self._radiant_analysis_worker,
-            args=(files, model_path, event_queue),
+            args=(files, model_path, showers, event_queue),
             daemon=True,
         )
         self.analysis_radiant_thread = worker
@@ -1075,7 +1375,16 @@ class AnalysisMixin:
                 tree.insert(
                     "",
                     tk.END,
-                    values=(os.path.basename(result.info_path), f"{result.shower_code} {result.shower_name}", angle, result.confidence),
+                    values=(
+                        os.path.basename(result.info_path),
+                        f"{result.shower_code} {result.shower_name}",
+                        (
+                            f"{result.radiant_radec[0] / 15.0:.2f}h / {result.radiant_radec[1]:+.1f}°"
+                            if result.radiant_radec else "—"
+                        ),
+                        angle,
+                        result.confidence,
+                    ),
                 )
             details = []
             for result in report.results:

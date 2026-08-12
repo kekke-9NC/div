@@ -134,9 +134,9 @@ class NavigationMixin:
 
     def navigate_to_analysis_start_button(self):
         self.notebook.select(self.tab_analysis)
-        if hasattr(self, "btn_analysis_start"):
-            self._scroll_analysis_to_widget(self.btn_analysis_start)
-            self._flash_button(self.btn_analysis_start)
+        if hasattr(self, "btn_radiant_analysis"):
+            self._scroll_analysis_to_widget(self.btn_radiant_analysis)
+            self._flash_button(self.btn_radiant_analysis)
 
     def navigate_to_blend_image_button(self):
         self.notebook.select(self.tab_analysis)

@@ -30,9 +30,9 @@ def test_discover_models_exposes_coverage_and_reference_night(tmp_path):
     assert len(models) == 1
     model = models[0]
     assert model["support_percent"] == 80.0
-    assert model["reference_night"] == "20260809"
+    assert model["reference_night"] == "2026/08/09"
     assert "被覆率 80%" in model["display_name"]
-    assert "基準夜 20260809" in format_model_details(model)
+    assert "基準夜 2026/08/09" in format_model_details(model)
 
 
 def test_discover_models_skips_stale_wcs(tmp_path):
