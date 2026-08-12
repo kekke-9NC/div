@@ -107,10 +107,30 @@ def test_radec_polar_plot_has_north_pole_at_center():
 
 def test_sphere_rotation_gif_is_written(tmp_path):
     output = Path(tmp_path) / "sphere_rotation.gif"
-    visualizations.save_sphere_rotation_gif(_report(), str(output), fps=4, frames=3)
+    visualizations.save_sphere_rotation_gif(
+        _report(),
+        str(output),
+        fps=4,
+        frames=3,
+        width_px=320,
+        height_px=240,
+        dpi=60,
+        options=analysis.SphereRenderOptions(
+            show_x_axis=False,
+            show_y_axis=False,
+            show_z_axis=True,
+            show_coordinate_grid=False,
+            legend_showers=("PER",),
+        ),
+    )
 
     assert output.is_file()
     assert output.read_bytes()[:6] == b"GIF89a"
+    from PIL import Image
+
+    with Image.open(output) as image:
+        assert image.size == (320, 240)
+        assert getattr(image, "n_frames", 1) == 3
 
 
 def test_configurable_sphere_png_is_written(tmp_path):
