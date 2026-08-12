@@ -153,7 +153,7 @@ def _legend_handles(results: Iterable[analysis.RadiantResult], line_labels: bool
             [0], [0], marker="*", linestyle="None", color=_color(result),
             markerfacecolor=_color(result), markeredgecolor="#FFFFFF",
             markeredgewidth=0.5, markersize=9,
-            label=f"{result.shower_code} {result.shower_name}（★放射点）",
+            label=f"{result.shower_code} {result.shower_name}（放射点）",
         ))
         seen.add(result.shower_code)
     return handles

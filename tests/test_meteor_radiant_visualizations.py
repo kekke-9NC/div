@@ -217,7 +217,8 @@ def test_sphere_preview_marks_radiant_with_star_and_legend_entry():
     )
 
     labels = {text.get_text() for text in axis.get_legend().get_texts()}
-    assert "★ 放射点" in labels
+    assert "放射点" in labels
+    assert "★ 放射点" not in labels
     assert any(collection.get_paths() for collection in axis.collections)
 
 

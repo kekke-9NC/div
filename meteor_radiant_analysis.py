@@ -896,7 +896,7 @@ def draw_radiant_sphere(
                 Line2D(
                     [0], [0], marker="*", linestyle="None", color="#FFFFFF",
                     markerfacecolor="#FFFFFF", markeredgecolor="#FFFFFF",
-                    markersize=10, label="★ 放射点",
+                    markersize=10, label="放射点",
                 )
             )
         handles.extend(shower_handles)
