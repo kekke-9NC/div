@@ -1,0 +1,19 @@
+Source: /Users/keisukematsumoto/Desktop/other/div/rtsp/20260809/03/14.mp4
+Detection Time (UTC): 2026-08-09T03:14:48.147545Z
+Frame Range (Clip): 1121 - 1137
+Detected Line Center (px): (776.00, 869.00)
+Detected Line Start (px): (764.00, 886.00)
+Detected Line End (px): (788.00, 851.00)
+Motion Direction Status: high
+Motion Direction Method: temporal_residual_line_centroid_v1
+Motion Start (px): (788.00, 851.00)
+Motion End (px): (764.00, 886.00)
+Motion Vector (px): (-24.0000, 35.0000)
+Motion Start Frame: 1125
+Motion End Frame: 1137
+Motion Speed (px/s): 88.4129
+Motion Direction Angle (image deg, +X right +Y down): 124.4390
+Motion Displacement Fraction: 1.000000
+Motion Fit R2: 0.748137
+Motion Active Frame Count: 13
+Motion Direction Note: 早い時刻の線上重心から遅い時刻の線上重心を回帰して決定。画像座標の角度は+X=右、+Y=下。

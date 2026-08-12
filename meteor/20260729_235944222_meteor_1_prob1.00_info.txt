@@ -1,0 +1,14 @@
+Source: /Users/keisukematsumoto/Desktop/other/div/rtsp/20260729/23/59_01.mp4
+Detection Time (UTC): 2026-07-29T23:59:44.222383Z
+Frame Range (Clip): 1056 - 1071
+Detected Line Center (px): (1253.00, 467.00)
+Detected Line Start (px): (1125.00, 346.00)
+Detected Line End (px): (1257.00, 469.00)
+Motion Direction Status: unknown
+Motion Direction Method: temporal_residual_line_centroid_v1
+Motion Start Frame: 1056
+Motion End Frame: 1071
+Motion Displacement Fraction: 0.115348
+Motion Fit R2: 0.097002
+Motion Active Frame Count: 12
+Motion Direction Note: 時間による位置変化または直線性が不十分で、方向を確定できません
