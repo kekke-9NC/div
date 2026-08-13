@@ -12,6 +12,8 @@ class TimelapseDragDropWindow(Toplevel):
         self.log_callback = log_callback
         self.dropped_paths = []
         self.timelapse_mask = None  # タイムラプス用マスク
+        self.timelapse_mode_var = tk.StringVar(value="standard")
+        self.trail_window_seconds_var = tk.StringVar(value="2.0")
         self.timelapse_timestamp_enabled_var = tk.BooleanVar(
             value=config.TIMELAPSE_TIMESTAMP_ENABLED
         )
@@ -159,10 +161,52 @@ class TimelapseDragDropWindow(Toplevel):
         
         duration_options = ttk.Frame(duration_frame)
         duration_options.pack()
-        
-        ttk.Radiobutton(duration_options, text="15秒", variable=self.duration_var, value=15).pack(side=tk.LEFT, padx=15)
-        ttk.Radiobutton(duration_options, text="30秒", variable=self.duration_var, value=30).pack(side=tk.LEFT, padx=15)
-        ttk.Radiobutton(duration_options, text="60秒", variable=self.duration_var, value=60).pack(side=tk.LEFT, padx=15)
+
+        self.duration_buttons = []
+        for label, value in (("15秒", 15), ("30秒", 30), ("60秒", 60)):
+            button = ttk.Radiobutton(
+                duration_options, text=label, variable=self.duration_var, value=value
+            )
+            button.pack(side=tk.LEFT, padx=15)
+            self.duration_buttons.append(button)
+
+        mode_frame = ttk.LabelFrame(main_frame, text="タイムラプス方式", padding=10)
+        mode_frame.pack(fill=tk.X, pady=(0, 10))
+        ttk.Radiobutton(
+            mode_frame,
+            text="通常タイムラプス（サンプリング）",
+            variable=self.timelapse_mode_var,
+            value="standard",
+            command=self._toggle_timelapse_mode,
+        ).pack(anchor=tk.W)
+        ttk.Radiobutton(
+            mode_frame,
+            text="流星トレイル（比較明合成＋残像）",
+            variable=self.timelapse_mode_var,
+            value="meteor_trail",
+            command=self._toggle_timelapse_mode,
+        ).pack(anchor=tk.W, pady=(4, 0))
+        self.trail_mode_settings = ttk.Frame(mode_frame)
+        self.trail_mode_settings.pack(fill=tk.X, pady=(6, 0))
+        ttk.Label(
+            self.trail_mode_settings,
+            text="入力の何秒分を1フレームに合成:",
+        ).pack(side=tk.LEFT)
+        self.trail_window_spin = ttk.Spinbox(
+            self.trail_mode_settings,
+            from_=0.5,
+            to=60.0,
+            increment=0.5,
+            textvariable=self.trail_window_seconds_var,
+            width=6,
+        )
+        self.trail_window_spin.pack(side=tk.LEFT, padx=(6, 4))
+        ttk.Label(
+            self.trail_mode_settings,
+            text="秒（2秒なら約50倍速。流星を残しやすい設定）",
+            foreground="gray",
+        ).pack(side=tk.LEFT)
+        self._toggle_timelapse_mode()
         
         mask_frame = ttk.LabelFrame(main_frame, text="マスク設定", padding=10)
         mask_frame.pack(fill=tk.X, pady=(0, 10))
@@ -1000,6 +1044,7 @@ class TimelapseDragDropWindow(Toplevel):
         
         duration = self.duration_var.get()
         paths = list(self.dropped_paths)
+        timelapse_mode = self.timelapse_mode_var.get()
         mask = self.timelapse_mask  # マスクを保存
         try:
             timestamp_size = float(self.timelapse_timestamp_size_var.get())
@@ -1067,19 +1112,36 @@ class TimelapseDragDropWindow(Toplevel):
             f"固定パターン補正: {fixed_pattern_status}, 星空注釈: {annotation_status})"
         )
         
-        def create_task(progress_callback):
-            return timelapse_creator.create_timelapse(
-                paths,
-                output_path,
-                target_duration_seconds=duration,
-                progress_callback=progress_callback,
-                mask=mask,
-                timestamp_settings=timestamp_settings,
-                temporal_mean_radius_frames=temporal_mean_radius,
-                annotation_settings=annotation_settings,
-                meteor_insert_settings=meteor_insert_settings,
-                fixed_pattern_correction=fixed_pattern_correction,
-            )
+        if timelapse_mode == "meteor_trail":
+            try:
+                trail_window_seconds = float(self.trail_window_seconds_var.get())
+            except (TypeError, ValueError, tk.TclError):
+                trail_window_seconds = 2.0
+            trail_window_seconds = max(0.5, min(60.0, trail_window_seconds))
+
+            def create_task(progress_callback):
+                return meteor_trail_timelapse.create_meteor_trail_timelapse(
+                    paths,
+                    output_path,
+                    settings=meteor_trail_timelapse.TrailTimelapseSettings(
+                        source_seconds_per_output_frame=trail_window_seconds,
+                    ),
+                    progress_callback=progress_callback,
+                )
+        else:
+            def create_task(progress_callback):
+                return timelapse_creator.create_timelapse(
+                    paths,
+                    output_path,
+                    target_duration_seconds=duration,
+                    progress_callback=progress_callback,
+                    mask=mask,
+                    timestamp_settings=timestamp_settings,
+                    temporal_mean_radius_frames=temporal_mean_radius,
+                    annotation_settings=annotation_settings,
+                    meteor_insert_settings=meteor_insert_settings,
+                    fixed_pattern_correction=fixed_pattern_correction,
+                )
 
         task_runner = getattr(self.parent, "_run_synthesis_task_async", None)
         if not callable(task_runner):
@@ -1090,6 +1152,16 @@ class TimelapseDragDropWindow(Toplevel):
             output_path=output_path,
             item_label="タイムラプス動画",
         )
+
+    def _toggle_timelapse_mode(self):
+        """Enable only the controls used by the selected timelapse mode."""
+        trail_enabled = self.timelapse_mode_var.get() == "meteor_trail"
+        duration_state = "disabled" if trail_enabled else "normal"
+        trail_state = "normal" if trail_enabled else "disabled"
+        for button in getattr(self, "duration_buttons", []):
+            button.configure(state=duration_state)
+        if hasattr(self, "trail_window_spin"):
+            self.trail_window_spin.configure(state=trail_state)
 
 
 class ProcessingOptionDialog(tk.Toplevel):

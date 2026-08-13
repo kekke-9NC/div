@@ -54,6 +54,7 @@ import meteor_angle_analysis
 import lighten_blend_video
 import lighten_blend_image
 import timelapse_creator
+import meteor_trail_timelapse
 import video_processor
 from tkinter import simpledialog
 import chat_gui
