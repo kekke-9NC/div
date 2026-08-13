@@ -1149,6 +1149,9 @@ class TimelapseDragDropWindow(Toplevel):
                     settings=meteor_trail_timelapse.TrailTimelapseSettings(
                         source_seconds_per_output_frame=trail_window_seconds,
                         trail_decay=trail_decay,
+                        timestamp_enabled=timestamp_settings["enabled"],
+                        timestamp_position=timestamp_settings["position"],
+                        timestamp_size_percent=timestamp_settings["size_percent"],
                     ),
                     progress_callback=progress_callback,
                 )

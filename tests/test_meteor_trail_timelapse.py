@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest import mock
 
@@ -38,6 +39,69 @@ class MeteorTrailTimelapseTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             trail.TrailTimelapseSettings(trail_decay=0.0).validate()
 
+    def test_timestamp_is_drawn_in_the_bottom_right_corner(self):
+        frame = np.zeros((120, 240, 3), dtype=np.uint8)
+        rendered = trail._draw_timestamp(
+            frame,
+            datetime(2026, 8, 13, 0, 12, 34, 500000),
+            "bottom_right",
+            1.8,
+        )
+        self.assertGreater(int(rendered[90:, 120:].max()), 0)
+        self.assertEqual(int(rendered[:50, :100].max()), 0)
+
+    def test_source_gap_flushes_window_and_does_not_carry_old_trail(self):
+        frames = [np.zeros((4, 6, 3), dtype=np.uint8) for _ in range(3)]
+        frames[0][1, 2] = 220
+        timestamps = [
+            datetime(2026, 8, 13, 0, 0, 0),
+            datetime(2026, 8, 13, 0, 0, 0, 500000),
+            datetime(2026, 8, 13, 0, 5, 0),
+        ]
+
+        class FakeWriter:
+            instances = []
+
+            def __init__(self, *_args, **_kwargs):
+                self.frames = []
+                FakeWriter.instances.append(self)
+
+            def isOpened(self):
+                return True
+
+            def write(self, frame):
+                self.frames.append(frame.copy())
+
+            def release(self):
+                pass
+
+        with (
+            mock.patch.object(trail, "discover_video_files", return_value=["one.mp4"]),
+            mock.patch.object(trail, "_count_frames", return_value=3),
+            mock.patch.object(
+                trail,
+                "_iter_frames",
+                return_value=iter((frame, 2.0, timestamp) for frame, timestamp in zip(frames, timestamps)),
+            ),
+            mock.patch.object(trail.video_encoding, "FFmpegFrameWriter", FakeWriter),
+            mock.patch.object(trail, "_tone_lut", return_value=np.arange(256, dtype=np.uint8)),
+        ):
+            self.assertTrue(
+                trail.create_meteor_trail_timelapse(
+                    ["one.mp4"],
+                    str(Path(tempfile.gettempdir()) / "trail-gap-test.mp4"),
+                    settings=trail.TrailTimelapseSettings(
+                        source_seconds_per_output_frame=10.0,
+                        output_size=(16, 16),
+                        timestamp_enabled=False,
+                    ),
+                )
+            )
+
+        self.assertEqual(len(FakeWriter.instances[0].frames), 2)
+        self.assertGreater(int(FakeWriter.instances[0].frames[0].max()), 0)
+        self.assertEqual(int(FakeWriter.instances[0].frames[1].max()), 0)
+
     def test_lut_lifts_dark_night_frames_without_exceeding_uint8(self):
         settings = trail.TrailTimelapseSettings(gamma=1.5, brightness=1.2).validate()
         lut = trail._tone_lut(settings)
@@ -72,7 +136,14 @@ class MeteorTrailTimelapseTests(unittest.TestCase):
         with (
             mock.patch.object(trail, "discover_video_files", return_value=["one.mp4"]),
             mock.patch.object(trail, "_count_frames", return_value=4),
-            mock.patch.object(trail, "_iter_frames", return_value=iter((frame, 2.0) for frame in frames)),
+            mock.patch.object(
+                trail,
+                "_iter_frames",
+                return_value=iter(
+                    (frame, 2.0, datetime(2026, 8, 13, 0, 0, index))
+                    for index, frame in enumerate(frames)
+                ),
+            ),
             mock.patch.object(trail.video_encoding, "FFmpegFrameWriter", FakeWriter),
             mock.patch.object(trail, "_tone_lut", return_value=np.arange(256, dtype=np.uint8)),
         ):

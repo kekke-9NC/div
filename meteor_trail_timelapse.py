@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 import os
 from pathlib import Path
 import re
@@ -21,6 +22,7 @@ import cv2
 import numpy as np
 
 import video_encoding
+import media_time
 
 
 VIDEO_SUFFIXES = {".mp4", ".mov", ".avi", ".mkv", ".m4v"}
@@ -42,6 +44,9 @@ class TrailTimelapseSettings:
     # Applied once per emitted frame, not once per source frame.  A high
     # value lets the fixed camera's slowly moving stars build real trails.
     trail_decay: float = 0.985
+    timestamp_enabled: bool = True
+    timestamp_position: str = "bottom_right"
+    timestamp_size_percent: float = 1.8
 
     def validate(self) -> "TrailTimelapseSettings":
         width, height = (int(self.output_size[0]), int(self.output_size[1]))
@@ -57,6 +62,16 @@ class TrailTimelapseSettings:
             raise ValueError("gamma, contrast, and brightness must be positive")
         if not 0.0 < self.trail_decay < 1.0:
             raise ValueError("trail_decay must be in (0, 1)")
+        position = {
+            "右下": "bottom_right",
+            "左下": "bottom_left",
+            "右上": "top_right",
+            "左上": "top_left",
+        }.get(str(self.timestamp_position), str(self.timestamp_position))
+        if position not in {"bottom_right", "bottom_left", "top_right", "top_left"}:
+            raise ValueError("timestamp_position is invalid")
+        if self.timestamp_size_percent <= 0:
+            raise ValueError("timestamp_size_percent must be positive")
         return TrailTimelapseSettings(
             source_seconds_per_output_frame=float(self.source_seconds_per_output_frame),
             output_fps=float(self.output_fps),
@@ -65,6 +80,9 @@ class TrailTimelapseSettings:
             contrast=float(self.contrast),
             brightness=float(self.brightness),
             trail_decay=float(self.trail_decay),
+            timestamp_enabled=bool(self.timestamp_enabled),
+            timestamp_position=position,
+            timestamp_size_percent=float(self.timestamp_size_percent),
         )
 
 
@@ -122,8 +140,18 @@ def _resize_frame(frame: np.ndarray, output_size: tuple[int, int]) -> np.ndarray
     return cv2.resize(frame, (width, height), interpolation=cv2.INTER_AREA)
 
 
+def _source_start_time(path: str) -> datetime:
+    """Return the capture start time, preferring the RTSP path timestamp."""
+
+    path_timestamp = getattr(media_time, "_path_time", lambda _path: None)(path)
+    if path_timestamp is not None:
+        return path_timestamp
+    timestamp, _source = media_time.get_media_start_time(path)
+    return timestamp or datetime.now()
+
+
 def _iter_frames(paths: Iterable[str]):
-    """Yield (frame, source_fps) while keeping only one decoder open."""
+    """Yield (frame, source_fps, capture_time) while keeping one decoder open."""
 
     for path in paths:
         capture = cv2.VideoCapture(path)
@@ -134,11 +162,14 @@ def _iter_frames(paths: Iterable[str]):
             fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
             if not 1.0 <= fps <= 120.0:
                 fps = 25.0
+            start_time = _source_start_time(path)
+            frame_index = 0
             while True:
                 ok, frame = capture.read()
                 if not ok:
                     break
-                yield frame, fps
+                yield frame, fps, start_time + timedelta(seconds=frame_index / fps)
+                frame_index += 1
         finally:
             capture.release()
 
@@ -157,6 +188,44 @@ def _count_frames(paths: Sequence[str]) -> int:
         finally:
             capture.release()
     return total
+
+
+def _draw_timestamp(
+    frame: np.ndarray,
+    timestamp: datetime,
+    position: str,
+    size_percent: float,
+) -> np.ndarray:
+    """Draw the same readable timestamp style used by ordinary timelapses."""
+
+    output = frame.copy()
+    height, width = output.shape[:2]
+    text = timestamp.strftime("%Y/%m/%d %H:%M:%S.%f")[:-3]
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    desired_height = max(12, int(round(height * size_percent / 100.0)))
+    unit_height = max(1, cv2.getTextSize("Ag", font, 1.0, 1)[0][1])
+    font_scale = desired_height / unit_height
+    thickness = max(1, int(round(desired_height / 18)))
+    (text_width, text_height), baseline = cv2.getTextSize(
+        text, font, font_scale, thickness
+    )
+    margin = max(8, int(round(desired_height * 0.55)))
+    x = margin if position.endswith("left") else width - text_width - margin
+    y = text_height + margin if position.startswith("top") else height - margin
+    x = max(0, min(x, max(0, width - text_width)))
+    y = max(text_height, min(y, max(text_height, height - baseline)))
+
+    padding = max(3, desired_height // 4)
+    left, top = max(0, x - padding), max(0, y - text_height - padding)
+    right, bottom = min(width, x + text_width + padding), min(height, y + baseline + padding)
+    if right > left and bottom > top:
+        roi = output[top:bottom, left:right]
+        output[top:bottom, left:right] = cv2.addWeighted(
+            roi, 0.45, np.zeros_like(roi), 0.55, 0
+        )
+    cv2.putText(output, text, (x, y), font, font_scale, (0, 0, 0), thickness + 2, cv2.LINE_AA)
+    cv2.putText(output, text, (x, y), font, font_scale, (245, 245, 245), thickness, cv2.LINE_AA)
+    return output
 
 
 def create_meteor_trail_timelapse(
@@ -198,13 +267,16 @@ def create_meteor_trail_timelapse(
 
     window_max: Optional[np.ndarray] = None
     trail: Optional[np.ndarray] = None
+    window_first_time: Optional[datetime] = None
+    window_last_time: Optional[datetime] = None
+    previous_capture_time: Optional[datetime] = None
     elapsed = 0.0
     processed = 0
     emitted = 0
     success = False
 
     def emit_window() -> None:
-        nonlocal window_max, trail, elapsed, emitted
+        nonlocal window_max, trail, elapsed, emitted, window_first_time, window_last_time
         if window_max is None:
             return
         composite = window_max
@@ -213,15 +285,42 @@ def create_meteor_trail_timelapse(
         else:
             faded = np.clip(trail.astype(np.float32) * options.trail_decay, 0, 255)
             trail = np.maximum(composite, faded.astype(np.uint8))
-        writer.write(trail)
+        rendered = trail
+        if options.timestamp_enabled and window_first_time is not None and window_last_time is not None:
+            timestamp = window_first_time + (window_last_time - window_first_time) / 2
+            rendered = _draw_timestamp(
+                rendered,
+                timestamp,
+                options.timestamp_position,
+                options.timestamp_size_percent,
+            )
+        writer.write(rendered)
         emitted += 1
         window_max = None
+        window_first_time = None
+        window_last_time = None
         elapsed = 0.0
 
     try:
-        for frame, fps in _iter_frames(normalized_paths):
+        for frame, fps, capture_time in _iter_frames(normalized_paths):
+            # Do not blend across a missing source interval.  Apart from
+            # making the timestamp ambiguous, carrying the old trail across
+            # a gap can make a cloud appear to reverse direction at a segment
+            # boundary.  Ordinary minute-to-minute RTSP segments differ by
+            # one frame period; a larger jump is a real archive gap.
+            if previous_capture_time is not None:
+                capture_step = (capture_time - previous_capture_time).total_seconds()
+                expected_step = 1.0 / fps
+                if capture_step > expected_step * 1.5:
+                    emit_window()
+                    trail = None
+                    elapsed = 0.0
+            previous_capture_time = capture_time
             toned = cv2.LUT(_resize_frame(frame, options.output_size), lut)
             window_max = toned.copy() if window_max is None else np.maximum(window_max, toned)
+            if window_first_time is None:
+                window_first_time = capture_time
+            window_last_time = capture_time
             elapsed += 1.0 / fps
             processed += 1
             if elapsed >= options.source_seconds_per_output_frame:
@@ -265,6 +364,10 @@ def _parse_args() -> argparse.Namespace:
         "--trail-decay", type=float, default=0.985,
         help="星の残像を次の出力フレームへ残す割合（既定: 0.985）",
     )
+    parser.add_argument(
+        "--no-timestamp", action="store_true",
+        help="右下の実時刻表示を無効にする",
+    )
     parser.add_argument("--fps", type=float, default=25.0, help="出力FPS（既定: 25）")
     parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--height", type=int, default=720)
@@ -278,6 +381,7 @@ def main() -> int:
         output_fps=args.fps,
         output_size=(args.width, args.height),
         trail_decay=args.trail_decay,
+        timestamp_enabled=not args.no_timestamp,
     )
     return 0 if create_meteor_trail_timelapse(
         args.inputs, args.output, settings=settings, progress_callback=print
