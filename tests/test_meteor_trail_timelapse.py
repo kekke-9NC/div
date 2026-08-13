@@ -29,6 +29,15 @@ class MeteorTrailTimelapseTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             trail.TrailTimelapseSettings(output_size=(641, 360)).validate()
 
+    def test_default_decay_is_long_enough_for_visible_star_trails(self):
+        settings = trail.TrailTimelapseSettings().validate()
+        self.assertAlmostEqual(settings.trail_decay, 0.985)
+        self.assertGreater(settings.trail_decay, 0.95)
+
+    def test_settings_reject_zero_decay(self):
+        with self.assertRaises(ValueError):
+            trail.TrailTimelapseSettings(trail_decay=0.0).validate()
+
     def test_lut_lifts_dark_night_frames_without_exceeding_uint8(self):
         settings = trail.TrailTimelapseSettings(gamma=1.5, brightness=1.2).validate()
         lut = trail._tone_lut(settings)

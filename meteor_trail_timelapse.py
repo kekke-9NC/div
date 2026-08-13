@@ -39,7 +39,9 @@ class TrailTimelapseSettings:
     gamma: float = 1.35
     contrast: float = 1.12
     brightness: float = 1.0
-    trail_decay: float = 0.78
+    # Applied once per emitted frame, not once per source frame.  A high
+    # value lets the fixed camera's slowly moving stars build real trails.
+    trail_decay: float = 0.985
 
     def validate(self) -> "TrailTimelapseSettings":
         width, height = (int(self.output_size[0]), int(self.output_size[1]))
@@ -53,8 +55,8 @@ class TrailTimelapseSettings:
             raise ValueError("output_fps must be positive")
         if self.gamma <= 0 or self.contrast <= 0 or self.brightness <= 0:
             raise ValueError("gamma, contrast, and brightness must be positive")
-        if not 0.0 <= self.trail_decay < 1.0:
-            raise ValueError("trail_decay must be in [0, 1)")
+        if not 0.0 < self.trail_decay < 1.0:
+            raise ValueError("trail_decay must be in (0, 1)")
         return TrailTimelapseSettings(
             source_seconds_per_output_frame=float(self.source_seconds_per_output_frame),
             output_fps=float(self.output_fps),
@@ -169,8 +171,10 @@ def create_meteor_trail_timelapse(
     One output frame represents ``source_seconds_per_output_frame`` seconds of
     source video.  The source frames in that interval are combined with a
     maximum operation, so a meteor remains visible even when it lasts only a
-    few source frames.  ``trail_decay`` adds a restrained afterglow to the
-    following output frame without drawing artificial markers.
+    few source frames.  ``trail_decay`` controls how long real star positions
+    remain in the composite.  It is close to one by default so the camera's
+    slow stellar motion becomes a continuous trail rather than dots; no
+    synthetic line or marker is drawn.
     """
 
     normalized_paths = discover_video_files(video_paths)
@@ -257,6 +261,10 @@ def _parse_args() -> argparse.Namespace:
         "--source-seconds-per-frame", type=float, default=2.0,
         help="入力の何秒を1出力フレームに合成するか（既定: 2）",
     )
+    parser.add_argument(
+        "--trail-decay", type=float, default=0.985,
+        help="星の残像を次の出力フレームへ残す割合（既定: 0.985）",
+    )
     parser.add_argument("--fps", type=float, default=25.0, help="出力FPS（既定: 25）")
     parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--height", type=int, default=720)
@@ -269,6 +277,7 @@ def main() -> int:
         source_seconds_per_output_frame=args.source_seconds_per_frame,
         output_fps=args.fps,
         output_size=(args.width, args.height),
+        trail_decay=args.trail_decay,
     )
     return 0 if create_meteor_trail_timelapse(
         args.inputs, args.output, settings=settings, progress_callback=print

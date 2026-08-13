@@ -14,6 +14,7 @@ class TimelapseDragDropWindow(Toplevel):
         self.timelapse_mask = None  # タイムラプス用マスク
         self.timelapse_mode_var = tk.StringVar(value="standard")
         self.trail_window_seconds_var = tk.StringVar(value="2.0")
+        self.trail_decay_var = tk.StringVar(value="0.985")
         self.timelapse_timestamp_enabled_var = tk.BooleanVar(
             value=config.TIMELAPSE_TIMESTAMP_ENABLED
         )
@@ -204,6 +205,23 @@ class TimelapseDragDropWindow(Toplevel):
         ttk.Label(
             self.trail_mode_settings,
             text="秒（2秒なら約50倍速。流星を残しやすい設定）",
+            foreground="gray",
+        ).pack(side=tk.LEFT)
+        ttk.Label(self.trail_mode_settings, text="  星の残像:").pack(
+            side=tk.LEFT, padx=(12, 0)
+        )
+        self.trail_decay_spin = ttk.Spinbox(
+            self.trail_mode_settings,
+            from_=0.80,
+            to=0.999,
+            increment=0.005,
+            textvariable=self.trail_decay_var,
+            width=7,
+        )
+        self.trail_decay_spin.pack(side=tk.LEFT, padx=(6, 4))
+        ttk.Label(
+            self.trail_mode_settings,
+            text="（0.985で長い星の軌跡）",
             foreground="gray",
         ).pack(side=tk.LEFT)
         self._toggle_timelapse_mode()
@@ -1118,6 +1136,11 @@ class TimelapseDragDropWindow(Toplevel):
             except (TypeError, ValueError, tk.TclError):
                 trail_window_seconds = 2.0
             trail_window_seconds = max(0.5, min(60.0, trail_window_seconds))
+            try:
+                trail_decay = float(self.trail_decay_var.get())
+            except (TypeError, ValueError, tk.TclError):
+                trail_decay = 0.985
+            trail_decay = max(0.80, min(0.999, trail_decay))
 
             def create_task(progress_callback):
                 return meteor_trail_timelapse.create_meteor_trail_timelapse(
@@ -1125,6 +1148,7 @@ class TimelapseDragDropWindow(Toplevel):
                     output_path,
                     settings=meteor_trail_timelapse.TrailTimelapseSettings(
                         source_seconds_per_output_frame=trail_window_seconds,
+                        trail_decay=trail_decay,
                     ),
                     progress_callback=progress_callback,
                 )
@@ -1162,6 +1186,8 @@ class TimelapseDragDropWindow(Toplevel):
             button.configure(state=duration_state)
         if hasattr(self, "trail_window_spin"):
             self.trail_window_spin.configure(state=trail_state)
+        if hasattr(self, "trail_decay_spin"):
+            self.trail_decay_spin.configure(state=trail_state)
 
 
 class ProcessingOptionDialog(tk.Toplevel):
