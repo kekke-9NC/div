@@ -472,6 +472,20 @@ class SettingsMixin:
         ttk.Entry(model_source, textvariable=self.camera_model_source_var, state="readonly").pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Button(model_source, text="動画", command=self.select_camera_model_video).pack(side=tk.LEFT, padx=(5, 0))
         ttk.Button(model_source, text="フォルダ", command=self.select_camera_model_folder).pack(side=tk.LEFT, padx=(3, 0))
+        model_method = ttk.Frame(model_lf); model_method.pack(fill=tk.X, pady=2)
+        ttk.Label(model_method, text="作成方式:").pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Combobox(
+            model_method,
+            textvariable=self.camera_model_method_var,
+            values=(self._TRAJECTORY_MODEL_METHOD, self._STATIC_MODEL_METHOD),
+            state="readonly",
+            width=28,
+        ).pack(side=tk.LEFT)
+        ttk.Label(
+            model_method,
+            text="動画方式は複数分の星の移動を解析します（RTSPフォルダ推奨）",
+            foreground=UI_MUTED,
+        ).pack(side=tk.LEFT, padx=(8, 0))
         model_range = ttk.Frame(model_lf); model_range.pack(fill=tk.X, pady=2)
         ttk.Label(model_range, text="時間範囲:").pack(side=tk.LEFT, padx=(0, 5))
         ttk.Entry(model_range, textvariable=self.camera_model_start_var, width=20).pack(side=tk.LEFT)
@@ -1572,6 +1586,7 @@ class SettingsMixin:
             'camera_model_source': self.camera_model_source_var.get(),
             'camera_model_start': self.camera_model_start_var.get(),
             'camera_model_end': self.camera_model_end_var.get(),
+            'camera_model_method': self.camera_model_method_var.get(),
             'camera_model_cloud_threshold': self.camera_model_cloud_threshold_var.get(),
             'camera_model_interval': self.camera_model_interval_var.get(),
             'camera_model_cloud_filter': self.camera_model_cloud_filter_var.get(),
@@ -1778,6 +1793,7 @@ class SettingsMixin:
             self.camera_model_source_var.set(settings.get('camera_model_source', ''))
             self.camera_model_start_var.set(settings.get('camera_model_start', ''))
             self.camera_model_end_var.set(settings.get('camera_model_end', ''))
+            self.camera_model_method_var.set(settings.get('camera_model_method', self._TRAJECTORY_MODEL_METHOD))
             self.camera_model_cloud_threshold_var.set(str(settings.get('camera_model_cloud_threshold', '0.10')))
             self.camera_model_interval_var.set(str(settings.get('camera_model_interval', '60')))
             self.camera_model_cloud_filter_var.set(bool(settings.get('camera_model_cloud_filter', True)))

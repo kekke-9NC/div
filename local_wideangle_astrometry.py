@@ -50,6 +50,12 @@ _constellation_lines: Optional[Tuple[np.ndarray, ...]] = None
 # calibrated-area boundary or a projection branch.
 _CONSTELLATION_MAX_ANGULAR_STEP_DEG = 0.5
 _CONSTELLATION_MAX_PIXEL_STEP_FACTOR = 0.20
+# A high-order detector polynomial can be locally many-to-one even when its
+# residuals at tracked stars are excellent.  In that case sky->pixel lands on
+# a different inverse branch and a short constellation edge can cross most of
+# the image.  Correct branches round-trip to far below an arcminute here; a
+# 0.1-degree ceiling leaves ample numerical margin while rejecting folds.
+_CONSTELLATION_MAX_SKY_ROUNDTRIP_DEG = 0.1
 _CONSTELLATION_ALIGNMENT_MAX_MAG = 4.8
 _CONSTELLATION_ALIGNMENT_MATCH_RADIUS_PX = 8.0
 _CONSTELLATION_ALIGNMENT_MIN_MATCHES = 4
@@ -997,6 +1003,90 @@ def _load_calibration(calibration_path: Optional[str]) -> Tuple[Dict[str, Any], 
         return metadata, wcs
 
 
+def _bridge_support_grid_for_display(values: np.ndarray) -> np.ndarray:
+    """Fill only small interior holes used to clip visual grid contours.
+
+    The original support grid remains authoritative for constellation safety
+    and astrometric validation.  This display copy joins a one-cell gap only
+    when validated cells surround it, so the outer unvalidated boundary is
+    never grown merely to make the overlay look continuous.
+    """
+    strict = (np.asarray(values) > 0).astype(np.uint8)
+    if strict.ndim != 2 or min(strict.shape) < 3:
+        return strict
+    display = strict.copy()
+    source = strict.copy()
+    rows, columns = source.shape
+    for row in range(1, rows - 1):
+        for column in range(1, columns - 1):
+            if source[row, column]:
+                continue
+            neighborhood = source[row - 1:row + 2, column - 1:column + 2]
+            neighbors = int(np.sum(neighborhood))
+            horizontal = bool(source[row, column - 1] and source[row, column + 1])
+            vertical = bool(source[row - 1, column] and source[row + 1, column])
+            if neighbors >= 5 or ((horizontal or vertical) and neighbors >= 3):
+                display[row, column] = 1
+    return display
+
+
+def _add_short_polyline_bridges(
+    visibility_mask: np.ndarray,
+    line: np.ndarray,
+    support_mask: np.ndarray,
+    maximum_gap_px: float,
+    thickness: int = 5,
+) -> None:
+    """Expose a contour only across short unsupported runs bounded at both ends."""
+    vertices = np.asarray(line, dtype=float).reshape(-1, 2)
+    if len(vertices) < 2 or maximum_gap_px <= 0:
+        return
+    samples: list[np.ndarray] = [vertices[0]]
+    distances: list[float] = [0.0]
+    distance = 0.0
+    for start, end in zip(vertices[:-1], vertices[1:]):
+        length = float(np.linalg.norm(end - start))
+        count = max(1, int(np.ceil(length / 2.0)))
+        for index in range(1, count + 1):
+            point = start + (end - start) * (index / count)
+            previous = samples[-1]
+            distance += float(np.linalg.norm(point - previous))
+            samples.append(point)
+            distances.append(distance)
+    sampled = np.asarray(samples, dtype=float)
+    rounded = np.rint(sampled).astype(int)
+    height, width = support_mask.shape[:2]
+    inside = (
+        (rounded[:, 0] >= 0) & (rounded[:, 0] < width)
+        & (rounded[:, 1] >= 0) & (rounded[:, 1] < height)
+    )
+    supported = np.zeros(len(rounded), dtype=bool)
+    supported[inside] = support_mask[
+        rounded[inside, 1], rounded[inside, 0]
+    ] > 0
+    index = 0
+    while index < len(supported):
+        if supported[index]:
+            index += 1
+            continue
+        start = index
+        while index < len(supported) and not supported[index]:
+            index += 1
+        end = index - 1
+        left = start - 1
+        right = end + 1
+        if left < 0 or right >= len(supported):
+            continue
+        if not (supported[left] and supported[right]):
+            continue
+        if distances[right] - distances[left] > float(maximum_gap_px):
+            continue
+        bridge = np.rint(sampled[left:right + 1]).astype(np.int32).reshape(-1, 1, 2)
+        cv2.polylines(
+            visibility_mask, [bridge], False, 255, max(1, int(thickness)), cv2.LINE_8,
+        )
+
+
 def _forward_grid_model(wcs: WCS, metadata: Dict[str, Any], width: int, height: int):
     """Cache stable pixel->sky contour generators (no inverse SIP iteration)."""
     key = (id(wcs), width, height)
@@ -1019,6 +1109,8 @@ def _forward_grid_model(wcs: WCS, metadata: Dict[str, Any], width: int, height: 
     support_hull = metadata.get("sip_support_hull")
     support_grid = metadata.get("support_grid")
     support_output = np.full((height, width), 255, dtype=np.uint8)
+    display_support_output = support_output
+    maximum_gap = 0
     range_ra = np.asarray(unwrapped_ra)
     range_dec = np.asarray(dec)
     if support_grid:
@@ -1044,6 +1136,26 @@ def _forward_grid_model(wcs: WCS, metadata: Dict[str, Any], width: int, height: 
         support_output = cv2.resize(
             support, (width, height), interpolation=cv2.INTER_NEAREST
         )
+        display_grid = _bridge_support_grid_for_display(grid_values)
+        display_support = np.zeros((calibration_height, calibration_width), dtype=np.uint8)
+        for row in range(grid_rows):
+            for column in range(grid_columns):
+                if not display_grid[row, column]:
+                    continue
+                left = round(column * calibration_width / grid_columns)
+                right = round((column + 1) * calibration_width / grid_columns)
+                top = round(row * calibration_height / grid_rows)
+                bottom = round((row + 1) * calibration_height / grid_rows)
+                display_support[top:bottom, left:right] = 255
+        display_support_output = cv2.resize(
+            display_support, (width, height), interpolation=cv2.INTER_NEAREST
+        )
+        cell_width = width / max(1, grid_columns)
+        cell_height = height / max(1, grid_rows)
+        # Two support cells correspond to the short visual breaks seen when a
+        # contour crosses a sparse cell near the validated boundary.
+        maximum_gap_cells = float(metadata.get("display_grid_max_gap_cells", 2.1))
+        maximum_gap = round(max(cell_width, cell_height) * maximum_gap_cells)
     elif support_hull and len(support_hull) >= 3:
         support = np.zeros((calibration_height, calibration_width), dtype=np.uint8)
         hull = np.rint(np.asarray(support_hull, dtype=float)).astype(np.int32)
@@ -1071,6 +1183,7 @@ def _forward_grid_model(wcs: WCS, metadata: Dict[str, Any], width: int, height: 
             support_output,
             cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (output_margin, output_margin)),
         )
+        display_support_output = support_output
     ra_values = np.asarray(range_ra).ravel()
     dec_values = np.asarray(range_dec).ravel()
     model = {
@@ -1080,6 +1193,8 @@ def _forward_grid_model(wcs: WCS, metadata: Dict[str, Any], width: int, height: 
         "dec_min": float(np.nanpercentile(dec_values, 1)),
         "dec_max": float(np.nanpercentile(dec_values, 99)),
         "support_mask": support_output,
+        "display_support_mask": display_support_output,
+        "display_grid_max_gap_px": maximum_gap,
         "ra_contours": contourpy.contour_generator(
             x=x_output, y=y_output, z=unwrapped_ra, corner_mask=True
         ),
@@ -1097,9 +1212,16 @@ def _draw_contour_lines(
     lines: Sequence[np.ndarray],
     color: Tuple[int, int, int],
     label: Optional[str] = None,
+    visibility_mask: Optional[np.ndarray] = None,
+    support_mask: Optional[np.ndarray] = None,
+    maximum_gap_px: float = 0.0,
 ) -> None:
     usable = [line for line in lines if isinstance(line, np.ndarray) and len(line) >= 3]
     for line in usable:
+        if visibility_mask is not None and support_mask is not None:
+            _add_short_polyline_bridges(
+                visibility_mask, line, support_mask, maximum_gap_px,
+            )
         points = np.rint(line).astype(np.int32).reshape(-1, 1, 2)
         cv2.polylines(output, [points], False, color, 1, cv2.LINE_AA)
     if label and usable:
@@ -1383,7 +1505,36 @@ def _project_constellation_samples(
         except Exception:
             return np.zeros_like(ra), np.zeros_like(dec), np.zeros_like(ra, dtype=bool)
         x, y = np.asarray(x, dtype=float), np.asarray(y, dtype=float)
-        return x, y, np.isfinite(x) & np.isfinite(y)
+        usable = np.isfinite(x) & np.isfinite(y)
+        # Validate the direction that matters for an overlay: requested sky
+        # coordinate -> detector -> recovered sky coordinate.  Pixel->sky->
+        # pixel alone cannot detect a polynomial fold because it starts on a
+        # single already-selected detector branch.
+        indices = np.flatnonzero(usable)
+        if len(indices):
+            try:
+                inverse_ra, inverse_dec = wcs.pixel_to_world_values(
+                    x[indices], y[indices]
+                )
+                target_ra = np.deg2rad(np.asarray(ra, dtype=float)[indices])
+                target_dec = np.deg2rad(np.asarray(dec, dtype=float)[indices])
+                recovered_ra = np.deg2rad(np.asarray(inverse_ra, dtype=float))
+                recovered_dec = np.deg2rad(np.asarray(inverse_dec, dtype=float))
+                cosine = (
+                    np.sin(target_dec) * np.sin(recovered_dec)
+                    + np.cos(target_dec) * np.cos(recovered_dec)
+                    * np.cos(recovered_ra - target_ra)
+                )
+                roundtrip_error = np.rad2deg(
+                    np.arccos(np.clip(cosine, -1.0, 1.0))
+                )
+                usable[indices] &= (
+                    np.isfinite(roundtrip_error)
+                    & (roundtrip_error <= _CONSTELLATION_MAX_SKY_ROUNDTRIP_DEG)
+                )
+            except Exception:
+                usable[indices] = False
+        return x, y, usable
     return _project_sky_with_forward_wcs(wcs, ra, dec)
 
 
@@ -1436,6 +1587,8 @@ def _draw_constellation_lines(
     anchor_points: Optional[np.ndarray] = None,
     anchor_tolerance_px: float = 5.0,
     pixel_offset: Tuple[float, float] = (0.0, 0.0),
+    allow_partial_segments: bool = False,
+    edge_admission: Optional[np.ndarray] = None,
 ) -> None:
     """Project visible constellation line segments into the current frame."""
     height, width = output.shape[:2]
@@ -1496,19 +1649,43 @@ def _draw_constellation_lines(
             anchor_usable &= np.min(distances, axis=1) <= float(anchor_tolerance_px)
         else:
             anchor_usable[:] = False
+    temporal_edge_admission = None
+    if edge_admission is not None:
+        temporal_edge_admission = np.asarray(edge_admission, dtype=bool).reshape(-1)
     max_pixel_step = max(
         96.0, min(width, height) * _CONSTELLATION_MAX_PIXEL_STEP_FACTOR
     )
     offset = 0
+    segment_offset = 0
     thickness = max(1, round(min(width, height) / 720.0))
     for line, length in zip(lines, lengths):
         for index in range(length - 1):
-            if not (
+            current_segment_offset = segment_offset
+            segment_offset += 1
+            # Legacy/single-frame calibrations still require both endpoint
+            # stars to be visible and detected.  A trajectory+Gaia model has
+            # already established a stable detector-to-sky projection across
+            # time, so it may safely draw the supported part of an edge even
+            # when one endpoint falls outside the mask.  This prevents valid
+            # in-frame stars from losing their connecting line merely because
+            # the other endpoint is just outside a support-cell boundary.
+            current_endpoints_admitted = (
                 endpoint_visible[offset + index]
                 and endpoint_visible[offset + index + 1]
                 and anchor_usable[offset + index]
                 and anchor_usable[offset + index + 1]
-            ):
+            )
+            held_edge_admitted = bool(
+                temporal_edge_admission is not None
+                and current_segment_offset < len(temporal_edge_admission)
+                and temporal_edge_admission[current_segment_offset]
+                and endpoint_visible[offset + index]
+                and endpoint_visible[offset + index + 1]
+            )
+            endpoints_admitted = current_endpoints_admitted or held_edge_admitted
+            if not allow_partial_segments and not endpoints_admitted:
+                continue
+            if allow_partial_segments and anchor_points is not None and not endpoints_admitted:
                 continue
             sampled = _sample_constellation_line(line[index:index + 2])
             segment_ra = (sampled[:, 0] - delta_ra) % 360.0
@@ -1556,6 +1733,98 @@ def _draw_constellation_lines(
         offset += length
 
 
+def _constellation_segment_detection_mask(
+    wcs: Any,
+    delta_ra: float,
+    support_mask: np.ndarray,
+    anchor_points: Optional[np.ndarray],
+    anchor_tolerance_px: float = 5.0,
+    pixel_offset: Tuple[float, float] = (0.0, 0.0),
+) -> np.ndarray:
+    """Return current-frame endpoint detection status for every constellation edge."""
+    lines = _load_constellation_lines()
+    segment_count = sum(max(0, len(line) - 1) for line in lines)
+    admitted = np.zeros(segment_count, dtype=bool)
+    if not lines or anchor_points is None:
+        return admitted
+    anchors = np.asarray(anchor_points, dtype=float).reshape(-1, 2)
+    finite_anchors = anchors[np.isfinite(anchors).all(axis=1)]
+    if not len(finite_anchors):
+        return admitted
+    coordinates = np.concatenate(lines, axis=0)
+    ra = (coordinates[:, 0] - delta_ra) % 360.0
+    x, y, usable = _project_sky_with_forward_wcs(wcs, ra, coordinates[:, 1])
+    vertex_points = np.column_stack((x, y))
+    pixel_shift = np.asarray(pixel_offset, dtype=float)
+    if pixel_shift.shape != (2,) or not np.isfinite(pixel_shift).all():
+        pixel_shift = np.zeros(2, dtype=float)
+    draw_points = vertex_points + pixel_shift
+    usable &= np.isfinite(draw_points).all(axis=1)
+    height, width = support_mask.shape[:2]
+    endpoint_visible = usable.copy()
+    endpoint_visible &= (
+        (draw_points[:, 0] >= 0) & (draw_points[:, 0] < width)
+        & (draw_points[:, 1] >= 0) & (draw_points[:, 1] < height)
+    )
+    rounded = np.zeros(draw_points.shape, dtype=np.int32)
+    visible_indices = np.flatnonzero(endpoint_visible)
+    if len(visible_indices):
+        rounded[visible_indices] = np.rint(draw_points[visible_indices]).astype(np.int32)
+    endpoint_visible &= (
+        (rounded[:, 0] >= 0) & (rounded[:, 0] < width)
+        & (rounded[:, 1] >= 0) & (rounded[:, 1] < height)
+    )
+    visible_indices = np.flatnonzero(endpoint_visible)
+    if len(visible_indices):
+        endpoint_visible[visible_indices] = support_mask[
+            rounded[visible_indices, 1], rounded[visible_indices, 0]
+        ] > 0
+    distances = np.linalg.norm(
+        draw_points[:, np.newaxis, :] - finite_anchors[np.newaxis, :, :], axis=2
+    )
+    anchor_usable = usable & (
+        np.min(distances, axis=1) <= float(anchor_tolerance_px)
+    )
+    offset = 0
+    segment_offset = 0
+    for line in lines:
+        for index in range(len(line) - 1):
+            admitted[segment_offset] = bool(
+                endpoint_visible[offset + index]
+                and endpoint_visible[offset + index + 1]
+                and anchor_usable[offset + index]
+                and anchor_usable[offset + index + 1]
+            )
+            segment_offset += 1
+        offset += len(line)
+    return admitted
+
+
+def _bridge_boolean_gaps(values: np.ndarray, max_gap_frames: int) -> np.ndarray:
+    """Fill only bounded false runs no longer than ``max_gap_frames``."""
+    result = np.asarray(values, dtype=bool).copy()
+    if result.ndim != 2 or result.size == 0 or max_gap_frames <= 0:
+        return result
+    for edge_index in range(result.shape[0]):
+        edge = result[edge_index]
+        index = 0
+        while index < len(edge):
+            if edge[index]:
+                index += 1
+                continue
+            start = index
+            while index < len(edge) and not edge[index]:
+                index += 1
+            end = index
+            if (
+                start > 0 and end < len(edge)
+                and end - start <= max_gap_frames
+                and edge[start - 1] and edge[end]
+            ):
+                edge[start:end] = True
+    return result
+
+
 def annotate_frame(
     frame_bgr: np.ndarray,
     frame_datetime: datetime,
@@ -1563,6 +1832,7 @@ def annotate_frame(
     draw_constellations: bool = False,
     draw_grid: bool = True,
     draw_detected_stars: bool = False,
+    constellation_edge_admission: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """Draw selected local, distortion-aware celestial annotations."""
     metadata, wcs = _load_calibration(calibration_path)
@@ -1590,6 +1860,28 @@ def annotate_frame(
             metadata.get("verified_constellation_only", False),
         )
     )
+    constellation_render_policy = str(
+        metadata.get("constellation_render_policy", "") or ""
+    ).strip().lower()
+    detected_endpoint_constellations = bool(
+        draw_constellations
+        and constellation_render_policy == "model-supported-detected-endpoints"
+    )
+    continuous_constellations = bool(
+        draw_constellations
+        and constellation_render_policy == "model-supported-continuous"
+    )
+    if continuous_constellations:
+        # The trajectory+Gaia solution is the temporal evidence.  Requiring
+        # fresh endpoint detections in every timelapse frame makes a correct
+        # line blink whenever a thin cloud hides one star for a few frames.
+        verify_constellations = False
+    elif detected_endpoint_constellations:
+        # This policy is deliberately cloud-visible: a line is drawn only if
+        # both of its endpoint stars are detected in this frame.  The
+        # trajectory model still supplies the sky position and branch guard;
+        # detections decide whether the line is currently observable.
+        verify_constellations = True
     align_constellations = bool(
         draw_constellations
         and metadata.get(
@@ -1606,9 +1898,12 @@ def annotate_frame(
         )
     grid_color = (90, 210, 255)
     grid = None
+    grid_visibility = None
     grid_layer = output.copy()
     if draw_grid or draw_constellations:
         grid = _forward_grid_model(wcs, metadata, width, height)
+        if grid is not None:
+            grid_visibility = grid.get("display_support_mask", grid["support_mask"]).copy()
     if draw_grid and grid is not None:
         for ra_value in range(0, 360, 15):
             reference_level = (ra_value - delta_ra) % 360.0
@@ -1619,12 +1914,18 @@ def annotate_frame(
                 _draw_contour_lines(
                     grid_layer, grid["ra_contours"].lines(reference_level), grid_color,
                     label=f"RA {ra_value // 15:02d}h",
+                    visibility_mask=grid_visibility,
+                    support_mask=grid.get("display_support_mask", grid["support_mask"]),
+                    maximum_gap_px=grid.get("display_grid_max_gap_px", 0.0),
                 )
         for dec_value in range(-80, 81, 10):
             if grid["dec_min"] <= dec_value <= grid["dec_max"]:
                 _draw_contour_lines(
                     grid_layer, grid["dec_contours"].lines(float(dec_value)), grid_color,
                     label=f"Dec {dec_value:+d}°",
+                    visibility_mask=grid_visibility,
+                    support_mask=grid.get("display_support_mask", grid["support_mask"]),
+                    maximum_gap_px=grid.get("display_grid_max_gap_px", 0.0),
                 )
     if draw_constellations and grid is not None:
         constellation_offset = (0.0, 0.0)
@@ -1633,14 +1934,21 @@ def annotate_frame(
                 detected_stars, metadata, wcs, delta_ra, grid["support_mask"],
                 width, height,
             )
+        constellation_support = (
+            grid.get("display_support_mask", grid["support_mask"])
+            if continuous_constellations or detected_endpoint_constellations
+            else grid["support_mask"]
+        )
         _draw_constellation_lines(
-            grid_layer, wcs, delta_ra, grid["support_mask"],
+            grid_layer, wcs, delta_ra, constellation_support,
             anchor_points=np.asarray(detected_stars, dtype=float) if verify_constellations else None,
             anchor_tolerance_px=float(metadata.get("constellation_anchor_tolerance_px", 5.0)),
             pixel_offset=constellation_offset,
+            allow_partial_segments=continuous_constellations,
+            edge_admission=constellation_edge_admission,
         )
     if grid is not None:
-        support = grid["support_mask"] > 0
+        support = (grid_visibility if grid_visibility is not None else grid["support_mask"]) > 0
         output[support] = grid_layer[support]
     if draw_detected_stars:
         marker_radius = max(4, round(min(width, height) * 0.0045))

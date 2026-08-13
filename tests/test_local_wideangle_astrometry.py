@@ -236,6 +236,150 @@ class LocalWideangleAstrometryTests(unittest.TestCase):
             self.assertIsNotNone(draw.call_args.kwargs["anchor_points"])
             align.assert_called_once()
 
+    def test_continuous_trajectory_constellations_do_not_depend_on_cloudy_frame_stars(self):
+        metadata = {
+            "reference_datetime": "2026-08-13T00:00:00",
+            "constellation_render_policy": "model-supported-continuous",
+            "constellation_anchor_filter": True,
+            "constellation_anchor_tolerance_px": 4.0,
+        }
+        strict = np.zeros((18, 32), dtype=np.uint8)
+        strict[:, 4:28] = 255
+        display = strict.copy()
+        display[:, 2:30] = 255
+        grid = {
+            "support_mask": strict,
+            "display_support_mask": display,
+        }
+        with mock.patch.object(local_astro, "_load_calibration", return_value=(metadata, object())), \
+             mock.patch.object(local_astro, "_forward_grid_model", return_value=grid), \
+             mock.patch.object(local_astro, "_extract_stars") as extract, \
+             mock.patch.object(local_astro, "_draw_constellation_lines") as draw:
+            local_astro.annotate_frame(
+                np.zeros((18, 32, 3), dtype=np.uint8),
+                datetime(2026, 8, 13, 0, 1),
+                draw_grid=False,
+                draw_constellations=True,
+            )
+        extract.assert_not_called()
+        self.assertIsNone(draw.call_args.kwargs["anchor_points"])
+        self.assertTrue(draw.call_args.kwargs["allow_partial_segments"])
+        self.assertIs(draw.call_args.args[3], display)
+
+    def test_detected_endpoint_policy_suppresses_lines_without_current_stars(self):
+        metadata = {
+            "reference_datetime": "2026-08-13T00:00:00",
+            "constellation_render_policy": "model-supported-detected-endpoints",
+            "constellation_anchor_tolerance_px": 6.0,
+        }
+        strict = np.zeros((18, 32), dtype=np.uint8)
+        strict[:, 4:28] = 255
+        display = strict.copy()
+        display[:, 2:30] = 255
+        grid = {"support_mask": strict, "display_support_mask": display}
+        with mock.patch.object(local_astro, "_load_calibration", return_value=(metadata, object())), \
+             mock.patch.object(local_astro, "_forward_grid_model", return_value=grid), \
+             mock.patch.object(local_astro, "_extract_stars", return_value=([], None, None)) as extract, \
+             mock.patch.object(local_astro, "_draw_constellation_lines") as draw:
+            local_astro.annotate_frame(
+                np.zeros((18, 32, 3), dtype=np.uint8),
+                datetime(2026, 8, 13, 0, 1),
+                draw_grid=False,
+                draw_constellations=True,
+            )
+        extract.assert_called_once()
+        self.assertEqual(len(draw.call_args.kwargs["anchor_points"]), 0)
+        self.assertFalse(draw.call_args.kwargs["allow_partial_segments"])
+        self.assertIs(draw.call_args.args[3], display)
+
+    def test_short_constellation_detection_gaps_are_bridged_only_when_bounded(self):
+        raw = np.asarray([
+            [True, False, False, True, False, False, False, False, True],
+            [True, False, False, False, False, False, False, False, True],
+        ], dtype=bool)
+        bridged = local_astro._bridge_boolean_gaps(raw, 2)
+        np.testing.assert_array_equal(
+            bridged[0],
+            [True, True, True, True, False, False, False, False, True],
+        )
+        np.testing.assert_array_equal(bridged[1], raw[1])
+
+    def test_temporally_held_constellation_edge_draws_without_current_anchors(self):
+        class ForwardOnlyFixedModel(local_astro.FixedCameraPlateModel):
+            def __init__(self):
+                pass
+
+            def world_to_pixel_values(self, ra, _dec):
+                wrapped = (np.asarray(ra, dtype=float) + 180.0) % 360.0 - 180.0
+                return wrapped * 10.0 + 10.0, np.full_like(wrapped, 90.0)
+
+            def pixel_to_world_values(self, x, _y):
+                return (np.asarray(x, dtype=float) - 10.0) / 10.0, np.full_like(
+                    np.asarray(x, dtype=float), 20.0
+                )
+
+        support = np.full((180, 320), 255, dtype=np.uint8)
+        line = (np.asarray([[0.0, 20.0], [5.0, 20.0]]),)
+        output = np.zeros((180, 320, 3), dtype=np.uint8)
+        with mock.patch.object(local_astro, "_constellation_lines", line):
+            local_astro._draw_constellation_lines(
+                output,
+                ForwardOnlyFixedModel(),
+                0.0,
+                support,
+                anchor_points=np.asarray([[999.0, 999.0]], dtype=float),
+                allow_partial_segments=False,
+                edge_admission=np.asarray([True], dtype=bool),
+            )
+        self.assertGreater(np.count_nonzero(output), 20)
+
+    def test_continuous_constellation_policy_draws_supported_partial_edge(self):
+        class ForwardOnlyFixedModel(local_astro.FixedCameraPlateModel):
+            def __init__(self):
+                pass
+
+            def world_to_pixel_values(self, ra, _dec):
+                wrapped = (np.asarray(ra, dtype=float) + 180.0) % 360.0 - 180.0
+                return wrapped * 10.0 + 10.0, np.full_like(wrapped, 90.0)
+
+            def pixel_to_world_values(self, x, _y):
+                return (np.asarray(x, dtype=float) - 10.0) / 10.0, np.full_like(
+                    np.asarray(x, dtype=float), 20.0
+                )
+
+        support = np.full((180, 320), 255, dtype=np.uint8)
+        line = (np.asarray([[-2.0, 20.0], [5.0, 20.0]]),)
+        strict_output = np.zeros((180, 320, 3), dtype=np.uint8)
+        partial_output = strict_output.copy()
+        with mock.patch.object(local_astro, "_constellation_lines", line):
+            local_astro._draw_constellation_lines(
+                strict_output, ForwardOnlyFixedModel(), 0.0, support,
+                allow_partial_segments=False,
+            )
+            local_astro._draw_constellation_lines(
+                partial_output, ForwardOnlyFixedModel(), 0.0, support,
+                allow_partial_segments=True,
+            )
+        self.assertEqual(np.count_nonzero(strict_output), 0)
+        self.assertGreater(np.count_nonzero(partial_output), 20)
+
+    def test_constellation_projection_rejects_wrong_fixed_model_inverse_branch(self):
+        class FoldedFixedModel(local_astro.FixedCameraPlateModel):
+            def __init__(self):
+                pass
+
+            def world_to_pixel_values(self, ra, dec):
+                return np.asarray(ra, dtype=float) * 2.0, np.asarray(dec, dtype=float) * 2.0
+
+            def pixel_to_world_values(self, x, y):
+                # The detector position belongs to a different sky branch.
+                return np.asarray(x, dtype=float) / 2.0 + 20.0, np.asarray(y, dtype=float) / 2.0
+
+        _x, _y, usable = local_astro._project_constellation_samples(
+            FoldedFixedModel(), np.asarray([10.0, 11.0]), np.asarray([20.0, 20.0])
+        )
+        self.assertFalse(np.any(usable))
+
     def test_detected_star_mode_draws_hollow_markers_from_frame_pixels(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -281,6 +425,40 @@ class LocalWideangleAstrometryTests(unittest.TestCase):
                     datetime(2026, 7, 10, 1, 0), str(metadata_path), draw_grid=False,
                 )
             grid_model.assert_not_called()
+
+    def test_display_grid_bridges_only_surrounded_internal_holes(self):
+        values = np.asarray([
+            [0, 0, 0, 0, 0],
+            [0, 1, 1, 1, 0],
+            [0, 1, 0, 1, 0],
+            [0, 1, 1, 1, 0],
+            [0, 0, 0, 0, 0],
+        ], dtype=np.uint8)
+        display = local_astro._bridge_support_grid_for_display(values)
+        self.assertEqual(int(display[2, 2]), 1)
+        # The display-only operation must not expand the outside boundary.
+        self.assertTrue(np.all(display[0] == 0))
+        self.assertTrue(np.all(display[:, 0] == 0))
+        self.assertEqual(int(values[2, 2]), 0)
+
+    def test_display_grid_bridges_only_short_bounded_polyline_gaps(self):
+        support = np.zeros((41, 81), dtype=np.uint8)
+        support[15:26, 5:31] = 255
+        support[15:26, 36:61] = 255
+        visibility = support.copy()
+        line = np.asarray([[5.0, 20.0], [60.0, 20.0]])
+        local_astro._add_short_polyline_bridges(
+            visibility, line, support, maximum_gap_px=10.0, thickness=3,
+        )
+        self.assertTrue(np.all(visibility[20, 31:36] > 0))
+        # A longer unsupported run remains hidden.
+        distant = np.zeros((41, 81), dtype=np.uint8)
+        distant[15:26, 5:21] = 255
+        distant[15:26, 40:61] = 255
+        local_astro._add_short_polyline_bridges(
+            distant, line, distant.copy(), maximum_gap_px=10.0, thickness=3,
+        )
+        self.assertTrue(np.all(distant[20, 21:40] == 0))
 
     def test_selected_video_frame_uses_distinct_cache_key_and_timestamp(self):
         class Capture:

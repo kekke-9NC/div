@@ -1,11 +1,61 @@
 from gui_common import *
 from camera_model_builder import CameraModelBuildRequest, build_camera_model
 from camera_model_monitor import RTSPCameraModelMonitor
+from camera_plate_model import MODEL_TYPE as FIXED_CAMERA_MODEL_TYPE
+from trajectory_camera_model import TrajectoryBuildRequest, build_trajectory_camera_model
 import camera_model_catalog
+
+
+def _usable_trajectory_seed(path: str) -> bool:
+    """Return whether path contains the fixed-camera parameters trajectories need."""
+    try:
+        payload = json.loads(Path(path).expanduser().read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return False
+    return bool(
+        payload.get("model_type") == FIXED_CAMERA_MODEL_TYPE
+        and payload.get("stg_parameters")
+        and payload.get("correction_coefficients") is not None
+        and payload.get("reference_datetime")
+    )
+
+
+def _build_camera_model_for_app(
+    request: CameraModelBuildRequest,
+    *,
+    use_trajectory: bool,
+    initial_model_path: str = "",
+    progress_callback=None,
+):
+    """Run the model path selected in the GUI, including seed creation."""
+    seed_path = initial_model_path if _usable_trajectory_seed(initial_model_path) else ""
+    if not use_trajectory:
+        return build_camera_model(request, progress_callback=progress_callback)
+    if not seed_path:
+        if progress_callback:
+            progress_callback("絶対座標の基準となる初期モデルを作成中...")
+        seed_result = build_camera_model(request, progress_callback=progress_callback)
+        if not seed_result.success or not seed_result.model_path:
+            return seed_result
+        seed_path = seed_result.model_path
+    if progress_callback:
+        progress_callback("動画内の恒星を追跡して投影モデルを学習中...")
+    return build_trajectory_camera_model(
+        TrajectoryBuildRequest(
+            source=request.source,
+            initial_model_path=seed_path,
+            start=request.start,
+            end=request.end,
+            cache_root=request.cache_root,
+        ),
+        progress_callback=progress_callback,
+    )
 
 
 class PlateSolveMixin:
     _AUTO_CAMERA_MODEL_LABEL = "自動選択（撮影日に合う補正データ）"
+    _TRAJECTORY_MODEL_METHOD = "動画の星の動き（推奨）"
+    _STATIC_MODEL_METHOD = "静止画プレートソルブ"
 
     def _refresh_plate_solve_model_choices(self):
         """Refresh the in-app camera-correction selector."""
@@ -308,7 +358,18 @@ class PlateSolveMixin:
             messagebox.showwarning("高精度モデル", str(exc), parent=self)
             return
         self.btn_build_camera_model.configure(state=tk.DISABLED)
-        self._set_camera_model_status("高精度モデル: 作成中...")
+        method = self.camera_model_method_var.get().strip()
+        use_trajectory = method != self._STATIC_MODEL_METHOD
+        current = dict(self.global_wcs_info or {})
+        initial_model_path = self.plate_solve_model_path_var.get().strip()
+        if not initial_model_path:
+            initial_model_path = str(
+                current.get("model_path") or current.get("calibration_path") or ""
+            ).strip()
+        if initial_model_path and not os.path.isfile(initial_model_path):
+            initial_model_path = ""
+        model_kind = "星の動きモデル" if use_trajectory else "静止画モデル"
+        self._set_camera_model_status(f"高精度モデル: {model_kind}を作成中...")
 
         def progress(message):
             self._set_camera_model_status(f"高精度モデル: {message}")
@@ -318,14 +379,21 @@ class PlateSolveMixin:
                 pass
 
         def worker():
-            result = build_camera_model(request, progress_callback=progress)
+            result = _build_camera_model_for_app(
+                request,
+                use_trajectory=use_trajectory,
+                initial_model_path=initial_model_path,
+                progress_callback=progress,
+            )
 
             def finished():
                 self.btn_build_camera_model.configure(state=tk.NORMAL)
                 if result.success and result.enabled:
+                    trajectory_count = int(getattr(result, "trajectory_count", 0) or 0)
+                    trajectory_text = f" / 恒星軌跡 {trajectory_count}本" if trajectory_count else ""
                     self.camera_model_status_var.set(
                         f"高精度モデル: 登録済み（被覆率 {result.support_fraction * 100:.0f}% / "
-                        f"p95 {result.residual_p95_px:.2f}px）"
+                        f"p95 {result.residual_p95_px:.2f}px{trajectory_text}）"
                     )
                     self.plate_solve_model_path_var.set(result.model_path)
                     self._refresh_plate_solve_model_choices()
@@ -346,7 +414,7 @@ class PlateSolveMixin:
                         "job_id": "local-wideangle-camera-model",
                     }
                     self.update_start_button_state()
-                    if result.target_met:
+                    if bool(getattr(result, "target_met", False)):
                         messagebox.showinfo("高精度モデル", "選択範囲から高精度カメラ補正データを作成し、登録しました。", parent=self)
                     else:
                         messagebox.showwarning(

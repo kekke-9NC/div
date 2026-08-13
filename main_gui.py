@@ -453,6 +453,7 @@ class App(
         self.camera_model_source_var = tk.StringVar()
         self.camera_model_start_var = tk.StringVar()
         self.camera_model_end_var = tk.StringVar()
+        self.camera_model_method_var = tk.StringVar(value="動画の星の動き（推奨）")
         self.camera_model_cloud_threshold_var = tk.StringVar(value="0.10")
         self.camera_model_interval_var = tk.StringVar(value="60")
         self.camera_model_cloud_filter_var = tk.BooleanVar(value=True)

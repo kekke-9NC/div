@@ -104,6 +104,12 @@ def _normalize_annotation_settings(annotation_settings: Optional[Dict]) -> Dict:
         reference_sample_index = max(0, int(settings.get("reference_sample_index", 0)))
     except (TypeError, ValueError):
         reference_sample_index = 0
+    try:
+        constellation_temporal_hold_frames = int(
+            settings.get("constellation_temporal_hold_frames", 3)
+        )
+    except (TypeError, ValueError):
+        constellation_temporal_hold_frames = 3
     return {
         "enabled": bool(
             settings.get(
@@ -122,6 +128,9 @@ def _normalize_annotation_settings(annotation_settings: Optional[Dict]) -> Dict:
         "draw_detected_stars": bool(settings.get("draw_detected_stars", False)),
         "reference_sample_index": reference_sample_index,
         "reference_selected": bool(settings.get("reference_selected", False)),
+        "constellation_temporal_hold_frames": max(
+            0, min(8, constellation_temporal_hold_frames)
+        ),
     }
 
 
@@ -210,6 +219,7 @@ def _apply_local_annotation(
     frame: np.ndarray,
     frame_datetime: datetime,
     annotation_settings: Dict,
+    constellation_edge_admission: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """Apply a local annotation callable and enforce the encoder frame shape."""
     original_height, original_width = frame.shape[:2]
@@ -220,6 +230,8 @@ def _apply_local_annotation(
         arguments["draw_constellations"] = True
     if annotation_settings.get("draw_detected_stars"):
         arguments["draw_detected_stars"] = True
+    if constellation_edge_admission is not None:
+        arguments["constellation_edge_admission"] = constellation_edge_admission
     result = annotator(frame, frame_datetime, **arguments)
     # Solvers may return ``(annotated_frame, calibration_info)`` so callers can
     # persist newly discovered calibration.  Timelapse output needs only frame 0.
@@ -251,6 +263,7 @@ def _annotate_and_overlay(
     mask: Optional[np.ndarray],
     timestamp_settings: Dict,
     fixed_pattern_correction: Optional[np.ndarray] = None,
+    constellation_edge_admission: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """Apply fixed-pattern correction, mask, annotation and timestamp."""
     if frame is None:
@@ -260,6 +273,7 @@ def _annotate_and_overlay(
         frame = cv2.bitwise_and(frame, frame, mask=mask)
     frame = _apply_local_annotation(
         annotator, frame, frame_timestamp, annotation_settings,
+        constellation_edge_admission,
     )
     if timestamp_settings["enabled"]:
         frame = _draw_timestamp(frame, frame_timestamp, timestamp_settings)
@@ -301,7 +315,11 @@ def _annotation_worker_init(
     }
 
 
-def _annotation_worker(frame: np.ndarray, frame_timestamp: datetime) -> np.ndarray:
+def _annotation_worker(
+    frame: np.ndarray,
+    frame_timestamp: datetime,
+    constellation_edge_admission: Optional[np.ndarray] = None,
+) -> np.ndarray:
     """Process-pool task; kept module-level so macOS spawn can pickle it."""
     return _annotate_and_overlay(
         frame,
@@ -311,6 +329,7 @@ def _annotation_worker(frame: np.ndarray, frame_timestamp: datetime) -> np.ndarr
         _annotation_worker_state["mask"],
         _annotation_worker_state["timestamp_settings"],
         _annotation_worker_state["fixed_pattern_correction"],
+        constellation_edge_admission,
     )
 
 
@@ -338,6 +357,7 @@ def _run_annotate_pipeline(
     ffmpeg_stdin,
     progress_callback: Optional[Callable],
     fixed_pattern_correction: Optional[np.ndarray] = None,
+    constellation_edge_admissions: Optional[Dict[int, np.ndarray]] = None,
 ) -> None:
     """Overlap sequential temporal means with bounded parallel annotation.
 
@@ -405,9 +425,10 @@ def _run_annotate_pipeline(
                 raise RuntimeError(
                     f"時間平均を作成できませんでした: フレーム {global_index}"
                 )
-            pending[global_index] = executor.submit(
-                _annotation_worker, mean_frame, loader.timestamp_for_index(global_index)
-            )
+            worker_args = [mean_frame, loader.timestamp_for_index(global_index)]
+            if constellation_edge_admissions is not None:
+                worker_args.append(constellation_edge_admissions.get(global_index))
+            pending[global_index] = executor.submit(_annotation_worker, *worker_args)
             if len(pending) >= max_in_flight:
                 drain_oldest()
         while pending:
@@ -1144,6 +1165,85 @@ class TemporalMeanFrameCache:
         self._valid_count = 0
         self._running_sum.fill(0)
         gc.collect()
+
+
+def _prepare_constellation_edge_admissions(
+    annotation_settings: Dict,
+    sample_indices: Sequence[int],
+    first_valid_idx: int,
+    first_mean_frame: Optional[np.ndarray],
+    temporal_mean_cache: TemporalMeanFrameCache,
+    loader: FrameLoader,
+    target_size: Tuple[int, int],
+    progress_callback: Optional[Callable],
+) -> Optional[Dict[int, np.ndarray]]:
+    """Build per-frame constellation gates with short detection gaps bridged."""
+    hold_frames = int(annotation_settings.get("constellation_temporal_hold_frames", 0))
+    calibration_path = annotation_settings.get("calibration_path")
+    if hold_frames <= 0 or not calibration_path:
+        return None
+    module = importlib.import_module("local_wideangle_astrometry")
+    metadata, wcs = module._load_calibration(calibration_path)
+    policy = str(metadata.get("constellation_render_policy", "") or "").strip().lower()
+    if policy != "model-supported-detected-endpoints":
+        return None
+    grid = module._forward_grid_model(wcs, metadata, *target_size)
+    if grid is None:
+        return None
+    support_mask = grid.get("display_support_mask", grid["support_mask"])
+    reference = datetime.fromisoformat(
+        str(metadata["reference_datetime"]).replace("Z", "+00:00")
+    )
+    selected_indices = list(sample_indices[first_valid_idx:])
+    if not selected_indices:
+        return None
+    raw_masks = []
+    for position, global_index in enumerate(selected_indices):
+        if position == 0 and first_mean_frame is not None:
+            mean_frame = first_mean_frame
+        else:
+            mean_frame = temporal_mean_cache.mean_for_index(global_index)
+        if mean_frame is None:
+            raise RuntimeError(
+                f"星座線の検出状態を作成できませんでした: フレーム {global_index}"
+            )
+        gray = cv2.cvtColor(mean_frame, cv2.COLOR_BGR2GRAY)
+        detected_stars, _diagnostic, _reference = module._extract_stars(
+            gray,
+            maximum_stars=1000,
+            exclude_lower_region=False,
+            build_diagnostic=False,
+        )
+        timestamp = loader.timestamp_for_index(global_index)
+        delta_ra = (
+            (timestamp - reference).total_seconds()
+            / module.SIDEREAL_DAY_SECONDS
+            * 360.0
+        )
+        raw_masks.append(
+            module._constellation_segment_detection_mask(
+                wcs,
+                delta_ra,
+                support_mask,
+                detected_stars,
+                anchor_tolerance_px=float(
+                    metadata.get("constellation_anchor_tolerance_px", 6.0)
+                ),
+            )
+        )
+        if progress_callback and (position == 0 or (position + 1) % 60 == 0):
+            _report_progress(
+                progress_callback,
+                f"星座線の短時間欠落を解析中: {position + 1}/{len(selected_indices)}フレーム",
+            )
+    if not raw_masks:
+        return None
+    raw = np.asarray(raw_masks, dtype=bool)
+    bridged = module._bridge_boolean_gaps(raw.T, hold_frames).T
+    return {
+        global_index: bridged[position].copy()
+        for position, global_index in enumerate(selected_indices)
+    }
 
 
 def load_frame_wrapper(args):
@@ -2160,6 +2260,43 @@ def create_timelapse(
     else:
         first_frame = mean_first_frame
 
+    constellation_edge_admissions = None
+    if local_annotator is not None and annotation_settings.get("draw_constellations"):
+        try:
+            constellation_edge_admissions = _prepare_constellation_edge_admissions(
+                annotation_settings,
+                sample_indices,
+                first_valid_idx,
+                mean_first_frame,
+                temporal_mean_cache,
+                loader,
+                target_size,
+                progress_callback,
+            )
+        except Exception as exc:
+            _report_progress(
+                progress_callback,
+                f"警告: 星座線の短時間欠落解析に失敗したため、通常の検出ゲートを使用します: {exc}",
+            )
+            constellation_edge_admissions = None
+        if constellation_edge_admissions is not None:
+            # The prepass consumes the rolling mean cache through the end of
+            # the night.  Rewind it before the actual rendering pass so the
+            # frame order and temporal means remain identical to the original
+            # output.  A bounded rolling cache is sufficient for this second
+            # pass and avoids retaining the complete source night in memory.
+            temporal_mean_cache.clear()
+            temporal_mean_cache._retain_all_frames = False
+            mean_first_frame = temporal_mean_cache.mean_for_index(
+                sample_indices[first_valid_idx]
+            )
+            if mean_first_frame is not None:
+                first_frame = mean_first_frame
+            _report_progress(
+                progress_callback,
+                f"星座線の短時間欠落を最大{annotation_settings['constellation_temporal_hold_frames']}フレーム補間します",
+            )
+
     # マスクをリサイズ（必要な場合）
     resized_mask = None
     if mask is not None:
@@ -2181,6 +2318,10 @@ def create_timelapse(
                 resized_mask,
                 timestamp_settings,
                 resized_fixed_pattern,
+                (
+                    constellation_edge_admissions.get(sample_indices[first_valid_idx])
+                    if constellation_edge_admissions is not None else None
+                ),
             )
         except Exception as exc:
             _report_progress(progress_callback, f"エラー: ローカル星空注釈に失敗しました: {exc}")
@@ -2277,6 +2418,7 @@ def create_timelapse(
                 proc.stdin,
                 progress_callback,
                 resized_fixed_pattern,
+                constellation_edge_admissions,
             )
         else:
             processed = 1

@@ -1016,6 +1016,9 @@ class TimelapseDragDropWindow(Toplevel):
             "draw_grid": self.timelapse_grid_var.get(),
             "draw_constellations": self.timelapse_constellations_var.get(),
             "draw_detected_stars": self.timelapse_detected_stars_var.get(),
+            # Keep only a short detection dropout bridged; longer cloudy
+            # intervals remain without constellation lines.
+            "constellation_temporal_hold_frames": 3,
             "reference_sample_index": self.timelapse_annotation_reference_sample_var.get(),
             "reference_selected": self.timelapse_annotation_reference_selected_var.get(),
         }
