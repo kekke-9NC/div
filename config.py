@@ -19,6 +19,7 @@ else:
 
 # Resolve model path relative to this file (portable/exe-friendly).
 _MODEL_CANDIDATES = [
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "meteor_fusion_universal_v2.pth"),
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "meteor_fusion_universal_v1.pth"),
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "model_epoch_47.pth"),
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "model_latest_1.pth"),
@@ -43,15 +44,17 @@ BORDER_SIZE = 30        # 画像処理時に無視する画像の端のピクセ
 MIN_LINE_LENGTH = 25    # 粗検出する直線の最小長（ピクセル）
 DEFAULT_FPS = 15        # 動画のFPSが取得できない場合のデフォルト値
 DUPLICATE_DETECTION_THRESHOLD = 100 # 重複検出とみなす距離(ピクセル)
+# Universal models carry a validated operating threshold in their metadata.
+# This remains the legacy fallback for older classifiers without calibration.
 METEOR_PROBABILITY_THRESHOLD = 0.5 # 流星と判定する確率閾値 (float)
 
 # --- 詳細検出関連 ---
 FINER_DETECT_WINDOW_SECONDS = 4.0 # 詳細検出用に取得する秒数 (float)
 FINER_COMPOSITE_STEP = 3          # 詳細検出時の比較明合成ステップ数（デフォルト値、FPSから動的計算される）
 FINER_DETECT_MIN_LENGTH = 15      # 詳細検出時の最小線長(ピクセル)
-# 流星の前後に残す余白。従来の 0.5 秒から 0.25 秒へ短縮し、
-# 実際の発光が短い流星で空白の方が長くならないようにする。
-FINER_DETECT_PADDING_SECONDS = 0.25 # 詳細検出で特定した範囲へのパディング秒数 (float)
+# 流星の前後に十分な余白を残す。短い発光の終端がクリップ外へ
+# 逃げないようにし、拡大表示でも途中で切れた印象にならないようにする。
+FINER_DETECT_PADDING_SECONDS = 1.0 # 詳細検出で特定した範囲へのパディング秒数 (float)
 FINER_CUTOUT_SIZE = 384           # 詳細検出時のカットアウトサイズ（線検出用、保存用CUTOUTとは別）
 # 詳細検出で、粗検出した流星候補と同じ軌跡とみなす許容値。
 # 雲の縁など、カットアウト内の無関係な線でクリップ時間が延びるのを防ぐ。

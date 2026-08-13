@@ -145,6 +145,50 @@ def _open_video_capture(source: str, decoder_threads: int = 2) -> cv2.VideoCaptu
     return cv2.VideoCapture(source)
 
 
+def _read_video_frame_range(
+    source: str,
+    start_frame: int,
+    end_frame: int,
+    decoder_threads: int = 2,
+) -> List[np.ndarray]:
+    """Read an inclusive frame range without disturbing the main stream.
+
+    The detector consumes a video sequentially while the finer stage needs to
+    inspect a small window around each coarse candidate.  Seeking the same
+    ``VideoCapture`` used by the sequential generator corrupts that stream's
+    position and silently skips later frames.  A short-lived sidecar capture
+    keeps both operations independent and makes file processing deterministic.
+    """
+    start = max(0, int(start_frame))
+    end = max(start - 1, int(end_frame))
+    if end < start:
+        return []
+
+    capture = _open_video_capture(source, decoder_threads)
+    if not capture.isOpened():
+        return []
+
+    frames: List[np.ndarray] = []
+    try:
+        capture.set(cv2.CAP_PROP_POS_FRAMES, start)
+        target_count = end - start + 1
+        read_count = 0
+        max_read_attempts = target_count + 2 * max(1, int(capture.get(cv2.CAP_PROP_FPS) or config.DEFAULT_FPS))
+        while len(frames) < target_count and read_count < max_read_attempts:
+            ret, frame = capture.read()
+            if not ret:
+                break
+            read_count += 1
+            current = int(capture.get(cv2.CAP_PROP_POS_FRAMES)) - 1
+            if start <= current <= end:
+                frames.append(frame)
+            elif current > end:
+                break
+    finally:
+        capture.release()
+    return frames
+
+
 _FULL_VIDEO_TIMESTAMP_POSITIONS = {
     "右下": "bottom_right",
     "左下": "bottom_left",
@@ -922,30 +966,14 @@ def create_line_video_clips(
                             print(f"RTSPバッファから詳細検出用フレームを取得: {len(frames_for_finer_detect)} フレーム")
                         else:
                             # 動画ファイルから取得
-                            if not cap.isOpened():
-                                cap = _open_video_capture(analysis_source, decoder_threads)
-                                if not cap.isOpened():
-                                    print(f"エラー: 動画を再オープンできませんでした: {source}")
-                                    continue
-                        
                             print(f"動画ファイルから詳細検出用フレームを取得: {start_frame_finer} - {end_frame_finer}")
-                            if not cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame_finer):
-                                print(f"警告: フレーム {start_frame_finer} へのシークに失敗した可能性があります。")
-                        
-                            target_frame_count = end_frame_finer - start_frame_finer + 1
-                            read_count = 0
-                            max_read_attempts = target_frame_count + int(frame_rate)
-                        
-                            while len(frames_for_finer_detect) < target_frame_count and read_count < max_read_attempts:
-                                if cancel_flag is not None and cancel_flag.is_set(): break
-                                ret, frame = cap.read()
-                                if not ret: break
-                                read_count += 1
-                                current_f_idx = int(cap.get(cv2.CAP_PROP_POS_FRAMES)) - 1
-                                if start_frame_finer <= current_f_idx <= end_frame_finer:
-                                    frames_for_finer_detect.append(frame)
-                                elif current_f_idx > end_frame_finer: break
-                        
+                            frames_for_finer_detect = _read_video_frame_range(
+                                analysis_source,
+                                start_frame_finer,
+                                end_frame_finer,
+                                decoder_threads,
+                            )
+
                             print(f"動画ファイルから {len(frames_for_finer_detect)} フレームを取得")
                     
                         if not frames_for_finer_detect:
@@ -1081,28 +1109,13 @@ def create_line_video_clips(
                                     final_frames_for_clip = list(rtsp_buffer)[rel_start_final : rel_end_final + 1]
                                     print(f"RTSPバッファから最終クリップフレームを取得: {actual_start_final} - {actual_end_final}, {len(final_frames_for_clip)} フレーム")
                                 else:
-                                    if not cap.isOpened():
-                                        cap = _open_video_capture(analysis_source, decoder_threads)
-                                        if not cap.isOpened():
-                                            continue
-                                
                                     print(f"動画ファイルから最終クリップフレームを取得: {adjusted_start_frame} - {adjusted_end_frame}")
-                                    if not cap.set(cv2.CAP_PROP_POS_FRAMES, adjusted_start_frame):
-                                        print(f"警告: フレーム {adjusted_start_frame} へのシークに失敗した可能性があります。")
-                                
-                                    read_count = 0
-                                    target_frame_indices = list(range(adjusted_start_frame, adjusted_end_frame + 1))
-                                    max_read_attempts = len(target_frame_indices) + int(frame_rate)
-                                
-                                    while len(final_frames_for_clip) < len(target_frame_indices) and read_count < max_read_attempts:
-                                        if cancel_flag is not None and cancel_flag.is_set(): break
-                                        ret, frame = cap.read()
-                                        if not ret: break
-                                        read_count += 1
-                                        current_f_idx = int(cap.get(cv2.CAP_PROP_POS_FRAMES)) - 1
-                                        if adjusted_start_frame <= current_f_idx <= adjusted_end_frame:
-                                            final_frames_for_clip.append(frame)
-                                        elif current_f_idx > adjusted_end_frame: break
+                                    final_frames_for_clip = _read_video_frame_range(
+                                        analysis_source,
+                                        adjusted_start_frame,
+                                        adjusted_end_frame,
+                                        decoder_threads,
+                                    )
                             
                                 if not final_frames_for_clip:
                                     print("警告: 最終クリップ用のフレームを取得できませんでした。スキップします。")
@@ -1518,31 +1531,13 @@ def create_line_video_clips(
                         print(f"RTSPバッファから詳細検出用フレームを取得: {actual_start_finer} - {actual_end_finer}, {len(frames_for_finer_detect)} フレーム")
 
                     else:
-                        if not cap.isOpened():
-                            print("動画キャプチャが閉じています。再オープンします。")
-                            cap = _open_video_capture(analysis_source, decoder_threads)
-                            if not cap.isOpened():
-                                print(f"エラー: 動画を再オープンできませんでした: {source}")
-                                continue
-                            last_read_frame_index_by_diff = -1
-
                         print(f"動画ファイルから詳細検出用フレームを取得: {start_frame_finer} - {end_frame_finer}")
-                        if not cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame_finer):
-                            print(f"警告: フレーム {start_frame_finer} へのシークに失敗した可能性があります。")
-
-                        read_count = 0
-                        target_frame_indices = list(range(start_frame_finer, end_frame_finer + 1))
-                        max_read_attempts = len(target_frame_indices) + int(frame_rate)
-
-                        while len(frames_for_finer_detect) < len(target_frame_indices) and read_count < max_read_attempts:
-                            if cancel_flag is not None and cancel_flag.is_set(): break
-                            ret, frame = cap.read()
-                            if not ret: break
-                            read_count += 1
-                            current_f_idx = int(cap.get(cv2.CAP_PROP_POS_FRAMES)) - 1
-                            if start_frame_finer <= current_f_idx <= end_frame_finer:
-                                frames_for_finer_detect.append(frame)
-                            elif current_f_idx > end_frame_finer: break
+                        frames_for_finer_detect = _read_video_frame_range(
+                            analysis_source,
+                            start_frame_finer,
+                            end_frame_finer,
+                            decoder_threads,
+                        )
 
                     if not frames_for_finer_detect:
                         print("警告: 詳細検出用のフレームを取得できませんでした。スキップします。")
@@ -1691,29 +1686,13 @@ def create_line_video_clips(
                         print(f"RTSPバッファから最終クリップフレームを取得: {actual_start_final} - {actual_end_final}, {len(final_frames_for_clip)} フレーム")
 
                     else:
-                        if not cap.isOpened():
-                            print("動画キャプチャが閉じています。再オープンします。")
-                            cap = _open_video_capture(analysis_source, decoder_threads)
-                            if not cap.isOpened(): continue
-                            last_read_frame_index_by_diff = -1
-
                         print(f"動画ファイルから最終クリップフレームを取得: {adjusted_start_frame} - {adjusted_end_frame}")
-                        if not cap.set(cv2.CAP_PROP_POS_FRAMES, adjusted_start_frame):
-                            print(f"警告: フレーム {adjusted_start_frame} へのシークに失敗した可能性があります。")
-
-                        read_count = 0
-                        target_frame_indices = list(range(adjusted_start_frame, adjusted_end_frame + 1))
-                        max_read_attempts = len(target_frame_indices) + int(frame_rate)
-
-                        while len(final_frames_for_clip) < len(target_frame_indices) and read_count < max_read_attempts:
-                            if cancel_flag is not None and cancel_flag.is_set(): break
-                            ret, frame = cap.read()
-                            if not ret: break
-                            read_count += 1
-                            current_f_idx = int(cap.get(cv2.CAP_PROP_POS_FRAMES)) - 1
-                            if adjusted_start_frame <= current_f_idx <= adjusted_end_frame:
-                                final_frames_for_clip.append(frame)
-                            elif current_f_idx > adjusted_end_frame: break
+                        final_frames_for_clip = _read_video_frame_range(
+                            analysis_source,
+                            adjusted_start_frame,
+                            adjusted_end_frame,
+                            decoder_threads,
+                        )
 
                     if not final_frames_for_clip:
                         print("警告: 最終クリップ用のフレームを取得できませんでした。スキップします。")

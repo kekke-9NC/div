@@ -98,6 +98,21 @@ class RuntimeStabilityTests(unittest.TestCase):
             [video_processing.cv2.CAP_PROP_N_THREADS, 2],
         )
 
+    def test_frame_range_reader_uses_a_sidecar_capture(self):
+        frame_a = np.zeros((4, 4, 3), dtype=np.uint8)
+        frame_b = np.full((4, 4, 3), 7, dtype=np.uint8)
+        capture = mock.Mock()
+        capture.isOpened.return_value = True
+        capture.get.side_effect = [25.0, 11.0, 12.0]
+        capture.read.side_effect = [(True, frame_a), (True, frame_b)]
+
+        with mock.patch.object(video_processing, "_open_video_capture", return_value=capture):
+            frames = video_processing._read_video_frame_range("sample.mp4", 10, 11)
+
+        self.assertEqual(len(frames), 2)
+        capture.set.assert_called_once_with(video_processing.cv2.CAP_PROP_POS_FRAMES, 10)
+        capture.release.assert_called_once()
+
     def test_status_callback_uses_queue_without_calling_tk(self):
         panel = object.__new__(status_panel.StatusPanel)
         panel.progress_queue = queue.Queue()
