@@ -127,10 +127,13 @@ def create_diff_images(
     is_rtsp: bool = False,
     cancel_flag: Optional[threading.Event] = None,
     evidence_cap: Optional[cv2.VideoCapture] = None,
+    include_frame_window: bool = False,
 ) -> Generator[
         Union[
             Tuple[np.ndarray, Tuple[int, int], np.ndarray, np.ndarray],
-            Tuple[np.ndarray, Tuple[int, int], np.ndarray, np.ndarray, Deque[np.ndarray], int]
+            Tuple[np.ndarray, Tuple[int, int], np.ndarray, np.ndarray, Deque[np.ndarray], int],
+            Tuple[np.ndarray, Tuple[int, int], np.ndarray, np.ndarray, List[np.ndarray]],
+            Tuple[np.ndarray, Tuple[int, int], np.ndarray, np.ndarray, Deque[np.ndarray], int, List[np.ndarray]],
         ], None, None]:
     """
     動画からフレームを読み込み、比較明合成と最小値画像の差分画像を生成するジェネレータ。
@@ -216,10 +219,24 @@ def create_diff_images(
             start_idx = max(0, end_idx - len(frames_for_diff) + 1)
             frame_indices = (start_idx, end_idx)
 
+            frame_window = list(frames_for_diff) if include_frame_window else None
             if is_rtsp and buffer_frames is not None:
-                 yield diff_image, frame_indices, brightness_composite_image, min_val_image, buffer_frames.copy(), frame_index
+                if frame_window is not None:
+                    yield (
+                        diff_image,
+                        frame_indices,
+                        brightness_composite_image,
+                        min_val_image,
+                        buffer_frames.copy(),
+                        frame_index,
+                        frame_window,
+                    )
+                else:
+                    yield diff_image, frame_indices, brightness_composite_image, min_val_image, buffer_frames.copy(), frame_index
+            elif frame_window is not None:
+                yield diff_image, frame_indices, brightness_composite_image, min_val_image, frame_window
             else:
-                 yield diff_image, frame_indices, brightness_composite_image, min_val_image
+                yield diff_image, frame_indices, brightness_composite_image, min_val_image
 
         frame_index += 1
 

@@ -56,6 +56,15 @@ FINER_DETECT_MIN_LENGTH = 15      # 詳細検出時の最小線長(ピクセル)
 # 逃げないようにし、拡大表示でも途中で切れた印象にならないようにする。
 FINER_DETECT_PADDING_SECONDS = 1.0 # 詳細検出で特定した範囲へのパディング秒数 (float)
 FINER_CUTOUT_SIZE = 384           # 詳細検出時のカットアウトサイズ（線検出用、保存用CUTOUTとは別）
+
+# --- Hough非依存の移動点候補検出 ---
+# 短時間・点状の流星を、線分化ではなくフレーム間の位置追跡で候補化する。
+MOVING_POINT_DETECT_ENABLED = True
+MOVING_POINT_SCALE = 0.5
+MOVING_POINT_RESIDUAL_THRESHOLD = 12.0
+MOVING_POINT_MAX_GAP = 1
+MOVING_POINT_MAX_STEP = 14.0
+MOVING_POINT_MAX_CANDIDATES = 20
 # 詳細検出で、粗検出した流星候補と同じ軌跡とみなす許容値。
 # 雲の縁など、カットアウト内の無関係な線でクリップ時間が延びるのを防ぐ。
 FINER_LINE_MATCH_DISTANCE = 70    # 粗検出線分からの最大距離 (px)

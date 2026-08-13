@@ -16,6 +16,7 @@ from multiprocessing import cpu_count
 
 import config
 import image_processing
+import moving_point_detector
 import model
 import astrometry
 import tracking
@@ -67,6 +68,28 @@ def _motion_world_coordinates(
     except Exception as exc:
         print(f"運動方向のWCS変換に失敗しました: {exc}")
         return values
+
+
+def _deduplicate_candidate_lines(
+    lines: List[Tuple[Tuple[int, int], Tuple[int, int]]],
+) -> List[Tuple[Tuple[int, int], Tuple[int, int]]]:
+    """Collapse Hough and moving-point lines describing the same event."""
+    unique = []
+    for line in lines:
+        (x1, y1), (x2, y2) = line
+        center_x = (int(x1) + int(x2)) / 2.0
+        center_y = (int(y1) + int(y2)) / 2.0
+        if any(
+            math.hypot(
+                center_x - (int(other[0][0]) + int(other[1][0])) / 2.0,
+                center_y - (int(other[0][1]) + int(other[1][1])) / 2.0,
+            )
+            < config.DUPLICATE_DETECTION_THRESHOLD
+            for other in unique
+        ):
+            continue
+        unique.append(line)
+    return unique
 
 
 def _write_motion_info(
@@ -850,6 +873,7 @@ def create_line_video_clips(
         diff_generator = image_processing.create_diff_images(
             cap, interval, duration, 1.0, buffer_duration, is_rtsp, cancel_flag,
             evidence_cap=evidence_cap,
+            include_frame_window=True,
         )
 
         last_read_frame_index_by_diff = -1
@@ -861,9 +885,23 @@ def create_line_video_clips(
                     break
 
                 if is_rtsp:
-                    diff_img, frame_idx_tuple, brightness_composite, median_image, rtsp_buffer, current_frame_index = diff_data
+                    (
+                        diff_img,
+                        frame_idx_tuple,
+                        brightness_composite,
+                        median_image,
+                        rtsp_buffer,
+                        current_frame_index,
+                        frame_window,
+                    ) = diff_data
                 else:
-                    diff_img, frame_idx_tuple, brightness_composite, median_image = diff_data
+                    (
+                        diff_img,
+                        frame_idx_tuple,
+                        brightness_composite,
+                        median_image,
+                        frame_window,
+                    ) = diff_data
                     rtsp_buffer = None
                     current_frame_index = frame_idx_tuple[1]
                     last_read_frame_index_by_diff = max(last_read_frame_index_by_diff, current_frame_index)
@@ -891,6 +929,46 @@ def create_line_video_clips(
                     canny_thresh1=effective_canny_thresh1, canny_thresh2=effective_canny_thresh2,
                     hough_threshold=effective_hough_threshold
                 )
+
+                # Hough detects a spatial line in a composite image.  A short
+                # point-like meteor can instead be identified by a coherent
+                # displacement across the original frame window.  Keep both
+                # candidate families and let the existing finer stage and
+                # classifier make the final decision.
+                if (
+                    config.MOVING_POINT_DETECT_ENABLED
+                    and use_rtsp_params
+                    and frame_window
+                ):
+                    moving_frames = frame_window
+                    if mask is not None:
+                        moving_frames = []
+                        for frame in frame_window:
+                            try:
+                                resized_mask = cv2.resize(
+                                    mask, (frame.shape[1], frame.shape[0])
+                                ).astype(np.uint8)
+                                moving_frames.append(
+                                    cv2.bitwise_and(frame, frame, mask=resized_mask)
+                                )
+                            except cv2.error:
+                                moving_frames.append(frame)
+                    moving_tracks = moving_point_detector.detect_moving_point_tracks(
+                        moving_frames,
+                        frame_rate=frame_rate,
+                        scale=config.MOVING_POINT_SCALE,
+                        threshold=config.MOVING_POINT_RESIDUAL_THRESHOLD,
+                        max_gap=config.MOVING_POINT_MAX_GAP,
+                        max_step=config.MOVING_POINT_MAX_STEP,
+                        max_candidates=config.MOVING_POINT_MAX_CANDIDATES,
+                    )
+                    # Prefer the temporally tracked geometry when both
+                    # detectors describe the same event.  The finer stage
+                    # crops around this line, so retaining Hough's first line
+                    # can make a real event look like a weak classifier input.
+                    lines = [track.line for track in moving_tracks] + lines
+
+                lines = _deduplicate_candidate_lines(lines)
 
                 if not lines:
                     continue
