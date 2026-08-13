@@ -56,6 +56,9 @@ FINER_DETECT_MIN_LENGTH = 15      # 詳細検出時の最小線長(ピクセル)
 # 逃げないようにし、拡大表示でも途中で切れた印象にならないようにする。
 FINER_DETECT_PADDING_SECONDS = 1.0 # 詳細検出で特定した範囲へのパディング秒数 (float)
 FINER_CUTOUT_SIZE = 384           # 詳細検出時のカットアウトサイズ（線検出用、保存用CUTOUTとは別）
+# Universal event classification uses a focused activity window.  The full
+# padded clip remains available for evidence and saved artifacts.
+MODEL_EVENT_PADDING_SECONDS = 0.5
 
 # --- Hough非依存の移動点候補検出 ---
 # 短時間・点状の流星を、線分化ではなくフレーム間の位置追跡で候補化する。

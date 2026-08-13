@@ -92,6 +92,31 @@ def _deduplicate_candidate_lines(
     return unique
 
 
+def _select_model_event_frames(
+    frames: List[np.ndarray],
+    clip_start_frame: int,
+    detection_start_frame: int,
+    detection_end_frame: int,
+    frame_rate: float,
+) -> List[np.ndarray]:
+    """Keep the classifier focused on the detected luminous activity."""
+    if not frames:
+        return frames
+    if model.get_active_model_info().get("architecture") != model.UNIVERSAL_ARCHITECTURE_NAME:
+        return frames
+    padding = max(0, int(round(config.MODEL_EVENT_PADDING_SECONDS * frame_rate)))
+    start = max(clip_start_frame, detection_start_frame - padding)
+    end = min(
+        clip_start_frame + len(frames) - 1,
+        detection_end_frame + padding,
+    )
+    relative_start = max(0, start - clip_start_frame)
+    relative_end = min(len(frames) - 1, end - clip_start_frame)
+    if relative_start > relative_end:
+        return frames
+    return frames[relative_start : relative_end + 1]
+
+
 def _write_motion_info(
     handle,
     estimate: meteor_direction.MotionEstimate,
@@ -1215,7 +1240,13 @@ def create_line_video_clips(
                                 # the enhanced difference below is strictly for saved artifacts.
                                 classification_diff_img = diff_img
                                 saved_diff_img = diff_img
-                                ml_source_frames = final_frames_for_clip
+                                ml_source_frames = _select_model_event_frames(
+                                    final_frames_for_clip,
+                                    adjusted_start_frame,
+                                    detection_start_frame,
+                                    detection_end_frame,
+                                    frame_rate,
+                                )
                                 enhancement_result: Optional[video_enhancement.EnhancementResult] = None
                                 if active_fixed_pattern_correction is not None:
                                     enhancement_result = video_enhancement.enhance_frames(
@@ -1791,7 +1822,13 @@ def create_line_video_clips(
                     # max/min difference when OFF, innovation when NoiseTwin is ON.
                     classification_diff_img = diff_img
                     saved_diff_img = diff_img
-                    ml_source_frames = final_frames_for_clip
+                    ml_source_frames = _select_model_event_frames(
+                        final_frames_for_clip,
+                        adjusted_start_frame,
+                        detection_start_frame,
+                        detection_end_frame,
+                        frame_rate,
+                    )
                     enhancement_result: Optional[video_enhancement.EnhancementResult] = None
                     if active_fixed_pattern_correction is not None:
                         enhancement_result = video_enhancement.enhance_frames(

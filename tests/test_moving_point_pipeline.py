@@ -61,6 +61,24 @@ class MovingPointPipelineTests(unittest.TestCase):
         )
         self.assertEqual(unique, [moving_line])
 
+    def test_universal_classifier_gets_focused_activity_window(self):
+        frames = [np.full((2, 2), index, dtype=np.uint8) for index in range(60)]
+        with mock.patch.object(
+            video_processing.model,
+            "get_active_model_info",
+            return_value={"architecture": video_processing.model.UNIVERSAL_ARCHITECTURE_NAME},
+        ):
+            selected = video_processing._select_model_event_frames(
+                frames,
+                clip_start_frame=677,
+                detection_start_frame=701,
+                detection_end_frame=711,
+                frame_rate=25.0,
+            )
+        self.assertEqual(len(selected), 35)
+        self.assertEqual(int(selected[0][0, 0]), 12)
+        self.assertEqual(int(selected[-1][0, 0]), 46)
+
 
 if __name__ == "__main__":
     unittest.main()
