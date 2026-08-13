@@ -227,6 +227,23 @@ def get_active_model_info() -> Dict:
     return dict(_active_model_info)
 
 
+def get_meteor_decision_threshold() -> float:
+    """Return the calibrated threshold for the active classifier.
+
+    Universal event models store an operating threshold selected for their
+    validation recall target.  Older image-only models do not have that
+    calibration and continue to use the GUI/configuration threshold.
+    """
+    fallback = float(getattr(config, "METEOR_PROBABILITY_THRESHOLD", 0.5))
+    if _active_model_info.get("architecture") != UNIVERSAL_ARCHITECTURE_NAME:
+        return fallback
+    try:
+        threshold = float(_active_model_info.get("decision_threshold", fallback))
+    except (TypeError, ValueError):
+        return fallback
+    return min(1.0, max(0.0, threshold))
+
+
 def predict_meteor_probability(image_path: str) -> float:
     global model, transform
     # MPS command submission and the mutable global model are deliberately

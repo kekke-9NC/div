@@ -172,6 +172,23 @@ class RuntimeStabilityTests(unittest.TestCase):
         self.assertEqual(max_active, 1)
         self.assertEqual(batch_sizes, [3] * 6)
 
+    def test_universal_model_uses_its_calibrated_decision_threshold(self):
+        with mock.patch.multiple(
+            model,
+            _active_model_info={
+                "architecture": model.UNIVERSAL_ARCHITECTURE_NAME,
+                "decision_threshold": 0.0568,
+            },
+        ):
+            self.assertAlmostEqual(model.get_meteor_decision_threshold(), 0.0568)
+
+    def test_legacy_model_keeps_configured_decision_threshold(self):
+        with mock.patch.multiple(
+            model,
+            _active_model_info={"architecture": "complex_cnn_v1"},
+        ), mock.patch.object(model.config, "METEOR_PROBABILITY_THRESHOLD", 0.5):
+            self.assertEqual(model.get_meteor_decision_threshold(), 0.5)
+
 
 if __name__ == "__main__":
     unittest.main()

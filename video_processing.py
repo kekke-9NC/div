@@ -1326,7 +1326,7 @@ def create_line_video_clips(
                                 except OSError as e: print(f"警告: 一時差分ファイルの削除に失敗: {e}")
                                 print(f"流星確率: {probability:.4f}")
                             
-                                is_meteor = probability >= config.METEOR_PROBABILITY_THRESHOLD
+                                is_meteor = probability >= model.get_meteor_decision_threshold()
                                 save_dir = meteor_save_path if is_meteor else not_meteor_save_path
                                 detection_label = "meteor" if is_meteor else "not_meteor"
                                 os.makedirs(save_dir, exist_ok=True)
@@ -1561,7 +1561,7 @@ def create_line_video_clips(
                                     progress_callback((f"検出 {detection_counter}: {detection_label} (Prob: {probability:.2f}) @ {display_timestamp}", None))
                                 
                                     try:
-                                        threshold = float(getattr(__import__('config'), 'METEOR_PROBABILITY_THRESHOLD', 0.5))
+                                        threshold = model.get_meteor_decision_threshold()
                                     except Exception:
                                         threshold = 0.5
                                 
@@ -1909,7 +1909,7 @@ def create_line_video_clips(
                     except OSError as e: print(f"警告: 一時差分ファイルの削除に失敗: {e}")
                     print(f"流星確率: {probability:.4f}")
 
-                    is_meteor = probability >= config.METEOR_PROBABILITY_THRESHOLD
+                    is_meteor = probability >= model.get_meteor_decision_threshold()
                     save_dir = meteor_save_path if is_meteor else not_meteor_save_path
                     detection_label = "meteor" if is_meteor else "not_meteor"
                     os.makedirs(save_dir, exist_ok=True)
@@ -2146,7 +2146,7 @@ def create_line_video_clips(
                         # If probability is below the configured meteor threshold, emit a concise
                         # Not Meteor summary line instead of listing all saved files.
                         try:
-                            threshold = float(getattr(__import__('config'), 'METEOR_PROBABILITY_THRESHOLD', 0.5))
+                            threshold = model.get_meteor_decision_threshold()
                         except Exception:
                             threshold = 0.5
 
