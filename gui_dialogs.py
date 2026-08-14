@@ -4,7 +4,9 @@ import camera_model_catalog
 
 
 class _SegmentedChoice(tk.Frame):
-    """Compact, keyboard-friendly choice buttons with a clear selected state."""
+    """High-contrast segmented buttons with an explicit selected state."""
+
+    _STYLE_READY = False
 
     def __init__(self, parent, variable, choices, command=None):
         super().__init__(
@@ -18,27 +20,88 @@ class _SegmentedChoice(tk.Frame):
         self.variable = variable
         self.command = command
         self._choices = list(choices)
+        self._labels = {value: label for label, value in self._choices}
         self._buttons = {}
         self._enabled = True
-        family = "SF Pro Text" if sys.platform == "darwin" else "Segoe UI"
+        self._configure_styles()
+        # Let the containing section control the width.  Without this, ttk
+        # calculates the frame from the longest label and the six FPS choices
+        # can push the last button outside the dialog on smaller displays.
+        self.configure(
+            width=1,
+            height=52 if any("\n" in label for label, _value in self._choices) else 42,
+        )
+        self.pack_propagate(False)
         for label, value in self._choices:
-            button = tk.Button(
+            button = ttk.Button(
                 self,
                 text=label,
                 command=lambda selected=value: self._select(selected),
-                relief=tk.FLAT,
-                bd=0,
-                highlightthickness=0,
-                padx=12,
-                pady=7,
-                cursor="hand2",
-                font=(family, 11, "bold"),
+                style="TimelapseSegment.TButton",
                 takefocus=True,
             )
             button.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
             self._buttons[value] = button
         self.variable.trace_add("write", lambda *_args: self.refresh())
         self.refresh()
+
+    def _configure_styles(self):
+        if self._STYLE_READY:
+            return
+        style = ttk.Style(self)
+        colors = ui_theme.COLORS
+        family = "SF Pro Text" if sys.platform == "darwin" else "Segoe UI"
+        common = {
+            "borderwidth": 1,
+            "relief": tk.FLAT,
+            "padding": (5, 8),
+            "anchor": tk.CENTER,
+            "font": (family, 10, "bold"),
+        }
+        style.configure(
+            "TimelapseSegment.TButton",
+            background=colors["glass"],
+            foreground=colors["text_secondary"],
+            bordercolor=colors["border"],
+            lightcolor=colors["border"],
+            darkcolor=colors["border"],
+            **common,
+        )
+        style.map(
+            "TimelapseSegment.TButton",
+            background=[
+                ("pressed", colors["glass_selected"]),
+                ("active", colors["glass_hover"]),
+            ],
+            foreground=[("active", colors["text"])],
+        )
+        style.configure(
+            "TimelapseSegmentSelected.TButton",
+            background=colors["accent_pressed"],
+            foreground=colors["text"],
+            bordercolor=colors["accent"],
+            lightcolor=colors["accent"],
+            darkcolor=colors["accent_pressed"],
+            **common,
+        )
+        style.map(
+            "TimelapseSegmentSelected.TButton",
+            background=[
+                ("pressed", colors["accent_pressed"]),
+                ("active", colors["accent_hover"]),
+            ],
+            foreground=[("active", "#07101E")],
+        )
+        style.configure(
+            "TimelapseSegmentDisabled.TButton",
+            background=colors["glass_strong"],
+            foreground=colors["text_tertiary"],
+            bordercolor=colors["border"],
+            lightcolor=colors["border"],
+            darkcolor=colors["border"],
+            **common,
+        )
+        self._STYLE_READY = True
 
     def _select(self, value):
         if not self._enabled:
@@ -49,17 +112,19 @@ class _SegmentedChoice(tk.Frame):
         self.refresh()
 
     def set_label(self, value, label):
-        button = self._buttons.get(value)
-        if button is not None:
-            button.configure(text=label)
+        if value in self._labels:
+            self._labels[value] = label
+            self.refresh()
 
     def set_enabled(self, enabled):
         self._enabled = bool(enabled)
-        self.configure(bg=ui_theme.COLORS["border"] if self._enabled else ui_theme.COLORS["glass_strong"])
+        self.configure(
+            bg=ui_theme.COLORS["border"]
+            if self._enabled else ui_theme.COLORS["glass_strong"]
+        )
         for button in self._buttons.values():
             button.configure(
                 state=tk.NORMAL if self._enabled else tk.DISABLED,
-                cursor="hand2" if self._enabled else "arrow",
             )
         self.refresh()
 
@@ -69,21 +134,15 @@ class _SegmentedChoice(tk.Frame):
         for value, button in self._buttons.items():
             selected = str(value) == str(selected_value)
             if not self._enabled:
-                background = colors["glass_strong"]
-                foreground = colors["text_tertiary"]
+                style = "TimelapseSegmentDisabled.TButton"
+                text = self._labels[value]
             elif selected:
-                background = colors["accent_pressed"]
-                foreground = colors["text"]
+                style = "TimelapseSegmentSelected.TButton"
+                text = f"✓ {self._labels[value]}"
             else:
-                background = colors["glass"]
-                foreground = colors["text_secondary"]
-            button.configure(
-                bg=background,
-                fg=foreground,
-                activebackground=colors["accent_hover"] if selected else colors["glass_hover"],
-                activeforeground=colors["text"],
-                disabledforeground=colors["text_tertiary"],
-            )
+                style = "TimelapseSegment.TButton"
+                text = self._labels[value]
+            button.configure(style=style, text=text)
 
 
 class TimelapseDragDropWindow(Toplevel):
@@ -96,12 +155,17 @@ class TimelapseDragDropWindow(Toplevel):
         self.dropped_paths = []
         self.timelapse_mask = None  # タイムラプス用マスク
         self.timelapse_mode_var = tk.StringVar(value="standard")
+        self.timelapse_mode_selection_summary_var = tk.StringVar(
+            value="選択中: 通常タイムラプス"
+        )
         self.duration_var = tk.StringVar(value="30")
         self.duration_custom_seconds = None
         self._last_duration_choice = "30"
+        self.duration_selection_summary_var = tk.StringVar(value="選択中: 30秒")
         self.output_fps_var = tk.StringVar(value="60")
         self.output_fps_custom = None
         self._last_output_fps_choice = "60"
+        self.output_fps_selection_summary_var = tk.StringVar(value="選択中: 60 fps")
         self.trail_window_seconds_var = tk.StringVar(value="2.0")
         self.trail_decay_var = tk.StringVar(value="0.985")
         self.timelapse_timestamp_enabled_var = tk.BooleanVar(
@@ -184,6 +248,7 @@ class TimelapseDragDropWindow(Toplevel):
             padding=(18, 16, 18, 22),
             style="Content.TFrame",
         )
+        self.timelapse_main_frame = main_frame
         self._timelapse_scroll_window = self.timelapse_scroll_canvas.create_window(
             (0, 0), window=main_frame, anchor=tk.NW
         )
@@ -249,7 +314,9 @@ class TimelapseDragDropWindow(Toplevel):
         ttk.Label(
             duration_frame,
             text="出力する動画の長さを選択してください。カスタムでは小数秒も指定できます。",
-            foreground="gray",
+            foreground=ui_theme.COLORS["text_secondary"],
+            wraplength=520,
+            justify=tk.LEFT,
         ).pack(anchor=tk.W, pady=(0, 7))
         duration_options = ttk.Frame(duration_frame)
         duration_options.pack(fill=tk.X)
@@ -260,13 +327,21 @@ class TimelapseDragDropWindow(Toplevel):
             command=self._on_duration_choice,
         )
         self.duration_selector.pack(fill=tk.X)
+        ttk.Label(
+            duration_frame,
+            textvariable=self.duration_selection_summary_var,
+            foreground=ui_theme.COLORS["cyan"],
+            font=("SF Pro Text" if sys.platform == "darwin" else "Segoe UI", 10, "bold"),
+        ).pack(anchor=tk.W, pady=(7, 0))
 
         fps_frame = ttk.LabelFrame(main_frame, text="出力FPS", padding=10)
         fps_frame.pack(fill=tk.X, pady=(0, 10))
         ttk.Label(
             fps_frame,
             text="1秒あたりのフレーム数です。高いほど動きは滑らかですが、ファイル容量が増えます。",
-            foreground="gray",
+            foreground=ui_theme.COLORS["text_secondary"],
+            wraplength=520,
+            justify=tk.LEFT,
         ).pack(anchor=tk.W, pady=(0, 7))
         fps_options = ttk.Frame(fps_frame)
         fps_options.pack(fill=tk.X)
@@ -286,8 +361,14 @@ class TimelapseDragDropWindow(Toplevel):
         self.output_fps_selector.pack(fill=tk.X)
         ttk.Label(
             fps_frame,
+            textvariable=self.output_fps_selection_summary_var,
+            foreground=ui_theme.COLORS["cyan"],
+            font=("SF Pro Text" if sys.platform == "darwin" else "Segoe UI", 10, "bold"),
+        ).pack(anchor=tk.W, pady=(7, 0))
+        ttk.Label(
+            fps_frame,
             text="標準動画は60fps、RTSP素材に合わせる場合は25fpsが目安です。",
-            foreground="gray",
+            foreground=ui_theme.COLORS["text_secondary"],
         ).pack(anchor=tk.W, pady=(6, 0))
 
         mode_frame = ttk.LabelFrame(main_frame, text="タイムラプス方式", padding=10)
@@ -298,17 +379,23 @@ class TimelapseDragDropWindow(Toplevel):
             mode_options,
             self.timelapse_mode_var,
             (
-                ("通常タイムラプス（サンプリング）", "standard"),
-                ("流星トレイル（比較明合成＋残像）", "meteor_trail"),
+                ("通常タイムラプス", "standard"),
+                ("流星トレイル", "meteor_trail"),
             ),
             command=lambda _value: self._toggle_timelapse_mode(),
         )
         self.timelapse_mode_selector.pack(fill=tk.X)
+        ttk.Label(
+            mode_frame,
+            textvariable=self.timelapse_mode_selection_summary_var,
+            foreground=ui_theme.COLORS["cyan"],
+            font=("SF Pro Text" if sys.platform == "darwin" else "Segoe UI", 10, "bold"),
+        ).pack(anchor=tk.W, pady=(7, 0))
         self.timelapse_mode_hint_var = tk.StringVar()
         ttk.Label(
             mode_frame,
             textvariable=self.timelapse_mode_hint_var,
-            foreground="gray",
+            foreground=ui_theme.COLORS["text_secondary"],
             wraplength=520,
             justify=tk.LEFT,
         ).pack(anchor=tk.W, pady=(7, 0))
@@ -316,8 +403,8 @@ class TimelapseDragDropWindow(Toplevel):
         self.trail_mode_settings.pack(fill=tk.X, pady=(6, 0))
         ttk.Label(
             self.trail_mode_settings,
-            text="入力の何秒分を1フレームに合成:",
-        ).pack(side=tk.LEFT)
+            text="合成時間窓:",
+        ).grid(row=0, column=0, sticky=tk.W)
         self.trail_window_spin = ttk.Spinbox(
             self.trail_mode_settings,
             from_=0.5,
@@ -326,14 +413,14 @@ class TimelapseDragDropWindow(Toplevel):
             textvariable=self.trail_window_seconds_var,
             width=6,
         )
-        self.trail_window_spin.pack(side=tk.LEFT, padx=(6, 4))
+        self.trail_window_spin.grid(row=0, column=1, padx=(6, 3), sticky=tk.W)
         ttk.Label(
             self.trail_mode_settings,
-            text="秒（2秒なら約50倍速。流星を残しやすい設定）",
-            foreground="gray",
-        ).pack(side=tk.LEFT)
-        ttk.Label(self.trail_mode_settings, text="  星の残像:").pack(
-            side=tk.LEFT, padx=(12, 0)
+            text="秒",
+            foreground=ui_theme.COLORS["text_secondary"],
+        ).grid(row=0, column=2, sticky=tk.W)
+        ttk.Label(self.trail_mode_settings, text="残像の長さ:").grid(
+            row=0, column=3, sticky=tk.W, padx=(16, 0)
         )
         self.trail_decay_spin = ttk.Spinbox(
             self.trail_mode_settings,
@@ -343,12 +430,15 @@ class TimelapseDragDropWindow(Toplevel):
             textvariable=self.trail_decay_var,
             width=7,
         )
-        self.trail_decay_spin.pack(side=tk.LEFT, padx=(6, 4))
+        self.trail_decay_spin.grid(row=0, column=4, padx=(6, 3), sticky=tk.W)
         ttk.Label(
             self.trail_mode_settings,
-            text="（0.985で長い星の軌跡）",
-            foreground="gray",
-        ).pack(side=tk.LEFT)
+            text="2秒なら約50倍速。値を大きくすると星の軌跡が長く残ります。",
+            foreground=ui_theme.COLORS["text_secondary"],
+            wraplength=520,
+            justify=tk.LEFT,
+        ).grid(row=1, column=0, columnspan=5, sticky=tk.W, pady=(5, 0))
+        self.trail_mode_settings.columnconfigure(5, weight=1)
         self._toggle_timelapse_mode()
         
         mask_frame = ttk.LabelFrame(main_frame, text="マスク設定", padding=10)
@@ -634,9 +724,15 @@ class TimelapseDragDropWindow(Toplevel):
             self.timelapse_scroll_canvas.configure(scrollregion=region)
 
     def _resize_timelapse_scroll_content(self, event):
+        width = max(1, event.width)
         self.timelapse_scroll_canvas.itemconfigure(
-            self._timelapse_scroll_window, width=max(1, event.width)
+            self._timelapse_scroll_window, width=width
         )
+        # Canvas window items otherwise keep the widest child request.  Keep
+        # the content inside the visible dialog so segmented choices and
+        # long labels wrap instead of creating a clipped horizontal layout.
+        if hasattr(self, "timelapse_main_frame"):
+            self.timelapse_main_frame.configure(width=width)
         self.after_idle(self._update_timelapse_scroll_region)
 
     def _bind_timelapse_scroll_widgets(self, widget):
@@ -826,9 +922,28 @@ class TimelapseDragDropWindow(Toplevel):
             return f"{int(value)}{suffix}"
         return f"{value:g}{suffix}"
 
+    def _update_duration_selection_summary(self):
+        if self.duration_var.get() == "custom" and self.duration_custom_seconds is not None:
+            value = self._format_choice_number(self.duration_custom_seconds, "秒")
+        elif self.duration_var.get() == "custom":
+            value = "カスタム値を入力してください"
+        else:
+            value = self._format_choice_number(self.duration_var.get(), "秒")
+        self.duration_selection_summary_var.set(f"選択中: {value}")
+
+    def _update_output_fps_selection_summary(self):
+        if self.output_fps_var.get() == "custom" and self.output_fps_custom is not None:
+            value = self._format_choice_number(self.output_fps_custom, " fps")
+        elif self.output_fps_var.get() == "custom":
+            value = "カスタム値を入力してください"
+        else:
+            value = self._format_choice_number(self.output_fps_var.get(), " fps")
+        self.output_fps_selection_summary_var.set(f"選択中: {value}")
+
     def _on_duration_choice(self, value):
         if value != "custom":
             self._last_duration_choice = value
+            self._update_duration_selection_summary()
             return
         initial = self.duration_custom_seconds
         if initial is None:
@@ -843,17 +958,17 @@ class TimelapseDragDropWindow(Toplevel):
         )
         if custom_value is None:
             self.duration_var.set(self._last_duration_choice)
+            self._update_duration_selection_summary()
             return
         self.duration_custom_seconds = float(custom_value)
         self._last_duration_choice = "custom"
-        self.duration_selector.set_label(
-            "custom",
-            f"カスタム（{self._format_choice_number(custom_value, '秒')}）",
-        )
+        # Keep the button compact; the exact custom value is shown below it.
+        self._update_duration_selection_summary()
 
     def _on_output_fps_choice(self, value):
         if value != "custom":
             self._last_output_fps_choice = value
+            self._update_output_fps_selection_summary()
             return
         initial = self.output_fps_custom
         if initial is None:
@@ -868,13 +983,12 @@ class TimelapseDragDropWindow(Toplevel):
         )
         if custom_value is None:
             self.output_fps_var.set(self._last_output_fps_choice)
+            self._update_output_fps_selection_summary()
             return
         self.output_fps_custom = float(custom_value)
         self._last_output_fps_choice = "custom"
-        self.output_fps_selector.set_label(
-            "custom",
-            f"カスタム（{self._format_choice_number(custom_value, ' fps')}）",
-        )
+        # Keep the button compact; the exact custom value is shown below it.
+        self._update_output_fps_selection_summary()
 
     def _selected_duration_seconds(self):
         if self.duration_var.get() == "custom":
@@ -1399,6 +1513,12 @@ class TimelapseDragDropWindow(Toplevel):
         trail_state = "normal" if trail_enabled else "disabled"
         if hasattr(self, "duration_selector"):
             self.duration_selector.set_enabled(not trail_enabled)
+        if hasattr(self, "timelapse_mode_selection_summary_var"):
+            self.timelapse_mode_selection_summary_var.set(
+                "選択中: 流星トレイル（比較明合成＋残像）"
+                if trail_enabled
+                else "選択中: 通常タイムラプス（サンプリング）"
+            )
         if hasattr(self, "timelapse_mode_hint_var"):
             self.timelapse_mode_hint_var.set(
                 "入力動画から一定間隔で代表フレームを選びます。短い流星は写らない場合があります。"
