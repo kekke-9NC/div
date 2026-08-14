@@ -3,6 +3,89 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import camera_model_catalog
 
 
+class _SegmentedChoice(tk.Frame):
+    """Compact, keyboard-friendly choice buttons with a clear selected state."""
+
+    def __init__(self, parent, variable, choices, command=None):
+        super().__init__(
+            parent,
+            bg=ui_theme.COLORS["border"],
+            bd=0,
+            highlightthickness=0,
+            padx=1,
+            pady=1,
+        )
+        self.variable = variable
+        self.command = command
+        self._choices = list(choices)
+        self._buttons = {}
+        self._enabled = True
+        family = "SF Pro Text" if sys.platform == "darwin" else "Segoe UI"
+        for label, value in self._choices:
+            button = tk.Button(
+                self,
+                text=label,
+                command=lambda selected=value: self._select(selected),
+                relief=tk.FLAT,
+                bd=0,
+                highlightthickness=0,
+                padx=12,
+                pady=7,
+                cursor="hand2",
+                font=(family, 11, "bold"),
+                takefocus=True,
+            )
+            button.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+            self._buttons[value] = button
+        self.variable.trace_add("write", lambda *_args: self.refresh())
+        self.refresh()
+
+    def _select(self, value):
+        if not self._enabled:
+            return
+        self.variable.set(value)
+        if self.command is not None:
+            self.command(value)
+        self.refresh()
+
+    def set_label(self, value, label):
+        button = self._buttons.get(value)
+        if button is not None:
+            button.configure(text=label)
+
+    def set_enabled(self, enabled):
+        self._enabled = bool(enabled)
+        self.configure(bg=ui_theme.COLORS["border"] if self._enabled else ui_theme.COLORS["glass_strong"])
+        for button in self._buttons.values():
+            button.configure(
+                state=tk.NORMAL if self._enabled else tk.DISABLED,
+                cursor="hand2" if self._enabled else "arrow",
+            )
+        self.refresh()
+
+    def refresh(self):
+        selected_value = self.variable.get()
+        colors = ui_theme.COLORS
+        for value, button in self._buttons.items():
+            selected = str(value) == str(selected_value)
+            if not self._enabled:
+                background = colors["glass_strong"]
+                foreground = colors["text_tertiary"]
+            elif selected:
+                background = colors["accent_pressed"]
+                foreground = colors["text"]
+            else:
+                background = colors["glass"]
+                foreground = colors["text_secondary"]
+            button.configure(
+                bg=background,
+                fg=foreground,
+                activebackground=colors["accent_hover"] if selected else colors["glass_hover"],
+                activeforeground=colors["text"],
+                disabledforeground=colors["text_tertiary"],
+            )
+
+
 class TimelapseDragDropWindow(Toplevel):
     """タイムラプス作成用のドラッグ＆ドロップウィンドウ"""
     
@@ -13,6 +96,12 @@ class TimelapseDragDropWindow(Toplevel):
         self.dropped_paths = []
         self.timelapse_mask = None  # タイムラプス用マスク
         self.timelapse_mode_var = tk.StringVar(value="standard")
+        self.duration_var = tk.StringVar(value="30")
+        self.duration_custom_seconds = None
+        self._last_duration_choice = "30"
+        self.output_fps_var = tk.StringVar(value="60")
+        self.output_fps_custom = None
+        self._last_output_fps_choice = "60"
         self.trail_window_seconds_var = tk.StringVar(value="2.0")
         self.trail_decay_var = tk.StringVar(value="0.985")
         self.timelapse_timestamp_enabled_var = tk.BooleanVar(
@@ -157,36 +246,72 @@ class TimelapseDragDropWindow(Toplevel):
         
         duration_frame = ttk.LabelFrame(main_frame, text="動画の長さ", padding=10)
         duration_frame.pack(fill=tk.X, pady=(0, 10))
-        
-        self.duration_var = tk.IntVar(value=30)
-        
+        ttk.Label(
+            duration_frame,
+            text="出力する動画の長さを選択してください。カスタムでは小数秒も指定できます。",
+            foreground="gray",
+        ).pack(anchor=tk.W, pady=(0, 7))
         duration_options = ttk.Frame(duration_frame)
-        duration_options.pack()
+        duration_options.pack(fill=tk.X)
+        self.duration_selector = _SegmentedChoice(
+            duration_options,
+            self.duration_var,
+            (("15秒", "15"), ("30秒", "30"), ("60秒", "60"), ("カスタム…", "custom")),
+            command=self._on_duration_choice,
+        )
+        self.duration_selector.pack(fill=tk.X)
 
-        self.duration_buttons = []
-        for label, value in (("15秒", 15), ("30秒", 30), ("60秒", 60)):
-            button = ttk.Radiobutton(
-                duration_options, text=label, variable=self.duration_var, value=value
-            )
-            button.pack(side=tk.LEFT, padx=15)
-            self.duration_buttons.append(button)
+        fps_frame = ttk.LabelFrame(main_frame, text="出力FPS", padding=10)
+        fps_frame.pack(fill=tk.X, pady=(0, 10))
+        ttk.Label(
+            fps_frame,
+            text="1秒あたりのフレーム数です。高いほど動きは滑らかですが、ファイル容量が増えます。",
+            foreground="gray",
+        ).pack(anchor=tk.W, pady=(0, 7))
+        fps_options = ttk.Frame(fps_frame)
+        fps_options.pack(fill=tk.X)
+        self.output_fps_selector = _SegmentedChoice(
+            fps_options,
+            self.output_fps_var,
+            (
+                ("15 fps", "15"),
+                ("24 fps", "24"),
+                ("25 fps", "25"),
+                ("30 fps", "30"),
+                ("60 fps", "60"),
+                ("カスタム…", "custom"),
+            ),
+            command=self._on_output_fps_choice,
+        )
+        self.output_fps_selector.pack(fill=tk.X)
+        ttk.Label(
+            fps_frame,
+            text="標準動画は60fps、RTSP素材に合わせる場合は25fpsが目安です。",
+            foreground="gray",
+        ).pack(anchor=tk.W, pady=(6, 0))
 
         mode_frame = ttk.LabelFrame(main_frame, text="タイムラプス方式", padding=10)
         mode_frame.pack(fill=tk.X, pady=(0, 10))
-        ttk.Radiobutton(
+        mode_options = ttk.Frame(mode_frame)
+        mode_options.pack(fill=tk.X)
+        self.timelapse_mode_selector = _SegmentedChoice(
+            mode_options,
+            self.timelapse_mode_var,
+            (
+                ("通常タイムラプス（サンプリング）", "standard"),
+                ("流星トレイル（比較明合成＋残像）", "meteor_trail"),
+            ),
+            command=lambda _value: self._toggle_timelapse_mode(),
+        )
+        self.timelapse_mode_selector.pack(fill=tk.X)
+        self.timelapse_mode_hint_var = tk.StringVar()
+        ttk.Label(
             mode_frame,
-            text="通常タイムラプス（サンプリング）",
-            variable=self.timelapse_mode_var,
-            value="standard",
-            command=self._toggle_timelapse_mode,
-        ).pack(anchor=tk.W)
-        ttk.Radiobutton(
-            mode_frame,
-            text="流星トレイル（比較明合成＋残像）",
-            variable=self.timelapse_mode_var,
-            value="meteor_trail",
-            command=self._toggle_timelapse_mode,
-        ).pack(anchor=tk.W, pady=(4, 0))
+            textvariable=self.timelapse_mode_hint_var,
+            foreground="gray",
+            wraplength=520,
+            justify=tk.LEFT,
+        ).pack(anchor=tk.W, pady=(7, 0))
         self.trail_mode_settings = ttk.Frame(mode_frame)
         self.trail_mode_settings.pack(fill=tk.X, pady=(6, 0))
         ttk.Label(
@@ -694,6 +819,73 @@ class TimelapseDragDropWindow(Toplevel):
         if path:
             self.timelapse_annotation_calibration_var.set(path)
 
+    @staticmethod
+    def _format_choice_number(value, suffix=""):
+        value = float(value)
+        if value.is_integer():
+            return f"{int(value)}{suffix}"
+        return f"{value:g}{suffix}"
+
+    def _on_duration_choice(self, value):
+        if value != "custom":
+            self._last_duration_choice = value
+            return
+        initial = self.duration_custom_seconds
+        if initial is None:
+            initial = float(self._last_duration_choice)
+        custom_value = simpledialog.askfloat(
+            "動画の長さを指定",
+            "作成する動画の長さを秒で入力してください。\n（0.5〜86400秒）",
+            parent=self,
+            initialvalue=initial,
+            minvalue=0.5,
+            maxvalue=86400.0,
+        )
+        if custom_value is None:
+            self.duration_var.set(self._last_duration_choice)
+            return
+        self.duration_custom_seconds = float(custom_value)
+        self._last_duration_choice = "custom"
+        self.duration_selector.set_label(
+            "custom",
+            f"カスタム（{self._format_choice_number(custom_value, '秒')}）",
+        )
+
+    def _on_output_fps_choice(self, value):
+        if value != "custom":
+            self._last_output_fps_choice = value
+            return
+        initial = self.output_fps_custom
+        if initial is None:
+            initial = float(self._last_output_fps_choice)
+        custom_value = simpledialog.askfloat(
+            "出力FPSを指定",
+            "出力FPSを入力してください。\n（1〜240 fps）",
+            parent=self,
+            initialvalue=initial,
+            minvalue=1.0,
+            maxvalue=240.0,
+        )
+        if custom_value is None:
+            self.output_fps_var.set(self._last_output_fps_choice)
+            return
+        self.output_fps_custom = float(custom_value)
+        self._last_output_fps_choice = "custom"
+        self.output_fps_selector.set_label(
+            "custom",
+            f"カスタム（{self._format_choice_number(custom_value, ' fps')}）",
+        )
+
+    def _selected_duration_seconds(self):
+        if self.duration_var.get() == "custom":
+            return float(self.duration_custom_seconds)
+        return float(self.duration_var.get())
+
+    def _selected_output_fps(self):
+        if self.output_fps_var.get() == "custom":
+            return float(self.output_fps_custom)
+        return float(self.output_fps_var.get())
+
     def _timelapse_reference_samples(self):
         """Return the exact global frames that will be emitted by the timelapse."""
         images = []
@@ -706,7 +898,11 @@ class TimelapseDragDropWindow(Toplevel):
         total, sources = timelapse_creator.count_total_frames(images, videos)
         if total <= 0:
             return None
-        samples = timelapse_creator.calculate_sample_indices(total, self.duration_var.get())
+        samples = timelapse_creator.calculate_sample_indices(
+            total,
+            self._selected_duration_seconds(),
+            self._selected_output_fps(),
+        )
         loader = timelapse_creator.FrameLoader(sources)
         target_size = None
         for global_index in samples:
@@ -1060,7 +1256,16 @@ class TimelapseDragDropWindow(Toplevel):
         except Exception:
             pass
         
-        duration = self.duration_var.get()
+        try:
+            duration = self._selected_duration_seconds()
+            output_fps = self._selected_output_fps()
+        except (TypeError, ValueError):
+            messagebox.showerror(
+                "出力設定",
+                "動画の長さとFPSを確認してください。",
+                parent=self,
+            )
+            return
         paths = list(self.dropped_paths)
         timelapse_mode = self.timelapse_mode_var.get()
         mask = self.timelapse_mask  # マスクを保存
@@ -1124,8 +1329,14 @@ class TimelapseDragDropWindow(Toplevel):
         fixed_pattern_status = (
             "あり" if fixed_pattern_correction is not None else "なし"
         )
+        duration_text = (
+            f"入力時間窓で決定（{self._format_choice_number(duration, '秒')}）"
+            if timelapse_mode == "meteor_trail"
+            else self._format_choice_number(duration, "秒")
+        )
         self.log_callback(
-            f"タイムラプス作成を開始します... (長さ: {duration}秒, "
+            f"タイムラプス作成を開始します... (長さ: {duration_text}, "
+            f"出力: {self._format_choice_number(output_fps, ' fps')}, "
             f"{len(paths)}個のアイテム, マスク: {mask_status}, "
             f"固定パターン補正: {fixed_pattern_status}, 星空注釈: {annotation_status})"
         )
@@ -1148,6 +1359,7 @@ class TimelapseDragDropWindow(Toplevel):
                     output_path,
                     settings=meteor_trail_timelapse.TrailTimelapseSettings(
                         source_seconds_per_output_frame=trail_window_seconds,
+                        output_fps=output_fps,
                         trail_decay=trail_decay,
                         timestamp_enabled=timestamp_settings["enabled"],
                         timestamp_position=timestamp_settings["position"],
@@ -1168,6 +1380,7 @@ class TimelapseDragDropWindow(Toplevel):
                     annotation_settings=annotation_settings,
                     meteor_insert_settings=meteor_insert_settings,
                     fixed_pattern_correction=fixed_pattern_correction,
+                    output_fps=output_fps,
                 )
 
         task_runner = getattr(self.parent, "_run_synthesis_task_async", None)
@@ -1183,10 +1396,15 @@ class TimelapseDragDropWindow(Toplevel):
     def _toggle_timelapse_mode(self):
         """Enable only the controls used by the selected timelapse mode."""
         trail_enabled = self.timelapse_mode_var.get() == "meteor_trail"
-        duration_state = "disabled" if trail_enabled else "normal"
         trail_state = "normal" if trail_enabled else "disabled"
-        for button in getattr(self, "duration_buttons", []):
-            button.configure(state=duration_state)
+        if hasattr(self, "duration_selector"):
+            self.duration_selector.set_enabled(not trail_enabled)
+        if hasattr(self, "timelapse_mode_hint_var"):
+            self.timelapse_mode_hint_var.set(
+                "入力動画から一定間隔で代表フレームを選びます。短い流星は写らない場合があります。"
+                if not trail_enabled
+                else "入力の明るい部分を時間方向に重ね、星や流星の軌跡を残します。雲も残像になるため、出力FPSと残像設定を確認してください。"
+            )
         if hasattr(self, "trail_window_spin"):
             self.trail_window_spin.configure(state=trail_state)
         if hasattr(self, "trail_decay_spin"):

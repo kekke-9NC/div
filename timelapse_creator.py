@@ -533,6 +533,8 @@ VIDEO_EXTENSIONS = {'.mp4', '.avi', '.mov', '.mkv', '.wmv', '.m4v'}
 
 # 出力動画のFPS
 OUTPUT_FPS = 60
+MIN_OUTPUT_FPS = 1.0
+MAX_OUTPUT_FPS = 240.0
 
 # RTSP録画セグメントでは、同じ入力レートでもコンテナに記録される平均FPSに
 # 0.001程度の丸め差が生じる。concat可否ではその差を同一レートとして扱う。
@@ -803,9 +805,29 @@ def count_total_frames(
     return total_frames, sources
 
 
-def calculate_sample_indices(total_frames: int, target_duration_seconds: int) -> List[int]:
+def _normalize_output_fps(output_fps: Optional[float] = None) -> float:
+    """Return a safe output rate while keeping the legacy module default."""
+    try:
+        value = OUTPUT_FPS if output_fps is None else float(output_fps)
+    except (TypeError, ValueError):
+        value = float(OUTPUT_FPS)
+    if not MIN_OUTPUT_FPS <= value <= MAX_OUTPUT_FPS:
+        raise ValueError(
+            f"output_fps must be between {MIN_OUTPUT_FPS:g} and {MAX_OUTPUT_FPS:g}"
+        )
+    return value
+
+
+def calculate_sample_indices(
+    total_frames: int,
+    target_duration_seconds: float,
+    output_fps: Optional[float] = None,
+) -> List[int]:
     """サンプリングするフレームのインデックスを計算する。"""
-    target_frame_count = target_duration_seconds * OUTPUT_FPS
+    output_fps = _normalize_output_fps(output_fps)
+    target_frame_count = max(
+        1, int(round(float(target_duration_seconds) * output_fps))
+    )
 
     if total_frames <= target_frame_count:
         return list(range(total_frames))
@@ -1363,10 +1385,12 @@ def _insert_meteor_clips(
     base_frame_count: int,
     progress_callback: Optional[Callable[[str], None]] = None,
     annotation_settings: Optional[Dict] = None,
+    output_fps: Optional[float] = None,
 ) -> bool:
     """Insert marked full-size meteor clips into an already rendered timelapse."""
     if not events:
         return True
+    output_fps = _normalize_output_fps(output_fps)
     width, height = target_size
     prepared_events = [dict(event) for event in events]
     annotated_temporary_paths: List[str] = []
@@ -1392,7 +1416,7 @@ def _insert_meteor_clips(
                 return False
             event["clip_path"] = annotated_path
             annotated_temporary_paths.append(annotated_path)
-    total_seconds = base_frame_count / OUTPUT_FPS
+    total_seconds = base_frame_count / output_fps
     command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", output_path]
     for event in prepared_events:
         command.extend(["-i", event["clip_path"]])
@@ -1401,7 +1425,7 @@ def _insert_meteor_clips(
     concat_labels = []
     cursor = 0.0
     for event_index, event in enumerate(prepared_events):
-        position = max(cursor, min(total_seconds, event["output_frame"] / OUTPUT_FPS))
+        position = max(cursor, min(total_seconds, event["output_frame"] / output_fps))
         if position > cursor + 1e-6:
             label = f"base{event_index}"
             graph.append(
@@ -1421,7 +1445,7 @@ def _insert_meteor_clips(
             f"[{event_index + 1}:v]drawbox=x={left}:y={top}:w={box_width}:h={box_height}:"
             f"color=yellow@0.5:t={marker_thickness},"
             f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
-            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black,fps={OUTPUT_FPS},"
+            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black,fps={output_fps:g},"
             f"setsar=1,setpts=PTS-STARTPTS,format=yuv420p[{meteor_label}]"
         )
         concat_labels.append(f"[{meteor_label}]")
@@ -1568,8 +1592,10 @@ def _create_timestamp_overlay_video(
     target_size: Tuple[int, int],
     settings: Dict,
     output_path: str,
+    output_fps: Optional[float] = None,
 ) -> Optional[Tuple[int, int]]:
     """Create a tiny alpha video so timestamping stays inside FFmpeg's pipeline."""
+    output_fps = _normalize_output_fps(output_fps)
     width, height = target_size
     font = cv2.FONT_HERSHEY_SIMPLEX
     desired_height = max(12, int(round(height * settings["size_percent"] / 100.0)))
@@ -1600,7 +1626,7 @@ def _create_timestamp_overlay_video(
         "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
         "-f", "rawvideo", "-pix_fmt", "bgra",
         "-s", f"{overlay_width}x{overlay_height}",
-        "-r", str(OUTPUT_FPS), "-i", "-", "-an",
+        "-r", str(output_fps), "-i", "-", "-an",
         "-c:v", "qtrle", "-pix_fmt", "argb", output_path,
     ]
     try:
@@ -1650,8 +1676,10 @@ def _build_fast_filter_graph(
     mask_input_index: Optional[int],
     source_label: str = "0:v",
     fixed_pattern_inputs: Optional[Tuple[int, int]] = None,
+    output_fps: Optional[float] = None,
 ) -> Optional[str]:
     """Build a centered temporal mean with fixed-size endpoint padding."""
+    output_fps = _normalize_output_fps(output_fps)
     output_count = len(sample_indices)
     if output_count <= 0:
         return None
@@ -1660,7 +1688,7 @@ def _build_fast_filter_graph(
     if radius <= 0:
         filters.append(
             f"[{source_label}]select=gte(n\\,floor(selected_n*{total_frames}/{output_count})),"
-            f"setpts=N/({OUTPUT_FPS}*TB)[sampled]"
+            f"setpts=N/({output_fps:g}*TB)[sampled]"
         )
     else:
         # Forward tmix covers the beginning and middle. At the end, reverse
@@ -1678,7 +1706,7 @@ def _build_fast_filter_graph(
         )
         if not tail_samples:
             filters.append(
-                f"[{source_label}]{forward_filter},setpts=N/({OUTPUT_FPS}*TB)[sampled]"
+                f"[{source_label}]{forward_filter},setpts=N/({output_fps:g}*TB)[sampled]"
             )
         else:
             reverse_positions = [
@@ -1701,7 +1729,7 @@ def _build_fast_filter_graph(
                 ),
                 (
                     f"[mean_main][mean_end]concat=n=2:v=1:a=0,"
-                    f"setpts=N/({OUTPUT_FPS}*TB)[sampled]"
+                    f"setpts=N/({output_fps:g}*TB)[sampled]"
                 ),
             ])
 
@@ -1727,7 +1755,7 @@ def _build_fast_filter_graph(
     if mask_input_index is not None:
         filters.extend([
             f"[{mask_input_index}:v]format=gray[mask_gray]",
-            f"color=c=black:s={width}x{height}:r={OUTPUT_FPS}[black]",
+            f"color=c=black:s={width}x{height}:r={output_fps:g}[black]",
             f"[black][{current}][mask_gray]maskedmerge[masked]",
         ])
         current = "masked"
@@ -1738,7 +1766,7 @@ def _build_fast_filter_graph(
             "shortest=1[stamped]"
         )
         current = "stamped"
-    filters.append(f"[{current}]format=yuv420p,setpts=N/({OUTPUT_FPS}*TB)[out]")
+    filters.append(f"[{current}]format=yuv420p,setpts=N/({output_fps:g}*TB)[out]")
     return ";".join(filters)
 
 
@@ -1754,12 +1782,14 @@ def _create_video_timelapse_fast(
     timestamp_settings: Dict,
     progress_callback: Optional[Callable[[str], None]],
     fixed_pattern_correction: Optional[np.ndarray] = None,
+    output_fps: Optional[float] = None,
 ) -> Optional[bool]:
     """Run the all-video path as one parallel FFmpeg filter/encode pipeline.
 
     ``None`` means the inputs are not suitable and the caller should use the
     portable Python path. ``False`` means FFmpeg failed and fallback is safe.
     """
+    output_fps = _normalize_output_fps(output_fps)
     if radius > 0 and total_frames <= radius * 2:
         return None
 
@@ -1822,7 +1852,8 @@ def _create_video_timelapse_fast(
         if timestamp_settings["enabled"]:
             overlay_path = os.path.join(temp_dir, "timestamp.mov")
             overlay_position = _create_timestamp_overlay_video(
-                loader, sample_indices, target_size, timestamp_settings, overlay_path
+                loader, sample_indices, target_size, timestamp_settings, overlay_path,
+                output_fps,
             )
             if overlay_position is None:
                 return False
@@ -1844,7 +1875,7 @@ def _create_video_timelapse_fast(
             if not cv2.imwrite(mask_path, resized_mask):
                 return False
             command.extend([
-                "-loop", "1", "-framerate", str(OUTPUT_FPS), "-i", mask_path
+                "-loop", "1", "-framerate", str(output_fps), "-i", mask_path
             ])
             mask_input_index = next_input_index
             next_input_index += 1
@@ -1874,8 +1905,8 @@ def _create_video_timelapse_fast(
             if not cv2.imwrite(negative_path, negative):
                 return False
             command.extend([
-                "-loop", "1", "-framerate", str(OUTPUT_FPS), "-i", positive_path,
-                "-loop", "1", "-framerate", str(OUTPUT_FPS), "-i", negative_path,
+                "-loop", "1", "-framerate", str(output_fps), "-i", positive_path,
+                "-loop", "1", "-framerate", str(output_fps), "-i", negative_path,
             ])
             fixed_pattern_inputs = (next_input_index, next_input_index + 1)
 
@@ -1888,6 +1919,7 @@ def _create_video_timelapse_fast(
             mask_input_index,
             source_label,
             fixed_pattern_inputs,
+            output_fps,
         )
         if filter_graph is None:
             return None
@@ -1897,7 +1929,7 @@ def _create_video_timelapse_fast(
         command.extend([
             "-filter_complex", filter_graph,
             "-map", "[out]", "-frames:v", str(len(sample_indices)),
-            "-r", str(OUTPUT_FPS), "-an", *encoder_args,
+            "-r", str(output_fps), "-an", *encoder_args,
             "-pix_fmt", "yuv420p", "-stats_period", "0.25",
             "-progress", "pipe:1", "-nostats",
         ])
@@ -1972,7 +2004,7 @@ def _create_video_timelapse_fast(
 def create_timelapse(
     input_paths: List[str],
     output_path: str,
-    target_duration_seconds: int = 30,
+    target_duration_seconds: float = 30,
     progress_callback: Optional[Callable[[str], None]] = None,
     mask: Optional[np.ndarray] = None,
     timestamp_settings: Optional[Dict] = None,
@@ -1980,6 +2012,7 @@ def create_timelapse(
     annotation_settings: Optional[Dict] = None,
     meteor_insert_settings: Optional[Dict] = None,
     fixed_pattern_correction: Optional[np.ndarray] = None,
+    output_fps: Optional[float] = None,
 ) -> bool:
     """
     タイムラプス動画を作成する（並列処理版）。
@@ -1992,6 +2025,20 @@ def create_timelapse(
 
     メモリ使用量は最大1GBに制限。
     """
+    try:
+        target_duration_seconds = float(target_duration_seconds)
+    except (TypeError, ValueError):
+        _report_progress(progress_callback, "エラー: 動画の長さは数値で指定してください")
+        return False
+    if target_duration_seconds <= 0:
+        _report_progress(progress_callback, "エラー: 動画の長さは0秒より大きくしてください")
+        return False
+    try:
+        output_fps = _normalize_output_fps(output_fps)
+    except ValueError as exc:
+        _report_progress(progress_callback, f"エラー: 出力FPSが不正です: {exc}")
+        return False
+
     timestamp_settings = _normalize_timestamp_settings(timestamp_settings)
     annotation_settings = _normalize_annotation_settings(annotation_settings)
     meteor_insert_settings = meteor_insert_settings or {}
@@ -2080,11 +2127,16 @@ def create_timelapse(
         progress_callback(f"総フレーム数: {total_frames}")
 
     # ステップ2: サンプリングインデックスを計算
-    target_frame_count = target_duration_seconds * OUTPUT_FPS
-    sample_indices = calculate_sample_indices(total_frames, target_duration_seconds)
+    target_frame_count = max(1, int(round(target_duration_seconds * output_fps)))
+    sample_indices = calculate_sample_indices(
+        total_frames, target_duration_seconds, output_fps
+    )
 
     if progress_callback:
-        progress_callback(f"サンプリング: {len(sample_indices)}フレーム ({OUTPUT_FPS}fps × {target_duration_seconds}秒)")
+        progress_callback(
+            f"サンプリング: {len(sample_indices)}フレーム "
+            f"({output_fps:g}fps × {target_duration_seconds:g}秒)"
+        )
         if total_frames > target_frame_count:
             interval = total_frames / len(sample_indices)
             progress_callback(f"サンプリング間隔: {interval:.2f}フレームごとに1フレーム抽出")
@@ -2186,6 +2238,7 @@ def create_timelapse(
             timestamp_settings,
             progress_callback,
             resized_fixed_pattern,
+            output_fps,
         )
         if fast_result is True:
             loader.cleanup()
@@ -2346,7 +2399,7 @@ def create_timelapse(
     sample_indices = sample_indices[first_valid_idx:]
 
     if progress_callback:
-        progress_callback(f"出力設定: {base_width}x{base_height}, {OUTPUT_FPS}fps")
+        progress_callback(f"出力設定: {base_width}x{base_height}, {output_fps:g}fps")
         mode = "全フレーム先読み＋スライド平均" if temporal_mean_cache._retain_all_frames else "ローリングキャッシュ＋スライド平均"
         progress_callback(f"時間平均: 前後{temporal_mean_radius}フレーム、方式: {mode}")
 
@@ -2358,7 +2411,7 @@ def create_timelapse(
         "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostats", "-y",
         "-f", "rawvideo", "-vcodec", "rawvideo",
         "-s", f"{base_width}x{base_height}", "-pix_fmt", "bgr24",
-        "-r", str(OUTPUT_FPS), "-i", "-", "-an", *encoder_args,
+        "-r", str(output_fps), "-i", "-", "-an", *encoder_args,
         "-pix_fmt", "yuv420p", output_path,
     ]
 
@@ -2494,6 +2547,7 @@ def create_timelapse(
     if meteor_events and not _insert_meteor_clips(
         output_path, meteor_events, target_size, len(sample_indices), progress_callback,
         annotation_settings=annotation_settings,
+        output_fps=output_fps,
     ):
         return False
 

@@ -255,6 +255,15 @@ class TimelapseCreatorTests(unittest.TestCase):
         self.assertNotIn("tmix=", graph)
         self.assertIn("[out]", graph)
 
+    def test_custom_duration_and_fps_change_output_sample_count(self):
+        indices = timelapse_creator.calculate_sample_indices(9000, 2.5, 24)
+        self.assertEqual(len(indices), 60)
+
+        graph = timelapse_creator._build_fast_filter_graph(
+            9000, indices, 0, (1920, 1080), None, None, output_fps=24
+        )
+        self.assertIn("setpts=N/(24*TB)", graph)
+
     def test_fast_filter_uses_small_reverse_tail_for_centered_mean(self):
         indices = timelapse_creator.calculate_sample_indices(9000, 15)
 
@@ -437,11 +446,15 @@ class TimelapseCreatorTests(unittest.TestCase):
             ) as fast_path,
         ):
             result = timelapse_creator.create_timelapse(
-                ["folder"], "output.mp4", progress_callback=lambda _message: None
+                ["folder"],
+                "output.mp4",
+                progress_callback=lambda _message: None,
+                output_fps=24,
             )
 
         self.assertTrue(result)
         self.assertEqual(fast_path.call_args.args[0], ["complete.mp4"])
+        self.assertEqual(fast_path.call_args.args[-1], 24)
 
     def test_local_annotation_loader_accepts_fallback_name(self):
         expected = mock.Mock()
