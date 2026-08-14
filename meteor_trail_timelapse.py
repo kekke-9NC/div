@@ -46,7 +46,7 @@ class TrailTimelapseSettings:
     trail_decay: float = 0.985
     timestamp_enabled: bool = True
     timestamp_position: str = "bottom_right"
-    timestamp_size_percent: float = 1.8
+    timestamp_size_percent: float = 2.6
 
     def validate(self) -> "TrailTimelapseSettings":
         width, height = (int(self.output_size[0]), int(self.output_size[1]))

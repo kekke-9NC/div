@@ -50,6 +50,10 @@ class MeteorTrailTimelapseTests(unittest.TestCase):
         self.assertGreater(int(rendered[90:, 120:].max()), 0)
         self.assertEqual(int(rendered[:50, :100].max()), 0)
 
+    def test_timestamp_default_size_is_readable(self):
+        settings = trail.TrailTimelapseSettings().validate()
+        self.assertAlmostEqual(settings.timestamp_size_percent, 2.6)
+
     def test_source_gap_flushes_window_and_does_not_carry_old_trail(self):
         frames = [np.zeros((4, 6, 3), dtype=np.uint8) for _ in range(3)]
         frames[0][1, 2] = 220
