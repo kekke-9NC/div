@@ -762,14 +762,14 @@ def build_trajectory_camera_model(
             "model_revision": "video-star-trajectories-v1",
             "algorithm_version": "video-star-trajectories-v1",
             # Sidereal trajectories plus held-out observations provide the
-            # temporal projection.  The display policy additionally gates
-            # each constellation edge on current-frame endpoint detections so
-            # clouds do not receive synthetic blue lines.
+            # temporal projection.  The display policy uses only model
+            # supported, round-trip-checked constellation segments so a
+            # momentary cloud does not make correct lines blink out.
             "verified_constellation_only": False,
             "constellation_anchor_filter": False,
             "constellation_anchor_tolerance_px": 4.0,
             "constellation_star_alignment": False,
-            "constellation_render_policy": "model-supported-detected-endpoints",
+            "constellation_render_policy": "model-supported-continuous",
             "constellation_support_policy": "display-bridged-internal-holes",
             "constellation_temporal_hold_frames": 3,
             "constellation_projection_guard": "sky-pixel-sky-roundtrip",

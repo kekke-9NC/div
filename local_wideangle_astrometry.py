@@ -1390,6 +1390,8 @@ def _draw_contour_lines(
     visibility_mask: Optional[np.ndarray] = None,
     support_mask: Optional[np.ndarray] = None,
     maximum_gap_px: float = 0.0,
+    label_positions: Optional[List[Tuple[int, int]]] = None,
+    minimum_label_separation_px: float = 0.0,
 ) -> None:
     usable = [line for line in lines if isinstance(line, np.ndarray) and len(line) >= 3]
     for line in usable:
@@ -1404,10 +1406,70 @@ def _draw_contour_lines(
         point = np.rint(longest[len(longest) // 2]).astype(int)
         height, width = output.shape[:2]
         if 5 <= point[0] < width - 70 and 16 <= point[1] < height - 5:
+            if label_positions is not None and any(
+                float(np.linalg.norm(point - np.asarray(previous, dtype=int)))
+                < float(minimum_label_separation_px)
+                for previous in label_positions
+            ):
+                return
             cv2.putText(
                 output, label, tuple(point), cv2.FONT_HERSHEY_SIMPLEX,
                 0.42, (170, 240, 255), 1, cv2.LINE_AA,
             )
+            if label_positions is not None:
+                label_positions.append((int(point[0]), int(point[1])))
+
+
+def _split_overlapping_contour_segments(
+    lines: Sequence[np.ndarray],
+    occupied_points: np.ndarray,
+    minimum_separation_px: float,
+    minimum_run_points: int = 3,
+) -> Tuple[List[np.ndarray], np.ndarray]:
+    """Keep only visually distinct portions of nearby contour lines.
+
+    Meridians converge at the celestial pole.  Drawing every RA contour all
+    the way through that convergence makes the lines stack into a thick,
+    staircase-shaped band at the validated-area boundary.  This helper keeps
+    the first line in a cluster and suppresses only later vertices that are
+    already within a small pixel distance of an earlier line.  Separate parts
+    of a contour are retained, so this does not reduce the grid where the
+    meridians are actually distinguishable.
+    """
+    occupied = np.asarray(occupied_points, dtype=float).reshape(-1, 2)
+    separation = max(0.0, float(minimum_separation_px))
+    selected: List[np.ndarray] = []
+    for line in lines:
+        vertices = np.asarray(line, dtype=float).reshape(-1, 2)
+        if len(vertices) < minimum_run_points:
+            continue
+        if separation <= 0.0 or not len(occupied):
+            parts = [vertices]
+        else:
+            distance_squared = np.sum(
+                (vertices[:, None, :] - occupied[None, :, :]) ** 2,
+                axis=2,
+            )
+            keep = np.min(distance_squared, axis=1) > separation ** 2
+            parts = []
+            start: Optional[int] = None
+            for index, is_distinct in enumerate(keep):
+                if is_distinct and start is None:
+                    start = index
+                end_of_run = (
+                    start is not None
+                    and (not is_distinct or index == len(keep) - 1)
+                )
+                if not end_of_run:
+                    continue
+                end = index if is_distinct else index - 1
+                if end - start + 1 >= minimum_run_points:
+                    parts.append(vertices[start:end + 1])
+                start = None
+        selected.extend(parts)
+        if parts:
+            occupied = np.vstack((occupied, *parts))
+    return selected, occupied
 
 
 def _load_constellation_lines() -> Tuple[np.ndarray, ...]:
@@ -2080,18 +2142,33 @@ def annotate_frame(
         if grid is not None:
             grid_visibility = grid.get("display_support_mask", grid["support_mask"]).copy()
     if draw_grid and grid is not None:
+        ra_occupied_points = np.empty((0, 2), dtype=float)
+        ra_label_positions: List[Tuple[int, int]] = []
+        try:
+            ra_min_separation_px = max(
+                0.0, float(metadata.get("grid_ra_min_separation_px", 12.0))
+            )
+        except (TypeError, ValueError):
+            ra_min_separation_px = 12.0
         for ra_value in range(0, 360, 15):
             reference_level = (ra_value - delta_ra) % 360.0
             reference_level = grid["center_ra"] + (
                 (reference_level - grid["center_ra"] + 180.0) % 360.0 - 180.0
             )
             if grid["ra_min"] <= reference_level <= grid["ra_max"]:
+                ra_lines, ra_occupied_points = _split_overlapping_contour_segments(
+                    grid["ra_contours"].lines(reference_level),
+                    ra_occupied_points,
+                    ra_min_separation_px,
+                )
                 _draw_contour_lines(
-                    grid_layer, grid["ra_contours"].lines(reference_level), grid_color,
+                    grid_layer, ra_lines, grid_color,
                     label=f"RA {ra_value // 15:02d}h",
                     visibility_mask=grid_visibility,
                     support_mask=grid.get("display_support_mask", grid["support_mask"]),
                     maximum_gap_px=grid.get("display_grid_max_gap_px", 0.0),
+                    label_positions=ra_label_positions,
+                    minimum_label_separation_px=80.0,
                 )
         for dec_value in range(-80, 81, 10):
             if grid["dec_min"] <= dec_value <= grid["dec_max"]:

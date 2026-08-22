@@ -119,6 +119,19 @@ class LocalWideangleAstrometryTests(unittest.TestCase):
             self.assertEqual(output.shape, frame.shape)
             self.assertGreater(np.count_nonzero(output), 300)
 
+    def test_overlapping_contour_segments_keep_distinct_parts(self):
+        first = np.asarray([[0.0, 0.0], [10.0, 0.0], [20.0, 0.0], [30.0, 0.0]])
+        second = np.asarray([
+            [0.0, 1.0], [10.0, 1.0], [20.0, 10.0], [25.0, 10.0], [30.0, 10.0],
+        ])
+        selected, occupied = local_astro._split_overlapping_contour_segments(
+            [first, second], np.empty((0, 2)), 3.0
+        )
+        self.assertEqual(len(selected), 2)
+        np.testing.assert_allclose(selected[0], first)
+        np.testing.assert_allclose(selected[1], second[2:])
+        self.assertEqual(len(occupied), len(first) + len(second[2:]))
+
     def test_bare_wcs_recovers_sibling_support_metadata(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
