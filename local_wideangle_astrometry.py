@@ -1472,6 +1472,22 @@ def _split_overlapping_contour_segments(
     return selected, occupied
 
 
+def _estimate_constellation_cloud_fraction(frame: np.ndarray) -> float:
+    """Return the fast deterministic cloud estimate used for line gating.
+
+    Per-frame constellation rendering must not call the optional VLM service.
+    Reuse the same conservative local heuristic as the camera-model builder;
+    if that optional module is unavailable, fail closed and hide the lines.
+    """
+    try:
+        from cloud_coverage import _heuristic_cloud_fraction
+
+        result = _heuristic_cloud_fraction(frame)
+        return float(np.clip(result.cloud_fraction, 0.0, 1.0))
+    except Exception:
+        return 1.0
+
+
 def _load_constellation_lines() -> Tuple[np.ndarray, ...]:
     """Load vendored J2000 constellation stick figures once per process."""
     global _constellation_lines
@@ -2086,6 +2102,20 @@ def annotate_frame(
         target = target.replace(tzinfo=None)
     delta_ra = ((target - reference).total_seconds() / SIDEREAL_DAY_SECONDS) * 360.0
     detected_stars: List[List[float]] = []
+    constellation_cloudy = False
+    if draw_constellations and bool(
+        metadata.get("constellation_cloud_filter", True)
+    ):
+        try:
+            constellation_cloud_threshold = float(
+                metadata.get("constellation_cloud_threshold", 0.10)
+            )
+        except (TypeError, ValueError):
+            constellation_cloud_threshold = 0.10
+        constellation_cloudy = (
+            _estimate_constellation_cloud_fraction(frame_bgr)
+            >= max(0.0, min(1.0, constellation_cloud_threshold))
+        )
     # Validated fixed-camera models store this policy as
     # ``verified_constellation_only``; newer builder output calls it
     # ``constellation_anchor_filter``.  Honor both names so an older validated
@@ -2179,7 +2209,7 @@ def annotate_frame(
                     support_mask=grid.get("display_support_mask", grid["support_mask"]),
                     maximum_gap_px=grid.get("display_grid_max_gap_px", 0.0),
                 )
-    if draw_constellations and grid is not None:
+    if draw_constellations and grid is not None and not constellation_cloudy:
         constellation_offset = (0.0, 0.0)
         if align_constellations:
             constellation_offset = _estimate_constellation_pixel_offset(

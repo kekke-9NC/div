@@ -1461,6 +1461,12 @@ class TimelapseDragDropWindow(Toplevel):
         except (TypeError, ValueError, tk.TclError):
             temporal_mean_radius = config.TIMELAPSE_TEMPORAL_MEAN_RADIUS_FRAMES
         temporal_mean_radius = max(0, min(100, temporal_mean_radius))
+        try:
+            night_latitude = float(self.parent.observation_latitude_var.get())
+            night_longitude = float(self.parent.observation_longitude_var.get())
+        except (AttributeError, TypeError, ValueError, tk.TclError):
+            night_latitude = 35.0
+            night_longitude = 135.0
         fixed_pattern_correction = None
         if self.timelapse_fixed_pattern_enabled_var.get():
             fixed_pattern_correction = getattr(self.parent, "rtsp_dark_frame", None)
@@ -1535,6 +1541,9 @@ class TimelapseDragDropWindow(Toplevel):
                     meteor_insert_settings=meteor_insert_settings,
                     fixed_pattern_correction=fixed_pattern_correction,
                     output_fps=output_fps,
+                    night_only=True,
+                    night_latitude=night_latitude,
+                    night_longitude=night_longitude,
                 )
 
         task_runner = getattr(self.parent, "_run_synthesis_task_async", None)

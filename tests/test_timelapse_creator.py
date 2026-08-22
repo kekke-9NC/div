@@ -15,6 +15,42 @@ from astropy.wcs import WCS
 
 
 class TimelapseCreatorTests(unittest.TestCase):
+    def test_select_one_astronomical_night_excludes_day_and_orders_midnight(self):
+        paths = [
+            "/archive/rtsp/20260821/00/30.mp4",
+            "/archive/rtsp/20260821/20/00.mp4",
+            "/archive/rtsp/20260821/12/00.mp4",
+            "/archive/rtsp/20260820/23/30.mp4",
+            "/archive/rtsp/20260821/03/30.mp4",
+        ]
+        stamps = {
+            paths[0]: datetime(2026, 8, 21, 0, 30),
+            paths[1]: datetime(2026, 8, 21, 20, 0),
+            paths[2]: datetime(2026, 8, 21, 12, 0),
+            paths[3]: datetime(2026, 8, 20, 23, 30),
+            paths[4]: datetime(2026, 8, 21, 3, 30),
+        }
+        windows = {
+            datetime(2026, 8, 20).date(): (
+                datetime(2026, 8, 20, 19), datetime(2026, 8, 21, 4),
+            ),
+            datetime(2026, 8, 21).date(): (
+                datetime(2026, 8, 21, 19), datetime(2026, 8, 22, 4),
+            ),
+        }
+        with mock.patch.object(
+            timelapse_creator, "_source_created_datetime",
+            side_effect=lambda path: stamps[path],
+        ), mock.patch.object(
+            timelapse_creator, "_night_window_for_date",
+            side_effect=lambda day, _lat, _lon: windows[day],
+        ):
+            selected, summary = timelapse_creator._select_one_astronomical_night(
+                paths, 35.0, 135.0
+            )
+        self.assertEqual(selected, [paths[3], paths[0], paths[4]])
+        self.assertEqual(summary["excluded_count"], 2)
+
     def test_rtsp_timelapse_timestamp_uses_capture_path_over_birth_time(self):
         path = "/archive/rtsp/20260811/01/39.mp4"
         birth_time = datetime(2026, 8, 11, 1, 39, 15)

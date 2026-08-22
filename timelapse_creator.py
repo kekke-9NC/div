@@ -32,6 +32,7 @@ import tempfile
 import time
 import json
 import media_time
+import sun_times
 from fixed_pattern import apply_fixed_pattern_correction
 
 
@@ -717,6 +718,124 @@ def get_files_from_path(path: str) -> Tuple[List[str], List[str]]:
     videos = sorted(list(set(videos)))
 
     return images, videos
+
+
+def _night_window_for_date(
+    night_date,
+    latitude: float,
+    longitude: float,
+) -> Tuple[Optional[datetime], Optional[datetime]]:
+    """Return the local evening-to-morning window for one observing night."""
+    try:
+        period = sun_times.compute_night_period(
+            float(latitude), float(longitude), when=night_date
+        )
+    except (TypeError, ValueError, OverflowError):
+        return None, None
+    return period.get("start"), period.get("end")
+
+
+def _select_one_astronomical_night(
+    video_paths: Sequence[str],
+    latitude: float,
+    longitude: float,
+) -> Tuple[List[str], Optional[Dict[str, object]]]:
+    """Keep one chronologically ordered night from RTSP archive paths.
+
+    Date folders contain both the early-morning tail of the previous night and
+    the following evening.  Lexicographic path sorting therefore can create a
+    timelapse that starts at 00:00 and later jumps to 19:00.  Group paths by
+    the astronomical night they belong to, prefer a group containing the
+    morning tail (the latest completed night), and sort the selected group by
+    capture time.
+    """
+    dated: List[Tuple[datetime, object, str]] = []
+    windows: Dict[object, Tuple[Optional[datetime], Optional[datetime]]] = {}
+    for path in video_paths:
+        if not any(parent.name.lower() == "rtsp" for parent in Path(path).parents):
+            continue
+        try:
+            stamp = _source_created_datetime(path)
+        except (OSError, TypeError, ValueError):
+            continue
+        matched = None
+        for candidate in (stamp.date(), stamp.date() - timedelta(days=1)):
+            if candidate not in windows:
+                windows[candidate] = _night_window_for_date(
+                    candidate, latitude, longitude
+                )
+            start, end = windows[candidate]
+            if start is not None and end is not None and start <= stamp <= end:
+                matched = candidate
+                break
+        if matched is None:
+            # Keep unclassified paths only when no usable astronomical window
+            # can be calculated; otherwise they are precisely the daylight
+            # material this filter is intended to remove.
+            continue
+        dated.append((stamp, matched, path))
+
+    if len(dated) < 2:
+        return list(video_paths), None
+
+    groups: Dict[object, List[Tuple[datetime, str]]] = {}
+    for stamp, anchor, path in dated:
+        groups.setdefault(anchor, []).append((stamp, path))
+
+    def score(item):
+        anchor, entries = item
+        stamps = [stamp for stamp, _path in entries]
+        coverage = (max(stamps) - min(stamps)).total_seconds()
+        has_morning_tail = any(stamp.hour < 12 for stamp in stamps)
+        return (bool(has_morning_tail), coverage, len(entries), anchor)
+
+    selected_anchor, selected_entries = max(groups.items(), key=score)
+    window_start, window_end = windows.get(selected_anchor, (None, None))
+    selected_by_path = {path: stamp for stamp, path in selected_entries}
+    base_selected_count = len(selected_by_path)
+
+    # A user commonly drops only ``rtsp/YYYYMMDD``.  If the selected night is
+    # its 00:00-04:00 tail, also look in the adjacent evening date folder so
+    # the result becomes one complete 19:00-04:00 night instead of a morning
+    # fragment.  This is limited to the exact selected date and window.
+    for selected_path in tuple(selected_by_path):
+        date_root = Path(selected_path).parent
+        while date_root != date_root.parent:
+            if date_root.parent.name.lower() == "rtsp":
+                evening_root = date_root.parent / selected_anchor.strftime("%Y%m%d")
+                if evening_root.is_dir():
+                    _images, adjacent_videos = get_files_from_path(str(evening_root))
+                    for candidate in adjacent_videos:
+                        if candidate in selected_by_path:
+                            continue
+                        try:
+                            stamp = _source_created_datetime(candidate)
+                        except (OSError, TypeError, ValueError):
+                            continue
+                        if (
+                            window_start is not None
+                            and window_end is not None
+                            and window_start <= stamp <= window_end
+                        ):
+                            selected_by_path[candidate] = stamp
+                break
+            date_root = date_root.parent
+
+    selected_entries = sorted(
+        selected_by_path.items(), key=lambda item: item[1]
+    )
+    selected = [path for path, _stamp in selected_entries]
+    return selected, {
+        "anchor": selected_anchor,
+        "start": window_start,
+        "end": window_end,
+        "input_count": len(video_paths),
+        "selected_count": len(selected),
+        "selected_first": selected_entries[0][1],
+        "selected_last": selected_entries[-1][1],
+        "excluded_count": max(0, len(video_paths) - len(selected)),
+        "added_adjacent_count": max(0, len(selected) - base_selected_count),
+    }
 
 
 def get_video_frame_count(video_path: str) -> int:
@@ -2013,6 +2132,9 @@ def create_timelapse(
     meteor_insert_settings: Optional[Dict] = None,
     fixed_pattern_correction: Optional[np.ndarray] = None,
     output_fps: Optional[float] = None,
+    night_only: bool = True,
+    night_latitude: float = 35.0,
+    night_longitude: float = 135.0,
 ) -> bool:
     """
     タイムラプス動画を作成する（並列処理版）。
@@ -2087,6 +2209,27 @@ def create_timelapse(
 
     all_images = sorted(list(set(all_images)))
     all_videos = sorted(list(set(all_videos)))
+
+    if night_only and all_videos:
+        filtered_videos, night_summary = _select_one_astronomical_night(
+            all_videos, night_latitude, night_longitude
+        )
+        if night_summary is not None:
+            all_videos = filtered_videos
+            _report_progress(
+                progress_callback,
+                "入力を一晩の天文夜間に限定しました: "
+                f"{night_summary['selected_first']:%Y/%m/%d %H:%M}"
+                " → "
+                f"{night_summary['selected_last']:%Y/%m/%d %H:%M} "
+                f"({night_summary['selected_count']}本、"
+                f"昼間など{night_summary['excluded_count']}本を除外"
+                + (
+                    f"、前日の夜分を{night_summary['added_adjacent_count']}本追加"
+                    if night_summary.get("added_adjacent_count", 0) else ""
+                )
+                + ")",
+            )
 
     if progress_callback:
         progress_callback(f"検出: 画像 {len(all_images)}枚, 動画 {len(all_videos)}本")
