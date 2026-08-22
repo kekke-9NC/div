@@ -86,6 +86,40 @@ def _emit(callback: Optional[Callable[[str], None]], message: str) -> None:
         callback(str(message))
 
 
+def _seed_catalog_stars(initial_path: Path, initial_payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Recover the plate-solver catalog when an older seed omitted it."""
+    catalog = initial_payload.get("catalog_stars")
+    if isinstance(catalog, list) and catalog:
+        return list(catalog)
+    wcs_value = str(initial_payload.get("wcs_path", "")).strip()
+    if not wcs_value:
+        return []
+    wcs_path = Path(wcs_value).expanduser()
+    if not wcs_path.is_absolute():
+        wcs_path = initial_path.parent / wcs_path
+    candidates: list[Path] = []
+    if wcs_path.name.startswith("wideangle_sip"):
+        suffix = wcs_path.stem[len("wideangle_sip"):]
+        candidates.append(wcs_path.with_name(f"calibration{suffix}.json"))
+    candidates.extend(sorted(wcs_path.parent.glob("calibration*.json")))
+    for candidate in dict.fromkeys(candidates):
+        if not candidate.exists():
+            continue
+        try:
+            calibration = json.loads(candidate.read_text(encoding="utf-8"))
+            calibration_wcs = Path(str(calibration.get("wcs_path", ""))).expanduser()
+            if not calibration_wcs.is_absolute():
+                calibration_wcs = candidate.parent / calibration_wcs
+            if calibration_wcs.resolve() != wcs_path.resolve():
+                continue
+            recovered = calibration.get("catalog_stars")
+            if isinstance(recovered, list) and recovered:
+                return list(recovered)
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            continue
+    return []
+
+
 def _selected_paths(request: TrajectoryBuildRequest) -> list[str]:
     # A trajectory build needs all intervening segments, not the evenly
     # distributed subset used by the single-frame builder.
@@ -672,6 +706,7 @@ def build_trajectory_camera_model(
         initial_payload = json.loads(initial_path.read_text(encoding="utf-8"))
         if initial_payload.get("model_type") != MODEL_TYPE:
             raise ValueError("初期モデルの形式が固定カメラモデルではありません")
+        seed_catalog_stars = _seed_catalog_stars(initial_path, initial_payload)
         paths = _selected_paths(request)
         _emit(progress_callback, f"軌跡解析対象: {len(paths)} 動画")
         stamps = [local_astrometry._capture_datetime(path) for path in paths]
@@ -766,18 +801,21 @@ def build_trajectory_camera_model(
             # supported, round-trip-checked constellation segments.  The
             # per-frame cloud gate hides all lines when the sky is cloudy;
             # clear frames do not additionally require endpoint detections.
+            # Bright catalog stars from the seed model provide a conservative
+            # per-frame translation for the small residual left by temporal
+            # averaging and the trajectory refit.
             "verified_constellation_only": False,
             "constellation_anchor_filter": False,
             "constellation_anchor_tolerance_px": 4.0,
-            "constellation_star_alignment": False,
+            "constellation_star_alignment": bool(seed_catalog_stars),
             "constellation_render_policy": "model-supported-continuous",
             "constellation_cloud_filter": True,
-            "constellation_cloud_threshold": 0.10,
+            "constellation_cloud_threshold": 0.005,
             "constellation_support_policy": "display-bridged-internal-holes",
             "constellation_temporal_hold_frames": 3,
             "constellation_projection_guard": "sky-pixel-sky-roundtrip",
             "constellation_max_sky_roundtrip_deg": 0.1,
-            "catalog_stars": [],
+            "catalog_stars": seed_catalog_stars,
             "source_videos": sorted(set(frame_sources)),
             "selection_summary": selection_summary,
             "fit_stats": {

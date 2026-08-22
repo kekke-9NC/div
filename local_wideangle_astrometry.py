@@ -57,8 +57,12 @@ _CONSTELLATION_MAX_PIXEL_STEP_FACTOR = 0.20
 # 0.1-degree ceiling leaves ample numerical margin while rejecting folds.
 _CONSTELLATION_MAX_SKY_ROUNDTRIP_DEG = 0.1
 _CONSTELLATION_ALIGNMENT_MAX_MAG = 4.8
-_CONSTELLATION_ALIGNMENT_MATCH_RADIUS_PX = 8.0
+_CONSTELLATION_ALIGNMENT_MATCH_RADIUS_PX = 4.0
 _CONSTELLATION_ALIGNMENT_MIN_MATCHES = 4
+# Rendering is intentionally stricter than model creation.  A temporal mean
+# can make a thin cloud look numerically close to clear while stars are still
+# visually obscured; in that case constellation lines must be suppressed.
+_CONSTELLATION_CLOUD_THRESHOLD = 0.005
 
 
 class CalibrationNotFoundError(RuntimeError):
@@ -1148,7 +1152,10 @@ def _load_calibration(calibration_path: Optional[str]) -> Tuple[Dict[str, Any], 
                             "catalog_stars", "sip_residual_median_px", "sip_residual_p95_px",
                             "sip_match_count", "center_ra_deg", "center_dec_deg",
                         ):
-                            if key not in metadata and key in candidate_metadata:
+                            if (
+                                (key not in metadata or not metadata.get(key))
+                                and key in candidate_metadata
+                            ):
                                 metadata[key] = candidate_metadata[key]
                         break
                     except (OSError, ValueError, TypeError, json.JSONDecodeError):
@@ -2108,10 +2115,13 @@ def annotate_frame(
     ):
         try:
             constellation_cloud_threshold = float(
-                metadata.get("constellation_cloud_threshold", 0.10)
+                metadata.get(
+                    "constellation_cloud_threshold",
+                    _CONSTELLATION_CLOUD_THRESHOLD,
+                )
             )
         except (TypeError, ValueError):
-            constellation_cloud_threshold = 0.10
+            constellation_cloud_threshold = _CONSTELLATION_CLOUD_THRESHOLD
         constellation_cloudy = (
             _estimate_constellation_cloud_fraction(frame_bgr)
             >= max(0.0, min(1.0, constellation_cloud_threshold))
@@ -2157,7 +2167,12 @@ def annotate_frame(
         )
         and metadata.get("catalog_stars")
     )
-    if draw_detected_stars or verify_constellations or align_constellations:
+    # A cloudy frame is never used to move the overlay.  Besides avoiding
+    # false matches on cloud texture, this keeps the cloud-suppressed path
+    # inexpensive while preserving the optional green detected-star markers.
+    if draw_detected_stars or (
+        (verify_constellations or align_constellations) and not constellation_cloudy
+    ):
         detection_gray = cv2.cvtColor(output, cv2.COLOR_BGR2GRAY)
         detected_stars, _diagnostic, _reference = _extract_stars(
             detection_gray, maximum_stars=1000, exclude_lower_region=False,

@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timedelta
 
 import cv2
@@ -6,11 +7,28 @@ import numpy as np
 from camera_plate_model import FixedCameraPlateModel
 from trajectory_camera_model import (
     _Track,
+    _seed_catalog_stars,
     _validated_seed_support_grid,
     _trajectory_support_grid,
     fit_trajectory_projection,
     track_stellar_trajectories,
 )
+
+
+def test_trajectory_seed_recovers_catalog_from_sibling_calibration(tmp_path):
+    wcs_path = tmp_path / "wideangle_sip.wcs"
+    wcs_path.write_bytes(b"wcs")
+    catalog = [{"ra_deg": 120.0, "dec_deg": 35.0, "metadata": {"MAG": 2.5}}]
+    (tmp_path / "calibration.json").write_text(
+        json.dumps({"wcs_path": str(wcs_path), "catalog_stars": catalog}),
+        encoding="utf-8",
+    )
+    seed_path = tmp_path / "camera_model.json"
+    seed_path.write_text(
+        json.dumps({"wcs_path": str(wcs_path), "catalog_stars": []}),
+        encoding="utf-8",
+    )
+    assert _seed_catalog_stars(seed_path, json.loads(seed_path.read_text())) == catalog
 
 
 def test_tracker_keeps_moving_stars_and_rejects_fixed_pixels():

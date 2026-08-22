@@ -300,6 +300,26 @@ class LocalWideangleAstrometryTests(unittest.TestCase):
             )
         draw.assert_not_called()
 
+    def test_thin_cloud_hides_constellations_with_strict_default_gate(self):
+        metadata = {
+            "reference_datetime": "2026-08-13T00:00:00",
+            "constellation_render_policy": "model-supported-continuous",
+            "constellation_cloud_filter": True,
+        }
+        support = np.full((18, 32), 255, dtype=np.uint8)
+        grid = {"support_mask": support, "display_support_mask": support}
+        with mock.patch.object(local_astro, "_load_calibration", return_value=(metadata, object())), \
+             mock.patch.object(local_astro, "_forward_grid_model", return_value=grid), \
+             mock.patch.object(local_astro, "_estimate_constellation_cloud_fraction", return_value=0.05), \
+             mock.patch.object(local_astro, "_draw_constellation_lines") as draw:
+            local_astro.annotate_frame(
+                np.zeros((18, 32, 3), dtype=np.uint8),
+                datetime(2026, 8, 13, 0, 1),
+                draw_grid=False,
+                draw_constellations=True,
+            )
+        draw.assert_not_called()
+
     def test_detected_endpoint_policy_suppresses_lines_without_current_stars(self):
         metadata = {
             "reference_datetime": "2026-08-13T00:00:00",
