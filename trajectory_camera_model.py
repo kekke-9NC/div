@@ -355,6 +355,89 @@ def _circular_mean_degrees(values: np.ndarray) -> float:
     return float(np.rad2deg(np.arctan2(np.mean(np.sin(radians)), np.mean(np.cos(radians)))) % 360.0)
 
 
+def _seed_support_anchor_samples(
+    initial_payload: dict[str, Any],
+    width: int,
+    height: int,
+) -> np.ndarray:
+    """Sample trusted seed pixels used to constrain unobserved image regions."""
+    seed_grid = initial_payload.get("support_grid")
+    if not seed_grid:
+        return np.empty((0, 2), dtype=float)
+    grid = np.asarray(seed_grid, dtype=np.uint8)
+    if grid.ndim != 2 or not np.any(grid > 0):
+        return np.empty((0, 2), dtype=float)
+    rows, columns = grid.shape
+    fractions = (0.2, 0.5, 0.8)
+    pixels = []
+    for row in range(rows):
+        for column in range(columns):
+            if grid[row, column] <= 0:
+                continue
+            for y_fraction in fractions:
+                for x_fraction in fractions:
+                    pixels.append([
+                        (column + x_fraction) / columns * width,
+                        (row + y_fraction) / rows * height,
+                    ])
+    points = np.asarray(pixels, dtype=float)
+    return points
+
+
+def _validated_seed_support_grid(
+    initial_payload: dict[str, Any],
+    fitted_payload: dict[str, Any],
+    width: int,
+    height: int,
+    columns: int,
+    rows: int,
+    *,
+    maximum_error_px: float = 3.0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return seed-supported cells that still agree with the refit model."""
+    seed_grid = initial_payload.get("support_grid")
+    if not seed_grid:
+        empty = np.zeros((rows, columns), dtype=bool)
+        return empty, np.full((rows, columns), np.inf, dtype=float)
+    seed_support = cv2.resize(
+        np.asarray(seed_grid, dtype=np.uint8),
+        (columns, rows),
+        interpolation=cv2.INTER_NEAREST,
+    ) > 0
+    initial_model = FixedCameraPlateModel(initial_payload)
+    fitted_model = FixedCameraPlateModel(fitted_payload)
+    initial_reference = datetime.fromisoformat(
+        str(initial_payload["reference_datetime"]).replace("Z", "+00:00")
+    )
+    fitted_reference = datetime.fromisoformat(
+        str(fitted_payload["reference_datetime"]).replace("Z", "+00:00")
+    )
+    if initial_reference.tzinfo is not None and fitted_reference.tzinfo is None:
+        fitted_reference = fitted_reference.replace(tzinfo=initial_reference.tzinfo)
+    elif initial_reference.tzinfo is None and fitted_reference.tzinfo is not None:
+        fitted_reference = fitted_reference.replace(tzinfo=None)
+    delta = (
+        (fitted_reference - initial_reference).total_seconds()
+        / SIDEREAL_DAY_SECONDS
+        * 360.0
+    )
+    x_values = (np.arange(columns, dtype=float) + 0.5) / columns * width
+    y_values = (np.arange(rows, dtype=float) + 0.5) / rows * height
+    mesh_x, mesh_y = np.meshgrid(x_values, y_values)
+    pixels = np.column_stack((mesh_x.ravel(), mesh_y.ravel()))
+    seed_ra, seed_dec = initial_model.pixel_to_world_values(
+        pixels[:, 0], pixels[:, 1]
+    )
+    fitted_x, fitted_y = fitted_model.world_to_pixel_values(
+        (seed_ra + delta) % 360.0, seed_dec
+    )
+    errors = np.hypot(fitted_x - pixels[:, 0], fitted_y - pixels[:, 1]).reshape(
+        rows, columns
+    )
+    validated = seed_support & np.isfinite(errors) & (errors <= float(maximum_error_px))
+    return validated, errors
+
+
 def fit_trajectory_projection(
     tracks: Sequence[_Track],
     timestamps: Sequence[datetime],
@@ -427,6 +510,27 @@ def fit_trajectory_projection(
     train_tracks, _train_frames, train_target, train_delta = arrays(training_rows)
     hold_tracks, _hold_frames, hold_target, hold_delta = arrays(holdout_rows)
 
+    # A trajectory build can observe only the stars that happen to cross the
+    # detector during the selected night.  Preserve the absolute calibration
+    # of the seed's already-verified region as additional pseudo-observations;
+    # otherwise the degree-5 fit is unconstrained in the lower/edge field and
+    # the reported coverage collapses to only the cells visited by tracks.
+    anchor_pixels = _seed_support_anchor_samples(initial_payload, width, height)
+    if len(anchor_pixels):
+        anchor_ra, anchor_dec = initial_model.pixel_to_world_values(
+            anchor_pixels[:, 0], anchor_pixels[:, 1]
+        )
+        reference_delta = (
+            (reference - initial_reference).total_seconds()
+            / SIDEREAL_DAY_SECONDS
+            * 360.0
+        )
+        anchor_world = static_builder._unit_vectors(
+            (anchor_ra + reference_delta) % 360.0, anchor_dec
+        )
+    else:
+        anchor_world = np.empty((0, 3), dtype=float)
+
     for _iteration in range(max(1, int(iterations))):
         train_ra = (track_sky[train_tracks, 0] - train_delta) % 360.0
         train_dec = track_sky[train_tracks, 1]
@@ -442,8 +546,15 @@ def fit_trajectory_projection(
 
         def residual(candidate: np.ndarray) -> np.ndarray:
             image = (_project(candidate, world, width, height, degree) - train_target).ravel()
+            if len(anchor_world):
+                anchor_image = _project(
+                    candidate, anchor_world, width, height, degree
+                )
+                anchor_residual = (anchor_image - anchor_pixels).ravel()
+            else:
+                anchor_residual = np.empty(0, dtype=float)
             prior = (candidate - initial_parameters) / scale
-            return np.concatenate((image, prior * 0.12))
+            return np.concatenate((image, anchor_residual, prior * 0.12))
 
         fitted = least_squares(
             residual, parameters, loss="soft_l1", f_scale=1.25,
@@ -521,6 +632,7 @@ def fit_trajectory_projection(
         "hold_target": hold_target,
         "holdout_residual": holdout_residual,
         "per_track_p95": per_track_p95,
+        "seed_anchor_count": int(len(anchor_pixels)),
     }
     return payload, stats
 
@@ -602,6 +714,22 @@ def build_trajectory_camera_model(
             tracks, fit["per_track_p95"], width, height,
             request.support_columns, request.support_rows, request.minimum_cell_tracks,
         )
+        validated_seed, seed_support_errors = _validated_seed_support_grid(
+            initial_payload,
+            payload,
+            width,
+            height,
+            request.support_columns,
+            request.support_rows,
+        )
+        trajectory_support = np.asarray(support, dtype=np.uint8) > 0
+        combined_support = trajectory_support | validated_seed
+        support = combined_support.astype(np.uint8).tolist()
+        support_fraction = float(np.mean(combined_support))
+        support_counts = np.asarray(support_counts, dtype=int)
+        support_counts[validated_seed] = np.maximum(
+            support_counts[validated_seed], int(request.minimum_cell_tracks)
+        )
         train = fit["train_residual"]
         holdout = fit["holdout_residual"]
         median = float(np.median(train))
@@ -671,6 +799,13 @@ def build_trajectory_camera_model(
                     "maximum": float(np.max(seed_consistency)),
                 },
                 "support_track_counts": support_counts.tolist(),
+                "trajectory_support_fraction": float(np.mean(trajectory_support)),
+                "seed_validated_support_fraction": float(np.mean(validated_seed)),
+                "seed_anchor_count": int(fit.get("seed_anchor_count", 0)),
+                "seed_support_error_p95_px": (
+                    float(np.percentile(seed_support_errors[np.isfinite(seed_support_errors)], 95))
+                    if np.any(np.isfinite(seed_support_errors)) else None
+                ),
                 "training_policy": "four observations train, every fifth observation holdout",
                 "stationary_features_rejected": True,
             },

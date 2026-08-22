@@ -86,11 +86,16 @@ def _calc_time_utc(is_rise: bool, lat: float, lon: float, zenith: float, when: d
 
 
 def _utc_hours_to_local_datetime(utc_hours: float, when: date, tz_offset_hours: int) -> datetime:
-    # Round via total seconds to avoid invalid values such as second=60 caused
-    # by floating-point error around hh:mm:59.999...
+    # _calc_time_utc returns a clock value for the requested calendar day.
+    # In east-of-UTC timezones, morning events often have a UTC clock value
+    # late on the previous UTC date (for example 20:23 UTC -> 05:23 local).
+    # Adding the offset to a UTC datetime would therefore incorrectly move the
+    # local event to the following calendar day.  Keep the local wall-clock
+    # time on ``when``; callers explicitly request the following day when they
+    # need the next morning's event.
     total_seconds = int(round((utc_hours % 24.0) * 3600.0))
-    dt_utc = datetime(when.year, when.month, when.day) + timedelta(seconds=total_seconds)
-    return dt_utc + timedelta(hours=tz_offset_hours)
+    local_seconds = (total_seconds + int(tz_offset_hours) * 3600) % (24 * 3600)
+    return datetime(when.year, when.month, when.day) + timedelta(seconds=local_seconds)
 
 
 def get_sun_times(lat: float, lon: float, when: Optional[date] = None, tz_offset_hours: Optional[int] = None) -> Dict[str, Optional[datetime]]:

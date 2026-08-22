@@ -1,9 +1,11 @@
 import json
+from datetime import date
 from pathlib import Path
 from unittest import mock
 
 import cv2
 import numpy as np
+import sun_times
 from astropy.io import fits
 from astropy.wcs import WCS
 
@@ -156,3 +158,13 @@ def test_select_auto_video_paths_prefers_night_candidates(tmp_path, monkeypatch)
     )
     selected = select_auto_video_paths(str(root), maximum=2)
     assert [Path(path).parent.name for path in selected] == ["20", "22"]
+
+
+def test_star_visibility_period_keeps_morning_on_the_following_local_day():
+    times = sun_times.get_sun_times(35.0, 135.0, when=date(2026, 8, 21))
+    assert times["civil_dawn"].date() == date(2026, 8, 21)
+    period = sun_times.compute_star_visibility_period(
+        35.0, 135.0, when=date(2026, 8, 21)
+    )
+    assert period["start"].date() == date(2026, 8, 21)
+    assert period["end"].date() == date(2026, 8, 22)

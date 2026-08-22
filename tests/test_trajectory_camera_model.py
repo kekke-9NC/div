@@ -6,6 +6,7 @@ import numpy as np
 from camera_plate_model import FixedCameraPlateModel
 from trajectory_camera_model import (
     _Track,
+    _validated_seed_support_grid,
     _trajectory_support_grid,
     fit_trajectory_projection,
     track_stellar_trajectories,
@@ -81,3 +82,29 @@ def test_bundle_fit_predicts_unseen_trajectory_observations():
     _fitted, stats = fit_trajectory_projection(tracks, times, payload, degree=2, iterations=2)
     assert np.percentile(stats["train_residual"], 95) < 0.25
     assert np.percentile(stats["holdout_residual"], 95) < 0.25
+
+
+def test_seed_supported_cells_are_retained_when_refit_keeps_the_seed_projection():
+    payload = {
+        "model_type": "fixed-camera-stg-poly",
+        "width": 320,
+        "height": 180,
+        "polynomial_degree": 1,
+        "stg_parameters": [0.15, -0.22, 0.08, np.log(150), np.log(148), 160, 90],
+        "correction_coefficients": np.zeros((3, 2)).tolist(),
+        "reference_datetime": "2026-08-13T00:00:00",
+        "support_grid": [[0, 1], [1, 1]],
+    }
+    refit = dict(payload)
+
+    validated, errors = _validated_seed_support_grid(
+        payload, refit, 320, 180, 4, 4,
+    )
+
+    assert validated.tolist() == [
+        [0, 0, 1, 1],
+        [0, 0, 1, 1],
+        [1, 1, 1, 1],
+        [1, 1, 1, 1],
+    ]
+    assert np.nanmax(errors[validated]) < 1e-6
