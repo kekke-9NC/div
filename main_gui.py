@@ -334,6 +334,13 @@ class App(
             background=c["field"],
             arrowcolor=c["text_secondary"],
         )
+        style.configure(
+            "Model.TCombobox",
+            **field_options,
+            background=c["field"],
+            arrowcolor=c["text_secondary"],
+            font=("SF Pro Text", 10),
+        )
         style.map(
             "TCombobox",
             fieldbackground=[("readonly", c["field"]), ("focus", c["field_focus"])],
@@ -453,6 +460,10 @@ class App(
         self.camera_model_source_var = tk.StringVar()
         self.camera_model_start_var = tk.StringVar()
         self.camera_model_end_var = tk.StringVar()
+        self.camera_model_auto_select_var = tk.BooleanVar(value=True)
+        self.camera_model_selection_info_var = tk.StringVar(
+            value="自動: 同じ撮影日の夜間動画から、星が見える時間を選択"
+        )
         self.camera_model_method_var = tk.StringVar(value="動画の星の動き（推奨）")
         self.camera_model_cloud_threshold_var = tk.StringVar(value="0.10")
         self.camera_model_interval_var = tk.StringVar(value="60")
@@ -464,6 +475,9 @@ class App(
         self._camera_model_hover_popup = None
         self._camera_model_hover_photo = None
         self._camera_model_hover_close_job = None
+        self.camera_model_visualization_path = ""
+        self._camera_model_visual_popup = None
+        self._camera_model_visual_photo = None
         self.camera_model_monitor = None
         self.use_plate_solve_var = tk.BooleanVar(value=True)
         self.concurrency_var = tk.StringVar(value=str(config.DEFAULT_CONCURRENCY))
@@ -914,6 +928,7 @@ class App(
             self.append_log("設定を保存しています...")
             self._hide_summary_preview()
             self._hide_camera_model_hover()
+            self._hide_camera_model_visualization()
             self.close_rtsp_live_preview()
             self.close_camera_control()
             monitor = getattr(self, "camera_model_monitor", None)

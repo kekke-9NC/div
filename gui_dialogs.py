@@ -210,6 +210,8 @@ class TimelapseDragDropWindow(Toplevel):
         )
         self.timelapse_model_start_var = tk.StringVar()
         self.timelapse_model_end_var = tk.StringVar()
+        self.timelapse_model_auto_var = tk.BooleanVar(value=True)
+        self.timelapse_model_manual_widgets = []
         
         self.title("タイムラプス作成")
         # Keep the model description readable while allowing the content to
@@ -548,6 +550,7 @@ class TimelapseDragDropWindow(Toplevel):
             textvariable=self.timelapse_annotation_model_var,
             state="readonly",
             width=42,
+            style="Model.TCombobox",
         )
         self.timelapse_annotation_model_combo.pack(
             side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5)
@@ -618,22 +621,41 @@ class TimelapseDragDropWindow(Toplevel):
         model_frame.pack(fill=tk.X, pady=(0, 10))
         ttk.Label(
             model_frame,
-            text="指定した時間帯の動画から、レンズの歪みと星の位置を学習して登録します。\n"
-                 "登録後は、上の補正データ欄からいつでも呼び出せます。",
+            text="このカメラのレンズ歪みと星の位置を学習して登録します。\n"
+                 "おすすめの自動モードでは、タイムラプスの時間外も含めて同じ撮影日の夜間動画を探します。",
             style="GlassMuted.TLabel", wraplength=520,
         ).pack(anchor=tk.W, pady=(0, 5))
+        ttk.Checkbutton(
+            model_frame,
+            text="おすすめ: 夜間の動画を自動選択する",
+            variable=self.timelapse_model_auto_var,
+            command=self._toggle_timelapse_model_auto,
+        ).pack(anchor=tk.W, pady=(0, 2))
+        ttk.Label(
+            model_frame,
+            text="タイムラプスに使わない時間の動画も、補正データ作成には利用できます。",
+            foreground="gray", wraplength=520,
+        ).pack(anchor=tk.W, padx=(22, 0), pady=(0, 4))
         model_range = ttk.Frame(model_frame)
         model_range.pack(fill=tk.X)
         ttk.Label(model_range, text="開始:").pack(side=tk.LEFT)
-        ttk.Entry(model_range, textvariable=self.timelapse_model_start_var, width=18).pack(side=tk.LEFT, padx=(4, 8))
+        start_entry = ttk.Entry(model_range, textvariable=self.timelapse_model_start_var, width=18)
+        start_entry.pack(side=tk.LEFT, padx=(4, 8))
         ttk.Label(model_range, text="終了:").pack(side=tk.LEFT)
-        ttk.Entry(model_range, textvariable=self.timelapse_model_end_var, width=18).pack(side=tk.LEFT, padx=4)
-        ttk.Label(model_frame, text="動画は秒または時:分、フォルダは日時または時:分。空欄は全範囲。", foreground="gray").pack(anchor=tk.W, pady=(3, 5))
+        end_entry = ttk.Entry(model_range, textvariable=self.timelapse_model_end_var, width=18)
+        end_entry.pack(side=tk.LEFT, padx=4)
+        self.timelapse_model_manual_widgets = [start_entry, end_entry]
+        ttk.Label(
+            model_frame,
+            text="手動モードのみ使用。動画は秒または時:分、フォルダは日時または時:分。",
+            foreground="gray",
+        ).pack(anchor=tk.W, pady=(3, 5))
         ttk.Button(
             model_frame,
-            text="この入力からモデルを作成",
+            text="カメラ補正データを自動作成",
             command=self._start_camera_model_from_timelapse,
         ).pack(anchor=tk.W)
+        self._toggle_timelapse_model_auto()
 
         meteor_frame = ttk.LabelFrame(main_frame, text="流星検出動画", padding=10)
         meteor_frame.pack(fill=tk.X, pady=(0, 10))
@@ -750,10 +772,13 @@ class TimelapseDragDropWindow(Toplevel):
             self.log_callback(f"カメラ補正データ一覧の取得に失敗しました: {exc}")
         self.timelapse_annotation_model_entries = models
         self.timelapse_annotation_model_by_display = {
-            item["display_name"]: item for item in models
+            item.get("selection_name", item["display_name"]): item for item in models
         }
         auto_label = "自動選択（撮影日に合う補正データ）"
-        values = [auto_label] + [item["display_name"] for item in models]
+        values = [
+            auto_label,
+            *[item.get("selection_name", item["display_name"]) for item in models],
+        ]
         self.timelapse_annotation_model_combo.configure(values=values)
         parent_path = ""
         parent_var = getattr(self.parent, "plate_solve_model_path_var", None)
@@ -766,7 +791,9 @@ class TimelapseDragDropWindow(Toplevel):
         ) if selected_path else None
         if selected is not None:
             self.timelapse_annotation_model_path_var.set(selected["path"])
-            self.timelapse_annotation_model_var.set(selected["display_name"])
+            self.timelapse_annotation_model_var.set(
+                selected.get("selection_name", selected["display_name"])
+            )
         elif self.timelapse_annotation_model_var.get() not in values:
             self.timelapse_annotation_model_var.set(auto_label)
         self._update_timelapse_annotation_model_info()
@@ -797,6 +824,18 @@ class TimelapseDragDropWindow(Toplevel):
         # so the chosen model is used without another file dialog.
         self.timelapse_annotation_calibration_var.set(selected["path"])
 
+    def _toggle_timelapse_model_auto(self):
+        automatic = bool(self.timelapse_model_auto_var.get())
+        state = tk.DISABLED if automatic else tk.NORMAL
+        for widget in self.timelapse_model_manual_widgets:
+            try:
+                widget.configure(state=state)
+            except tk.TclError:
+                pass
+        if automatic:
+            self.timelapse_model_start_var.set("")
+            self.timelapse_model_end_var.set("")
+
     def _start_camera_model_from_timelapse(self):
         if not self.dropped_paths:
             messagebox.showwarning("高精度モデル", "先に動画またはフォルダを追加してください。", parent=self)
@@ -809,8 +848,12 @@ class TimelapseDragDropWindow(Toplevel):
         else:
             source = os.path.commonpath([os.path.abspath(path) for path in self.dropped_paths])
         self.parent.camera_model_source_var.set(source)
+        self.parent.camera_model_auto_select_var.set(
+            bool(self.timelapse_model_auto_var.get())
+        )
         self.parent.camera_model_start_var.set(self.timelapse_model_start_var.get().strip())
         self.parent.camera_model_end_var.set(self.timelapse_model_end_var.get().strip())
+        self.parent._toggle_camera_model_auto_selection()
         self.parent.start_camera_model_build()
 
     def _scroll_timelapse_window(self, event):
@@ -1443,11 +1486,7 @@ class TimelapseDragDropWindow(Toplevel):
         fixed_pattern_status = (
             "あり" if fixed_pattern_correction is not None else "なし"
         )
-        duration_text = (
-            f"入力時間窓で決定（{self._format_choice_number(duration, '秒')}）"
-            if timelapse_mode == "meteor_trail"
-            else self._format_choice_number(duration, "秒")
-        )
+        duration_text = self._format_choice_number(duration, "秒")
         self.log_callback(
             f"タイムラプス作成を開始します... (長さ: {duration_text}, "
             f"出力: {self._format_choice_number(output_fps, ' fps')}, "
@@ -1479,6 +1518,7 @@ class TimelapseDragDropWindow(Toplevel):
                         timestamp_position=timestamp_settings["position"],
                         timestamp_size_percent=timestamp_settings["size_percent"],
                     ),
+                    target_duration_seconds=duration,
                     progress_callback=progress_callback,
                 )
         else:
@@ -1512,7 +1552,10 @@ class TimelapseDragDropWindow(Toplevel):
         trail_enabled = self.timelapse_mode_var.get() == "meteor_trail"
         trail_state = "normal" if trail_enabled else "disabled"
         if hasattr(self, "duration_selector"):
-            self.duration_selector.set_enabled(not trail_enabled)
+            # Both modes honor the selected final video duration.  The trail
+            # mode uses the choice to resample its composite frames across
+            # the full input range.
+            self.duration_selector.set_enabled(True)
         if hasattr(self, "timelapse_mode_selection_summary_var"):
             self.timelapse_mode_selection_summary_var.set(
                 "選択中: 流星トレイル（比較明合成＋残像）"

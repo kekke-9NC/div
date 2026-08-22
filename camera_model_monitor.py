@@ -43,6 +43,7 @@ class RTSPCameraModelMonitor:
         builder: Optional[Callable[..., CameraModelBuildResult]] = None,
         status_callback: Optional[Callable[[str], None]] = None,
         progress_callback: Optional[Callable[[dict[str, Any]], None]] = None,
+        result_callback: Optional[Callable[[CameraModelBuildResult], None]] = None,
     ):
         self.rtsp_url = rtsp_url
         self.save_root = save_root
@@ -58,6 +59,7 @@ class RTSPCameraModelMonitor:
         self.builder = builder or build_camera_model
         self.status_callback = status_callback
         self.progress_callback = progress_callback
+        self.result_callback = result_callback
         self.stop_event = threading.Event()
         self.thread: Optional[threading.Thread] = None
         self.last_classification: Optional[CloudClassification] = None
@@ -218,6 +220,7 @@ class RTSPCameraModelMonitor:
             source=self.save_root,
             start=start,
             end=end,
+            auto_select=True,
             cache_root=self.cache_root,
             cloud_threshold=self.cloud_threshold,
             backend=self.backend,
@@ -245,6 +248,11 @@ class RTSPCameraModelMonitor:
         result = self.builder(request, progress_callback=on_build_progress, classifier=classify_build_frame)
         self.last_build_result = result
         self._last_build_signature = signature
+        if self.result_callback is not None:
+            try:
+                self.result_callback(result)
+            except Exception as exc:
+                self._emit(f"高精度モデル可視化コールバック失敗: {type(exc).__name__}: {exc}")
         if result.success and result.enabled:
             self._emit_progress(100, "completed", "高精度モデル作成完了")
             self._emit(f"RTSP自動モデル作成完了: {result.model_path}")

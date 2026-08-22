@@ -12,7 +12,9 @@ from camera_model_builder import (
     _duration_seconds,
     _fit_model_from_wcs,
     _support_grid,
+    automatic_model_source,
     build_camera_model,
+    select_auto_video_paths,
     select_video_paths,
 )
 from camera_plate_model import FixedCameraPlateModel
@@ -76,7 +78,8 @@ def test_build_registers_model_and_filters_cloudy_source(tmp_path):
 
     classifier = lambda frame, **kwargs: CloudClassification(0.05, "test", 1.0)
     request = CameraModelBuildRequest(
-        source=str(video), start="00:01", end="00:03", cache_root=str(tmp_path / "cache"),
+        source=str(video), start="00:01", end="00:03", auto_select=True,
+        cache_root=str(tmp_path / "cache"),
     )
     with mock.patch("camera_model_builder._read_probe_frame", return_value=np.zeros((180, 320, 3), np.uint8)):
         result = build_camera_model(request, classifier=classifier, solver=fake_solver)
@@ -88,6 +91,7 @@ def test_build_registers_model_and_filters_cloudy_source(tmp_path):
     assert payload["support_fraction"] == 1.0
     assert payload["catalog_stars"] == [{"ra_deg": 120.0, "dec_deg": 35.0}]
     assert payload["constellation_star_alignment"] is True
+    assert payload["selection_summary"]["mode"] == "automatic"
     assert seen["kwargs"]["force"] is True
 
 
@@ -129,3 +133,26 @@ def test_select_video_paths_supports_clock_ranges(tmp_path):
         (hour / f"{minute:02d}.mp4").write_bytes(b"")
     selected = select_video_paths(str(tmp_path), "04:05", "04:15")
     assert [Path(path).name for path in selected] == ["10.mp4"]
+
+
+def test_automatic_model_source_expands_recorder_clip_to_date_folder(tmp_path):
+    clip = tmp_path / "rtsp" / "20260809" / "04" / "05.mp4"
+    clip.parent.mkdir(parents=True)
+    clip.write_bytes(b"")
+    assert automatic_model_source(str(clip)) == str(clip.parents[1].resolve())
+
+
+def test_select_auto_video_paths_prefers_night_candidates(tmp_path, monkeypatch):
+    root = tmp_path / "20260809"
+    root.mkdir()
+    for hour in (12, 18, 20, 22):
+        hour_dir = root / f"{hour:02d}"
+        hour_dir.mkdir()
+        (hour_dir / "00.mp4").write_bytes(b"")
+
+    monkeypatch.setattr(
+        "camera_model_builder._is_star_visibility_time",
+        lambda stamp, _lat, _lon: stamp.hour >= 20,
+    )
+    selected = select_auto_video_paths(str(root), maximum=2)
+    assert [Path(path).parent.name for path in selected] == ["20", "22"]

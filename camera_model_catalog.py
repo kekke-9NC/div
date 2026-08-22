@@ -104,6 +104,32 @@ def _display_name(metadata: Dict[str, Any], path: Path) -> str:
     return f"{label}  /  被覆率 {coverage}  /  基準夜 {night}  /  {size}  /  {state}"
 
 
+def _selection_kind(metadata: Dict[str, Any], path: Path) -> str:
+    """Return a short Japanese label suitable for a dropdown row."""
+    label = str(metadata.get("model_label") or path.parent.name).strip().upper()
+    if "GAIA" in label:
+        return "星の動き＋Gaia"
+    if "STAR-TRAJECTORY" in label or "TRAJECTORY" in label:
+        return "星の動きモデル"
+    if "MOSAIC" in label or "STABLE REGION" in label:
+        return "固定カメラ（安定領域）"
+    if "TRIPOD" in label:
+        return "固定カメラ（検証済み）"
+    if "AUTO FIXED" in label:
+        return "固定カメラ（自動）"
+    if "FIXED CAMERA" in label or "STG+POLY" in label:
+        return "固定カメラモデル"
+    return "カメラ補正モデル"
+
+
+def _selection_name(metadata: Dict[str, Any], path: Path) -> str:
+    """Build a compact, scannable choice for the model combobox."""
+    coverage = f"{_support_fraction(metadata) * 100:.0f}%"
+    night = _reference_night(metadata)
+    state = "使用可" if metadata.get("enabled", False) else "候補・未適用"
+    return f"{_selection_kind(metadata, path)}  |  {coverage}  |  {night}  |  {state}"
+
+
 def _read_model(path: Path) -> Optional[Dict[str, Any]]:
     try:
         metadata = json.loads(path.read_text(encoding="utf-8"))
@@ -124,6 +150,7 @@ def _read_model(path: Path) -> Optional[Dict[str, Any]]:
         "path": str(path.resolve()),
         "metadata": metadata,
         "display_name": _display_name(metadata, path),
+        "selection_name": _selection_name(metadata, path),
         "model_label": str(metadata.get("model_label") or path.parent.name),
         "width": int(metadata.get("width", 0) or 0),
         "height": int(metadata.get("height", 0) or 0),
@@ -158,6 +185,14 @@ def discover_camera_models(cache_root: Optional[str] = None) -> List[Dict[str, A
             item["display_name"],
         )
     )
+    # The compact label is used only in selectors. Keep display_name for
+    # diagnostics and make duplicate compact labels unambiguous.
+    seen: Dict[str, int] = {}
+    for item in models:
+        choice = str(item.get("selection_name") or item["display_name"])
+        seen[choice] = seen.get(choice, 0) + 1
+        if seen[choice] > 1:
+            item["selection_name"] = f"{choice}  #{seen[choice]}"
     return models
 
 
@@ -169,8 +204,19 @@ def format_model_details(model: Optional[Dict[str, Any]]) -> str:
     quality_text = f" / p95誤差 {quality:.2f}px" if quality is not None else ""
     dates = ", ".join(str(value) for value in model.get("valid_dates", []) if str(value).strip())
     valid_text = f" / 適用夜 {dates}" if dates and dates != model.get("reference_night") else ""
+    metadata = model.get("metadata") or {}
+    selection = metadata.get("selection_summary") or {}
+    if selection.get("mode") == "automatic":
+        count = selection.get("selected_video_count", "-")
+        selection_text = f" / 学習動画 {count}本（夜間を自動選択）"
+    elif selection.get("mode") == "manual":
+        selection_text = " / 学習動画 手動指定"
+    else:
+        selection_text = ""
+    state = "使用可" if model.get("enabled") else "候補・未適用"
     return (
-        f"カメラ補正データ: {model['model_label']} | {model['width']}×{model['height']} | "
-        f"画面被覆率 {model['support_percent']:.0f}% | 基準夜 {model['reference_night']} "
-        f"/ 投影基準時刻 {model['reference_datetime']}{valid_text}{quality_text}"
+        f"種類: {model['model_label']}  /  状態: {state}\n"
+        f"解像度: {model['width']}×{model['height']}  /  画面被覆率: {model['support_percent']:.0f}%  /  "
+        f"基準夜: {model['reference_night']}\n"
+        f"投影基準時刻: {model['reference_datetime']}{selection_text}{valid_text}{quality_text}"
     )

@@ -435,12 +435,13 @@ class SettingsMixin:
         selected_model_lf.pack(fill=tk.X, pady=(6, 2))
         selected_model_row = ttk.Frame(selected_model_lf)
         selected_model_row.pack(fill=tk.X, pady=(3, 1))
-        ttk.Label(selected_model_row, text="モデル:").pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Label(selected_model_row, text="モデル（種類・被覆率・基準夜・状態）:").pack(side=tk.LEFT, padx=(0, 6))
         self.cmb_plate_solve_model = ttk.Combobox(
             selected_model_row,
             textvariable=self.plate_solve_model_var,
             state="readonly",
-            width=74,
+            width=52,
+            style="Model.TCombobox",
         )
         self.cmb_plate_solve_model.pack(side=tk.LEFT, fill=tk.X, expand=True)
         self.cmb_plate_solve_model.bind(
@@ -467,42 +468,68 @@ class SettingsMixin:
 
         model_lf = ttk.LabelFrame(lf_astro, text="高精度カメラ補正データ（作成・自動更新）")
         model_lf.pack(fill=tk.X, pady=(8, 2))
+        ttk.Label(
+            model_lf,
+            text="カメラのレンズ歪みと星の位置を学習する補正データです。タイムラプスの時間外に撮影した動画も利用できます。",
+            foreground=UI_MUTED, wraplength=1120, justify=tk.LEFT,
+        ).pack(anchor=tk.W, pady=(1, 5))
         model_source = ttk.Frame(model_lf); model_source.pack(fill=tk.X, pady=2)
-        ttk.Label(model_source, text="対象動画/RTSPフォルダ:").pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Label(model_source, text="動画またはフォルダ:").pack(side=tk.LEFT, padx=(0, 5))
         ttk.Entry(model_source, textvariable=self.camera_model_source_var, state="readonly").pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Button(model_source, text="動画", command=self.select_camera_model_video).pack(side=tk.LEFT, padx=(5, 0))
         ttk.Button(model_source, text="フォルダ", command=self.select_camera_model_folder).pack(side=tk.LEFT, padx=(3, 0))
-        model_method = ttk.Frame(model_lf); model_method.pack(fill=tk.X, pady=2)
+        auto_row = ttk.Frame(model_lf); auto_row.pack(fill=tk.X, pady=(5, 1))
+        ttk.Checkbutton(
+            auto_row,
+            text="おすすめ: 夜間の動画を自動選択する",
+            variable=self.camera_model_auto_select_var,
+            command=self._toggle_camera_model_auto_selection,
+        ).pack(side=tk.LEFT)
+        ttk.Label(
+            model_lf, textvariable=self.camera_model_selection_info_var,
+            foreground=UI_CYAN, wraplength=1120,
+        ).pack(anchor=tk.W, padx=(25, 0), pady=(0, 4))
+        model_range = ttk.Frame(model_lf); model_range.pack(fill=tk.X, pady=2)
+        ttk.Label(model_range, text="手動の時間範囲:").pack(side=tk.LEFT, padx=(0, 5))
+        start_entry = ttk.Entry(model_range, textvariable=self.camera_model_start_var, width=20)
+        start_entry.pack(side=tk.LEFT)
+        ttk.Label(model_range, text=" ～ ").pack(side=tk.LEFT)
+        end_entry = ttk.Entry(model_range, textvariable=self.camera_model_end_var, width=20)
+        end_entry.pack(side=tk.LEFT)
+        ttk.Label(model_range, text="（自動選択中は使用しません）").pack(side=tk.LEFT, padx=(6, 0))
+        self.camera_model_manual_range_widgets = [start_entry, end_entry]
+        details = ttk.LabelFrame(model_lf, text="詳細設定（通常は変更不要）")
+        details.pack(fill=tk.X, pady=(5, 2))
+        model_method = ttk.Frame(details); model_method.pack(fill=tk.X, pady=2)
         ttk.Label(model_method, text="作成方式:").pack(side=tk.LEFT, padx=(0, 5))
         ttk.Combobox(
             model_method,
             textvariable=self.camera_model_method_var,
             values=(self._TRAJECTORY_MODEL_METHOD, self._STATIC_MODEL_METHOD),
-            state="readonly",
-            width=28,
+            state="readonly", width=28,
         ).pack(side=tk.LEFT)
         ttk.Label(
-            model_method,
-            text="動画方式は複数分の星の移動を解析します（RTSPフォルダ推奨）",
+            model_method, text="動画の星の動き（推奨）は複数時間の動画を使います。",
             foreground=UI_MUTED,
         ).pack(side=tk.LEFT, padx=(8, 0))
-        model_range = ttk.Frame(model_lf); model_range.pack(fill=tk.X, pady=2)
-        ttk.Label(model_range, text="時間範囲:").pack(side=tk.LEFT, padx=(0, 5))
-        ttk.Entry(model_range, textvariable=self.camera_model_start_var, width=20).pack(side=tk.LEFT)
-        ttk.Label(model_range, text=" ～ ").pack(side=tk.LEFT)
-        ttk.Entry(model_range, textvariable=self.camera_model_end_var, width=20).pack(side=tk.LEFT)
-        ttk.Label(model_range, text="(動画は秒/時:分、フォルダは日時または時:分)").pack(side=tk.LEFT, padx=(6, 0))
-        model_options = ttk.Frame(model_lf); model_options.pack(fill=tk.X, pady=2)
+        model_options = ttk.Frame(details); model_options.pack(fill=tk.X, pady=2)
         ttk.Label(model_options, text="雲量しきい値:").pack(side=tk.LEFT)
         ttk.Entry(model_options, textvariable=self.camera_model_cloud_threshold_var, width=7).pack(side=tk.LEFT, padx=(3, 10))
         ttk.Label(model_options, text="監視間隔(秒):").pack(side=tk.LEFT)
         ttk.Entry(model_options, textvariable=self.camera_model_interval_var, width=7).pack(side=tk.LEFT, padx=(3, 10))
         ttk.Checkbutton(model_options, text="作成前に雲量判定（10%未満）", variable=self.camera_model_cloud_filter_var).pack(side=tk.LEFT)
         model_actions = ttk.Frame(model_lf); model_actions.pack(fill=tk.X, pady=2)
-        self.btn_build_camera_model = ttk.Button(model_actions, text="選択範囲からモデル作成", command=self.start_camera_model_build)
+        self.btn_build_camera_model = ttk.Button(model_actions, text="カメラ補正データを作成", command=self.start_camera_model_build)
         self.btn_build_camera_model.pack(side=tk.LEFT)
-        self.btn_toggle_camera_model_monitor = ttk.Button(model_actions, text="RTSP自動監視を開始", command=self.toggle_camera_model_monitor)
+        self.btn_toggle_camera_model_monitor = ttk.Button(model_actions, text="RTSPを監視して自動作成", command=self.toggle_camera_model_monitor)
         self.btn_toggle_camera_model_monitor.pack(side=tk.LEFT, padx=(6, 0))
+        self.btn_show_camera_model_visualization = ttk.Button(
+            model_actions,
+            text="作成結果を表示",
+            command=self.show_camera_model_visualization,
+            state=tk.DISABLED,
+        )
+        self.btn_show_camera_model_visualization.pack(side=tk.LEFT, padx=(6, 0))
         model_status_row = ttk.Frame(model_lf)
         model_status_row.pack(fill=tk.X, pady=(2, 3))
         self.camera_model_status_label = ttk.Label(
@@ -517,6 +544,7 @@ class SettingsMixin:
         self.bind_camera_model_input_hover(
             model_status_row, self.camera_model_status_label, self.camera_model_progress_label
         )
+        self._toggle_camera_model_auto_selection()
         self._refresh_plate_solve_model_choices()
         ttk.Label(
             model_lf,
@@ -1586,6 +1614,7 @@ class SettingsMixin:
             'camera_model_source': self.camera_model_source_var.get(),
             'camera_model_start': self.camera_model_start_var.get(),
             'camera_model_end': self.camera_model_end_var.get(),
+            'camera_model_auto_select': self.camera_model_auto_select_var.get(),
             'camera_model_method': self.camera_model_method_var.get(),
             'camera_model_cloud_threshold': self.camera_model_cloud_threshold_var.get(),
             'camera_model_interval': self.camera_model_interval_var.get(),
@@ -1793,6 +1822,9 @@ class SettingsMixin:
             self.camera_model_source_var.set(settings.get('camera_model_source', ''))
             self.camera_model_start_var.set(settings.get('camera_model_start', ''))
             self.camera_model_end_var.set(settings.get('camera_model_end', ''))
+            self.camera_model_auto_select_var.set(settings.get('camera_model_auto_select', True))
+            if hasattr(self, '_toggle_camera_model_auto_selection'):
+                self._toggle_camera_model_auto_selection()
             self.camera_model_method_var.set(settings.get('camera_model_method', self._TRAJECTORY_MODEL_METHOD))
             self.camera_model_cloud_threshold_var.set(str(settings.get('camera_model_cloud_threshold', '0.10')))
             self.camera_model_interval_var.set(str(settings.get('camera_model_interval', '60')))

@@ -335,6 +335,12 @@ class ProcessingMixin:
                     except Exception:
                         pass
                     continue
+                if isinstance(value, dict) and "camera_model_visualization" in value:
+                    try:
+                        self._handle_camera_model_visualization(value["camera_model_visualization"])
+                    except Exception:
+                        pass
+                    continue
                 if isinstance(value, tuple) and len(value) == 2:
                     current, total = value
                     if total > 0:

@@ -847,7 +847,7 @@ class AnalysisMixin:
         self.analysis_radiant_model_choices = {}
         values = ["自動選択（撮影日の高精度モデル）"]
         for model in models:
-            display = model["display_name"]
+            display = model.get("selection_name", model["display_name"])
             if display in self.analysis_radiant_model_choices:
                 display = f"{display} [{len(values)}]"
             values.append(display)
@@ -867,7 +867,9 @@ class AnalysisMixin:
             pass
         selected = next((model for model in models if model["path"] == preferred_path), None)
         if selected:
-            self.analysis_radiant_model_var.set(selected["display_name"])
+            self.analysis_radiant_model_var.set(
+                selected.get("selection_name", selected["display_name"])
+            )
             self._on_analysis_radiant_model_selected()
         else:
             self.analysis_radiant_model_var.set(values[0])
@@ -1186,7 +1188,12 @@ class AnalysisMixin:
 
         setting_frame.columnconfigure(1, weight=1)
         ttk.Label(setting_frame, text="モデル").grid(row=0, column=0, sticky=tk.W, padx=(0, 10), pady=4)
-        self.analysis_radiant_model_combo = ttk.Combobox(setting_frame, textvariable=self.analysis_radiant_model_var, state="readonly")
+        self.analysis_radiant_model_combo = ttk.Combobox(
+            setting_frame,
+            textvariable=self.analysis_radiant_model_var,
+            state="readonly",
+            style="Model.TCombobox",
+        )
         self.analysis_radiant_model_combo.grid(row=0, column=1, sticky=tk.EW, pady=4)
         self.analysis_radiant_model_combo.bind("<<ComboboxSelected>>", self._on_analysis_radiant_model_selected)
         ttk.Label(setting_frame, textvariable=self.analysis_radiant_model_info_var, style="GlassMuted.TLabel", wraplength=850, justify=tk.LEFT).grid(row=1, column=0, columnspan=2, sticky=tk.W, pady=(0, 8))

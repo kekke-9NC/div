@@ -1,7 +1,12 @@
 from gui_common import *
-from camera_model_builder import CameraModelBuildRequest, build_camera_model
+from camera_model_builder import (
+    CameraModelBuildRequest,
+    automatic_model_source,
+    build_camera_model,
+)
 from camera_model_monitor import RTSPCameraModelMonitor
 from camera_plate_model import MODEL_TYPE as FIXED_CAMERA_MODEL_TYPE
+from camera_model_visualization import render_camera_model_visualization
 from trajectory_camera_model import TrajectoryBuildRequest, build_trajectory_camera_model
 import camera_model_catalog
 
@@ -40,13 +45,23 @@ def _build_camera_model_for_app(
         seed_path = seed_result.model_path
     if progress_callback:
         progress_callback("動画内の恒星を追跡して投影モデルを学習中...")
+    trajectory_source = request.source
+    trajectory_start = request.start
+    trajectory_end = request.end
+    if request.auto_select:
+        trajectory_source = automatic_model_source(request.source)
+        trajectory_start = ""
+        trajectory_end = ""
     return build_trajectory_camera_model(
         TrajectoryBuildRequest(
-            source=request.source,
+            source=trajectory_source,
             initial_model_path=seed_path,
-            start=request.start,
-            end=request.end,
+            start=trajectory_start,
+            end=trajectory_end,
+            auto_select=request.auto_select,
             cache_root=request.cache_root,
+            observation_latitude=request.observation_latitude,
+            observation_longitude=request.observation_longitude,
         ),
         progress_callback=progress_callback,
     )
@@ -68,10 +83,10 @@ class PlateSolveMixin:
                 logger(f"カメラ補正データ一覧の取得に失敗しました: {exc}")
         self.plate_solve_model_entries = models
         self.plate_solve_model_by_display = {
-            item["display_name"]: item for item in models
+            item.get("selection_name", item["display_name"]): item for item in models
         }
         values = [self._AUTO_CAMERA_MODEL_LABEL] + [
-            item["display_name"] for item in models
+            item.get("selection_name", item["display_name"]) for item in models
         ]
         combo = getattr(self, "cmb_plate_solve_model", None)
         if combo is not None:
@@ -82,7 +97,7 @@ class PlateSolveMixin:
             None,
         ) if selected_path else None
         if selected is not None:
-            self.plate_solve_model_var.set(selected["display_name"])
+            self.plate_solve_model_var.set(selected.get("selection_name", selected["display_name"]))
         elif self.plate_solve_model_var.get() not in values:
             self.plate_solve_model_var.set(self._AUTO_CAMERA_MODEL_LABEL)
         self._update_plate_solve_model_info()
@@ -254,6 +269,89 @@ class PlateSolveMixin:
             except tk.TclError:
                 pass
 
+    def show_camera_model_visualization(self, model_path: str = ""):
+        """Show the latest saved camera-model visual report in a Tk window."""
+        path = str(model_path or getattr(self, "camera_model_visualization_path", "") or "").strip()
+        if not path or not os.path.isfile(path):
+            messagebox.showwarning(
+                "カメラモデル可視化",
+                "表示できるカメラモデルの可視化画像がありません。",
+                parent=self,
+            )
+            return
+        try:
+            image = Image.open(path).convert("RGB")
+            image.thumbnail((1280, 760), Image.Resampling.LANCZOS)
+            photo = ImageTk.PhotoImage(image)
+        except (OSError, ValueError) as exc:
+            messagebox.showerror(
+                "カメラモデル可視化",
+                f"可視化画像を読み込めませんでした:\n{exc}",
+                parent=self,
+            )
+            return
+
+        previous = getattr(self, "_camera_model_visual_popup", None)
+        if previous is not None:
+            try:
+                previous.destroy()
+            except tk.TclError:
+                pass
+        popup = Toplevel(self)
+        popup.title("カメラモデル可視化")
+        popup.transient(self)
+        popup.configure(background=ui_theme.COLORS["content"])
+        popup.protocol("WM_DELETE_WINDOW", self._hide_camera_model_visualization)
+        image_label = ttk.Label(popup, image=photo)
+        image_label.pack(padx=10, pady=(10, 6))
+        ttk.Label(
+            popup,
+            text="緑: 有効領域  /  青・紫: モデルから投影した空の座標グリッド",
+        ).pack(padx=10, pady=(0, 10))
+        popup.update_idletasks()
+        width = min(max(900, image.width + 20), 1320)
+        height = min(max(560, image.height + 70), 840)
+        popup.geometry(f"{width}x{height}")
+        self._camera_model_visual_popup = popup
+        self._camera_model_visual_photo = photo
+
+    def _hide_camera_model_visualization(self):
+        popup = getattr(self, "_camera_model_visual_popup", None)
+        self._camera_model_visual_popup = None
+        self._camera_model_visual_photo = None
+        if popup is not None:
+            try:
+                popup.destroy()
+            except tk.TclError:
+                pass
+
+    def _handle_camera_model_visualization(self, path: str):
+        path = str(path or "").strip()
+        if not path or not os.path.isfile(path):
+            return
+        self.camera_model_visualization_path = path
+        button = getattr(self, "btn_show_camera_model_visualization", None)
+        if button is not None:
+            button.configure(state=tk.NORMAL)
+        self.show_camera_model_visualization(path)
+
+    def _queue_camera_model_visualization(self, path: str):
+        try:
+            self.progress_queue.put((None, {"camera_model_visualization": str(path)}))
+        except Exception:
+            pass
+
+    def _handle_camera_model_monitor_result(self, result):
+        """Render and display an RTSP monitor model on the Tk thread."""
+        if not getattr(result, "success", False) or not getattr(result, "model_path", ""):
+            return
+        try:
+            path = render_camera_model_visualization(result.model_path)
+        except Exception as exc:
+            self._set_camera_model_status(f"高精度モデル: 登録済み（可視化失敗: {exc}）")
+            return
+        self._queue_camera_model_visualization(path)
+
     def _handle_plate_solve_ui(self, payload):
         """Apply one plate-solve UI event; called only by the Tk poller."""
         action = payload.get("action")
@@ -339,17 +437,45 @@ class PlateSolveMixin:
             raise ValueError("雲量しきい値は数値で指定してください") from exc
         if not 0.0 <= threshold <= 1.0:
             raise ValueError("雲量しきい値は0.0〜1.0で指定してください")
+        try:
+            latitude = float(self.observation_latitude_var.get())
+            longitude = float(self.observation_longitude_var.get())
+        except (AttributeError, ValueError) as exc:
+            latitude, longitude = 35.0, 135.0
         return CameraModelBuildRequest(
             source=source,
             start=self.camera_model_start_var.get().strip(),
             end=self.camera_model_end_var.get().strip(),
+            auto_select=bool(self.camera_model_auto_select_var.get()),
             cloud_threshold=threshold,
             use_cloud_filter=bool(self.camera_model_cloud_filter_var.get()),
             backend=self.ai_vlm_backend_var.get(),
             lm_studio_url=self.lm_studio_vlm_url_var.get(),
             lm_studio_model_id=self.lm_studio_vlm_model_var.get(),
             lm_studio_api_key=self.lm_studio_vlm_api_key_var.get(),
+            observation_latitude=latitude,
+            observation_longitude=longitude,
         )
+
+    def _toggle_camera_model_auto_selection(self):
+        """Keep automatic mode as the clear default while exposing manual limits."""
+        automatic = bool(self.camera_model_auto_select_var.get())
+        state = tk.DISABLED if automatic else tk.NORMAL
+        for widget in getattr(self, "camera_model_manual_range_widgets", []):
+            try:
+                widget.configure(state=state)
+            except tk.TclError:
+                pass
+        if automatic:
+            self.camera_model_selection_info_var.set(
+                "自動: 同じ撮影日の夜間動画から、タイムラプス範囲外も含めて星が多い時間を選択"
+            )
+            self.camera_model_start_var.set("")
+            self.camera_model_end_var.set("")
+        else:
+            self.camera_model_selection_info_var.set(
+                "手動: 下の開始・終了時刻に含まれる動画だけを使用"
+            )
 
     def start_camera_model_build(self):
         try:
@@ -369,7 +495,10 @@ class PlateSolveMixin:
         if initial_model_path and not os.path.isfile(initial_model_path):
             initial_model_path = ""
         model_kind = "星の動きモデル" if use_trajectory else "静止画モデル"
-        self._set_camera_model_status(f"高精度モデル: {model_kind}を作成中...")
+        selection_kind = "自動選択" if request.auto_select else "指定範囲"
+        self._set_camera_model_status(
+            f"高精度モデル: {selection_kind}・{model_kind}を作成中..."
+        )
 
         def progress(message):
             self._set_camera_model_status(f"高精度モデル: {message}")
@@ -385,9 +514,20 @@ class PlateSolveMixin:
                 initial_model_path=initial_model_path,
                 progress_callback=progress,
             )
+            visualization_path = ""
+            visualization_error = ""
+            if result.success and result.model_path:
+                try:
+                    visualization_path = render_camera_model_visualization(result.model_path)
+                except Exception as exc:
+                    visualization_error = f"{type(exc).__name__}: {exc}"
 
             def finished():
                 self.btn_build_camera_model.configure(state=tk.NORMAL)
+                if visualization_path:
+                    self._handle_camera_model_visualization(visualization_path)
+                elif visualization_error:
+                    self.append_log(f"カメラモデル可視化を作成できませんでした: {visualization_error}")
                 if result.success and result.enabled:
                     trajectory_count = int(getattr(result, "trajectory_count", 0) or 0)
                     trajectory_text = f" / 恒星軌跡 {trajectory_count}本" if trajectory_count else ""
@@ -395,6 +535,12 @@ class PlateSolveMixin:
                         f"高精度モデル: 登録済み（被覆率 {result.support_fraction * 100:.0f}% / "
                         f"p95 {result.residual_p95_px:.2f}px{trajectory_text}）"
                     )
+                    summary = getattr(result, "selection_summary", {}) or {}
+                    if summary.get("selected_start"):
+                        self.camera_model_selection_info_var.set(
+                            f"今回使用: {summary.get('selected_video_count', len(result.selected_videos))}本 / "
+                            f"{summary['selected_start'][:16]}〜{summary['selected_end'][:16]}"
+                        )
                     self.plate_solve_model_path_var.set(result.model_path)
                     self._refresh_plate_solve_model_choices()
                     selected = next(
@@ -403,7 +549,9 @@ class PlateSolveMixin:
                         None,
                     )
                     if selected is not None:
-                        self.plate_solve_model_var.set(selected["display_name"])
+                        self.plate_solve_model_var.set(
+                            selected.get("selection_name", selected["display_name"])
+                        )
                         self._update_plate_solve_model_info()
                     self.plate_solve_wcs_path_var.set(result.model_path)
                     self.plate_solve_status_var.set("プレートソルブ: 高精度カメラ補正データを適用")
@@ -427,6 +575,12 @@ class PlateSolveMixin:
                         f"高精度モデル: 候補保存（被覆率 {result.support_fraction * 100:.0f}% / "
                         f"p95 {result.residual_p95_px:.2f}px、未適用）"
                     )
+                    summary = getattr(result, "selection_summary", {}) or {}
+                    if summary.get("selected_start"):
+                        self.camera_model_selection_info_var.set(
+                            f"候補: {summary.get('selected_video_count', len(result.selected_videos))}本 / "
+                            f"{summary['selected_start'][:16]}〜{summary['selected_end'][:16]}"
+                        )
                     messagebox.showwarning(
                         "高精度モデル",
                         "候補モデルは保存しましたが、安全な被覆率または誤差基準に届かないため適用しません。\n"
@@ -466,6 +620,7 @@ class PlateSolveMixin:
             lm_studio_model_id=self.lm_studio_vlm_model_var.get(), lm_studio_api_key=self.lm_studio_vlm_api_key_var.get(),
             status_callback=self._set_camera_model_status,
             progress_callback=self._queue_camera_model_progress,
+            result_callback=self._handle_camera_model_monitor_result,
         )
         self.camera_model_monitor = monitor
         monitor.start()

@@ -313,6 +313,71 @@ def _video_sample_stack(
     return average, np.stack(samples)
 
 
+def _video_centered_stack(
+    video_path: str,
+    center_frame_index: int,
+    half_window_seconds: float = 10.0,
+    maximum_samples: int = 31,
+) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
+    """Build a mean image from a time window centered on one video frame.
+
+    The full window is accumulated without retaining every frame in memory.
+    A sparse set of temporal samples is returned as well so the existing
+    fixed-pattern-noise suppression can be applied during star extraction.
+    """
+    half_window_seconds = float(half_window_seconds)
+    if half_window_seconds < 0.0:
+        raise ValueError("half_window_seconds must be non-negative")
+    cap = _open_video(video_path)
+    if not cap.isOpened():
+        raise IOError(f"動画を開けません: {video_path}")
+    try:
+        fps = float(cap.get(cv2.CAP_PROP_FPS))
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if not (0.1 <= fps <= 240.0):
+            raise IOError(f"動画のフレームレートを読めません: {video_path}")
+        center = max(0, int(center_frame_index))
+        if frame_count > 0:
+            center = min(center, frame_count - 1)
+        radius = max(0, int(round(fps * half_window_seconds)))
+        start = max(0, center - radius)
+        end = center + radius
+        if frame_count > 0:
+            end = min(end, frame_count - 1)
+        expected = max(1, end - start + 1)
+        stride = max(1, int(np.ceil(expected / max(1, int(maximum_samples)))))
+        cap.set(cv2.CAP_PROP_POS_FRAMES, start)
+        accumulated: Optional[np.ndarray] = None
+        samples: List[np.ndarray] = []
+        read_count = 0
+        while read_count < expected:
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                break
+            gray = frame if frame.ndim == 2 else cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            if accumulated is None:
+                accumulated = np.zeros_like(gray, dtype=np.float32)
+            accumulated += gray
+            if read_count % stride == 0 or read_count == expected - 1:
+                samples.append(gray.copy())
+            read_count += 1
+    finally:
+        cap.release()
+    if accumulated is None or read_count == 0 or not samples:
+        raise IOError(f"スタック用フレームを読めません: {video_path}")
+    average = np.clip(accumulated / read_count, 0, 255).astype(np.uint8)
+    info = {
+        "stack_method": "centered_mean",
+        "stack_half_window_seconds": half_window_seconds,
+        "stack_start_frame": int(start),
+        "stack_end_frame": int(start + read_count - 1),
+        "stack_frame_count": int(read_count),
+        "stack_fps": fps,
+        "reference_frame_index": int(center),
+    }
+    return average, np.stack(samples), info
+
+
 def _frames_sample_stack(frames: Sequence[np.ndarray]) -> Tuple[np.ndarray, np.ndarray]:
     if not frames:
         raise ValueError("frames must not be empty")
@@ -686,6 +751,8 @@ def _solve_samples(
     payload = _persist_calibration(
         source_path, date_obs, width, height, paths, solved, len(stars), reference_frame_index
     )
+    payload["detected_star_count"] = int(len(stars))
+    payload["fit_star_count"] = int(len(fit_stars))
     _emit(
         progress_callback,
         f"ローカル広角較正成功: SIP{payload.get('sip_order', '?')} / HFOV約"
@@ -763,8 +830,18 @@ def solve_video_frame_local(
     cache_root: Optional[str] = None,
     force: bool = False,
     progress_callback: Optional[Callable] = None,
+    stack_half_window_seconds: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Create or reuse a calibration from one user-selected video frame."""
+    if stack_half_window_seconds is not None:
+        return solve_video_frame_stack_local(
+            video_path,
+            frame_index,
+            half_window_seconds=stack_half_window_seconds,
+            cache_root=cache_root,
+            force=force,
+            progress_callback=progress_callback,
+        )
     frame_index = max(0, int(frame_index))
     cap = _open_video(video_path)
     if not cap.isOpened():
@@ -786,7 +863,14 @@ def solve_video_frame_local(
     if not force and paths["metadata"].exists() and paths["wcs"].exists():
         payload = json.loads(paths["metadata"].read_text(encoding="utf-8"))
         if payload.get("algorithm_version") == ALGORITHM_VERSION:
-            return {"calibration_path": str(paths["metadata"]), **payload}
+            reference = datetime.fromisoformat(payload["reference_datetime"])
+            return {
+                "wcs_file": str(paths["wcs"]),
+                "calibration_path": str(paths["metadata"]),
+                "plate_solve_datetime": reference,
+                "job_id": "local-wideangle-cache",
+                **payload,
+            }
     timestamp = _capture_datetime(video_path)
     if 0.1 <= fps <= 240.0:
         timestamp += timedelta(seconds=frame_index / fps)
@@ -800,6 +884,97 @@ def solve_video_frame_local(
         reference_key=reference_key,
         reference_frame_index=frame_index,
     )
+
+
+def solve_video_frame_stack_local(
+    video_path: str,
+    frame_index: int,
+    *,
+    half_window_seconds: float = 10.0,
+    cache_root: Optional[str] = None,
+    force: bool = False,
+    progress_callback: Optional[Callable] = None,
+) -> Dict[str, Any]:
+    """Solve WCS from a centered temporal stack around a selected frame."""
+    frame_index = max(0, int(frame_index))
+    half_window_seconds = float(half_window_seconds)
+    if half_window_seconds < 0.0:
+        raise ValueError("half_window_seconds must be non-negative")
+
+    probe = _open_video(video_path)
+    if not probe.isOpened():
+        raise IOError(f"動画を開けません: {video_path}")
+    try:
+        width = int(probe.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(probe.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    finally:
+        probe.release()
+    if width <= 0 or height <= 0:
+        raise IOError(f"動画の解像度を読めません: {video_path}")
+
+    source_digest = hashlib.sha256(
+        str(Path(video_path).expanduser().resolve()).encode("utf-8")
+    ).hexdigest()[:8]
+    window_label = str(int(round(half_window_seconds))).replace("-", "m")
+    reference_key = f"stack_pm{window_label}s_frame_{frame_index}_{source_digest}"
+    paths = _calibration_paths(video_path, width, height, cache_root, reference_key)
+    if not force and paths["metadata"].exists() and paths["wcs"].exists():
+        payload = json.loads(paths["metadata"].read_text(encoding="utf-8"))
+        if payload.get("algorithm_version") == ALGORITHM_VERSION:
+            reference = datetime.fromisoformat(payload["reference_datetime"])
+            return {
+                "wcs_file": str(paths["wcs"]),
+                "calibration_path": str(paths["metadata"]),
+                "plate_solve_datetime": reference,
+                "job_id": "local-wideangle-stack-cache",
+                **payload,
+            }
+
+    average, samples, stack_info = _video_centered_stack(
+        video_path, frame_index, half_window_seconds=half_window_seconds
+    )
+    timestamp = _capture_datetime(video_path)
+    fps = float(stack_info.get("stack_fps") or 0.0)
+    if 0.1 <= fps <= 240.0:
+        timestamp += timedelta(seconds=int(stack_info["reference_frame_index"]) / fps)
+    _emit(
+        progress_callback,
+        f"基準フレーム前後±{half_window_seconds:g}秒をスタックしてWCSを計算します "
+        f"（{stack_info['stack_frame_count']}フレーム）",
+    )
+    result = _solve_samples(
+        average,
+        # For a short centered window, the temporal median still contains
+        # the slowly moving stars and would subtract much of the S/N gained
+        # by the mean stack.  Use the stack directly for WCS extraction.
+        None,
+        video_path,
+        timestamp,
+        cache_root,
+        progress_callback,
+        reference_key=reference_key,
+        reference_frame_index=int(stack_info["reference_frame_index"]),
+    )
+    result.update(stack_info)
+    result["stack_sample_count"] = int(len(samples))
+    metadata_path = Path(result["calibration_path"])
+    try:
+        persisted = json.loads(metadata_path.read_text(encoding="utf-8"))
+        persisted.update({
+            key: value for key, value in result.items()
+            if key.startswith("stack_") or key in {
+                "reference_frame_index", "detected_star_count", "fit_star_count"
+            }
+        })
+        temporary = metadata_path.with_suffix(".json.tmp")
+        temporary.write_text(
+            json.dumps(persisted, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        os.replace(temporary, metadata_path)
+        result.update(persisted)
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        pass
+    return result
 
 
 def solve_reference_frame_local(

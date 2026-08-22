@@ -36,7 +36,10 @@ class TrajectoryBuildRequest:
     initial_model_path: str
     start: str = ""
     end: str = ""
+    auto_select: bool = False
     cache_root: Optional[str] = None
+    observation_latitude: float = 35.0
+    observation_longitude: float = 135.0
     sample_interval_seconds: float = 10.0
     maximum_frames: int = 420
     maximum_features: int = 1200
@@ -64,6 +67,7 @@ class TrajectoryBuildResult:
     right_half_trajectory_count: int = 0
     error: str = ""
     diagnostics: dict[str, Any] = field(default_factory=dict)
+    selection_summary: dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         return dict(self.__dict__)
@@ -85,6 +89,13 @@ def _emit(callback: Optional[Callable[[str], None]], message: str) -> None:
 def _selected_paths(request: TrajectoryBuildRequest) -> list[str]:
     # A trajectory build needs all intervening segments, not the evenly
     # distributed subset used by the single-frame builder.
+    if request.auto_select:
+        return static_builder.select_auto_video_paths(
+            request.source,
+            maximum=100000,
+            latitude=request.observation_latitude,
+            longitude=request.observation_longitude,
+        )
     return static_builder.select_video_paths(
         request.source, request.start, request.end, maximum=100000,
     )
@@ -551,6 +562,18 @@ def build_trajectory_camera_model(
             raise ValueError("初期モデルの形式が固定カメラモデルではありません")
         paths = _selected_paths(request)
         _emit(progress_callback, f"軌跡解析対象: {len(paths)} 動画")
+        stamps = [local_astrometry._capture_datetime(path) for path in paths]
+        selection_summary = {
+            "mode": "automatic" if request.auto_select else "manual",
+            "scope": str(Path(request.source).expanduser().resolve()),
+            "selected_video_count": len(paths),
+            "selected_start": min(stamps).isoformat() if stamps else "",
+            "selected_end": max(stamps).isoformat() if stamps else "",
+            "selection_rule": (
+                "同じ撮影日の夜間動画をすべて使用"
+                if request.auto_select else "指定された時間範囲の動画をすべて使用"
+            ),
+        }
         frames, timestamps, frame_sources = _sample_video_frames(
             paths, request.sample_interval_seconds, request.maximum_frames, progress_callback,
         )
@@ -625,6 +648,7 @@ def build_trajectory_camera_model(
             "constellation_max_sky_roundtrip_deg": 0.1,
             "catalog_stars": [],
             "source_videos": sorted(set(frame_sources)),
+            "selection_summary": selection_summary,
             "fit_stats": {
                 "residual_median_px": median,
                 "residual_p95_px": p95,
@@ -686,6 +710,7 @@ def build_trajectory_camera_model(
                 "frame_count": len(frames), "raw_track_count": len(raw_tracks),
                 "support_counts": support_counts.tolist(),
             },
+            selection_summary=selection_summary,
         )
     except Exception as exc:
         return TrajectoryBuildResult(False, error=f"{type(exc).__name__}: {exc}")

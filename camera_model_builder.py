@@ -29,12 +29,15 @@ from scipy.spatial.transform import Rotation
 import local_wideangle_astrometry as local_astrometry
 from camera_plate_model import FixedCameraPlateModel, MODEL_TYPE
 from cloud_coverage import CloudClassification, classify_cloud_fraction
+import sun_times
 from usage_metrics import record_usage
 
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".ts"}
 DEFAULT_TARGET_SUPPORT_FRACTION = 0.80
 DEFAULT_MINIMUM_SUPPORT_FRACTION = 0.70
+DEFAULT_OBSERVATION_LATITUDE = 35.0
+DEFAULT_OBSERVATION_LONGITUDE = 135.0
 
 
 @dataclass
@@ -42,6 +45,7 @@ class CameraModelBuildRequest:
     source: str
     start: str = ""
     end: str = ""
+    auto_select: bool = False
     cache_root: Optional[str] = None
     cloud_threshold: float = 0.10
     use_cloud_filter: bool = True
@@ -53,6 +57,8 @@ class CameraModelBuildRequest:
     target_support_fraction: float = DEFAULT_TARGET_SUPPORT_FRACTION
     maximum_videos: int = 12
     force_initial_solve: bool = False
+    observation_latitude: float = DEFAULT_OBSERVATION_LATITUDE
+    observation_longitude: float = DEFAULT_OBSERVATION_LONGITUDE
 
 
 @dataclass
@@ -73,6 +79,7 @@ class CameraModelBuildResult:
     input_tokens: int = 0
     output_tokens: int = 0
     total_tokens: int = 0
+    selection_summary: dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -92,6 +99,7 @@ class CameraModelBuildResult:
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
             "total_tokens": self.total_tokens,
+            "selection_summary": self.selection_summary,
         }
 
 
@@ -113,6 +121,100 @@ def discover_video_paths(source: str | os.PathLike[str]) -> list[str]:
         str(item) for item in path.rglob("*")
         if item.is_file() and item.suffix.lower() in VIDEO_EXTENSIONS
     )
+
+
+_DATE_FOLDER = re.compile(r"^(?:19|20)\d{6}$")
+
+
+def automatic_model_source(source: str | os.PathLike[str]) -> str:
+    """Expand a selected file/hour folder to the surrounding recorder date.
+
+    RTSP recordings normally live under ``.../YYYYMMDD/HH/MM.mp4``.  A user
+    often selects one timelapse clip, but camera calibration benefits from the
+    other clear clips recorded that night, so automatic mode uses the date
+    folder as its search scope.  Non-recorder paths remain unchanged.
+    """
+    original = Path(source).expanduser()
+    if not original.exists():
+        return str(source)
+    path = original.resolve()
+    probe = path.parent if path.is_file() else path
+    for candidate in (probe, *probe.parents):
+        if _DATE_FOLDER.fullmatch(candidate.name):
+            return str(candidate)
+    return str(probe)
+
+
+def _is_star_visibility_time(
+    stamp: datetime,
+    latitude: float,
+    longitude: float,
+) -> bool:
+    """Return whether a recorder timestamp is within a usable star period."""
+    try:
+        for day in (stamp.date(), stamp.date() - timedelta(days=1)):
+            period = sun_times.compute_star_visibility_period(latitude, longitude, day)
+            start, end = period.get("start"), period.get("end")
+            if start is not None and end is not None and start <= stamp <= end:
+                return True
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return False
+
+
+def _evenly_sample_paths(paths: Sequence[str], maximum: int) -> list[str]:
+    maximum = max(1, int(maximum))
+    if len(paths) <= maximum:
+        return list(paths)
+    indices = np.linspace(0, len(paths) - 1, maximum).round().astype(int)
+    return [paths[int(index)] for index in dict.fromkeys(indices)]
+
+
+def _select_auto_video_paths(
+    source: str,
+    *,
+    maximum: int,
+    latitude: float,
+    longitude: float,
+) -> tuple[list[str], dict[str, Any]]:
+    scope = automatic_model_source(source)
+    paths = discover_video_paths(scope)
+    if not paths:
+        raise FileNotFoundError(f"動画が見つかりません: {scope}")
+    night_paths = [
+        path for path in paths
+        if _is_star_visibility_time(local_astrometry._capture_datetime(path), latitude, longitude)
+    ]
+    candidates = night_paths or paths
+    selected = _evenly_sample_paths(candidates, maximum)
+    stamps = [local_astrometry._capture_datetime(path) for path in selected]
+    summary = {
+        "mode": "automatic",
+        "source": str(Path(source).expanduser().resolve()),
+        "scope": scope,
+        "available_video_count": len(paths),
+        "night_candidate_count": len(night_paths),
+        "night_filter_used": bool(night_paths),
+        "selected_video_count": len(selected),
+        "selected_start": min(stamps).isoformat() if stamps else "",
+        "selected_end": max(stamps).isoformat() if stamps else "",
+        "selection_rule": "同じ撮影日の夜間候補から時間を均等サンプリング",
+    }
+    return selected, summary
+
+
+def select_auto_video_paths(
+    source: str,
+    maximum: int = 12,
+    *,
+    latitude: float = DEFAULT_OBSERVATION_LATITUDE,
+    longitude: float = DEFAULT_OBSERVATION_LONGITUDE,
+) -> list[str]:
+    """Select calibration videos automatically across the available night."""
+    selected, _summary = _select_auto_video_paths(
+        source, maximum=maximum, latitude=latitude, longitude=longitude,
+    )
+    return selected
 
 
 def _parse_datetime(value: str, date_hint: Optional[datetime] = None) -> Optional[datetime]:
@@ -354,7 +456,32 @@ def build_camera_model(
     cloud_reports: list[dict[str, Any]] = []
     result: Optional[CameraModelBuildResult] = None
     try:
-        videos = select_video_paths(request.source, request.start, request.end, request.maximum_videos)
+        if request.auto_select:
+            videos, selection_summary = _select_auto_video_paths(
+                request.source,
+                maximum=request.maximum_videos,
+                latitude=float(request.observation_latitude),
+                longitude=float(request.observation_longitude),
+            )
+            _emit(
+                progress_callback,
+                f"自動選択: {len(videos)}本 / {selection_summary['selected_start'][:16]}〜"
+                f"{selection_summary['selected_end'][:16]}"
+                "（タイムラプス範囲外を含む同じ撮影日の夜間動画）",
+            )
+        else:
+            videos = select_video_paths(request.source, request.start, request.end, request.maximum_videos)
+            stamps = [local_astrometry._capture_datetime(path) for path in videos]
+            selection_summary = {
+                "mode": "manual",
+                "source": str(Path(request.source).expanduser().resolve()),
+                "scope": str(Path(request.source).expanduser().resolve()),
+                "available_video_count": len(discover_video_paths(request.source)),
+                "selected_video_count": len(videos),
+                "selected_start": min(stamps).isoformat() if stamps else "",
+                "selected_end": max(stamps).isoformat() if stamps else "",
+                "selection_rule": "指定された時間範囲",
+            }
         _emit(progress_callback, f"モデル作成対象を {len(videos)} 本選択しました")
         classifier = classifier or classify_cloud_fraction
         for path in videos:
@@ -396,7 +523,30 @@ def build_camera_model(
                 _emit(progress_callback, f"指定秒数の基準フレームでソルブ: {chosen_seconds:.2f}s")
                 calibration = local_astrometry.solve_video_frame_local(
                     seed, frame_index, cache_root=request.cache_root, force=force_initial_solve,
-                    progress_callback=progress_callback,
+                    progress_callback=progress_callback, stack_half_window_seconds=10.0,
+                )
+            else:
+                calibration = solver(seed, cache_root=request.cache_root, force=force_initial_solve, progress_callback=progress_callback)
+        elif request.auto_select:
+            # Automatic selection may use many videos outside the timelapse
+            # range.  Use a centered +/-10-second stack from the middle of
+            # the selected seed rather than falling back to the legacy prefix
+            # stack used by solve_video_local.
+            cap = cv2.VideoCapture(seed)
+            fps = float(cap.get(cv2.CAP_PROP_FPS)) if cap.isOpened() else 0.0
+            frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) if cap.isOpened() else 0
+            cap.release()
+            if fps > 0.1 and frame_count > 0:
+                frame_index = max(0, min(frame_count - 1, frame_count // 2))
+                _emit(
+                    progress_callback,
+                    f"自動選択した基準動画の中央を前後±10秒スタックでソルブ: "
+                    f"{Path(seed).name} / {frame_index / fps:.1f}s",
+                )
+                calibration = local_astrometry.solve_video_frame_local(
+                    seed, frame_index, cache_root=request.cache_root,
+                    force=force_initial_solve, progress_callback=progress_callback,
+                    stack_half_window_seconds=10.0,
                 )
             else:
                 calibration = solver(seed, cache_root=request.cache_root, force=force_initial_solve, progress_callback=progress_callback)
@@ -471,6 +621,7 @@ def build_camera_model(
             "catalog_stars": calibration.get("catalog_stars", []),
             "constellation_star_alignment": bool(enabled),
             "source_videos": clear_videos,
+            "selection_summary": selection_summary,
             "cloud_threshold": float(request.cloud_threshold),
             "fit_stats": fit_stats,
             "created_at": datetime.now().astimezone().isoformat(),
@@ -480,6 +631,7 @@ def build_camera_model(
             "calibration": calibration,
             "selected_videos": videos,
             "clear_videos": clear_videos,
+            "selection_summary": selection_summary,
             "cloud_reports": cloud_reports,
             "quality": {**fit_stats, "support_fraction": support_fraction, "enabled": enabled, "target_met": target_met},
         }
@@ -490,7 +642,7 @@ def build_camera_model(
             True, str(model_path), str(calibration.get("calibration_path", "")), str(report_path),
             bool(enabled), bool(target_met), support_fraction,
             fit_stats["residual_median_px"], fit_stats["residual_p95_px"],
-            videos, cloud_reports,
+            videos, cloud_reports, selection_summary=selection_summary,
         )
         return result
     except Exception as exc:
@@ -520,6 +672,8 @@ def build_camera_model(
             metadata={
                 "selected_videos": len(videos),
                 "clear_videos": len(clear_videos),
+                "selection_mode": selection_summary.get("mode", ""),
+                "selection_scope": selection_summary.get("scope", ""),
                 "backend": request.backend,
                 "report_path": result.report_path if result is not None else "",
             },
