@@ -937,6 +937,99 @@ def _normalize_output_fps(output_fps: Optional[float] = None) -> float:
     return value
 
 
+def _parse_ffmpeg_frame_rate(value: object) -> Optional[float]:
+    """Parse an FFmpeg ``num/den`` frame-rate value."""
+    try:
+        text = str(value)
+        if "/" in text:
+            numerator, denominator = text.split("/", 1)
+            denominator_value = float(denominator)
+            if denominator_value == 0:
+                return None
+            return float(numerator) / denominator_value
+        return float(text)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+
+
+def _validate_output_video(
+    output_path: str,
+    expected_frame_count: int,
+    expected_fps: float,
+    progress_callback: Optional[Callable[[str], None]] = None,
+) -> bool:
+    """Verify that the encoded file kept the requested frame schedule.
+
+    FFmpeg can report a successful process exit even when a filter graph or an
+    overlay ended early.  Checking the finished container catches that silent
+    truncation before the GUI reports success.
+    """
+    if expected_frame_count <= 0 or not os.path.isfile(output_path):
+        _report_progress(progress_callback, "出力検証に失敗しました: 出力動画がありません")
+        return False
+
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "error", "-count_frames",
+                "-select_streams", "v:0",
+                "-show_entries",
+                "stream=nb_frames,nb_read_frames,duration,avg_frame_rate,r_frame_rate",
+                "-of", "json", output_path,
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        payload = json.loads(result.stdout or "{}")
+        streams = payload.get("streams") or []
+        stream = streams[0] if streams else {}
+        raw_count = stream.get("nb_frames")
+        if not str(raw_count).isdigit():
+            raw_count = stream.get("nb_read_frames")
+        actual_frame_count = int(raw_count) if str(raw_count).isdigit() else 0
+        duration = float(stream.get("duration"))
+        actual_fps = (
+            _parse_ffmpeg_frame_rate(stream.get("avg_frame_rate"))
+            or _parse_ffmpeg_frame_rate(stream.get("r_frame_rate"))
+        )
+    except (
+        FileNotFoundError, subprocess.TimeoutExpired, ValueError, TypeError,
+        json.JSONDecodeError, IndexError,
+    ):
+        _report_progress(progress_callback, "出力検証に失敗しました: ffprobeで確認できません")
+        return False
+
+    expected_duration = expected_frame_count / expected_fps
+    duration_tolerance = max(0.05, 1.5 / expected_fps)
+    fps_tolerance = max(0.01, expected_fps * 0.001)
+    problems = []
+    if actual_frame_count != expected_frame_count:
+        problems.append(f"フレーム数 {actual_frame_count}（期待値 {expected_frame_count}）")
+    if abs(duration - expected_duration) > duration_tolerance:
+        problems.append(f"長さ {duration:.6f}秒（期待値 {expected_duration:.6f}秒）")
+    if actual_fps is None or abs(actual_fps - expected_fps) > fps_tolerance:
+        actual_fps_text = "不明" if actual_fps is None else f"{actual_fps:g}"
+        problems.append(f"FPS {actual_fps_text}（期待値 {expected_fps:g}）")
+
+    if problems:
+        _report_progress(progress_callback, "出力検証に失敗しました: " + ", ".join(problems))
+        return False
+    return True
+
+
+def _should_filter_to_one_astronomical_night(input_paths: Sequence[str]) -> bool:
+    """Only infer a night when the user dropped one recording directory.
+
+    A list of explicitly dropped files is already the user's selection.  It
+    must not be silently reduced to one night just because those files happen
+    to belong to multiple RTSP date folders.
+    """
+    return len(input_paths) == 1 and Path(input_paths[0]).is_dir()
+
+
 def _build_deterministic_select_expression(
     total_frames: int,
     output_count: int,
@@ -2155,6 +2248,14 @@ def _create_video_timelapse_fast(
                 f"高速FFmpeg処理に失敗しました: {stderr_output[-800:]}",
             )
             return False
+        if not _validate_output_video(
+            output_path, len(sample_indices), output_fps, progress_callback
+        ):
+            _report_progress(
+                progress_callback,
+                "高速処理の出力が指定条件と一致しないため、互換処理で再生成します",
+            )
+            return None
 
     _report_progress(
         progress_callback,
@@ -2255,7 +2356,7 @@ def create_timelapse(
     all_images = sorted(list(set(all_images)))
     all_videos = sorted(list(set(all_videos)))
 
-    if night_only and all_videos:
+    if night_only and all_videos and _should_filter_to_one_astronomical_night(input_paths):
         filtered_videos, night_summary = _select_one_astronomical_night(
             all_videos, night_latitude, night_longitude
         )
@@ -2275,6 +2376,11 @@ def create_timelapse(
                 )
                 + ")",
             )
+    elif night_only and all_videos:
+        _report_progress(
+            progress_callback,
+            "明示的に指定された入力動画をそのまま使用します（自動的な一晩限定は行いません）",
+        )
 
     if progress_callback:
         progress_callback(f"検出: 画像 {len(all_images)}枚, 動画 {len(all_videos)}本")
@@ -2446,7 +2552,7 @@ def create_timelapse(
         else:
             _report_progress(
                 progress_callback,
-                "入力動画の形式が一致しないため、互換処理を使用します",
+                "高速処理の出力検証に失敗したため、互換処理で再生成します",
             )
     elif all_videos and not all_images and local_annotator is not None:
         _report_progress(
@@ -2736,6 +2842,11 @@ def create_timelapse(
         output_path, meteor_events, target_size, len(sample_indices), progress_callback,
         annotation_settings=annotation_settings,
         output_fps=output_fps,
+    ):
+        return False
+
+    if not _validate_output_video(
+        output_path, len(sample_indices), output_fps, progress_callback
     ):
         return False
 

@@ -51,6 +51,52 @@ class TimelapseCreatorTests(unittest.TestCase):
         self.assertEqual(selected, [paths[3], paths[0], paths[4]])
         self.assertEqual(summary["excluded_count"], 2)
 
+    def test_explicit_multiple_inputs_are_not_reduced_to_one_night(self):
+        self.assertFalse(
+            timelapse_creator._should_filter_to_one_astronomical_night(
+                ["/archive/rtsp/20260820/23/30.mp4", "/archive/rtsp/20260821/00/30.mp4"]
+            )
+        )
+
+    def test_sample_schedule_has_exact_count_for_duration_fps_matrix(self):
+        total_frames = 1_000_000
+        for duration in (15, 30, 60):
+            for fps in (15, 30, 60):
+                with self.subTest(duration=duration, fps=fps):
+                    expected = duration * fps
+                    indices = timelapse_creator.calculate_sample_indices(
+                        total_frames, duration, fps
+                    )
+                    self.assertEqual(len(indices), expected)
+                    self.assertEqual(indices[0], 0)
+                    self.assertLess(indices[-1], total_frames)
+                    self.assertEqual(len(set(indices)), len(indices))
+
+    def test_output_validation_rejects_a_truncated_container(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory, "timelapse.mp4")
+            output.write_bytes(b"placeholder")
+            probe = SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps({
+                    "streams": [{
+                        "nb_frames": "450",
+                        "nb_read_frames": "450",
+                        "duration": "15.000000",
+                        "avg_frame_rate": "30/1",
+                    }]
+                }),
+                stderr="",
+            )
+            with mock.patch.object(
+                timelapse_creator.subprocess, "run", return_value=probe
+            ):
+                self.assertFalse(
+                    timelapse_creator._validate_output_video(
+                        str(output), 900, 60, lambda _message: None
+                    )
+                )
+
     def test_rtsp_timelapse_timestamp_uses_capture_path_over_birth_time(self):
         path = "/archive/rtsp/20260811/01/39.mp4"
         birth_time = datetime(2026, 8, 11, 1, 39, 15)
@@ -416,6 +462,9 @@ class TimelapseCreatorTests(unittest.TestCase):
                 timelapse_creator, "_select_h264_encoder",
                 return_value=("test", ["-c:v", "libx264"], "test"),
             ),
+            mock.patch.object(
+                timelapse_creator, "_validate_output_video", return_value=True
+            ),
             mock.patch.object(timelapse_creator.subprocess, "Popen", return_value=proc) as popen,
         ):
             result = timelapse_creator._create_video_timelapse_fast(
@@ -645,6 +694,9 @@ class TimelapseCreatorTests(unittest.TestCase):
                 timelapse_creator, "_select_h264_encoder", return_value=("test", [], "test")
             ),
             mock.patch.object(
+                timelapse_creator, "_validate_output_video", return_value=True
+            ),
+            mock.patch.object(
                 timelapse_creator.subprocess, "Popen", return_value=proc
             ) as ffmpeg_popen,
             mock.patch.object(
@@ -729,6 +781,9 @@ class TimelapseCreatorTests(unittest.TestCase):
             ) as fast_path,
             mock.patch.object(
                 timelapse_creator, "_select_h264_encoder", return_value=("test", [], "test")
+            ),
+            mock.patch.object(
+                timelapse_creator, "_validate_output_video", return_value=True
             ),
             mock.patch.object(
                 timelapse_creator.subprocess, "Popen", return_value=proc
