@@ -937,6 +937,35 @@ def _normalize_output_fps(output_fps: Optional[float] = None) -> float:
     return value
 
 
+def _build_deterministic_select_expression(
+    total_frames: int,
+    output_count: int,
+    frame_offset: int = 0,
+    max_sample_index: Optional[int] = None,
+) -> Optional[str]:
+    """Build a stateless FFmpeg ``select`` expression for sampled frames.
+
+    ``selected_n`` is stateful: its value depends on how many frames have
+    already passed through the filter.  That makes expressions which combine
+    ``n`` and ``selected_n`` sensitive to timestamp discontinuities in a
+    concatenated night archive.  The expression below derives the intended
+    sample number directly from the current source frame number, so it remains
+    deterministic even when the input is a long concat-demuxer stream.
+    """
+    if total_frames <= 0 or output_count <= 0:
+        return None
+    offset = int(frame_offset)
+    sample_number = f"ceil((n-{offset})*{output_count}/{total_frames})"
+    target_position = f"floor({sample_number}*{total_frames}/{output_count})"
+    terms = [
+        f"gte(n\\,{offset})",
+        f"eq(n-{offset}\\,{target_position})",
+    ]
+    if max_sample_index is not None:
+        terms.insert(1, f"lt({sample_number}\\,{int(max_sample_index)})")
+    return "*".join(terms)
+
+
 def calculate_sample_indices(
     total_frames: int,
     target_duration_seconds: float,
@@ -1805,8 +1834,13 @@ def _build_fast_filter_graph(
     filters: List[str] = []
 
     if radius <= 0:
+        select_expression = _build_deterministic_select_expression(
+            total_frames, output_count
+        )
+        if select_expression is None:
+            return None
         filters.append(
-            f"[{source_label}]select=gte(n\\,floor(selected_n*{total_frames}/{output_count})),"
+            f"[{source_label}]select={select_expression},"
             f"setpts=N/({output_fps:g}*TB)[sampled]"
         )
     else:
@@ -1818,10 +1852,21 @@ def _build_fast_filter_graph(
         tail_samples = sample_indices[main_count:]
         if main_count <= 0:
             return None
+        # ``tmix`` delays each usable centered result by ``radius`` source
+        # frames.  Select the exact delayed positions with a stateless
+        # expression rather than deriving them from ``selected_n`` while the
+        # filter is running.
+        forward_select = _build_deterministic_select_expression(
+            total_frames,
+            output_count,
+            frame_offset=radius,
+            max_sample_index=main_count,
+        )
+        if forward_select is None:
+            return None
         forward_filter = (
             f"tmix=frames={radius * 2 + 1}:weights=1,"
-            f"select=gte(n\\,{radius})*lt(selected_n\\,{main_count})*"
-            f"gte(n-{radius}\\,floor(selected_n*{total_frames}/{output_count}))"
+            f"select={forward_select}"
         )
         if not tail_samples:
             filters.append(

@@ -287,7 +287,8 @@ class TimelapseCreatorTests(unittest.TestCase):
             9000, indices, 0, (1920, 1080), None, None
         )
 
-        self.assertIn("selected_n*9000/900", graph)
+        self.assertIn("ceil((n-0)*900/9000)", graph)
+        self.assertNotIn("selected_n", graph)
         self.assertNotIn("tmix=", graph)
         self.assertIn("[out]", graph)
 
@@ -309,7 +310,8 @@ class TimelapseCreatorTests(unittest.TestCase):
 
         self.assertIn("tmix=frames=101", graph)
         self.assertIn("trim=start_frame=8900", graph)
-        self.assertIn("lt(selected_n\\,895)", graph)
+        self.assertIn("ceil((n-50)*900/9000)", graph)
+        self.assertNotIn("selected_n", graph)
         self.assertIn("eq(n\\,59)", graph)
         self.assertIn("eq(n\\,99)", graph)
 
@@ -322,7 +324,8 @@ class TimelapseCreatorTests(unittest.TestCase):
 
         self.assertIsNotNone(graph)
         self.assertIn("tmix=frames=101", graph)
-        self.assertIn("lt(selected_n\\,900)", graph)
+        self.assertIn("ceil((n-50)*900/90000)", graph)
+        self.assertNotIn("selected_n", graph)
         self.assertNotIn("split=2", graph)
         self.assertNotIn("reverse", graph)
 
