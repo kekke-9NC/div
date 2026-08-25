@@ -526,6 +526,64 @@ class TimelapseCreatorTests(unittest.TestCase):
         loader.cleanup.assert_called_once()
         self.assertTrue(any("自動切り替えしません" in str(item) for item in messages))
 
+    def test_masked_video_uses_python_schedule_instead_of_framesync_fast_path(self):
+        frame = timelapse_creator.np.full(
+            (16, 16, 3), 80, dtype=timelapse_creator.np.uint8
+        )
+        loader = mock.MagicMock()
+        loader.load_frame.return_value = frame.copy()
+        loader.timestamp_for_index.return_value = datetime(2026, 7, 10, 1, 0, 0)
+
+        mean_cache = mock.MagicMock()
+        mean_cache.full_preload_enabled = False
+        mean_cache.enabled = True
+        mean_cache._retain_all_frames = False
+        mean_cache.mean_for_index.side_effect = [frame.copy(), frame.copy()]
+
+        stdin = mock.MagicMock()
+        stdin.closed = False
+        proc = mock.MagicMock(stdin=stdin)
+        proc.poll.return_value = 0
+        mask = timelapse_creator.np.full((16, 16), 255, dtype=timelapse_creator.np.uint8)
+
+        with (
+            mock.patch.object(
+                timelapse_creator, "get_files_from_path", return_value=([], ["input.mp4"])
+            ),
+            mock.patch.object(
+                timelapse_creator,
+                "count_total_frames",
+                return_value=(2, [("input.mp4", 0, 2)]),
+            ),
+            mock.patch.object(
+                timelapse_creator, "calculate_sample_indices", return_value=[0, 1]
+            ),
+            mock.patch.object(timelapse_creator, "FrameLoader", return_value=loader),
+            mock.patch.object(
+                timelapse_creator, "TemporalMeanFrameCache", return_value=mean_cache
+            ),
+            mock.patch.object(timelapse_creator, "_create_video_timelapse_fast") as fast_path,
+            mock.patch.object(
+                timelapse_creator, "_select_h264_encoder", return_value=("test", [], "test")
+            ),
+            mock.patch.object(timelapse_creator, "_validate_output_video", return_value=True),
+            mock.patch.object(timelapse_creator.subprocess, "Popen", return_value=proc),
+            mock.patch.object(
+                timelapse_creator, "_finish_ffmpeg_process", return_value=(0, b"")
+            ),
+        ):
+            result = timelapse_creator.create_timelapse(
+                ["input.mp4"],
+                "output.mp4",
+                timestamp_settings={"enabled": False},
+                temporal_mean_radius_frames=0,
+                mask=mask,
+            )
+
+        self.assertTrue(result)
+        fast_path.assert_not_called()
+        self.assertEqual(stdin.write.call_count, 2)
+
     def test_invalid_probed_video_is_not_sent_to_fast_concat(self):
         loader = mock.MagicMock()
         loader.load_frame.return_value = timelapse_creator.np.zeros(

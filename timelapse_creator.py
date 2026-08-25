@@ -2525,13 +2525,19 @@ def create_timelapse(
     # positions diverge from ``sample_indices`` (for example, frame 383 in the
     # base represented 22:00 while the insertion schedule represented 22:36).
     # That failure is silent because duration and frame-count probes both pass.
-    # Keep the fast path when there is nothing to insert, but use the shared
-    # FrameLoader/TemporalMeanFrameCache schedule whenever meteor events exist.
+    # Keep the fast path only when every output frame can be produced from one
+    # FFmpeg stream.  ``maskedmerge`` is a framesync filter: on a long concat
+    # stream it can emit the requested frame count while pairing the mask with
+    # an earlier part of the sampled video.  The timestamp overlay is then
+    # correct but the pixels are not (the last frame can show roughly the
+    # middle of the night).  Use the shared Python schedule for masked output
+    # so the same ``sample_indices`` drive decoding, masking and timestamps.
     use_fast_video_path = (
         bool(all_videos)
         and not all_images
         and local_annotator is None
         and not meteor_events
+        and mask is None
     )
     if use_fast_video_path:
         fast_result = _create_video_timelapse_fast(
@@ -2572,6 +2578,11 @@ def create_timelapse(
         _report_progress(
             progress_callback,
             "ローカル星空注釈を各フレームへ描画するため、Python注釈処理を使用します",
+        )
+    elif all_videos and not all_images and mask is not None:
+        _report_progress(
+            progress_callback,
+            "マスクをフレーム番号と同期して適用するため、互換処理を使用します",
         )
     elif all_videos and not all_images and meteor_events:
         _report_progress(
