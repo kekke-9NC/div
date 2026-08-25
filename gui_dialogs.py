@@ -1541,7 +1541,10 @@ class TimelapseDragDropWindow(Toplevel):
                     meteor_insert_settings=meteor_insert_settings,
                     fixed_pattern_correction=fixed_pattern_correction,
                     output_fps=output_fps,
-                    night_only=True,
+                    # Drag-and-drop is an explicit source selection.  Keep
+                    # every discovered video instead of silently reducing a
+                    # dropped recording folder to one astronomical night.
+                    night_only=False,
                     night_latitude=night_latitude,
                     night_longitude=night_longitude,
                 )
