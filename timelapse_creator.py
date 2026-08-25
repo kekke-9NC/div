@@ -2011,17 +2011,31 @@ def _build_fast_filter_graph(
     width, height = target_size
     if mask_input_index is not None:
         filters.extend([
-            f"[{mask_input_index}:v]format=gray[mask_gray]",
-            f"color=c=black:s={width}x{height}:r={output_fps:g}[black]",
-            f"[black][{current}][mask_gray]maskedmerge[masked]",
+            # ``maskedmerge`` is a framesync filter.  A looped PNG and the
+            # sampled stream can otherwise bring different time bases into
+            # the merge; the output may still contain the requested number of
+            # frames while its PTS covers only part of the source night.
+            f"[{mask_input_index}:v]format=gray,trim=end_frame={output_count},"
+            f"setpts=N/({output_fps:g}*TB)[mask_gray]",
+            f"color=c=black:s={width}x{height}:r={output_fps:g},"
+            f"trim=end_frame={output_count},setpts=N/({output_fps:g}*TB)[black]",
+            f"[black][{current}][mask_gray]maskedmerge,"
+            f"setpts=N/({output_fps:g}*TB)[masked]",
         ])
         current = "masked"
     if timestamp_input is not None:
         input_index, overlay_x, overlay_y = timestamp_input
-        filters.append(
-            f"[{current}][{input_index}:v]overlay=x={overlay_x}:y={overlay_y}:"
-            "shortest=1[stamped]"
-        )
+        # Normalize both sides immediately before overlay.  Normalizing only
+        # the final output is too late: overlay matches frames by PTS and can
+        # consume a compressed prefix of the timestamp stream after a mask.
+        filters.extend([
+            f"[{current}]setpts=N/({output_fps:g}*TB)[timestamp_base]",
+            f"[{input_index}:v]setpts=N/({output_fps:g}*TB)[timestamp_overlay]",
+            (
+                f"[timestamp_base][timestamp_overlay]overlay=x={overlay_x}:y={overlay_y}:"
+                "shortest=1[stamped]"
+            ),
+        ])
         current = "stamped"
     filters.append(f"[{current}]format=yuv420p,setpts=N/({output_fps:g}*TB)[out]")
     return ";".join(filters)

@@ -401,6 +401,19 @@ class TimelapseCreatorTests(unittest.TestCase):
         self.assertIn("blend=all_expr='clip(A+B,0,255)'", graph)
         self.assertLess(graph.index("[fixed_corrected]"), graph.index("maskedmerge"))
 
+    def test_fast_filter_normalizes_mask_and_timestamp_frame_timing(self):
+        indices = timelapse_creator.calculate_sample_indices(15000, 30, 60)
+
+        graph = timelapse_creator._build_fast_filter_graph(
+            15000, indices, 50, (1920, 1080), (1, 1513, 1030), 2,
+            output_fps=60,
+        )
+
+        self.assertIn("trim=end_frame=1800", graph)
+        self.assertIn("[black][sampled][mask_gray]maskedmerge,setpts=N/(60*TB)[masked]", graph)
+        self.assertIn("[masked]setpts=N/(60*TB)[timestamp_base]", graph)
+        self.assertIn("[1:v]setpts=N/(60*TB)[timestamp_overlay]", graph)
+
     def test_concat_compatibility_allows_small_fps_rounding_drift(self):
         def capture(fps):
             item = mock.MagicMock()
