@@ -44,4 +44,5 @@ python -m pip install --upgrade pip setuptools wheel
 python -m pip install -r requirements-mac.txt
 
 mkdir -p meteor not_meteor temp_clips rtsp lighten_blend_cache
+
 python main_gui.py

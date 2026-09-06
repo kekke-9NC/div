@@ -233,6 +233,7 @@ def create_meteor_trail_timelapse(
     output_path: str,
     *,
     settings: Optional[TrailTimelapseSettings] = None,
+    target_duration_seconds: Optional[float] = None,
     progress_callback: Optional[Callable[[str], None]] = None,
 ) -> bool:
     """Create a meteor-preserving lighten-composite timelapse.
@@ -252,7 +253,27 @@ def create_meteor_trail_timelapse(
             progress_callback("有効な動画ファイルがありません。")
         return False
     options = (settings or TrailTimelapseSettings()).validate()
+    if target_duration_seconds is not None:
+        try:
+            target_duration_seconds = float(target_duration_seconds)
+        except (TypeError, ValueError):
+            if progress_callback:
+                progress_callback("エラー: 動画の長さは数値で指定してください。")
+            return False
+        if target_duration_seconds <= 0:
+            if progress_callback:
+                progress_callback("エラー: 動画の長さは0秒より大きくしてください。")
+            return False
     total_frames = _count_frames(normalized_paths)
+    target_frame_count: Optional[int] = None
+    if target_duration_seconds is not None and total_frames > 0:
+        target_frame_count = max(
+            1, int(round(target_duration_seconds * options.output_fps))
+        )
+        # A source shorter than the requested duration cannot provide more
+        # unique frames without inventing repeated output frames.  Match the
+        # ordinary timelapse behavior and emit each available source frame.
+        target_frame_count = min(target_frame_count, total_frames)
     lut = _tone_lut(options)
     writer = video_encoding.FFmpegFrameWriter(
         output_path,
@@ -273,6 +294,7 @@ def create_meteor_trail_timelapse(
     elapsed = 0.0
     processed = 0
     emitted = 0
+    current_target_frame: Optional[int] = None
     success = False
 
     def emit_window() -> None:
@@ -312,18 +334,46 @@ def create_meteor_trail_timelapse(
                 capture_step = (capture_time - previous_capture_time).total_seconds()
                 expected_step = 1.0 / fps
                 if capture_step > expected_step * 1.5:
-                    emit_window()
-                    trail = None
-                    elapsed = 0.0
+                    if target_frame_count is None:
+                        emit_window()
+                        trail = None
+                        elapsed = 0.0
+                    else:
+                        # Keep the requested output frame count fixed even
+                        # when a source archive has a time gap.  Do not carry
+                        # the previous trail across that gap.
+                        window_max = None
+                        window_first_time = None
+                        window_last_time = None
+                        trail = None
+                        elapsed = 0.0
             previous_capture_time = capture_time
             toned = cv2.LUT(_resize_frame(frame, options.output_size), lut)
+
+            if target_frame_count is not None:
+                # The duration selector describes the final video duration.
+                # Map the complete input range into the requested number of
+                # output frames, just like the ordinary timelapse path.  Each
+                # mapped interval still uses a lighten composite, preserving
+                # the meteor-trail behavior while guaranteeing the duration.
+                source_index = processed
+                target_frame = min(
+                    target_frame_count - 1,
+                    source_index * target_frame_count // max(1, total_frames),
+                )
+                if current_target_frame is None:
+                    current_target_frame = target_frame
+                elif target_frame != current_target_frame:
+                    emit_window()
+                    current_target_frame = target_frame
+
             window_max = toned.copy() if window_max is None else np.maximum(window_max, toned)
             if window_first_time is None:
                 window_first_time = capture_time
             window_last_time = capture_time
             elapsed += 1.0 / fps
             processed += 1
-            if elapsed >= options.source_seconds_per_output_frame:
+            if target_frame_count is None and elapsed >= options.source_seconds_per_output_frame:
                 emit_window()
             if progress_callback and (processed == 1 or processed % 250 == 0):
                 fraction = processed / max(1, total_frames)
@@ -344,10 +394,18 @@ def create_meteor_trail_timelapse(
         return False
 
     if progress_callback:
-        speedup = options.source_seconds_per_output_frame * options.output_fps
+        if target_duration_seconds is None:
+            speedup = options.source_seconds_per_output_frame * options.output_fps
+            detail = f"約{speedup:.1f}倍速、{emitted}フレーム"
+        else:
+            actual_duration = emitted / options.output_fps
+            detail = (
+                f"指定{target_duration_seconds:g}秒、実測約{actual_duration:g}秒、"
+                f"{emitted}フレーム"
+            )
         progress_callback(
             f"流星トレイルタイムラプスを保存しました: {output_path} "
-            f"（約{speedup:.1f}倍速、{emitted}フレーム）"
+            f"（{detail}）"
         )
     return success
 
@@ -368,6 +426,10 @@ def _parse_args() -> argparse.Namespace:
         "--no-timestamp", action="store_true",
         help="右下の実時刻表示を無効にする",
     )
+    parser.add_argument(
+        "--duration", type=float, default=None,
+        help="最終動画の長さ（秒）。省略時は入力時間から決定",
+    )
     parser.add_argument("--fps", type=float, default=25.0, help="出力FPS（既定: 25）")
     parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--height", type=int, default=720)
@@ -384,7 +446,11 @@ def main() -> int:
         timestamp_enabled=not args.no_timestamp,
     )
     return 0 if create_meteor_trail_timelapse(
-        args.inputs, args.output, settings=settings, progress_callback=print
+        args.inputs,
+        args.output,
+        settings=settings,
+        target_duration_seconds=args.duration,
+        progress_callback=print,
     ) else 1
 
 

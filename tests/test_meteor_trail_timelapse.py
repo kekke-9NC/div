@@ -1,6 +1,6 @@
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
@@ -168,6 +168,61 @@ class MeteorTrailTimelapseTests(unittest.TestCase):
         self.assertTrue(result)
         self.assertTrue(callbacks)
         self.assertGreaterEqual(len(callbacks), 1)
+
+    def test_target_duration_limits_output_frame_count(self):
+        frames = [np.full((4, 6, 3), index, dtype=np.uint8) for index in range(20)]
+
+        class FakeWriter:
+            instances = []
+
+            def __init__(self, *_args, **_kwargs):
+                self.frames = []
+                FakeWriter.instances.append(self)
+
+            def isOpened(self):
+                return True
+
+            def write(self, frame):
+                self.frames.append(frame.copy())
+
+            def release(self):
+                pass
+
+        callbacks = []
+        with (
+            mock.patch.object(trail, "discover_video_files", return_value=["one.mp4"]),
+            mock.patch.object(trail, "_count_frames", return_value=len(frames)),
+            mock.patch.object(
+                trail,
+                "_iter_frames",
+                return_value=iter(
+                    (
+                        frame,
+                        10.0,
+                        datetime(2026, 8, 13, 0, 0, 0)
+                        + timedelta(seconds=index / 10.0),
+                    )
+                    for index, frame in enumerate(frames)
+                ),
+            ),
+            mock.patch.object(trail.video_encoding, "FFmpegFrameWriter", FakeWriter),
+            mock.patch.object(trail, "_tone_lut", return_value=np.arange(256, dtype=np.uint8)),
+        ):
+            result = trail.create_meteor_trail_timelapse(
+                ["one.mp4"],
+                str(Path(tempfile.gettempdir()) / "trail-duration-test.mp4"),
+                settings=trail.TrailTimelapseSettings(
+                    output_fps=5.0,
+                    output_size=(16, 16),
+                    timestamp_enabled=False,
+                ),
+                target_duration_seconds=2.0,
+                progress_callback=callbacks.append,
+            )
+
+        self.assertTrue(result)
+        self.assertEqual(len(FakeWriter.instances[0].frames), 10)
+        self.assertIn("指定2秒", callbacks[-1])
 
 
 if __name__ == "__main__":

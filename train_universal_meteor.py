@@ -291,6 +291,10 @@ def train(args):
         )
 
     model = MeteorFusionUniversal().to(device)
+    if args.initial_model:
+        initial_state = torch.load(args.initial_model, map_location=device, weights_only=True)
+        model.load_state_dict(initial_state)
+        print(f"initialized_from={args.initial_model}")
     parameter_count = sum(parameter.numel() for parameter in model.parameters())
     print(f"parameters={parameter_count:,}")
     positive = sum(event["label"] for event in training)
@@ -467,6 +471,11 @@ def parse_args():
         "--cache-root", default="ml_training_data/universal_cache_v1"
     )
     parser.add_argument("--output", default="models/meteor_fusion_universal_v1.pth")
+    parser.add_argument(
+        "--initial-model",
+        default="",
+        help="Optional compatible checkpoint used as the starting point for fine-tuning.",
+    )
     parser.add_argument("--epochs", type=int, default=35)
     parser.add_argument("--patience", type=int, default=8)
     parser.add_argument("--batch-size", type=int, default=32)

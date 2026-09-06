@@ -23,6 +23,9 @@ env/
 temp_clips/
 temp_video/
 rtsp/
+rtsp_test/
+rtsp_compression_tests_20260815/
+analysis_results/
 noise_twin_models/
 
 # Local generated media and training data
