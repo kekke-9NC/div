@@ -167,6 +167,43 @@ def test_detection_mask_is_passed_to_all_run_modes(tmp_path):
         assert call["mask"].tolist() == [[255, 255], [255, 255]]
 
 
+def test_rtsp_preset_and_fps_are_applied_temporarily():
+    from swift_backend import Bridge
+
+    config = SimpleNamespace(
+        RTSP_PRESET_CLEAR_SKY={
+            "min_line_length": 20,
+            "hough_threshold": 25,
+            "canny_thresh1": 75,
+            "canny_thresh2": 180,
+        },
+        RTSP_PRESET_CLOUDY={
+            "min_line_length": 25,
+            "hough_threshold": 35,
+            "canny_thresh1": 100,
+            "canny_thresh2": 240,
+        },
+        RTSP_MIN_LINE_LENGTH=99,
+        RTSP_HOUGH_THRESHOLD=99,
+        RTSP_CANNY_THRESH1=99,
+        RTSP_CANNY_THRESH2=99,
+        RTSP_FPS=25,
+    )
+
+    with Bridge._temporary_rtsp_config(config, {"rtspPreset": "clear", "rtspFps": 30}):
+        assert config.RTSP_MIN_LINE_LENGTH == 20
+        assert config.RTSP_HOUGH_THRESHOLD == 25
+        assert config.RTSP_CANNY_THRESH1 == 75
+        assert config.RTSP_CANNY_THRESH2 == 180
+        assert config.RTSP_FPS == 30
+
+    assert config.RTSP_MIN_LINE_LENGTH == 99
+    assert config.RTSP_HOUGH_THRESHOLD == 99
+    assert config.RTSP_CANNY_THRESH1 == 99
+    assert config.RTSP_CANNY_THRESH2 == 99
+    assert config.RTSP_FPS == 25
+
+
 def test_settings_are_written_atomically_and_unknown_commands_fail(tmp_path):
     messages = run_bridge(
         tmp_path,
@@ -181,6 +218,8 @@ def test_settings_are_written_atomically_and_unknown_commands_fail(tmp_path):
                     "rtsp_start_hour": 18,
                     "rtsp_end_hour": 6,
                     "rtsp_notification_sound": False,
+                    "rtsp_preset": "clear",
+                    "rtsp_fps": "30",
                     "summary_video_config": [
                         {"name": "Composite Image", "enabled": False, "duration": 3.5}
                     ],
@@ -200,6 +239,8 @@ def test_settings_are_written_atomically_and_unknown_commands_fail(tmp_path):
     assert settings["rtsp_start_hour"] == 18
     assert settings["rtsp_end_hour"] == 6
     assert settings["rtsp_notification_sound"] is False
+    assert settings["rtsp_preset"] == "clear"
+    assert settings["rtsp_fps"] == "30"
     assert settings["summary_video_config"] == [
         {"name": "Composite Image", "enabled": False, "duration": 3.5}
     ]
@@ -221,7 +262,11 @@ def test_invalid_run_requests_return_errors_without_starting_processing(tmp_path
         {
             "id": "bad_rtsp_options",
             "command": "run_rtsp",
-            "payload": {"url": "rtsp://camera/live", "notifyOnDetection": "false"},
+            "payload": {
+                "url": "rtsp://camera/live",
+                "notifyOnDetection": "false",
+                "rtspPreset": "invalid",
+            },
         },
         {
             "id": "bad_periodic_window",
@@ -338,6 +383,8 @@ def test_legacy_feature_settings_are_reported_to_the_swiftui_frontend(tmp_path):
                 "summary_video_config": [{"name": "Composite Image", "enabled": False}],
                 "rtsp_time_limit_enabled": True,
                 "rtsp_notification_sound": False,
+                "rtsp_preset": "clear",
+                "rtsp_fps": "30",
                 "video_concat_settings": {"codec": "h265"},
                 "periodic_scan_enabled": True,
                 "periodic_scan_directory": str(tmp_path),
@@ -359,6 +406,8 @@ def test_legacy_feature_settings_are_reported_to_the_swiftui_frontend(tmp_path):
     assert "定期スキャン" not in unsupported
     assert "RTSP時間制限" not in unsupported
     assert "RTSP検出通知音" not in unsupported
+    assert "RTSPプリセット" not in unsupported
+    assert "RTSPフレームレート" not in unsupported
 
 
 def test_periodic_scan_accepts_a_directory_and_cancel_request(tmp_path):
@@ -426,6 +475,8 @@ def test_rtsp_payload_is_normalized_before_worker_starts(tmp_path):
                     {"name": "Composite Image", "enabled": False, "duration": 3.5},
                     {"name": "Full Size Video", "enabled": True},
                 ],
+                "rtspPreset": "clear",
+                "rtspFps": 30,
             },
         }
     )
@@ -444,6 +495,8 @@ def test_rtsp_payload_is_normalized_before_worker_starts(tmp_path):
     assert captured["endHour"] == 6
     assert captured["endMinute"] == 40
     assert captured["notifyOnDetection"] is False
+    assert captured["rtspPreset"] == "clear"
+    assert captured["rtspFps"] == 30
     assert captured["summaryConfig"] == [
         {"name": "Composite Image", "enabled": False, "duration": 3.5},
         {"name": "Full Size Video", "enabled": True},

@@ -1085,6 +1085,22 @@ struct SettingsView: View {
                 GlassCard {
                     VStack(alignment: .leading, spacing: 16) {
                         SectionTitle("RTSP運用", subtitle: "ネットワークカメラの録画時間帯と検出通知を設定します")
+                        HStack(spacing: 28) {
+                            Picker("検出感度", selection: $store.rtspPreset) {
+                                Text("雲が多いとき（推奨）").tag("cloudy")
+                                Text("雲が少ないとき").tag("clear")
+                            }
+                            .pickerStyle(.menu)
+                            .onChange(of: store.rtspPreset) { _, _ in
+                                store.saveSettings()
+                            }
+                            Stepper(value: $store.rtspFPS, in: 1...120) {
+                                SettingValue(title: "録画FPS", value: "\(store.rtspFPS) fps")
+                            }
+                            .onChange(of: store.rtspFPS) { _, _ in
+                                store.saveSettings()
+                            }
+                        }
                         Toggle("録画時間帯を制限する", isOn: $store.rtspTimeLimitEnabled)
                             .toggleStyle(.switch)
                             .tint(AppTheme.accent)

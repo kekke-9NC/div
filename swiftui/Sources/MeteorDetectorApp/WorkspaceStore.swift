@@ -63,6 +63,8 @@ final class WorkspaceStore: ObservableObject {
     @Published var rtspEndHour = 7
     @Published var rtspEndMinute = 0
     @Published var rtspNotificationSound = true
+    @Published var rtspPreset = "cloudy"
+    @Published var rtspFPS = 25
 
     let rootURL: URL
     private let bridge: PythonBridge
@@ -446,6 +448,8 @@ final class WorkspaceStore: ObservableObject {
                     "rtsp_end_hour": String(rtspEndHour),
                     "rtsp_end_minute": String(rtspEndMinute),
                     "rtsp_notification_sound": rtspNotificationSound,
+                    "rtsp_preset": rtspPreset,
+                    "rtsp_fps": String(rtspFPS),
                 ],
             ]
         ) { [weak self] result in
@@ -551,6 +555,8 @@ final class WorkspaceStore: ObservableObject {
                     "endHour": rtspEndHour,
                     "endMinute": rtspEndMinute,
                     "notifyOnDetection": rtspNotificationSound,
+                    "rtspPreset": rtspPreset,
+                    "rtspFps": rtspFPS,
                 ]
             )
         ) { [weak self] result in
@@ -734,6 +740,9 @@ final class WorkspaceStore: ObservableObject {
         rtspEndHour = max(0, min(23, intValue(settings["rtsp_end_hour"], default: 7)))
         rtspEndMinute = max(0, min(59, intValue(settings["rtsp_end_minute"], default: 0)))
         rtspNotificationSound = boolValue(settings["rtsp_notification_sound"], default: true)
+        let savedPreset = settings["rtsp_preset"] as? String ?? "cloudy"
+        rtspPreset = savedPreset == "clear" ? "clear" : "cloudy"
+        rtspFPS = max(1, min(120, intValue(settings["rtsp_fps"], default: 25)))
         if let options = settings["save_options"] as? [String: Any] {
             for key in saveOptions.keys {
                 if let value = options[key] { saveOptions[key] = boolValue(value, default: saveOptions[key] ?? true) }

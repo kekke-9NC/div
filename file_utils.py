@@ -241,12 +241,39 @@ def monitor_directory(
     print("[定期スキャン] 監視スレッドを終了します。")
     if progress_callback: progress_callback(("[定期スキャン] 監視を終了しました。", None))
 
+def _rtsp_ffmpeg_segment_output_options(
+    segment_pattern: str,
+    duration_secs: int,
+    requested_fps: Optional[float] = None,
+) -> List[str]:
+    """Build FFmpeg segment-muxer output options with the output path last."""
+    options = [
+        '-map', '0:v:0',
+        '-c:v', 'libx264',
+        '-preset', 'ultrafast',
+        '-force_key_frames', f'expr:gte(t,n_forced*{duration_secs})',
+        '-an',
+        '-f', 'segment',
+        '-segment_time', str(duration_secs),
+        '-segment_time_delta', '0.5',
+        '-segment_format', 'mp4',
+        '-reset_timestamps', '1',
+        '-strftime', '1',
+        '-strftime_mkdir', '1',
+    ]
+    if requested_fps is not None:
+        options.extend(['-r', str(requested_fps)])
+    options.append(segment_pattern)
+    return options
+
+
 def save_rtsp_video_segments_ffmpeg(
     rtsp_url: str, save_root: str = config.RTSP_SAVE_ROOT,
     segment_duration: int = config.RTSP_SEGMENT_DURATION, cancel_flag: Optional[threading.Event] = None,
     time_limit_enabled: bool = False, start_hour: int = 17, start_minute: int = 0,
     end_hour: int = 7, end_minute: int = 0,
-    preview_callback: Optional[Callable[[np.ndarray], None]] = None
+    preview_callback: Optional[Callable[[np.ndarray], None]] = None,
+    requested_fps: Optional[float] = None,
 ):
     """
     FFmpegのsegment muxerを使用してRTSPストリームを連続録画する。
@@ -267,7 +294,13 @@ def save_rtsp_video_segments_ffmpeg(
     ffmpeg_path = shutil.which("ffmpeg")
     if not ffmpeg_path:
         print("[RTSP保存] FFmpegが見つかりません。OpenCV方式にフォールバック")
-        return save_rtsp_video_segments(rtsp_url, save_root, segment_duration, cancel_flag)
+        return save_rtsp_video_segments(
+            rtsp_url,
+            save_root,
+            segment_duration,
+            cancel_flag,
+            requested_fps=requested_fps,
+        )
     
     # h264_cuvidサポート確認 + CUDAデバイス利用可否の確認
     use_cuvid = False
@@ -353,21 +386,13 @@ def save_rtsp_video_segments_ffmpeg(
             # 入力と出力設定（segment muxer）
             ffmpeg_cmd.extend(['-i', rtsp_url])
 
-            ffmpeg_cmd.extend([
-                '-map', '0:v:0',
-                '-c:v', 'libx264',
-                '-preset', 'ultrafast',
-                '-force_key_frames', f'expr:gte(t,n_forced*{duration_secs})',
-                '-an',  # オーディオなし
-                '-f', 'segment',  # セグメントmuxer
-                '-segment_time', str(duration_secs),  # セグメント長（秒）
-                '-segment_time_delta', '0.5',
-                '-segment_format', 'mp4',
-                '-reset_timestamps', '1',  # 各セグメントのタイムスタンプをリセット
-                '-strftime', '1',  # strftimeでファイル名生成
-                '-strftime_mkdir', '1',  # 必要なディレクトリを自動作成
-                segment_pattern
-            ])
+            ffmpeg_cmd.extend(
+                _rtsp_ffmpeg_segment_output_options(
+                    segment_pattern,
+                    duration_secs,
+                    requested_fps,
+                )
+            )
 
             if preview_callback is not None:
                 ffmpeg_cmd.extend([
@@ -644,6 +669,7 @@ def save_rtsp_video_segments(
     preview_callback: Optional[Callable[[np.ndarray], None]] = None,
     dark_frame: Optional[np.ndarray] = None,
     noise_twin_options: Optional[Dict[str, Any]] = None,
+    requested_fps: Optional[float] = None,
 ):
     """
     RTSPストリームから設定されたフレーム数ごとに動画ファイルを保存する。
@@ -661,7 +687,7 @@ def save_rtsp_video_segments(
             return save_rtsp_video_segments_ffmpeg(
                 rtsp_url, save_root, segment_duration, cancel_flag,
                 time_limit_enabled, start_hour, start_minute, end_hour, end_minute,
-                preview_callback
+                preview_callback, requested_fps
             )
     
     # ネットワーク監視パラメータ
@@ -672,7 +698,7 @@ def save_rtsp_video_segments(
     cap = None
     width = 0
     height = 0
-    fps = config.RTSP_FPS
+    fps = requested_fps or config.RTSP_FPS
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     dark_frame_cache = None
     dark_frame_cache_shape = None
@@ -701,10 +727,10 @@ def save_rtsp_video_segments(
                 width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
                 height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
                 detected_fps = float(cap.get(cv2.CAP_PROP_FPS) or 0)
-                if detected_fps > 0:
+                if requested_fps is None and detected_fps > 0:
                     fps = detected_fps
                 else:
-                    fps = config.RTSP_FPS
+                    fps = requested_fps or config.RTSP_FPS
                 if twin_options.enabled:
                     if not twin_options.model_path:
                         raise noise_twin.NoiseTwinError("NoiseTwinモデルが選択されていません。")
@@ -1118,6 +1144,7 @@ def rtsp_save_and_process_thread_target(
     dark_frame: Optional[np.ndarray] = None,
     notify_on_detection: bool = True,
     noise_twin_options: Optional[Dict[str, Any]] = None,
+    rtsp_fps: Optional[float] = None,
 ):
     global rtsp_processed_files
     video_extensions = config.PERIODIC_VIDEO_EXTENSIONS
@@ -1244,10 +1271,10 @@ def rtsp_save_and_process_thread_target(
         dark_frame if (noise_twin_options or {}).get("enabled", False) else None
     )
     save_thread = threading.Thread(
-        target=save_rtsp_video_segments, 
+        target=save_rtsp_video_segments,
         args=(rtsp_url, save_root, segment_duration, cancel_flag,
               time_limit_enabled, start_hour, start_minute, end_hour, end_minute,
-              preview_callback, recording_correction, noise_twin_options),
+              preview_callback, recording_correction, noise_twin_options, rtsp_fps),
         daemon=True
     )
     save_thread.start()

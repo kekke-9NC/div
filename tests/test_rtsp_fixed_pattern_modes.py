@@ -9,6 +9,18 @@ import file_utils
 
 
 class RtspFixedPatternModeTests(unittest.TestCase):
+    def test_ffmpeg_requested_fps_is_before_output_path(self):
+        options = file_utils._rtsp_ffmpeg_segment_output_options(
+            "/tmp/%H/%M.mp4",
+            60,
+            30,
+        )
+
+        self.assertEqual(options[-1], "/tmp/%H/%M.mp4")
+        fps_index = options.index("-r")
+        self.assertEqual(options[fps_index + 1], "30")
+        self.assertLess(fps_index, len(options) - 1)
+
     def test_noise_twin_and_temporal_mean_receive_selected_correction(self):
         correction = np.ones((4, 4), dtype=np.int16)
         modes = (
@@ -97,6 +109,27 @@ class RtspFixedPatternModeTests(unittest.TestCase):
                 integration.join(timeout=3)
 
         self.assertFalse(integration.is_alive())
+
+    def test_rtsp_requested_fps_reaches_recording_thread(self):
+        captured = {}
+        cancel = threading.Event()
+        cancel.set()
+
+        def save_stub(*args, **kwargs):
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.object(file_utils, "save_rtsp_video_segments", side_effect=save_stub):
+                file_utils.rtsp_save_and_process_thread_target(
+                    "rtsp://camera/stream",
+                    save_root=directory,
+                    cancel_flag=cancel,
+                    rtsp_fps=30,
+                    noise_twin_options={},
+                )
+
+        self.assertEqual(captured["args"][-1], 30)
 
 
 if __name__ == "__main__":

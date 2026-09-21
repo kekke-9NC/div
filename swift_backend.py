@@ -24,6 +24,7 @@ import sys
 import tempfile
 import threading
 import traceback
+from contextlib import contextmanager
 from urllib.parse import urlparse
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, TextIO
@@ -186,14 +187,6 @@ class Bridge:
             unsupported.append("NoiseTwin / 時間平均")
         if settings.get("advanced_settings"):
             unsupported.append("詳細パラメータ")
-        if settings.get("rtsp_preset") not in (None, "", "cloudy"):
-            unsupported.append("RTSPプリセット")
-        try:
-            rtsp_fps = float(settings.get("rtsp_fps", 25))
-        except (TypeError, ValueError):
-            rtsp_fps = 25
-        if rtsp_fps != 25:
-            unsupported.append("RTSPフレームレート")
         if settings.get("camera_control_base_url") or settings.get("camera_control_ev_target"):
             unsupported.append("カメラ制御")
         if settings.get("custom_model_paths"):
@@ -394,6 +387,12 @@ class Bridge:
                 normalized_payload["maskPath"] = self._validated_path(
                     payload.get("maskPath"), name="maskPath"
                 )
+                normalized_payload["rtspPreset"] = self._validated_choice(
+                    payload.get("rtspPreset"), {"cloudy", "clear"}, "cloudy", "rtspPreset"
+                )
+                normalized_payload["rtspFps"] = self._validated_int(
+                    payload.get("rtspFps"), 1, 120, 25, "rtspFps"
+                )
                 for key, lower, upper, default in (
                     ("startHour", 0, 23, 17),
                     ("startMinute", 0, 59, 0),
@@ -549,6 +548,14 @@ class Bridge:
         if not isinstance(value, str) or not value.strip():
             raise ValueError(f"{name} must be a non-empty string")
         return value.strip()
+
+    @staticmethod
+    def _validated_choice(value: Any, choices: set[str], default: str, name: str) -> str:
+        if value is None:
+            return default
+        if not isinstance(value, str) or value not in choices:
+            raise ValueError(f"{name} is invalid")
+        return value
 
     @staticmethod
     def _validate_time_window(payload: Dict[str, Any]) -> None:
@@ -767,34 +774,36 @@ class Bridge:
             # Legacy RTSP code still writes diagnostic ``print`` messages.
             # main() replaces sys.stdout with a stderr sink, while emit()
             # writes directly to the preserved protocol stream.
-            file_utils.rtsp_save_and_process_thread_target(
-                rtsp_url=url,
-                save_root=str(rtsp_root),
-                segment_duration=config.RTSP_SEGMENT_DURATION,
-                scan_interval=60,
-                progress_callback=progress_callback,
-                mask=mask,
-                global_wcs_info=None,
-                plate_solve_mask=None,
-                meteor_save_path=str(meteor_path),
-                not_meteor_save_path=str(not_meteor_path),
-                cancel_flag=cancel_event,
-                save_options=payload.get("saveOptions") or self._default_save_options(),
-                interval=self._bounded_float(payload.get("interval", 1.0), 0.05, 60.0),
-                duration=self._bounded_float(payload.get("duration", 1.0), 0.05, 30.0),
-                min_length=config.MIN_LINE_LENGTH,
-                summary_video_config=payload.get("summaryConfig") or self._default_summary_config(),
-                time_limit_enabled=bool(payload.get("timeLimitEnabled", False)),
-                start_hour=self._bounded_int(payload.get("startHour", 17), 0, 23),
-                start_minute=self._bounded_int(payload.get("startMinute", 0), 0, 59),
-                end_hour=self._bounded_int(payload.get("endHour", 7), 0, 23),
-                end_minute=self._bounded_int(payload.get("endMinute", 0), 0, 59),
-                max_workers=self._bounded_int(payload.get("maxWorkers", 1), 1, 6),
-                preview_callback=None,
-                dark_frame=None,
-                notify_on_detection=bool(payload.get("notifyOnDetection", True)),
-                noise_twin_options={"enabled": False},
-            )
+            with self._temporary_rtsp_config(config, payload):
+                file_utils.rtsp_save_and_process_thread_target(
+                    rtsp_url=url,
+                    save_root=str(rtsp_root),
+                    segment_duration=config.RTSP_SEGMENT_DURATION,
+                    scan_interval=60,
+                    progress_callback=progress_callback,
+                    mask=mask,
+                    global_wcs_info=None,
+                    plate_solve_mask=None,
+                    meteor_save_path=str(meteor_path),
+                    not_meteor_save_path=str(not_meteor_path),
+                    cancel_flag=cancel_event,
+                    save_options=payload.get("saveOptions") or self._default_save_options(),
+                    interval=self._bounded_float(payload.get("interval", 1.0), 0.05, 60.0),
+                    duration=self._bounded_float(payload.get("duration", 1.0), 0.05, 30.0),
+                    min_length=config.MIN_LINE_LENGTH,
+                    summary_video_config=payload.get("summaryConfig") or self._default_summary_config(),
+                    time_limit_enabled=bool(payload.get("timeLimitEnabled", False)),
+                    start_hour=self._bounded_int(payload.get("startHour", 17), 0, 23),
+                    start_minute=self._bounded_int(payload.get("startMinute", 0), 0, 59),
+                    end_hour=self._bounded_int(payload.get("endHour", 7), 0, 23),
+                    end_minute=self._bounded_int(payload.get("endMinute", 0), 0, 59),
+                    max_workers=self._bounded_int(payload.get("maxWorkers", 1), 1, 6),
+                    preview_callback=None,
+                    dark_frame=None,
+                    notify_on_detection=bool(payload.get("notifyOnDetection", True)),
+                    noise_twin_options={"enabled": False},
+                    rtsp_fps=self._bounded_int(payload.get("rtspFps", 25), 1, 120),
+                )
             if cancel_event.is_set():
                 self.log("RTSP処理を停止しました。")
                 self.event("run_state", {"state": "cancelled"})
@@ -815,6 +824,49 @@ class Bridge:
             return fallback
         path = Path(os.path.expanduser(value)).resolve()
         return path
+
+    @staticmethod
+    @contextmanager
+    def _temporary_rtsp_config(config: Any, payload: Dict[str, Any]):
+        presets = {
+            "clear": {
+                "min_line_length": 20,
+                "hough_threshold": 25,
+                "canny_thresh1": 75,
+                "canny_thresh2": 180,
+            },
+            "cloudy": {
+                "min_line_length": 25,
+                "hough_threshold": 35,
+                "canny_thresh1": 100,
+                "canny_thresh2": 240,
+            },
+        }
+        preset_name = payload.get("rtspPreset", "cloudy")
+        preset = presets.get(preset_name, presets["cloudy"])
+        config_preset_name = "RTSP_PRESET_CLEAR_SKY" if preset_name == "clear" else "RTSP_PRESET_CLOUDY"
+        config_preset = getattr(config, config_preset_name, None)
+        if isinstance(config_preset, dict):
+            preset = config_preset
+        values = {
+            "RTSP_MIN_LINE_LENGTH": preset["min_line_length"],
+            "RTSP_HOUGH_THRESHOLD": preset["hough_threshold"],
+            "RTSP_CANNY_THRESH1": preset["canny_thresh1"],
+            "RTSP_CANNY_THRESH2": preset["canny_thresh2"],
+            "RTSP_FPS": int(payload.get("rtspFps", 25)),
+        }
+        missing = object()
+        previous = {name: getattr(config, name, missing) for name in values}
+        for name, value in values.items():
+            setattr(config, name, value)
+        try:
+            yield
+        finally:
+            for name, value in previous.items():
+                if value is missing:
+                    delattr(config, name)
+                else:
+                    setattr(config, name, value)
 
     def _load_detection_mask(self, payload: Dict[str, Any]) -> Any:
         if not payload.get("applyMask", False):
