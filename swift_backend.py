@@ -117,6 +117,19 @@ class Bridge:
                         "unsupportedFeatures": self._unsupported_features(settings),
                     },
                 )
+            elif command == "validate_mask":
+                normalized_path = self._validated_path(payload.get("maskPath"), name="maskPath")
+                mask = self._load_detection_mask(
+                    {"applyMask": True, "maskPath": normalized_path}
+                )
+                self.response(
+                    request_id,
+                    {
+                        "valid": True,
+                        "height": int(mask.shape[0]),
+                        "width": int(mask.shape[1]),
+                    },
+                )
             elif command == "save_settings":
                 settings = payload.get("settings") or {}
                 self._save_settings(settings)
@@ -165,8 +178,6 @@ class Bridge:
             temporal_mean_frames = int(settings.get("temporal_mean_frames", 0) or 0)
         except (TypeError, ValueError):
             temporal_mean_frames = 0
-        if settings.get("apply_mask") or settings.get("has_mask_image") or settings.get("mask_path_or_status"):
-            unsupported.append("検出マスク")
         if settings.get("use_plate_solve") or settings.get("global_wcs_info"):
             unsupported.append("プレートソルブ / 座標注釈")
         if settings.get("apply_rtsp_dark"):
@@ -333,6 +344,12 @@ class Bridge:
                 normalized_payload["summaryConfig"] = self._validated_summary_config(
                     payload.get("summaryConfig")
                 )
+                normalized_payload["applyMask"] = self._validated_bool(
+                    payload.get("applyMask"), default=False, name="applyMask"
+                )
+                normalized_payload["maskPath"] = self._validated_path(
+                    payload.get("maskPath"), name="maskPath"
+                )
             except ValueError as exc:
                 self.response(request_id, error=str(exc))
                 return
@@ -370,6 +387,12 @@ class Bridge:
                 )
                 normalized_payload["notifyOnDetection"] = self._validated_bool(
                     payload.get("notifyOnDetection"), default=True, name="notifyOnDetection"
+                )
+                normalized_payload["applyMask"] = self._validated_bool(
+                    payload.get("applyMask"), default=False, name="applyMask"
+                )
+                normalized_payload["maskPath"] = self._validated_path(
+                    payload.get("maskPath"), name="maskPath"
                 )
                 for key, lower, upper, default in (
                     ("startHour", 0, 23, 17),
@@ -415,6 +438,12 @@ class Bridge:
                 )
                 normalized_payload["summaryConfig"] = self._validated_summary_config(
                     payload.get("summaryConfig")
+                )
+                normalized_payload["applyMask"] = self._validated_bool(
+                    payload.get("applyMask"), default=False, name="applyMask"
+                )
+                normalized_payload["maskPath"] = self._validated_path(
+                    payload.get("maskPath"), name="maskPath"
                 )
                 normalized_payload["timeLimitEnabled"] = self._validated_bool(
                     payload.get("timeLimitEnabled"), default=False, name="timeLimitEnabled"
@@ -514,6 +543,14 @@ class Bridge:
         return value
 
     @staticmethod
+    def _validated_path(value: Any, name: str) -> str:
+        if value is None:
+            return ""
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{name} must be a non-empty string")
+        return value.strip()
+
+    @staticmethod
     def _validate_time_window(payload: Dict[str, Any]) -> None:
         if not payload.get("timeLimitEnabled"):
             return
@@ -538,6 +575,8 @@ class Bridge:
         try:
             import config
             import download_pipeline
+
+            mask = self._load_detection_mask(payload)
 
             sources = [
                 {"path": str(item.get("path", "")), "is_rtsp": False}
@@ -592,7 +631,7 @@ class Bridge:
                 max_workers=max_workers,
                 interval=interval,
                 duration=duration,
-                mask=None,
+                mask=mask,
                 global_wcs_info=None,
                 plate_solve_mask=None,
                 meteor_save_path=str(meteor_path),
@@ -623,6 +662,8 @@ class Bridge:
         try:
             import config
             import file_utils
+
+            mask = self._load_detection_mask(payload)
 
             directory = self._safe_path(payload.get("directory"), self.root)
             meteor_path = self._safe_path(
@@ -656,7 +697,7 @@ class Bridge:
                 directory=str(directory),
                 scan_interval=self._bounded_int(payload.get("scanInterval", 60), 5, 3600),
                 progress_callback=progress_callback,
-                mask=None,
+                mask=mask,
                 global_wcs_info=None,
                 plate_solve_mask=None,
                 meteor_save_path=str(meteor_path),
@@ -690,6 +731,8 @@ class Bridge:
         try:
             import config
             import file_utils
+
+            mask = self._load_detection_mask(payload)
 
             url = str(payload.get("url", "")).strip()
             meteor_path = self._safe_path(
@@ -730,7 +773,7 @@ class Bridge:
                 segment_duration=config.RTSP_SEGMENT_DURATION,
                 scan_interval=60,
                 progress_callback=progress_callback,
-                mask=None,
+                mask=mask,
                 global_wcs_info=None,
                 plate_solve_mask=None,
                 meteor_save_path=str(meteor_path),
@@ -772,6 +815,39 @@ class Bridge:
             return fallback
         path = Path(os.path.expanduser(value)).resolve()
         return path
+
+    def _load_detection_mask(self, payload: Dict[str, Any]) -> Any:
+        if not payload.get("applyMask", False):
+            return None
+        mask_path = self._safe_path(
+            payload.get("maskPath"), self.root / "app_masks.npz"
+        )
+        if not mask_path.is_file():
+            raise ValueError(f"検出マスクファイルが見つかりません: {mask_path}")
+        try:
+            import numpy as np
+
+            with np.load(mask_path, allow_pickle=False) as archive:
+                if "mask_image" not in archive.files:
+                    raise ValueError("検出マスクファイルにmask_imageがありません")
+                mask = archive["mask_image"]
+        except ValueError:
+            raise
+        except Exception as exc:
+            raise ValueError(f"検出マスクを読み込めませんでした: {exc}") from exc
+
+        if getattr(mask, "ndim", 0) != 2 or getattr(mask, "size", 0) == 0:
+            raise ValueError("検出マスクは空でない2次元画像である必要があります")
+        height, width = (int(mask.shape[0]), int(mask.shape[1]))
+        if height > 16_384 or width > 16_384 or int(mask.size) > 100_000_000:
+            raise ValueError("検出マスクのサイズが大きすぎます")
+        if mask.dtype == np.bool_:
+            return mask.astype(np.uint8) * 255
+        if not np.issubdtype(mask.dtype, np.number):
+            raise ValueError("検出マスクの画素形式が不正です")
+        if not np.isfinite(mask).all():
+            raise ValueError("検出マスクに有限でない画素があります")
+        return np.clip(mask, 0, 255).astype(np.uint8)
 
     @staticmethod
     def _bounded_int(value: Any, lower: int, upper: int) -> int:

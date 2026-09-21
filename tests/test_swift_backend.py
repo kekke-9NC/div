@@ -3,7 +3,10 @@ import io
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -47,6 +50,121 @@ def test_summary_config_fills_legacy_duration_defaults():
     assert Bridge._validated_summary_config(
         [{"name": "Composite Image", "enabled": True}]
     ) == [{"name": "Composite Image", "enabled": True, "duration": 1.0}]
+
+
+def test_detection_mask_loads_legacy_npz(tmp_path):
+    import numpy as np
+
+    from swift_backend import Bridge
+
+    mask_path = tmp_path / "app_masks.npz"
+    np.savez(mask_path, mask_image=np.array([[0, 300], [True, False]]))
+    mask = Bridge(tmp_path)._load_detection_mask(
+        {"applyMask": True, "maskPath": str(mask_path)}
+    )
+
+    assert mask.dtype == np.uint8
+    assert mask.tolist() == [[0, 255], [1, 0]]
+
+
+def test_detection_mask_rejects_missing_payload_file(tmp_path):
+    from swift_backend import Bridge
+
+    try:
+        Bridge(tmp_path)._load_detection_mask(
+            {"applyMask": True, "maskPath": str(tmp_path / "missing.npz")}
+        )
+    except ValueError as exc:
+        assert "見つかりません" in str(exc)
+    else:
+        raise AssertionError("missing detection mask should fail")
+
+
+def test_validate_mask_command_reports_shape_and_errors(tmp_path):
+    import numpy as np
+
+    mask_path = tmp_path / "app_masks.npz"
+    np.savez(mask_path, mask_image=np.zeros((4, 6), dtype=np.uint8))
+    messages = run_bridge(
+        tmp_path,
+        {
+            "id": "valid",
+            "command": "validate_mask",
+            "payload": {"maskPath": str(mask_path)},
+        },
+        {
+            "id": "missing",
+            "command": "validate_mask",
+            "payload": {"maskPath": str(tmp_path / "missing.npz")},
+        },
+    )
+    responses = {message["id"]: message for message in messages if message["type"] == "response"}
+
+    assert responses["valid"]["ok"] is True
+    assert responses["valid"]["payload"]["width"] == 6
+    assert responses["valid"]["payload"]["height"] == 4
+    assert responses["missing"]["ok"] is False
+
+
+def test_detection_mask_is_passed_to_all_run_modes(tmp_path):
+    import numpy as np
+
+    from swift_backend import Bridge
+
+    mask_path = tmp_path / "app_masks.npz"
+    np.savez(mask_path, mask_image=np.full((2, 2), 255, dtype=np.uint8))
+    calls = {}
+
+    def fake_pipeline(**kwargs):
+        calls["local"] = kwargs
+
+    def fake_monitor(**kwargs):
+        calls["periodic"] = kwargs
+
+    def fake_rtsp(**kwargs):
+        calls["rtsp"] = kwargs
+
+    fake_config = SimpleNamespace(MIN_LINE_LENGTH=1, RTSP_SEGMENT_DURATION=1)
+    fake_download_pipeline = SimpleNamespace(run_pipeline=fake_pipeline)
+    fake_file_utils = SimpleNamespace(
+        monitor_directory=fake_monitor,
+        rtsp_save_and_process_thread_target=fake_rtsp,
+    )
+    payload = {
+        "applyMask": True,
+        "maskPath": str(mask_path),
+        "saveOptions": Bridge._default_save_options(),
+        "summaryConfig": Bridge._default_summary_config(),
+        "meteorSavePath": str(tmp_path / "meteor"),
+        "notMeteorSavePath": str(tmp_path / "not_meteor"),
+        "interval": 1.0,
+        "duration": 1.0,
+    }
+
+    bridge = Bridge(tmp_path, protocol_stdout=io.StringIO())
+    with mock.patch.dict(
+        sys.modules,
+        {
+            "config": fake_config,
+            "download_pipeline": fake_download_pipeline,
+            "file_utils": fake_file_utils,
+        },
+    ):
+        bridge._run_pipeline(
+            {**payload, "sources": [{"path": str(tmp_path / "sample.mp4")}]},
+            threading.Event(),
+        )
+        bridge._run_periodic(
+            {**payload, "directory": str(tmp_path), "scanInterval": 5},
+            threading.Event(),
+        )
+        bridge._run_rtsp(
+            {**payload, "url": "rtsp://camera/live"},
+            threading.Event(),
+        )
+
+    for call in calls.values():
+        assert call["mask"].tolist() == [[255, 255], [255, 255]]
 
 
 def test_settings_are_written_atomically_and_unknown_commands_fail(tmp_path):
@@ -145,6 +263,14 @@ def test_invalid_run_requests_return_errors_without_starting_processing(tmp_path
             },
         },
         {
+            "id": "bad_mask_type",
+            "command": "run_detection",
+            "payload": {
+                "sources": [{"path": str(tmp_path / "sample.mp4")}],
+                "applyMask": "true",
+            },
+        },
+        {
             "id": "bad_rtsp_window",
             "command": "run_rtsp",
             "payload": {
@@ -168,6 +294,7 @@ def test_invalid_run_requests_return_errors_without_starting_processing(tmp_path
     assert responses["bad_summary"]["ok"] is False
     assert responses["bad_summary_name"]["ok"] is False
     assert responses["bad_summary_empty"]["ok"] is False
+    assert responses["bad_mask_type"]["ok"] is False
     assert responses["bad_rtsp_window"]["ok"] is False
 
 

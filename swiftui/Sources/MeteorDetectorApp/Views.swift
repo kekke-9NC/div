@@ -923,6 +923,51 @@ struct SettingsView: View {
 
                 GlassCard {
                     VStack(alignment: .leading, spacing: 14) {
+                        SectionTitle("検出マスク", subtitle: "空やノイズの多い領域を解析対象から外します")
+                        Toggle("検出マスクを適用する", isOn: $store.detectionMaskEnabled)
+                            .toggleStyle(.switch)
+                            .tint(AppTheme.accent)
+                            .onChange(of: store.detectionMaskEnabled) { _, _ in
+                                store.saveSettings()
+                                store.validateDetectionMask()
+                            }
+                        if store.detectionMaskEnabled {
+                            HStack(spacing: 10) {
+                                TextField("app_masks.npz", text: $store.detectionMaskPath)
+                                    .textFieldStyle(.roundedBorder)
+                                    .onSubmit {
+                                        store.saveSettings()
+                                        store.validateDetectionMask()
+                                    }
+                                Button("選択") {
+                                    chooseMaskFile {
+                                        store.detectionMaskPath = $0
+                                        store.saveSettings()
+                                        store.validateDetectionMask()
+                                    }
+                                }
+                                .buttonStyle(.bordered)
+                                Button("開く") {
+                                    guard store.detectionMaskIsValid else { return }
+                                    NSWorkspace.shared.open(URL(fileURLWithPath: store.detectionMaskPath))
+                                }
+                                .buttonStyle(.bordered)
+                            }
+                            Label(
+                                store.detectionMaskStatusMessage,
+                                systemImage: store.detectionMaskIsValid ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"
+                            )
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(store.detectionMaskIsValid ? AppTheme.success : AppTheme.warning)
+                        }
+                        Text("旧UIで作成した app_masks.npz をそのまま利用できます。")
+                            .font(.system(size: 11))
+                            .foregroundStyle(AppTheme.tertiaryText)
+                    }
+                }
+
+                GlassCard {
+                    VStack(alignment: .leading, spacing: 14) {
                         SectionTitle("サマリー出力", subtitle: "検出後に保存する画像・動画を選びます")
                         Text("チェックを外した形式は作成されません。動画形式は候補を表示する時間も調整できます。")
                             .font(.system(size: 12))
@@ -1147,6 +1192,18 @@ struct SettingsView: View {
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
+        panel.prompt = "選択"
+        if panel.runModal() == .OK, let url = panel.url {
+            completion(url.path)
+        }
+    }
+
+    private func chooseMaskFile(_ completion: @escaping (String) -> Void) {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [UTType(filenameExtension: "npz")].compactMap { $0 }
         panel.prompt = "選択"
         if panel.runModal() == .OK, let url = panel.url {
             completion(url.path)

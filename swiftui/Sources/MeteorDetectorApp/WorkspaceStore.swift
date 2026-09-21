@@ -3,6 +3,13 @@ import Combine
 import Foundation
 import MeteorDetectorCore
 
+enum DetectionMaskValidation: Equatable {
+    case unknown
+    case validating
+    case valid
+    case invalid(String)
+}
+
 @MainActor
 final class WorkspaceStore: ObservableObject {
     @Published var selection: AppSection = .overview
@@ -29,6 +36,19 @@ final class WorkspaceStore: ObservableObject {
     @Published var longitude = 135.0
     @Published var saveOptions: [String: Bool]
     @Published var summaryVideoOptions: [SummaryVideoOption] = WorkspaceStore.defaultSummaryVideoOptions
+    @Published var detectionMaskEnabled = false {
+        didSet {
+            detectionMaskValidation = .unknown
+            detectionMaskValidationGeneration &+= 1
+        }
+    }
+    @Published var detectionMaskPath = "" {
+        didSet {
+            detectionMaskValidation = .unknown
+            detectionMaskValidationGeneration &+= 1
+        }
+    }
+    @Published private(set) var detectionMaskValidation: DetectionMaskValidation = .unknown
     @Published var periodicScanEnabled = false
     @Published var periodicScanDirectory = ""
     @Published var periodicScanInterval = 60
@@ -48,6 +68,7 @@ final class WorkspaceStore: ObservableObject {
     private let bridge: PythonBridge
     private var cancellables = Set<AnyCancellable>()
     private var resultsRefreshGeneration = 0
+    private var detectionMaskValidationGeneration = 0
 
     private static var defaultSummaryVideoOptions: [SummaryVideoOption] {
         [
@@ -65,6 +86,7 @@ final class WorkspaceStore: ObservableObject {
         self.meteorSavePath = resolvedRoot.appendingPathComponent("meteor").path
         self.notMeteorSavePath = resolvedRoot.appendingPathComponent("not_meteor").path
         self.saveOptions = LegacySettings().saveOptions
+        self.detectionMaskPath = resolvedRoot.appendingPathComponent("app_masks.npz").path
 
         let bridge = PythonBridge(rootURL: resolvedRoot)
         self.bridge = bridge
@@ -142,10 +164,40 @@ final class WorkspaceStore: ObservableObject {
         summaryVideoOptions.contains(where: { $0.enabled })
     }
 
+    var detectionMaskIsValid: Bool {
+        guard detectionMaskEnabled else { return true }
+        guard URL(fileURLWithPath: detectionMaskPath).pathExtension.lowercased() == "npz" else {
+            return false
+        }
+        guard FileManager.default.fileExists(atPath: detectionMaskPath) else { return false }
+        return detectionMaskValidation == .valid
+    }
+
+    var detectionMaskStatusMessage: String {
+        guard detectionMaskEnabled else { return "無効" }
+        guard URL(fileURLWithPath: detectionMaskPath).pathExtension.lowercased() == "npz" else {
+            return ".npz形式の検出マスクを選択してください"
+        }
+        guard FileManager.default.fileExists(atPath: detectionMaskPath) else {
+            return "検出マスクファイルが見つかりません"
+        }
+        switch detectionMaskValidation {
+        case .unknown, .validating:
+            return "検出マスクを確認しています…"
+        case .valid:
+            return "検出マスクを使用できます"
+        case .invalid(let message):
+            return message
+        }
+    }
+
     var readinessMessage: String {
         if connection != .connected { return "処理エンジンを接続しています" }
         if !unsupportedFeatures.isEmpty && !allowReducedFeatureRun {
             return "旧UIの未対応設定を確認してください"
+        }
+        if detectionMaskEnabled && !detectionMaskIsValid {
+            return detectionMaskStatusMessage
         }
         if !summaryVideoSelectionIsValid { return "出力構成を1つ以上選択してください" }
         if periodicScanEnabled {
@@ -233,6 +285,11 @@ final class WorkspaceStore: ObservableObject {
             return
         }
         guard !isBusy else { return }
+        guard detectionMaskIsValid else {
+            appendLog("検出マスクファイルを選択してください。", level: .warning)
+            selection = .settings
+            return
+        }
         guard summaryVideoSelectionIsValid else {
             appendLog("出力構成を1つ以上選択してください。", level: .warning)
             selection = .settings
@@ -371,6 +428,10 @@ final class WorkspaceStore: ObservableObject {
                     "observation_longitude": String(longitude),
                     "save_options": saveOptions,
                     "summary_video_config": summaryVideoConfigPayload,
+                    "apply_mask": detectionMaskEnabled,
+                    "detection_mask_path": detectionMaskPath,
+                    "mask_path_or_status": detectionMaskPath,
+                    "has_mask_image": FileManager.default.fileExists(atPath: detectionMaskPath),
                     "periodic_scan_enabled": periodicScanEnabled,
                     "periodic_scan_directory": periodicScanDirectory,
                     "periodic_scan_interval": String(periodicScanInterval),
@@ -390,6 +451,31 @@ final class WorkspaceStore: ObservableObject {
         ) { [weak self] result in
             if case .failure(let error) = result {
                 self?.appendLog("設定を保存できませんでした: \(error.localizedDescription)", level: .warning)
+            }
+        }
+    }
+
+    func validateDetectionMask() {
+        guard detectionMaskEnabled else {
+            detectionMaskValidation = .valid
+            return
+        }
+        guard URL(fileURLWithPath: detectionMaskPath).pathExtension.lowercased() == "npz",
+              FileManager.default.fileExists(atPath: detectionMaskPath) else {
+            detectionMaskValidation = .invalid(detectionMaskStatusMessage)
+            return
+        }
+        detectionMaskValidation = .validating
+        detectionMaskValidationGeneration &+= 1
+        let generation = detectionMaskValidationGeneration
+        bridge.request("validate_mask", payload: ["maskPath": detectionMaskPath]) { [weak self] result in
+            guard let self else { return }
+            guard self.detectionMaskValidationGeneration == generation else { return }
+            switch result {
+            case .success:
+                self.detectionMaskValidation = .valid
+            case .failure(let error):
+                self.detectionMaskValidation = .invalid(error.localizedDescription)
             }
         }
     }
@@ -506,6 +592,8 @@ final class WorkspaceStore: ObservableObject {
             "notMeteorSavePath": notMeteorSavePath,
             "saveOptions": saveOptions,
             "summaryConfig": summaryVideoConfigPayload,
+            "applyMask": detectionMaskEnabled,
+            "maskPath": detectionMaskPath,
         ]
         for (key, value) in additional {
             payload[key] = value
@@ -624,6 +712,14 @@ final class WorkspaceStore: ObservableObject {
         latitude = doubleValue(settings["observation_latitude"], default: latitude)
         longitude = doubleValue(settings["observation_longitude"], default: longitude)
         applySummaryVideoConfig(settings["summary_video_config"])
+        detectionMaskEnabled = boolValue(settings["apply_mask"], default: false)
+        if let configuredMaskPath = settings["detection_mask_path"] as? String,
+           !configuredMaskPath.isEmpty {
+            detectionMaskPath = configuredMaskPath
+        } else if let legacyMaskPath = settings["mask_path_or_status"] as? String,
+                  FileManager.default.fileExists(atPath: legacyMaskPath) {
+            detectionMaskPath = legacyMaskPath
+        }
         periodicScanEnabled = boolValue(settings["periodic_scan_enabled"], default: false)
         periodicScanDirectory = settings["periodic_scan_directory"] as? String ?? ""
         periodicScanInterval = max(5, min(3600, intValue(settings["periodic_scan_interval"], default: 60)))
@@ -646,6 +742,7 @@ final class WorkspaceStore: ObservableObject {
         if !restored.isEmpty {
             appendLog("前回の入力設定を復元しました。")
         }
+        validateDetectionMask()
         refreshResults()
     }
 

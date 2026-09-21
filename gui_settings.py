@@ -1620,7 +1620,8 @@ class SettingsMixin:
             'camera_model_interval': self.camera_model_interval_var.get(),
             'camera_model_cloud_filter': self.camera_model_cloud_filter_var.get(),
             'use_plate_solve': self.use_plate_solve_var.get(), 'apply_mask': self.apply_mask_var.get(),
-            'mask_path_or_status': self.mask_path_var.get(), 'concurrency': self.concurrency_var.get(),
+            'mask_path_or_status': self.mask_path_var.get(), 'detection_mask_path': self.masks_file,
+            'concurrency': self.concurrency_var.get(),
             'interval': self.interval_var.get(), 'duration': self.duration_var.get(),
             'meteor_save_path': self.meteor_save_path_var.get(), 'not_meteor_save_path': self.not_meteor_save_path_var.get(),
             'ml_training_export_enabled': self.ml_training_export_enabled_var.get(),
@@ -1719,6 +1720,10 @@ class SettingsMixin:
         
         try:
             with open(self.settings_file, 'r', encoding='utf-8') as f: settings = json.load(f)
+
+            configured_mask_file = settings.get('detection_mask_path')
+            if isinstance(configured_mask_file, str) and configured_mask_file.strip():
+                self.masks_file = os.path.abspath(os.path.expanduser(configured_mask_file))
 
             self.periodic_scan_var.set(settings.get('periodic_scan_enabled', False))
             self.periodic_dir_var.set(settings.get('periodic_scan_directory', ''))
