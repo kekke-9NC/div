@@ -969,8 +969,47 @@ struct SettingsView: View {
                                         minute: $store.periodicEndMinute
                                     )
                                 }
+                                if !store.periodicTimeWindowIsValid {
+                                    Text("開始と終了が同じ場合は、時間制限をオフにしてください。")
+                                        .font(.system(size: 11, weight: .medium))
+                                        .foregroundStyle(AppTheme.warning)
+                                }
                             }
                         }
+                    }
+                }
+
+                GlassCard {
+                    VStack(alignment: .leading, spacing: 16) {
+                        SectionTitle("RTSP運用", subtitle: "ネットワークカメラの録画時間帯と検出通知を設定します")
+                        Toggle("録画時間帯を制限する", isOn: $store.rtspTimeLimitEnabled)
+                            .toggleStyle(.switch)
+                            .tint(AppTheme.accent)
+                        if store.rtspTimeLimitEnabled {
+                            HStack(spacing: 12) {
+                                TimeStepperGroup(
+                                    title: "開始",
+                                    hour: $store.rtspStartHour,
+                                    minute: $store.rtspStartMinute
+                                )
+                                TimeStepperGroup(
+                                    title: "終了",
+                                    hour: $store.rtspEndHour,
+                                    minute: $store.rtspEndMinute
+                                )
+                            }
+                            Text("時間外は録画を停止し、時間帯内に再開します。")
+                                .font(.system(size: 11))
+                                .foregroundStyle(AppTheme.tertiaryText)
+                            if !store.rtspTimeWindowIsValid {
+                                Text("開始と終了が同じ場合は、時間制限をオフにしてください。")
+                                    .font(.system(size: 11, weight: .medium))
+                                    .foregroundStyle(AppTheme.warning)
+                            }
+                        }
+                        Toggle("流星検出時に通知音を鳴らす", isOn: $store.rtspNotificationSound)
+                            .toggleStyle(.switch)
+                            .tint(AppTheme.accent)
                     }
                 }
 

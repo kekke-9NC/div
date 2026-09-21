@@ -175,10 +175,6 @@ class Bridge:
             unsupported.append("NoiseTwin / 時間平均")
         if settings.get("advanced_settings"):
             unsupported.append("詳細パラメータ")
-        if settings.get("rtsp_time_limit_enabled"):
-            unsupported.append("RTSP時間制限")
-        if settings.get("rtsp_notification_sound") is False:
-            unsupported.append("RTSP検出通知音")
         if settings.get("rtsp_preset") not in (None, "", "cloudy"):
             unsupported.append("RTSPプリセット")
         try:
@@ -352,11 +348,38 @@ class Bridge:
             if parsed.scheme.lower() not in {"rtsp", "rtsps"} or not parsed.hostname:
                 self.response(request_id, error="有効なRTSP URLがありません")
                 return
+            try:
+                normalized_payload = dict(payload)
+                normalized_payload["saveOptions"] = self._validated_save_options(
+                    payload.get("saveOptions")
+                )
+                normalized_payload["summaryConfig"] = self._validated_summary_config(
+                    payload.get("summaryConfig")
+                )
+                normalized_payload["timeLimitEnabled"] = self._validated_bool(
+                    payload.get("timeLimitEnabled"), default=False, name="timeLimitEnabled"
+                )
+                normalized_payload["notifyOnDetection"] = self._validated_bool(
+                    payload.get("notifyOnDetection"), default=True, name="notifyOnDetection"
+                )
+                for key, lower, upper, default in (
+                    ("startHour", 0, 23, 17),
+                    ("startMinute", 0, 59, 0),
+                    ("endHour", 0, 23, 7),
+                    ("endMinute", 0, 59, 0),
+                ):
+                    normalized_payload[key] = self._validated_int(
+                        payload.get(key), lower, upper, default, key
+                    )
+                self._validate_time_window(normalized_payload)
+            except ValueError as exc:
+                self.response(request_id, error=str(exc))
+                return
             self._cancel_event = threading.Event()
             cancel_event = self._cancel_event
             self._run_thread = threading.Thread(
                 target=self._run_rtsp,
-                args=(payload, cancel_event),
+                args=(normalized_payload, cancel_event),
                 name="swiftui-rtsp-pipeline",
                 daemon=True,
             )
@@ -399,6 +422,7 @@ class Bridge:
                     normalized_payload[key] = self._validated_int(
                         payload.get(key), lower, upper, default, key
                     )
+                self._validate_time_window(normalized_payload)
             except ValueError as exc:
                 self.response(request_id, error=str(exc))
                 return
@@ -459,6 +483,15 @@ class Bridge:
         if not isinstance(value, bool):
             raise ValueError(f"{name} must be a boolean")
         return value
+
+    @staticmethod
+    def _validate_time_window(payload: Dict[str, Any]) -> None:
+        if not payload.get("timeLimitEnabled"):
+            return
+        start = (payload["startHour"], payload["startMinute"])
+        end = (payload["endHour"], payload["endMinute"])
+        if start == end:
+            raise ValueError("時間制限の開始と終了を同じにはできません。24時間運用では時間制限をオフにしてください")
 
     @staticmethod
     def _validated_int(value: Any, lower: int, upper: int, default: int, name: str) -> int:
@@ -679,10 +712,15 @@ class Bridge:
                 duration=self._bounded_float(payload.get("duration", 1.0), 0.05, 30.0),
                 min_length=config.MIN_LINE_LENGTH,
                 summary_video_config=payload.get("summaryConfig") or self._default_summary_config(),
+                time_limit_enabled=bool(payload.get("timeLimitEnabled", False)),
+                start_hour=self._bounded_int(payload.get("startHour", 17), 0, 23),
+                start_minute=self._bounded_int(payload.get("startMinute", 0), 0, 59),
+                end_hour=self._bounded_int(payload.get("endHour", 7), 0, 23),
+                end_minute=self._bounded_int(payload.get("endMinute", 0), 0, 59),
                 max_workers=self._bounded_int(payload.get("maxWorkers", 1), 1, 6),
                 preview_callback=None,
                 dark_frame=None,
-                notify_on_detection=True,
+                notify_on_detection=bool(payload.get("notifyOnDetection", True)),
                 noise_twin_options={"enabled": False},
             )
             if cancel_event.is_set():

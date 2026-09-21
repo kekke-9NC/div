@@ -1272,3 +1272,5 @@ def rtsp_save_and_process_thread_target(
             time.sleep(1)
 
     print("[RTSP統合] 統合処理スレッドを終了します。")
+    if cancel_flag is not None and save_thread.is_alive():
+        save_thread.join()

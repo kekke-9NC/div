@@ -36,6 +36,12 @@ final class WorkspaceStore: ObservableObject {
     @Published var periodicStartMinute = 0
     @Published var periodicEndHour = 7
     @Published var periodicEndMinute = 0
+    @Published var rtspTimeLimitEnabled = false
+    @Published var rtspStartHour = 17
+    @Published var rtspStartMinute = 0
+    @Published var rtspEndHour = 7
+    @Published var rtspEndMinute = 0
+    @Published var rtspNotificationSound = true
 
     let rootURL: URL
     private let bridge: PythonBridge
@@ -113,6 +119,14 @@ final class WorkspaceStore: ObservableObject {
             .resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
     }
 
+    var periodicTimeWindowIsValid: Bool {
+        !periodicTimeLimitEnabled || periodicStartHour != periodicEndHour || periodicStartMinute != periodicEndMinute
+    }
+
+    var rtspTimeWindowIsValid: Bool {
+        !rtspTimeLimitEnabled || rtspStartHour != rtspEndHour || rtspStartMinute != rtspEndMinute
+    }
+
     var readinessMessage: String {
         if connection != .connected { return "処理エンジンを接続しています" }
         if !unsupportedFeatures.isEmpty && !allowReducedFeatureRun {
@@ -124,12 +138,16 @@ final class WorkspaceStore: ObservableObject {
             if !periodicDirectoryIsValid {
                 return "監視フォルダが見つかりません"
             }
+            if !periodicTimeWindowIsValid { return "時間制限の開始と終了を変えてください" }
             return "定期スキャンを開始できます"
         }
         if sources.isEmpty { return "入力ソースを追加すると解析を開始できます" }
         if sources.contains(where: { !$0.exists }) { return "存在しない入力があります" }
         if localSourceCount > 0 && rtspSourceCount > 0 { return "動画とRTSPは同時に実行できません" }
         if rtspSourceCount > 1 { return "RTSPは1台ずつ実行してください" }
+        if rtspSourceCount == 1 && !rtspTimeWindowIsValid {
+            return "RTSP時間制限の開始と終了を変えてください"
+        }
         if !unsupportedFeatures.isEmpty { return "基本解析モードで開始できます" }
         return "解析を開始できます"
     }
@@ -216,6 +234,11 @@ final class WorkspaceStore: ObservableObject {
                 selection = .settings
                 return
             }
+            guard periodicTimeWindowIsValid else {
+                appendLog("定期スキャン時間制限の開始と終了を変えてください。", level: .warning)
+                selection = .settings
+                return
+            }
             selection = .analysis
             runState = .preparing
             progress = nil
@@ -242,6 +265,11 @@ final class WorkspaceStore: ObservableObject {
         guard rtspSourceCount <= 1 else {
             appendLog("RTSPカメラは一度に1台だけ実行できます。", level: .warning)
             selection = .capture
+            return
+        }
+        guard rtspTimeWindowIsValid else {
+            appendLog("RTSP時間制限の開始と終了を変えてください。", level: .warning)
+            selection = .settings
             return
         }
 
@@ -329,6 +357,12 @@ final class WorkspaceStore: ObservableObject {
                     "periodic_start_minute": String(periodicStartMinute),
                     "periodic_end_hour": String(periodicEndHour),
                     "periodic_end_minute": String(periodicEndMinute),
+                    "rtsp_time_limit_enabled": rtspTimeLimitEnabled,
+                    "rtsp_start_hour": String(rtspStartHour),
+                    "rtsp_start_minute": String(rtspStartMinute),
+                    "rtsp_end_hour": String(rtspEndHour),
+                    "rtsp_end_minute": String(rtspEndMinute),
+                    "rtsp_notification_sound": rtspNotificationSound,
                 ],
             ]
         ) { [weak self] result in
@@ -400,7 +434,17 @@ final class WorkspaceStore: ObservableObject {
         queueStatus = "RTSP接続を開始しています"
         bridge.request(
             "run_rtsp",
-            payload: runPayload(merging: ["url": url])
+            payload: runPayload(
+                merging: [
+                    "url": url,
+                    "timeLimitEnabled": rtspTimeLimitEnabled,
+                    "startHour": rtspStartHour,
+                    "startMinute": rtspStartMinute,
+                    "endHour": rtspEndHour,
+                    "endMinute": rtspEndMinute,
+                    "notifyOnDetection": rtspNotificationSound,
+                ]
+            )
         ) { [weak self] result in
             if case .failure(let error) = result {
                 self?.runState = .failed(error.localizedDescription)
@@ -521,6 +565,12 @@ final class WorkspaceStore: ObservableObject {
         periodicStartMinute = max(0, min(59, intValue(settings["periodic_start_minute"], default: 0)))
         periodicEndHour = max(0, min(23, intValue(settings["periodic_end_hour"], default: 7)))
         periodicEndMinute = max(0, min(59, intValue(settings["periodic_end_minute"], default: 0)))
+        rtspTimeLimitEnabled = boolValue(settings["rtsp_time_limit_enabled"], default: false)
+        rtspStartHour = max(0, min(23, intValue(settings["rtsp_start_hour"], default: 17)))
+        rtspStartMinute = max(0, min(59, intValue(settings["rtsp_start_minute"], default: 0)))
+        rtspEndHour = max(0, min(23, intValue(settings["rtsp_end_hour"], default: 7)))
+        rtspEndMinute = max(0, min(59, intValue(settings["rtsp_end_minute"], default: 0)))
+        rtspNotificationSound = boolValue(settings["rtsp_notification_sound"], default: true)
         if let options = settings["save_options"] as? [String: Any] {
             for key in saveOptions.keys {
                 if let value = options[key] { saveOptions[key] = boolValue(value, default: saveOptions[key] ?? true) }

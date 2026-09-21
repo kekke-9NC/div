@@ -1,4 +1,5 @@
 import threading
+import tempfile
 import unittest
 from unittest import mock
 
@@ -67,6 +68,35 @@ class RtspFixedPatternModeTests(unittest.TestCase):
         self.assertIs(analysis_args[-2], correction)
         self.assertFalse(analysis_args[-1]["already_processed"])
         self.assertEqual(analysis_args[-1]["temporal_mean_frames"], 3)
+
+    def test_raw_rtsp_waits_for_recording_thread_before_returning(self):
+        recording_started = threading.Event()
+        release_recording = threading.Event()
+
+        def save_stub(*args, **kwargs):
+            recording_started.set()
+            release_recording.wait(timeout=2)
+
+        cancel = threading.Event()
+        cancel.set()
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.object(file_utils, "save_rtsp_video_segments", side_effect=save_stub):
+                integration = threading.Thread(
+                    target=file_utils.rtsp_save_and_process_thread_target,
+                    kwargs={
+                        "rtsp_url": "rtsp://camera/stream",
+                        "save_root": directory,
+                        "cancel_flag": cancel,
+                        "noise_twin_options": {},
+                    },
+                )
+                integration.start()
+                self.assertTrue(recording_started.wait(timeout=1))
+                self.assertTrue(integration.is_alive())
+                release_recording.set()
+                integration.join(timeout=3)
+
+        self.assertFalse(integration.is_alive())
 
 
 if __name__ == "__main__":
