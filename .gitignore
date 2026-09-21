@@ -76,6 +76,7 @@ build/
 dist/
 .build/
 swiftui/.build/
+.meteor_detector.lock
 
 # Benchmark results and scripts
 meteor_vlm_benchmark.py

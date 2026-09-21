@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 import tempfile
@@ -26,6 +27,8 @@ import traceback
 from urllib.parse import urlparse
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, TextIO
+
+from process_lock import AppProcessLock
 
 
 VIDEO_EXTENSIONS = (".mp4", ".avi", ".mov")
@@ -122,6 +125,8 @@ class Bridge:
                 self._discover(request_id, payload)
             elif command == "run_detection":
                 self._start_run(request_id, payload)
+            elif command == "run_periodic":
+                self._start_periodic_run(request_id, payload)
             elif command == "run_rtsp":
                 self._start_rtsp_run(request_id, payload)
             elif command == "cancel":
@@ -168,12 +173,8 @@ class Bridge:
             unsupported.append("RTSP固定パターン補正")
         if settings.get("noise_twin_enabled") or temporal_mean_frames in (3, 5):
             unsupported.append("NoiseTwin / 時間平均")
-        if settings.get("periodic_scan_enabled"):
-            unsupported.append("定期スキャン")
         if settings.get("advanced_settings"):
             unsupported.append("詳細パラメータ")
-        if settings.get("periodic_scan_directory"):
-            unsupported.append("定期スキャン")
         if settings.get("rtsp_time_limit_enabled"):
             unsupported.append("RTSP時間制限")
         if settings.get("rtsp_notification_sound") is False:
@@ -362,6 +363,114 @@ class Bridge:
             self._run_thread.start()
         self.response(request_id, {"accepted": True, "url": url})
 
+    def _start_periodic_run(self, request_id: str, payload: Dict[str, Any]) -> None:
+        with self._run_lock:
+            if self._run_thread is not None and self._run_thread.is_alive():
+                self.response(request_id, error="別の処理が実行中です")
+                return
+            raw_directory = payload.get("directory")
+            if not isinstance(raw_directory, str) or not raw_directory.strip():
+                self.response(request_id, error="有効な定期スキャンフォルダがありません")
+                return
+            directory = self._safe_path(raw_directory, self.root)
+            if not directory.is_dir():
+                self.response(request_id, error="有効な定期スキャンフォルダがありません")
+                return
+            try:
+                normalized_payload = dict(payload)
+                normalized_payload["saveOptions"] = self._validated_save_options(
+                    payload.get("saveOptions")
+                )
+                normalized_payload["summaryConfig"] = self._validated_summary_config(
+                    payload.get("summaryConfig")
+                )
+                normalized_payload["timeLimitEnabled"] = self._validated_bool(
+                    payload.get("timeLimitEnabled"), default=False, name="timeLimitEnabled"
+                )
+                normalized_payload["scanInterval"] = self._validated_int(
+                    payload.get("scanInterval"), 5, 3600, 60, "scanInterval"
+                )
+                for key, lower, upper, default in (
+                    ("startHour", 0, 23, 17),
+                    ("startMinute", 0, 59, 0),
+                    ("endHour", 0, 23, 7),
+                    ("endMinute", 0, 59, 0),
+                ):
+                    normalized_payload[key] = self._validated_int(
+                        payload.get(key), lower, upper, default, key
+                    )
+            except ValueError as exc:
+                self.response(request_id, error=str(exc))
+                return
+            self._cancel_event = threading.Event()
+            cancel_event = self._cancel_event
+            self._run_thread = threading.Thread(
+                target=self._run_periodic,
+                args=(normalized_payload, cancel_event),
+                name="swiftui-periodic-scan",
+                daemon=True,
+            )
+            self._run_thread.start()
+        self.response(request_id, {"accepted": True, "directory": str(directory)})
+
+    @classmethod
+    def _validated_save_options(cls, value: Any) -> Dict[str, bool]:
+        defaults = cls._default_save_options()
+        if value is None:
+            return defaults
+        if not isinstance(value, dict):
+            raise ValueError("saveOptions must be an object")
+        normalized = dict(defaults)
+        for key, item in value.items():
+            if key not in normalized or not isinstance(item, bool):
+                raise ValueError("saveOptionsの形式が不正です")
+            normalized[key] = item
+        return normalized
+
+    @staticmethod
+    def _validated_summary_config(value: Any) -> List[Dict[str, Any]]:
+        if value is None:
+            return Bridge._default_summary_config()
+        if not isinstance(value, list):
+            raise ValueError("summaryConfig must be an array")
+        normalized: List[Dict[str, Any]] = []
+        for item in value:
+            if not isinstance(item, dict):
+                raise ValueError("summaryConfigの形式が不正です")
+            name = item.get("name")
+            enabled = item.get("enabled")
+            if not isinstance(name, str) or not name.strip() or not isinstance(enabled, bool):
+                raise ValueError("summaryConfigの形式が不正です")
+            entry: Dict[str, Any] = {"name": name, "enabled": enabled}
+            if "duration" in item:
+                duration = item["duration"]
+                if isinstance(duration, bool) or not isinstance(duration, (int, float)):
+                    raise ValueError("summaryConfigのdurationが不正です")
+                if not math.isfinite(float(duration)) or not 0.05 <= float(duration) <= 60:
+                    raise ValueError("summaryConfigのdurationが範囲外です")
+                entry["duration"] = float(duration)
+            normalized.append(entry)
+        return normalized
+
+    @staticmethod
+    def _validated_bool(value: Any, default: bool, name: str) -> bool:
+        if value is None:
+            return default
+        if not isinstance(value, bool):
+            raise ValueError(f"{name} must be a boolean")
+        return value
+
+    @staticmethod
+    def _validated_int(value: Any, lower: int, upper: int, default: int, name: str) -> int:
+        if value is None:
+            return default
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"{name} must be an integer")
+        parsed = value
+        if not lower <= parsed <= upper:
+            raise ValueError(f"{name} is out of range")
+        return parsed
+
     def _run_pipeline(self, payload: Dict[str, Any], cancel_event: threading.Event) -> None:
         self.event("run_state", {"state": "running"})
         try:
@@ -444,6 +553,73 @@ class Bridge:
                 self.event("run_state", {"state": "completed"})
         except Exception as exc:
             self.log(f"処理中にエラーが発生しました: {exc}", "error")
+            traceback.print_exc(file=sys.stderr)
+            self.event("run_state", {"state": "failed", "error": str(exc)})
+
+    def _run_periodic(self, payload: Dict[str, Any], cancel_event: threading.Event) -> None:
+        self.event("run_state", {"state": "running"})
+        try:
+            import config
+            import file_utils
+
+            directory = self._safe_path(payload.get("directory"), self.root)
+            meteor_path = self._safe_path(
+                payload.get("meteorSavePath"), self.root / "meteor"
+            )
+            not_meteor_path = self._safe_path(
+                payload.get("notMeteorSavePath"), self.root / "not_meteor"
+            )
+            meteor_path.mkdir(parents=True, exist_ok=True)
+            not_meteor_path.mkdir(parents=True, exist_ok=True)
+
+            def progress_callback(item: Any) -> None:
+                message = None
+                value: Any = None
+                if isinstance(item, (tuple, list)) and len(item) == 2:
+                    message, value = item
+                if isinstance(value, (tuple, list)) and len(value) == 2:
+                    self.event(
+                        "progress",
+                        {
+                            "current": int(value[0]),
+                            "total": max(0, int(value[1])),
+                            "message": str(message or ""),
+                        },
+                    )
+                elif message:
+                    self.event("log", {"message": str(message), "level": "info"})
+
+            self.log(f"定期スキャンを開始しました: {directory}")
+            file_utils.monitor_directory(
+                directory=str(directory),
+                scan_interval=self._bounded_int(payload.get("scanInterval", 60), 5, 3600),
+                progress_callback=progress_callback,
+                mask=None,
+                global_wcs_info=None,
+                plate_solve_mask=None,
+                meteor_save_path=str(meteor_path),
+                not_meteor_save_path=str(not_meteor_path),
+                cancel_flag=cancel_event,
+                save_options=payload.get("saveOptions") or self._default_save_options(),
+                interval=self._bounded_float(payload.get("interval", 1.0), 0.05, 60.0),
+                duration=self._bounded_float(payload.get("duration", 1.0), 0.05, 30.0),
+                min_length=config.MIN_LINE_LENGTH,
+                summary_video_config=payload.get("summaryConfig") or self._default_summary_config(),
+                time_limit_enabled=bool(payload.get("timeLimitEnabled", False)),
+                start_hour=self._bounded_int(payload.get("startHour", 17), 0, 23),
+                start_minute=self._bounded_int(payload.get("startMinute", 0), 0, 59),
+                end_hour=self._bounded_int(payload.get("endHour", 7), 0, 23),
+                end_minute=self._bounded_int(payload.get("endMinute", 0), 0, 59),
+                fixed_pattern_correction=None,
+                noise_twin_options={"enabled": False},
+            )
+            if cancel_event.is_set():
+                self.log("定期スキャンを停止しました。", "warning")
+                self.event("run_state", {"state": "cancelled"})
+            else:
+                self.event("run_state", {"state": "completed"})
+        except Exception as exc:
+            self.log(f"定期スキャン中にエラーが発生しました: {exc}", "error")
             traceback.print_exc(file=sys.stderr)
             self.event("run_state", {"state": "failed", "error": str(exc)})
 
@@ -580,21 +756,28 @@ def main() -> int:
         print("Use --stdio for the SwiftUI JSON bridge.", file=sys.stderr)
         return 2
     root = args.root or Path(os.environ.get("METEOR_DETECTOR_ROOT", Path.cwd()))
+    process_lock = AppProcessLock(root)
+    if not process_lock.acquire():
+        print("Meteor Detector is already running.", file=sys.stderr)
+        return 3
     protocol_stdout = sys.stdout
     sys.stdout = _NonProtocolStdout(sys.stderr)
-    bridge = Bridge(root, protocol_stdout=protocol_stdout)
-    for raw_line in sys.stdin:
-        line = raw_line.strip()
-        if not line:
-            continue
-        try:
-            request = json.loads(line)
-            if not isinstance(request, dict):
-                raise ValueError("request must be an object")
-            bridge.handle(request)
-        except Exception as exc:
-            bridge.log(f"リクエストを解釈できませんでした: {exc}", "error")
-    return 0
+    try:
+        bridge = Bridge(root, protocol_stdout=protocol_stdout)
+        for raw_line in sys.stdin:
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                request = json.loads(line)
+                if not isinstance(request, dict):
+                    raise ValueError("request must be an object")
+                bridge.handle(request)
+            except Exception as exc:
+                bridge.log(f"リクエストを解釈できませんでした: {exc}", "error")
+        return 0
+    finally:
+        process_lock.release()
 
 
 if __name__ == "__main__":

@@ -923,6 +923,59 @@ struct SettingsView: View {
 
                 GlassCard {
                     VStack(alignment: .leading, spacing: 16) {
+                        SectionTitle("定期スキャン", subtitle: "指定したフォルダを監視し、新しい動画を自動で解析します")
+                        Toggle("定期スキャンを有効にする", isOn: $store.periodicScanEnabled)
+                            .toggleStyle(.switch)
+                            .tint(AppTheme.accent)
+                            .onChange(of: store.periodicScanEnabled) { _, _ in
+                                store.saveSettings()
+                            }
+                        if store.periodicScanEnabled {
+                            HStack(spacing: 10) {
+                                TextField("監視フォルダ", text: $store.periodicScanDirectory)
+                                    .textFieldStyle(.roundedBorder)
+                                    .onSubmit { store.saveSettings() }
+                                Button("選択") {
+                                    chooseDirectory {
+                                        store.periodicScanDirectory = $0
+                                        store.saveSettings()
+                                    }
+                                }
+                                .buttonStyle(.bordered)
+                                Button("開く") {
+                                    guard !store.periodicScanDirectory.isEmpty else { return }
+                                    NSWorkspace.shared.open(URL(fileURLWithPath: store.periodicScanDirectory))
+                                }
+                                .buttonStyle(.bordered)
+                            }
+                            HStack(spacing: 28) {
+                                Stepper(value: $store.periodicScanInterval, in: 5...3600, step: 5) {
+                                    SettingValue(title: "監視間隔", value: "\(store.periodicScanInterval) 秒")
+                                }
+                                Toggle("時間帯を制限", isOn: $store.periodicTimeLimitEnabled)
+                                    .toggleStyle(.switch)
+                                    .tint(AppTheme.accent)
+                            }
+                            if store.periodicTimeLimitEnabled {
+                                HStack(spacing: 12) {
+                                    TimeStepperGroup(
+                                        title: "開始",
+                                        hour: $store.periodicStartHour,
+                                        minute: $store.periodicStartMinute
+                                    )
+                                    TimeStepperGroup(
+                                        title: "終了",
+                                        hour: $store.periodicEndHour,
+                                        minute: $store.periodicEndMinute
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                GlassCard {
+                    VStack(alignment: .leading, spacing: 16) {
                         SectionTitle("保存先", subtitle: "既存のapp_settings.jsonと互換性を保って保存します")
                         OutputPathRow(title: "流星候補", path: $store.meteorSavePath) {
                             chooseDirectory {
@@ -1016,6 +1069,32 @@ struct SettingValue: View {
             Text(value)
                 .font(.system(size: 17, weight: .bold, design: .rounded))
                 .foregroundStyle(AppTheme.text)
+        }
+    }
+}
+
+struct TimeStepperGroup: View {
+    let title: String
+    @Binding var hour: Int
+    @Binding var minute: Int
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(title)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(AppTheme.secondaryText)
+            Stepper(value: $hour, in: 0...23) {
+                Text(String(format: "%02d", hour))
+                    .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(AppTheme.text)
+            }
+            Text(":")
+                .foregroundStyle(AppTheme.secondaryText)
+            Stepper(value: $minute, in: 0...59, step: 5) {
+                Text(String(format: "%02d", minute))
+                    .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(AppTheme.text)
+            }
         }
     }
 }

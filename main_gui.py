@@ -949,6 +949,14 @@ if __name__ == "__main__":
 
         raise SystemExit(noise_twin_worker.main())
     else:
+        from process_lock import AppProcessLock
+
         os.makedirs(config.TEMP_CLIP_DIR, exist_ok=True)
-        app = App()
-        app.mainloop()
+        process_lock = AppProcessLock(Path(__file__).resolve().parent)
+        if not process_lock.acquire():
+            raise SystemExit("Meteor Detector is already running.")
+        try:
+            app = App()
+            app.mainloop()
+        finally:
+            process_lock.release()

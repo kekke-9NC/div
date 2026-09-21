@@ -1,4 +1,5 @@
 import json
+import io
 import os
 import subprocess
 import sys
@@ -65,11 +66,19 @@ def test_invalid_run_requests_return_errors_without_starting_processing(tmp_path
     messages = run_bridge(
         tmp_path,
         {"id": "run", "command": "run_detection", "payload": {"sources": []}},
+        {"id": "periodic", "command": "run_periodic", "payload": {"directory": str(tmp_path / "missing")}},
+        {
+            "id": "bad_periodic",
+            "command": "run_periodic",
+            "payload": {"directory": str(tmp_path), "saveOptions": []},
+        },
         {"id": "rtsp", "command": "run_rtsp", "payload": {"url": "not-a-url"}},
     )
 
     responses = {message["id"]: message for message in messages if message["type"] == "response"}
     assert responses["run"]["ok"] is False
+    assert responses["periodic"]["ok"] is False
+    assert responses["bad_periodic"]["ok"] is False
     assert responses["rtsp"]["ok"] is False
 
 
@@ -114,6 +123,9 @@ def test_legacy_feature_settings_are_reported_to_the_swiftui_frontend(tmp_path):
                 "rtsp_time_limit_enabled": True,
                 "rtsp_notification_sound": False,
                 "video_concat_settings": {"codec": "h265"},
+                "periodic_scan_enabled": True,
+                "periodic_scan_directory": str(tmp_path),
+                "periodic_time_limit_enabled": True,
             }
         ),
         encoding="utf-8",
@@ -130,3 +142,42 @@ def test_legacy_feature_settings_are_reported_to_the_swiftui_frontend(tmp_path):
     assert "RTSP時間制限" in unsupported
     assert "RTSP検出通知音" in unsupported
     assert "動画連結設定" in unsupported
+    assert "定期スキャン" not in unsupported
+
+
+def test_periodic_scan_accepts_a_directory_and_cancel_request(tmp_path):
+    messages = run_bridge(
+        tmp_path,
+        {"id": "periodic", "command": "run_periodic", "payload": {"directory": str(tmp_path)}},
+        {"id": "cancel", "command": "cancel", "payload": {}},
+    )
+
+    responses = {message["id"]: message for message in messages if message["type"] == "response"}
+    assert responses["periodic"]["ok"] is True
+    assert responses["cancel"]["ok"] is True
+
+
+def test_periodic_scan_emits_cancelled_state(tmp_path):
+    from swift_backend import Bridge
+
+    output = io.StringIO()
+    bridge = Bridge(tmp_path, protocol_stdout=output)
+    bridge.handle(
+        {
+            "id": "periodic",
+            "command": "run_periodic",
+            "payload": {"directory": str(tmp_path), "scanInterval": 5},
+        }
+    )
+    bridge.handle({"id": "cancel", "command": "cancel", "payload": {}})
+    worker = bridge._run_thread
+    assert worker is not None
+    worker.join(timeout=3)
+    assert not worker.is_alive()
+    messages = [json.loads(line) for line in output.getvalue().splitlines() if line.strip()]
+    assert any(
+        message.get("type") == "event"
+        and message.get("event") == "run_state"
+        and message.get("payload", {}).get("state") == "cancelled"
+        for message in messages
+    )

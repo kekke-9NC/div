@@ -28,6 +28,14 @@ final class WorkspaceStore: ObservableObject {
     @Published var latitude = 35.0
     @Published var longitude = 135.0
     @Published var saveOptions: [String: Bool]
+    @Published var periodicScanEnabled = false
+    @Published var periodicScanDirectory = ""
+    @Published var periodicScanInterval = 60
+    @Published var periodicTimeLimitEnabled = false
+    @Published var periodicStartHour = 17
+    @Published var periodicStartMinute = 0
+    @Published var periodicEndHour = 7
+    @Published var periodicEndMinute = 0
 
     let rootURL: URL
     private let bridge: PythonBridge
@@ -99,10 +107,24 @@ final class WorkspaceStore: ObservableObject {
         results.filter { $0.category == resultFilter }
     }
 
+    var periodicDirectoryIsValid: Bool {
+        guard !periodicScanDirectory.isEmpty else { return false }
+        return (try? URL(fileURLWithPath: periodicScanDirectory)
+            .resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+    }
+
     var readinessMessage: String {
         if connection != .connected { return "処理エンジンを接続しています" }
         if !unsupportedFeatures.isEmpty && !allowReducedFeatureRun {
             return "旧UIの未対応設定を確認してください"
+        }
+        if periodicScanEnabled {
+            if !sources.isEmpty { return "定期スキャンと入力ソースは同時に実行できません" }
+            if periodicScanDirectory.isEmpty { return "監視フォルダを設定してください" }
+            if !periodicDirectoryIsValid {
+                return "監視フォルダが見つかりません"
+            }
+            return "定期スキャンを開始できます"
         }
         if sources.isEmpty { return "入力ソースを追加すると解析を開始できます" }
         if sources.contains(where: { !$0.exists }) { return "存在しない入力があります" }
@@ -180,6 +202,26 @@ final class WorkspaceStore: ObservableObject {
         guard unsupportedFeatures.isEmpty || allowReducedFeatureRun else {
             appendLog("未対応設定があるため停止しました。確認後に基本解析モードを許可してください。", level: .warning)
             selection = .analysis
+            return
+        }
+        if periodicScanEnabled {
+            guard sources.isEmpty else {
+                appendLog("定期スキャンと動画/RTSP入力は同時に実行できません。入力ソースを削除してください。", level: .warning)
+                selection = .capture
+                return
+            }
+            guard !periodicScanDirectory.isEmpty,
+                  periodicDirectoryIsValid else {
+                appendLog("定期スキャン用の監視フォルダを設定してください。", level: .warning)
+                selection = .settings
+                return
+            }
+            selection = .analysis
+            runState = .preparing
+            progress = nil
+            queueStatus = "定期スキャンを開始しています"
+            saveSettings()
+            startPeriodicRun()
             return
         }
         guard !sources.isEmpty else {
@@ -279,6 +321,14 @@ final class WorkspaceStore: ObservableObject {
                     "observation_latitude": String(latitude),
                     "observation_longitude": String(longitude),
                     "save_options": saveOptions,
+                    "periodic_scan_enabled": periodicScanEnabled,
+                    "periodic_scan_directory": periodicScanDirectory,
+                    "periodic_scan_interval": String(periodicScanInterval),
+                    "periodic_time_limit_enabled": periodicTimeLimitEnabled,
+                    "periodic_start_hour": String(periodicStartHour),
+                    "periodic_start_minute": String(periodicStartMinute),
+                    "periodic_end_hour": String(periodicEndHour),
+                    "periodic_end_minute": String(periodicEndMinute),
                 ],
             ]
         ) { [weak self] result in
@@ -351,6 +401,28 @@ final class WorkspaceStore: ObservableObject {
         bridge.request(
             "run_rtsp",
             payload: runPayload(merging: ["url": url])
+        ) { [weak self] result in
+            if case .failure(let error) = result {
+                self?.runState = .failed(error.localizedDescription)
+                self?.appendLog(error.localizedDescription, level: .error)
+            }
+        }
+    }
+
+    private func startPeriodicRun() {
+        bridge.request(
+            "run_periodic",
+            payload: runPayload(
+                merging: [
+                    "directory": periodicScanDirectory,
+                    "scanInterval": periodicScanInterval,
+                    "timeLimitEnabled": periodicTimeLimitEnabled,
+                    "startHour": periodicStartHour,
+                    "startMinute": periodicStartMinute,
+                    "endHour": periodicEndHour,
+                    "endMinute": periodicEndMinute,
+                ]
+            )
         ) { [weak self] result in
             if case .failure(let error) = result {
                 self?.runState = .failed(error.localizedDescription)
@@ -441,6 +513,14 @@ final class WorkspaceStore: ObservableObject {
         twilightFilterEnabled = boolValue(settings["date_folder_twilight_filter_enabled"], default: true)
         latitude = doubleValue(settings["observation_latitude"], default: latitude)
         longitude = doubleValue(settings["observation_longitude"], default: longitude)
+        periodicScanEnabled = boolValue(settings["periodic_scan_enabled"], default: false)
+        periodicScanDirectory = settings["periodic_scan_directory"] as? String ?? ""
+        periodicScanInterval = max(5, min(3600, intValue(settings["periodic_scan_interval"], default: 60)))
+        periodicTimeLimitEnabled = boolValue(settings["periodic_time_limit_enabled"], default: false)
+        periodicStartHour = max(0, min(23, intValue(settings["periodic_start_hour"], default: 17)))
+        periodicStartMinute = max(0, min(59, intValue(settings["periodic_start_minute"], default: 0)))
+        periodicEndHour = max(0, min(23, intValue(settings["periodic_end_hour"], default: 7)))
+        periodicEndMinute = max(0, min(59, intValue(settings["periodic_end_minute"], default: 0)))
         if let options = settings["save_options"] as? [String: Any] {
             for key in saveOptions.keys {
                 if let value = options[key] { saveOptions[key] = boolValue(value, default: saveOptions[key] ?? true) }
