@@ -386,8 +386,8 @@ struct SourceView: View {
                         HStack {
                             SectionTitle("追加済みの入力", subtitle: "\(store.sources.count)件")
                             Spacer()
-                            if store.localSourceCount > 0 && store.rtspSourceCount > 0 {
-                                StatusPill(title: "入力種別が混在", color: AppTheme.warning, symbol: "exclamationmark.triangle.fill")
+                            if store.activeSourceTypeCount > 1 {
+                                StatusPill(title: "優先: \(store.selectedSourceLabel)", color: AppTheme.accent, symbol: "arrow.up.circle.fill")
                             }
                         }
                         let localSources = store.sources.filter { $0.kind != .rtsp }
@@ -991,6 +991,101 @@ struct SettingsView: View {
 
                 GlassCard {
                     VStack(alignment: .leading, spacing: 14) {
+                        SectionTitle("処理対象の優先順位", subtitle: "複数の入力が有効な場合は、最上位の1種類だけを実行します")
+                        ForEach(Array(store.sourcePriority.enumerated()), id: \.element) { index, sourceType in
+                            HStack(spacing: 12) {
+                                Text("\(index + 1)")
+                                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                                    .foregroundStyle(AppTheme.accent)
+                                    .frame(width: 26, height: 26)
+                                    .background(AppTheme.accent.opacity(0.14), in: Circle())
+                                Label(
+                                    store.sourcePriorityTitle(for: sourceType),
+                                    systemImage: store.sourcePrioritySymbol(for: sourceType)
+                                )
+                                .font(.system(size: 13, weight: .semibold, design: .rounded))
+                                .foregroundStyle(AppTheme.text)
+                                Spacer()
+                                Button {
+                                    store.moveSourcePriority(sourceType, by: -1)
+                                } label: {
+                                    Image(systemName: "chevron.up")
+                                }
+                                .buttonStyle(.borderless)
+                                .disabled(index == 0)
+                                .accessibilityLabel("上へ移動")
+                                Button {
+                                    store.moveSourcePriority(sourceType, by: 1)
+                                } label: {
+                                    Image(systemName: "chevron.down")
+                                }
+                                .buttonStyle(.borderless)
+                                .disabled(index == store.sourcePriority.count - 1)
+                                .accessibilityLabel("下へ移動")
+                            }
+                            .padding(.vertical, 4)
+                            if index < store.sourcePriority.count - 1 {
+                                Divider().overlay(AppTheme.border)
+                            }
+                        }
+                        HStack {
+                            if store.activeSourceTypeCount > 1 {
+                                Label(
+                                    "現在は「\(store.selectedSourceLabel)」を優先",
+                                    systemImage: "arrow.up.circle.fill"
+                                )
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(AppTheme.accent)
+                            } else {
+                                Text("入力種別を複数登録したときだけ、この順位が適用されます。")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(AppTheme.tertiaryText)
+                            }
+                            Spacer()
+                            Button("標準に戻す") {
+                                store.resetSourcePriority()
+                            }
+                            .buttonStyle(.bordered)
+                        }
+                    }
+                }
+
+                GlassCard {
+                    VStack(alignment: .leading, spacing: 14) {
+                        SectionTitle("検出モデル", subtitle: "解析に使うPyTorchモデルを選択します")
+                        HStack(spacing: 10) {
+                            TextField("標準モデルを使用", text: $store.selectedModelPath)
+                                .textFieldStyle(.roundedBorder)
+                                .disabled(true)
+                            Button("選択") {
+                                chooseDetectionModel {
+                                    store.selectedModelPath = $0
+                                    store.saveSettings()
+                                }
+                            }
+                            .buttonStyle(.bordered)
+                            Button("開く") {
+                                guard store.selectedModelConfigurationIsValid,
+                                      !store.selectedModelPath.isEmpty else { return }
+                                NSWorkspace.shared.open(URL(fileURLWithPath: store.selectedModelPath))
+                            }
+                            .buttonStyle(.bordered)
+                            .disabled(!store.selectedModelConfigurationIsValid || store.selectedModelPath.isEmpty)
+                        }
+                        Label(
+                            store.selectedModelStatusMessage,
+                            systemImage: store.selectedModelConfigurationIsValid ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"
+                        )
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(store.selectedModelConfigurationIsValid ? AppTheme.success : AppTheme.warning)
+                        Text("未選択の場合は、設定ファイルの標準モデルを使用します。")
+                            .font(.system(size: 11))
+                            .foregroundStyle(AppTheme.tertiaryText)
+                    }
+                }
+
+                GlassCard {
+                    VStack(alignment: .leading, spacing: 14) {
                         SectionTitle("検出マスク", subtitle: "空やノイズの多い領域を解析対象から外します")
                         Toggle("検出マスクを適用する", isOn: $store.detectionMaskEnabled)
                             .toggleStyle(.switch)
@@ -1366,6 +1461,21 @@ struct SettingsView: View {
     }
 
     private func chooseNoiseTwinModel(_ completion: @escaping (String) -> Void) {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [
+            UTType(filenameExtension: "pth"),
+            UTType(filenameExtension: "pt"),
+        ].compactMap { $0 }
+        panel.prompt = "選択"
+        if panel.runModal() == .OK, let url = panel.url {
+            completion(url.path)
+        }
+    }
+
+    private func chooseDetectionModel(_ completion: @escaping (String) -> Void) {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = false
         panel.canChooseFiles = true

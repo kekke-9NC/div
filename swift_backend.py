@@ -183,8 +183,6 @@ class Bridge:
             unsupported.append("詳細パラメータ")
         if settings.get("camera_control_base_url") or settings.get("camera_control_ev_target"):
             unsupported.append("カメラ制御")
-        if settings.get("custom_model_paths"):
-            unsupported.append("カスタム検出モデル")
         if settings.get("ml_training_export_enabled") or settings.get("auto_video_mask_enabled"):
             unsupported.append("学習データ / 自動マスク")
         if settings.get("ai_vlm_backend") not in (None, "", "local_qwen3_vl_4b", "lmstudio_qwen3_5_2b"):
@@ -293,7 +291,7 @@ class Bridge:
                 cancel_flag=cancel_event,
             )
             if cancel_event.is_set():
-                self._release_discovery_thread()
+                self._release_run_thread()
                 self.response(request_id, {"sources": [], "cancelled": True})
                 self.event("run_state", {"state": "cancelled"})
                 return
@@ -302,7 +300,7 @@ class Bridge:
                 for item in sources
                 if item.get("path")
             ]
-            self._release_discovery_thread()
+            self._release_run_thread()
             self.response(request_id, {"sources": serialized})
             if not serialized:
                 self.event("run_state", {"state": "idle"})
@@ -311,12 +309,12 @@ class Bridge:
                 self.event("run_state", {"state": "discovery_completed"})
                 self.log(f"{len(serialized)}本の動画を検出しました。")
         except Exception as exc:
-            self._release_discovery_thread()
+            self._release_run_thread()
             self.log(f"入力の走査中にエラーが発生しました: {exc}", "error")
             self.response(request_id, error=str(exc))
             self.event("run_state", {"state": "failed", "error": str(exc)})
 
-    def _release_discovery_thread(self) -> None:
+    def _release_run_thread(self) -> None:
         with self._run_lock:
             if self._run_thread is threading.current_thread():
                 self._run_thread = None
@@ -343,6 +341,9 @@ class Bridge:
                 )
                 normalized_payload["maskPath"] = self._validated_path(
                     payload.get("maskPath"), name="maskPath"
+                )
+                normalized_payload["modelPath"] = self._validated_model_path(
+                    payload.get("modelPath")
                 )
                 normalized_payload["noiseTwinOptions"] = self._validated_noise_twin_options(
                     payload.get("noiseTwinOptions")
@@ -390,6 +391,9 @@ class Bridge:
                 )
                 normalized_payload["maskPath"] = self._validated_path(
                     payload.get("maskPath"), name="maskPath"
+                )
+                normalized_payload["modelPath"] = self._validated_model_path(
+                    payload.get("modelPath")
                 )
                 normalized_payload["rtspPreset"] = self._validated_choice(
                     payload.get("rtspPreset"), {"cloudy", "clear"}, "cloudy", "rtspPreset"
@@ -450,6 +454,9 @@ class Bridge:
                 )
                 normalized_payload["maskPath"] = self._validated_path(
                     payload.get("maskPath"), name="maskPath"
+                )
+                normalized_payload["modelPath"] = self._validated_model_path(
+                    payload.get("modelPath")
                 )
                 normalized_payload["noiseTwinOptions"] = self._validated_noise_twin_options(
                     payload.get("noiseTwinOptions")
@@ -559,6 +566,20 @@ class Bridge:
             raise ValueError(f"{name} must be a non-empty string")
         return value.strip()
 
+    def _validated_model_path(self, value: Any) -> str:
+        """Return an existing model path, or an empty path for the default model."""
+        if value is None:
+            return ""
+        if not isinstance(value, str):
+            raise ValueError("modelPath must be a string")
+        raw_path = value.strip()
+        if not raw_path:
+            return ""
+        model_path = self._safe_path(raw_path, self.root)
+        if not model_path.is_file():
+            raise ValueError(f"検出モデルが見つかりません: {model_path}")
+        return str(model_path)
+
     def _validated_noise_twin_options(self, value: Any) -> Dict[str, Any]:
         if value is None:
             return {
@@ -644,6 +665,7 @@ class Bridge:
             import config
             import download_pipeline
 
+            self._load_selected_model(payload)
             mask = self._load_detection_mask(payload)
 
             sources = [
@@ -715,14 +737,17 @@ class Bridge:
             )
             if cancel_event.is_set():
                 self.log("処理をキャンセルしました。", "warning")
+                self._release_run_thread()
                 self.event("run_state", {"state": "cancelled"})
             else:
                 self.event("progress", {"current": len(sources), "total": len(sources), "message": "完了"})
                 self.log("すべての処理が完了しました。")
+                self._release_run_thread()
                 self.event("run_state", {"state": "completed"})
         except Exception as exc:
             self.log(f"処理中にエラーが発生しました: {exc}", "error")
             traceback.print_exc(file=sys.stderr)
+            self._release_run_thread()
             self.event("run_state", {"state": "failed", "error": str(exc)})
 
     def _run_periodic(self, payload: Dict[str, Any], cancel_event: threading.Event) -> None:
@@ -731,6 +756,7 @@ class Bridge:
             import config
             import file_utils
 
+            self._load_selected_model(payload)
             mask = self._load_detection_mask(payload)
 
             directory = self._safe_path(payload.get("directory"), self.root)
@@ -786,12 +812,15 @@ class Bridge:
             )
             if cancel_event.is_set():
                 self.log("定期スキャンを停止しました。", "warning")
+                self._release_run_thread()
                 self.event("run_state", {"state": "cancelled"})
             else:
+                self._release_run_thread()
                 self.event("run_state", {"state": "completed"})
         except Exception as exc:
             self.log(f"定期スキャン中にエラーが発生しました: {exc}", "error")
             traceback.print_exc(file=sys.stderr)
+            self._release_run_thread()
             self.event("run_state", {"state": "failed", "error": str(exc)})
 
     def _run_rtsp(self, payload: Dict[str, Any], cancel_event: threading.Event) -> None:
@@ -800,6 +829,7 @@ class Bridge:
             import config
             import file_utils
 
+            self._load_selected_model(payload)
             mask = self._load_detection_mask(payload)
 
             url = str(payload.get("url", "")).strip()
@@ -864,15 +894,18 @@ class Bridge:
                     notify_on_detection=bool(payload.get("notifyOnDetection", True)),
                     noise_twin_options=payload.get("noiseTwinOptions") or {"enabled": False},
                     rtsp_fps=self._bounded_int(payload.get("rtspFps", 25), 1, 120),
-                )
+            )
             if cancel_event.is_set():
                 self.log("RTSP処理を停止しました。")
+                self._release_run_thread()
                 self.event("run_state", {"state": "cancelled"})
             else:
+                self._release_run_thread()
                 self.event("run_state", {"state": "completed"})
         except Exception as exc:
             self.log(f"RTSP処理中にエラーが発生しました: {exc}", "error")
             traceback.print_exc(file=sys.stderr)
+            self._release_run_thread()
             self.event("run_state", {"state": "failed", "error": str(exc)})
 
     def _cancel(self) -> None:
@@ -961,6 +994,25 @@ class Bridge:
         if not np.isfinite(mask).all():
             raise ValueError("検出マスクに有限でない画素があります")
         return np.clip(mask, 0, 255).astype(np.uint8)
+
+    def _load_selected_model(self, payload: Dict[str, Any]) -> None:
+        """Apply the optional SwiftUI-selected classifier before processing starts."""
+        raw_path = payload.get("modelPath")
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            return
+
+        model_path = self._validated_model_path(raw_path)
+        try:
+            import model
+            import model_catalog
+
+            metadata = model_catalog.load_model_metadata(model_path)
+            ok, message = model.reload_model(model_path=model_path, metadata=metadata)
+        except Exception as exc:
+            raise ValueError(f"検出モデルを読み込めませんでした: {exc}") from exc
+        if not ok:
+            raise ValueError(f"検出モデルを読み込めませんでした: {message}")
+        self.log(f"検出モデルを適用しました: {Path(model_path).name}")
 
     @staticmethod
     def _bounded_int(value: Any, lower: int, upper: int) -> int:

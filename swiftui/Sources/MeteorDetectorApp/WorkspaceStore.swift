@@ -14,6 +14,7 @@ enum DetectionMaskValidation: Equatable {
 final class WorkspaceStore: ObservableObject {
     @Published var selection: AppSection = .overview
     @Published var sources: [InputSource] = []
+    @Published var sourcePriority = ["periodic", "rtsp", "folder"]
     @Published var connection: BackendConnectionState = .starting
     @Published var runState: RunState = .idle
     @Published var progress: PipelineProgress?
@@ -68,6 +69,7 @@ final class WorkspaceStore: ObservableObject {
     @Published var rtspNotificationSound = true
     @Published var rtspPreset = "cloudy"
     @Published var rtspFPS = 25
+    @Published var selectedModelPath = ""
     @Published var noiseTwinEnabled = false
     @Published var noiseTwinModelPath = ""
     @Published var temporalMeanFrames = 0
@@ -80,6 +82,21 @@ final class WorkspaceStore: ObservableObject {
     private var detectionMaskValidationGeneration = 0
     private var settingsSaveGeneration = 0
     private var activeRunToken = UUID()
+
+    private static let defaultSourcePriority = ["periodic", "rtsp", "folder"]
+
+    private static func normalizeSourcePriority(_ priority: [String]) -> [String] {
+        var normalized: [String] = []
+        for item in priority where defaultSourcePriority.contains(item) {
+            if !normalized.contains(item) { normalized.append(item) }
+        }
+        normalized.append(contentsOf: defaultSourcePriority.filter { !normalized.contains($0) })
+        return normalized
+    }
+
+    private var normalizedSourcePriority: [String] {
+        Self.normalizeSourcePriority(sourcePriority)
+    }
 
     private static var defaultSummaryVideoOptions: [SummaryVideoOption] {
         [
@@ -149,17 +166,24 @@ final class WorkspaceStore: ObservableObject {
     var canStart: Bool {
         guard settingsLoaded, connection == .connected, !isBusy else { return false }
         guard detectionMaskIsValid, summaryVideoSelectionIsValid else { return false }
+        guard selectedModelConfigurationIsValid else { return false }
         guard noiseTwinConfigurationIsValid else { return false }
         guard unsupportedFeatures.isEmpty || allowReducedFeatureRun else { return false }
-        if periodicScanEnabled {
-            return sources.isEmpty && periodicDirectoryIsValid && periodicTimeWindowIsValid
+        guard let sourceType = selectedSourceType else { return false }
+        switch sourceType {
+        case "periodic":
+            return periodicDirectoryIsValid && periodicTimeWindowIsValid
+        case "rtsp":
+            let rtspSources = sources.filter { $0.kind == .rtsp }
+            return rtspSources.count == 1
+                && rtspSources.allSatisfy(\.exists)
+                && rtspTimeWindowIsValid
+        case "folder":
+            let localSources = sources.filter { $0.kind != .rtsp }
+            return !localSources.isEmpty && localSources.allSatisfy(\.exists)
+        default:
+            return false
         }
-        guard !sources.isEmpty,
-              sources.allSatisfy({ $0.exists }),
-              localSourceCount == 0 || rtspSourceCount == 0,
-              rtspSourceCount <= 1,
-              rtspTimeWindowIsValid else { return false }
-        return true
     }
 
     var localSourceCount: Int {
@@ -168,6 +192,75 @@ final class WorkspaceStore: ObservableObject {
 
     var rtspSourceCount: Int {
         sources.filter { $0.kind == .rtsp }.count
+    }
+
+    var selectedSourceType: String? {
+        let active: [String: Bool] = [
+            "periodic": periodicScanEnabled,
+            "rtsp": rtspSourceCount > 0,
+            "folder": localSourceCount > 0,
+        ]
+        for sourceType in normalizedSourcePriority where active[sourceType] == true {
+            return sourceType
+        }
+        return nil
+    }
+
+    var activeSourceTypeCount: Int {
+        [periodicScanEnabled, rtspSourceCount > 0, localSourceCount > 0].filter { $0 }.count
+    }
+
+    var selectedSourceLabel: String {
+        sourcePriorityTitle(for: selectedSourceType ?? "")
+    }
+
+    var selectedModelConfigurationIsValid: Bool {
+        let path = selectedModelPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !path.isEmpty, FileManager.default.fileExists(atPath: path) else {
+            return path.isEmpty
+        }
+        return (try? URL(fileURLWithPath: path)
+            .resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true
+    }
+
+    var selectedModelStatusMessage: String {
+        let path = selectedModelPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !path.isEmpty else { return "標準モデルを使用します" }
+        guard selectedModelConfigurationIsValid else {
+            return "選択した検出モデルが見つかりません"
+        }
+        return "このモデルを実行時に適用します"
+    }
+
+    func sourcePriorityTitle(for sourceType: String) -> String {
+        switch sourceType {
+        case "periodic": return "定期スキャン"
+        case "rtsp": return "RTSPストリーム"
+        case "folder": return "フォルダ / 動画ファイル"
+        default: return "入力"
+        }
+    }
+
+    func sourcePrioritySymbol(for sourceType: String) -> String {
+        switch sourceType {
+        case "periodic": return "clock.arrow.2.circlepath"
+        case "rtsp": return "dot.radiowaves.left.and.right"
+        case "folder": return "film.stack"
+        default: return "line.3.horizontal"
+        }
+    }
+
+    func moveSourcePriority(_ sourceType: String, by offset: Int) {
+        guard let index = sourcePriority.firstIndex(of: sourceType) else { return }
+        let target = index + offset
+        guard sourcePriority.indices.contains(target) else { return }
+        sourcePriority.swapAt(index, target)
+        saveSettings()
+    }
+
+    func resetSourcePriority() {
+        sourcePriority = Self.defaultSourcePriority
+        saveSettings()
     }
 
     var filteredResults: [OutputItem] {
@@ -249,23 +342,30 @@ final class WorkspaceStore: ObservableObject {
         if detectionMaskEnabled && !detectionMaskIsValid {
             return detectionMaskStatusMessage
         }
+        if !selectedModelConfigurationIsValid { return selectedModelStatusMessage }
         if !noiseTwinConfigurationIsValid { return noiseTwinStatusMessage }
         if !summaryVideoSelectionIsValid { return "出力構成を1つ以上選択してください" }
-        if periodicScanEnabled {
-            if !sources.isEmpty { return "定期スキャンと入力ソースは同時に実行できません" }
-            if periodicScanDirectory.isEmpty { return "監視フォルダを設定してください" }
-            if !periodicDirectoryIsValid {
-                return "監視フォルダが見つかりません"
-            }
-            if !periodicTimeWindowIsValid { return "時間制限の開始と終了を変えてください" }
-            return "定期スキャンを開始できます"
+        guard let sourceType = selectedSourceType else {
+            return "入力ソースを追加するか、定期スキャンを有効にしてください"
         }
-        if sources.isEmpty { return "入力ソースを追加すると解析を開始できます" }
-        if sources.contains(where: { !$0.exists }) { return "存在しない入力があります" }
-        if localSourceCount > 0 && rtspSourceCount > 0 { return "動画とRTSPは同時に実行できません" }
-        if rtspSourceCount > 1 { return "RTSPは1台ずつ実行してください" }
-        if rtspSourceCount == 1 && !rtspTimeWindowIsValid {
-            return "RTSP時間制限の開始と終了を変えてください"
+        let priorityNote = activeSourceTypeCount > 1 ? "\(selectedSourceLabel)を優先します。" : ""
+        switch sourceType {
+        case "periodic":
+            if periodicScanDirectory.isEmpty { return "監視フォルダを設定してください" }
+            if !periodicDirectoryIsValid { return "監視フォルダが見つかりません" }
+            if !periodicTimeWindowIsValid { return "時間制限の開始と終了を変えてください" }
+            return priorityNote.isEmpty ? "定期スキャンを開始できます" : "\(priorityNote)定期スキャンを開始できます"
+        case "rtsp":
+            if rtspSourceCount > 1 { return "RTSPは1台ずつ実行してください" }
+            if !rtspTimeWindowIsValid { return "RTSP時間制限の開始と終了を変えてください" }
+            return priorityNote.isEmpty ? "RTSP解析を開始できます" : "\(priorityNote)RTSP解析を開始できます"
+        case "folder":
+            let localSources = sources.filter { $0.kind != .rtsp }
+            if localSources.isEmpty { return "動画・フォルダを追加してください" }
+            if localSources.contains(where: { !$0.exists }) { return "存在しない動画入力があります" }
+            return priorityNote.isEmpty ? "解析を開始できます" : "\(priorityNote)動画解析を開始できます"
+        default:
+            break
         }
         if !unsupportedFeatures.isEmpty { return "基本解析モードで開始できます" }
         return "解析を開始できます"
@@ -350,17 +450,32 @@ final class WorkspaceStore: ObservableObject {
             selection = .settings
             return
         }
+        guard selectedModelConfigurationIsValid else {
+            appendLog(selectedModelStatusMessage, level: .warning)
+            selection = .settings
+            return
+        }
+        guard noiseTwinConfigurationIsValid else {
+            appendLog(noiseTwinStatusMessage, level: .warning)
+            selection = .settings
+            return
+        }
         guard unsupportedFeatures.isEmpty || allowReducedFeatureRun else {
             appendLog("未対応設定があるため停止しました。確認後に基本解析モードを許可してください。", level: .warning)
             selection = .analysis
             return
         }
-        if periodicScanEnabled {
-            guard sources.isEmpty else {
-                appendLog("定期スキャンと動画/RTSP入力は同時に実行できません。入力ソースを削除してください。", level: .warning)
-                selection = .capture
-                return
-            }
+        guard let sourceType = selectedSourceType else {
+            appendLog("動画・フォルダ・RTSPカメラを追加するか、定期スキャンを有効にしてください。", level: .warning)
+            selection = .capture
+            return
+        }
+
+        if activeSourceTypeCount > 1 {
+            appendLog("複数の入力が有効です。優先順位により「\(selectedSourceLabel)」だけを実行します。")
+        }
+
+        if sourceType == "periodic" {
             guard !periodicScanDirectory.isEmpty,
                   periodicDirectoryIsValid else {
                 appendLog("定期スキャン用の監視フォルダを設定してください。", level: .warning)
@@ -376,31 +491,36 @@ final class WorkspaceStore: ObservableObject {
             runState = .preparing
             progress = nil
             queueStatus = "定期スキャンを開始しています"
+            activeRunToken = UUID()
             saveSettings()
             startPeriodicRun()
             return
         }
-        guard !sources.isEmpty else {
-            appendLog("先に動画・フォルダ・RTSPカメラを追加してください。", level: .warning)
+
+        let selectedSources: [InputSource]
+        if sourceType == "rtsp" {
+            let rtspSources = sources.filter { $0.kind == .rtsp }
+            guard rtspSources.count == 1 else {
+                appendLog("RTSPカメラは一度に1台だけ実行できます。", level: .warning)
+                selection = .capture
+                return
+            }
+            selectedSources = rtspSources
+        } else {
+            selectedSources = sources.filter { $0.kind != .rtsp }
+        }
+
+        guard !selectedSources.isEmpty else {
+            appendLog("先に動画・フォルダを追加してください。", level: .warning)
             selection = .capture
             return
         }
-        guard sources.allSatisfy({ $0.exists }) else {
+        guard selectedSources.allSatisfy({ $0.exists }) else {
             appendLog("存在しない入力ソースを削除または選び直してください。", level: .error)
             selection = .capture
             return
         }
-        guard localSourceCount == 0 || rtspSourceCount == 0 else {
-            appendLog("動画/フォルダとRTSPカメラは同時に実行できません。どちらかを選んでください。", level: .warning)
-            selection = .capture
-            return
-        }
-        guard rtspSourceCount <= 1 else {
-            appendLog("RTSPカメラは一度に1台だけ実行できます。", level: .warning)
-            selection = .capture
-            return
-        }
-        guard rtspTimeWindowIsValid else {
+        guard sourceType != "rtsp" || rtspTimeWindowIsValid else {
             appendLog("RTSP時間制限の開始と終了を変えてください。", level: .warning)
             selection = .settings
             return
@@ -414,11 +534,12 @@ final class WorkspaceStore: ObservableObject {
         activeRunToken = runToken
         saveSettings()
 
-        let localPaths = sources.filter { $0.kind != .rtsp }.map(\.value)
-        if localPaths.isEmpty, let rtsp = sources.first(where: { $0.kind == .rtsp })?.value {
+        if sourceType == "rtsp", let rtsp = selectedSources.first?.value {
             startRTSPRun(url: rtsp)
             return
         }
+
+        let localPaths = selectedSources.map(\.value)
 
         bridge.request(
             "discover_sources",
@@ -484,6 +605,7 @@ final class WorkspaceStore: ObservableObject {
                 "settings": [
                     "folder_paths": localPaths,
                     "rtsp_urls": rtspURLs,
+                    "processing_source_priority": sourcePriority,
                     "meteor_save_path": meteorSavePath,
                     "not_meteor_save_path": notMeteorSavePath,
                     "concurrency": String(maxWorkers),
@@ -514,6 +636,7 @@ final class WorkspaceStore: ObservableObject {
                     "rtsp_notification_sound": rtspNotificationSound,
                     "rtsp_preset": rtspPreset,
                     "rtsp_fps": String(rtspFPS),
+                    "selected_model_path": selectedModelPath,
                     "noise_twin_enabled": noiseTwinEnabled,
                     "noise_twin_model_path": noiseTwinModelPath,
                     "temporal_mean_frames": temporalMeanFrames,
@@ -681,6 +804,7 @@ final class WorkspaceStore: ObservableObject {
             "summaryConfig": summaryVideoConfigPayload,
             "applyMask": detectionMaskEnabled,
             "maskPath": detectionMaskPath,
+            "modelPath": selectedModelPath,
             "noiseTwinOptions": [
                 "enabled": noiseTwinEnabled,
                 "modelPath": noiseTwinModelPath,
@@ -808,6 +932,7 @@ final class WorkspaceStore: ObservableObject {
         }
         let folderPaths = stringArray(settings["folder_paths"])
         let rtspURLs = stringArray(settings["rtsp_urls"])
+        sourcePriority = Self.normalizeSourcePriority(stringArray(settings["processing_source_priority"]))
         var restored: [InputSource] = []
         restored += folderPaths.map {
             let isDirectory = (try? URL(fileURLWithPath: $0).resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
@@ -850,6 +975,18 @@ final class WorkspaceStore: ObservableObject {
         let savedPreset = settings["rtsp_preset"] as? String ?? "cloudy"
         rtspPreset = savedPreset == "clear" ? "clear" : "cloudy"
         rtspFPS = max(1, min(120, intValue(settings["rtsp_fps"], default: 25)))
+        let savedModelPath = (settings["selected_model_path"] as? String ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if !savedModelPath.isEmpty,
+           (try? URL(fileURLWithPath: savedModelPath)
+               .resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true {
+            selectedModelPath = savedModelPath
+        } else {
+            selectedModelPath = ""
+            if !savedModelPath.isEmpty {
+                appendLog("保存されていた検出モデルが見つからないため、標準モデルへ戻しました。", level: .warning)
+            }
+        }
         noiseTwinModelPath = settings["noise_twin_model_path"] as? String ?? ""
         noiseTwinEnabled = boolValue(settings["noise_twin_enabled"], default: false)
         let savedMeanFrames = intValue(settings["temporal_mean_frames"], default: 0)

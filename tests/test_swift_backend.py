@@ -75,6 +75,49 @@ def test_noise_twin_options_validate_temporal_mean_without_loading_a_model():
         raise AssertionError("unsupported temporal mean window should fail")
 
 
+def test_selected_model_path_requires_an_existing_file(tmp_path):
+    from swift_backend import Bridge
+
+    model_path = tmp_path / "custom_detector.pth"
+    model_path.write_bytes(b"placeholder")
+    bridge = Bridge(tmp_path)
+
+    assert bridge._validated_model_path(str(model_path)) == str(model_path.resolve())
+    assert bridge._validated_model_path("") == ""
+
+    try:
+        bridge._validated_model_path(str(tmp_path / "missing.pth"))
+    except ValueError as exc:
+        assert "検出モデルが見つかりません" in str(exc)
+    else:
+        raise AssertionError("missing selected model should fail")
+
+
+def test_selected_model_is_loaded_with_metadata_before_processing(tmp_path):
+    from swift_backend import Bridge
+
+    model_path = tmp_path / "custom_detector.pth"
+    model_path.write_bytes(b"placeholder")
+    calls = {}
+    fake_model = SimpleNamespace(
+        reload_model=lambda **kwargs: calls.update(reload=kwargs) or (True, "ok")
+    )
+    fake_catalog = SimpleNamespace(
+        load_model_metadata=lambda path: calls.update(metadata_path=path) or {"architecture": "test"}
+    )
+
+    bridge = Bridge(tmp_path, protocol_stdout=io.StringIO())
+    with mock.patch.dict(
+        sys.modules,
+        {"model": fake_model, "model_catalog": fake_catalog},
+    ):
+        bridge._load_selected_model({"modelPath": str(model_path)})
+
+    assert calls["metadata_path"] == str(model_path.resolve())
+    assert calls["reload"]["model_path"] == str(model_path.resolve())
+    assert calls["reload"]["metadata"] == {"architecture": "test"}
+
+
 def test_detection_mask_loads_legacy_npz(tmp_path):
     import numpy as np
 
@@ -243,6 +286,8 @@ def test_settings_are_written_atomically_and_unknown_commands_fail(tmp_path):
                     "rtsp_notification_sound": False,
                     "rtsp_preset": "clear",
                     "rtsp_fps": "30",
+                    "selected_model_path": "/tmp/custom_detector.pth",
+                    "processing_source_priority": ["folder", "rtsp", "periodic"],
                     "summary_video_config": [
                         {"name": "Composite Image", "enabled": False, "duration": 3.5}
                     ],
@@ -264,6 +309,8 @@ def test_settings_are_written_atomically_and_unknown_commands_fail(tmp_path):
     assert settings["rtsp_notification_sound"] is False
     assert settings["rtsp_preset"] == "clear"
     assert settings["rtsp_fps"] == "30"
+    assert settings["selected_model_path"] == "/tmp/custom_detector.pth"
+    assert settings["processing_source_priority"] == ["folder", "rtsp", "periodic"]
     assert settings["summary_video_config"] == [
         {"name": "Composite Image", "enabled": False, "duration": 3.5}
     ]
@@ -537,6 +584,8 @@ def test_local_payload_is_normalized_before_worker_starts(tmp_path):
     output = io.StringIO()
     bridge = Bridge(tmp_path, protocol_stdout=output)
     captured = {}
+    model_path = tmp_path / "custom_detector.pth"
+    model_path.write_bytes(b"placeholder")
 
     def fake_run(payload, cancel_event):
         captured.update(payload)
@@ -548,6 +597,7 @@ def test_local_payload_is_normalized_before_worker_starts(tmp_path):
             "command": "run_detection",
             "payload": {
                 "sources": [{"path": str(tmp_path / "sample.mp4")}],
+                "modelPath": str(model_path),
                 "summaryConfig": [
                     {"name": "Zoom Sequence", "enabled": True, "duration": 4.0}
                 ],
@@ -566,6 +616,7 @@ def test_local_payload_is_normalized_before_worker_starts(tmp_path):
     messages = [json.loads(line) for line in output.getvalue().splitlines() if line.strip()]
     response = next(message for message in messages if message.get("id") == "local")
     assert response["ok"] is True
+    assert captured["modelPath"] == str(model_path.resolve())
     assert captured["summaryConfig"] == [
         {"name": "Zoom Sequence", "enabled": True, "duration": 4.0}
     ]
