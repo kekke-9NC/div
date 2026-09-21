@@ -23,8 +23,19 @@ export PYTORCH_ENABLE_MPS_FALLBACK="${PYTORCH_ENABLE_MPS_FALLBACK:-1}"
 export PYTHONFAULTHANDLER="${PYTHONFAULTHANDLER:-1}"
 export PYTHONUNBUFFERED="${PYTHONUNBUFFERED:-1}"
 
+PYTHON_RUNNER=""
+if [[ -n "${METEOR_PYTHON:-}" ]]; then
+  if [[ -x "${METEOR_PYTHON}" ]]; then
+    PYTHON_RUNNER="$METEOR_PYTHON"
+  elif command -v "$METEOR_PYTHON" >/dev/null 2>&1; then
+    PYTHON_RUNNER="$(command -v "$METEOR_PYTHON")"
+  else
+    echo "METEOR_PYTHON is not executable; falling back to the managed macOS environment." >&2
+  fi
+fi
+
 PYTHON_BIN="${PYTHON_BIN:-}"
-if [[ -z "$PYTHON_BIN" ]]; then
+if [[ -z "$PYTHON_RUNNER" && -z "$PYTHON_BIN" ]]; then
   if command -v python3.11 >/dev/null 2>&1; then
     PYTHON_BIN="$(command -v python3.11)"
   elif command -v python3 >/dev/null 2>&1; then
@@ -35,14 +46,24 @@ if [[ -z "$PYTHON_BIN" ]]; then
   fi
 fi
 
-if [[ ! -d .venv-mac ]]; then
+if [[ -z "$PYTHON_RUNNER" && ! -d .venv-mac ]]; then
   "$PYTHON_BIN" -m venv .venv-mac
 fi
 
-source .venv-mac/bin/activate
-python -m pip install --upgrade pip setuptools wheel
-python -m pip install -r requirements-mac.txt
+if [[ -z "$PYTHON_RUNNER" ]]; then
+  source .venv-mac/bin/activate
+  PYTHON_RUNNER="$(command -v python)"
+  python -m pip install --upgrade pip setuptools wheel
+  python -m pip install -r requirements-mac.txt
+fi
 
 mkdir -p meteor not_meteor temp_clips rtsp lighten_blend_cache
 
-python main_gui.py
+export METEOR_DETECTOR_ROOT="$(pwd)"
+export METEOR_PYTHON="$PYTHON_RUNNER"
+
+if [[ "${METEOR_UI_MODE:-swiftui}" == "legacy" ]]; then
+  exec "$PYTHON_RUNNER" main_gui.py "$@"
+fi
+
+exec swift run --package-path swiftui MeteorDetectorSwiftUI "$@"

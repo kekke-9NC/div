@@ -4,13 +4,15 @@
 
 ## 起動
 
-開発時はプロジェクトルートで次を実行します。
+プロジェクトルートで次を実行すると、SwiftUI版が標準UIとして起動します。
 
 ```sh
-./run_swiftui.sh
+./run_mac.command
 ```
 
-初回は既存の `.venv-mac` をPython処理エンジンとして優先し、なければ `METEOR_PYTHON`、Homebrew Python、システムPythonの順で探します。
+ターミナルから起動する場合は `./run_swiftui.sh` または `./run_mac.sh` を使えます。`run_mac.sh` は `.venv-mac` の作成と依存関係の準備を行い、`METEOR_PYTHON` を指定した場合はそのPythonを使います。既存環境だけで起動したい場合は `run_swiftui.sh` を使ってください。旧Tkinter版へ戻す必要がある場合は `./run_legacy_mac.sh` を使います。
+
+`run_mac.sh` は `METEOR_PYTHON` が指定されていればそれを優先し、未指定なら既存の `.venv-mac` を使い、未作成ならPython 3.11またはPython 3から作成します。`run_swiftui.sh` は既存の `.venv-mac` または `.venv` を使い、見つからない場合はブリッジ側がHomebrew PythonやシステムPythonを探索します。
 
 ## 構成
 
@@ -29,4 +31,4 @@ swift run --package-path swiftui MeteorDetectorCoreValidation
 .venv-mac/bin/python -m pytest -q tests/test_swift_backend.py
 ```
 
-旧Tkinter UIは、機能移行中のフォールバックとして `./run_mac.command` から起動できます。マスク編集、プレートソルブ、NoiseTwin、定期スキャン、解析ツール、AIアシスタントなどは、既存動作を壊さず順次SwiftUIへ移行します。
+旧Tkinter UIは、機能移行中のフォールバックとして `./run_legacy_mac.sh` から起動できます。マスク編集、プレートソルブ、NoiseTwin、定期スキャン、解析ツール、AIアシスタントなどは、既存動作を壊さず順次SwiftUIへ移行します。
