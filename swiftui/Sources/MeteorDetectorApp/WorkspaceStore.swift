@@ -11,6 +11,9 @@ final class WorkspaceStore: ObservableObject {
     @Published var runState: RunState = .idle
     @Published var progress: PipelineProgress?
     @Published var logs: [ActivityEntry] = []
+    @Published private(set) var results: [OutputItem] = []
+    @Published var resultFilter: OutputCategory = .meteor
+    @Published var selectedResultID: String?
     @Published var queueStatus = "待機中"
     @Published var isDropTargeted = false
     @Published private(set) var unsupportedFeatures: [String] = []
@@ -29,6 +32,7 @@ final class WorkspaceStore: ObservableObject {
     let rootURL: URL
     private let bridge: PythonBridge
     private var cancellables = Set<AnyCancellable>()
+    private var resultsRefreshGeneration = 0
 
     init(rootURL: URL? = nil) {
         let resolvedRoot = rootURL ?? Self.resolveRoot()
@@ -89,6 +93,10 @@ final class WorkspaceStore: ObservableObject {
 
     var rtspSourceCount: Int {
         sources.filter { $0.kind == .rtsp }.count
+    }
+
+    var filteredResults: [OutputItem] {
+        results.filter { $0.category == resultFilter }
     }
 
     var readinessMessage: String {
@@ -293,6 +301,33 @@ final class WorkspaceStore: ObservableObject {
         NSWorkspace.shared.open(url)
     }
 
+    func openResult(_ item: OutputItem) {
+        NSWorkspace.shared.open(item.url)
+    }
+
+    func revealResult(_ item: OutputItem) {
+        NSWorkspace.shared.activateFileViewerSelecting([item.url])
+    }
+
+    func refreshResults() {
+        resultsRefreshGeneration &+= 1
+        let generation = resultsRefreshGeneration
+        let meteorPath = URL(fileURLWithPath: meteorSavePath)
+        let notMeteorPath = URL(fileURLWithPath: notMeteorSavePath)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let items = WorkspaceStore.collectResults(meteorPath: meteorPath, notMeteorPath: notMeteorPath)
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                guard self.resultsRefreshGeneration == generation else { return }
+                self.results = items
+                if let selected = self.selectedResultID,
+                   !items.contains(where: { $0.id == selected }) {
+                    self.selectedResultID = nil
+                }
+            }
+        }
+    }
+
     func shutdown() {
         saveSettings()
         bridge.stop(after: 0.25)
@@ -371,7 +406,9 @@ final class WorkspaceStore: ObservableObject {
             case "preparing": runState = .preparing
             case "running": runState = .running
             case "cancelling": runState = .cancelling
-            case "completed": runState = .completed
+            case "completed":
+                runState = .completed
+                refreshResults()
             case "cancelled": runState = .cancelled
             case "failed": runState = .failed(envelope.payload["error"] as? String ?? "処理に失敗しました")
             default: runState = .idle
@@ -412,6 +449,50 @@ final class WorkspaceStore: ObservableObject {
         if !restored.isEmpty {
             appendLog("前回の入力設定を復元しました。")
         }
+        refreshResults()
+    }
+
+    private nonisolated static func collectResults(meteorPath: URL, notMeteorPath: URL) -> [OutputItem] {
+        let fileManager = FileManager.default
+        let keys: Set<URLResourceKey> = [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey]
+        let allowedExtensions: Set<String> = [
+            "jpg", "jpeg", "png", "gif", "tif", "tiff", "webp",
+            "mp4", "mov", "avi", "m4v", "mkv", "json", "txt", "csv",
+        ]
+
+        func scan(_ root: URL, category: OutputCategory) -> [OutputItem] {
+            guard fileManager.fileExists(atPath: root.path),
+                  let enumerator = fileManager.enumerator(
+                      at: root,
+                      includingPropertiesForKeys: Array(keys),
+                      options: [.skipsHiddenFiles, .skipsPackageDescendants]
+                  ) else { return [] }
+
+            var found: [OutputItem] = []
+            for case let url as URL in enumerator {
+                let ext = url.pathExtension.lowercased()
+                guard allowedExtensions.contains(ext), let kind = OutputKind.from(fileExtension: ext) else { continue }
+                guard let values = try? url.resourceValues(forKeys: keys), values.isRegularFile == true else { continue }
+                found.append(
+                    OutputItem(
+                        url: url,
+                        category: category,
+                        kind: kind,
+                        byteCount: Int64(values.fileSize ?? 0),
+                        modifiedAt: values.contentModificationDate ?? .distantPast
+                    )
+                )
+            }
+            return found
+        }
+
+        return (scan(meteorPath, category: .meteor) + scan(notMeteorPath, category: .notMeteor))
+            .sorted { lhs, rhs in
+                if lhs.modifiedAt != rhs.modifiedAt { return lhs.modifiedAt > rhs.modifiedAt }
+                return lhs.id < rhs.id
+            }
+            .prefix(300)
+            .map { $0 }
     }
 
     private static func resolveRoot() -> URL {

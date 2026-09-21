@@ -4,6 +4,7 @@ public enum AppSection: String, CaseIterable, Identifiable, Hashable {
     case overview
     case capture
     case analysis
+    case results
     case settings
     case activity
 
@@ -14,6 +15,7 @@ public enum AppSection: String, CaseIterable, Identifiable, Hashable {
         case .overview: return "概要"
         case .capture: return "入力ソース"
         case .analysis: return "検出と解析"
+        case .results: return "結果"
         case .settings: return "設定"
         case .activity: return "アクティビティ"
         }
@@ -24,6 +26,7 @@ public enum AppSection: String, CaseIterable, Identifiable, Hashable {
         case .overview: return "観測ワークスペース"
         case .capture: return "動画・フォルダ・RTSP"
         case .analysis: return "処理の開始と進捗"
+        case .results: return "候補一覧とプレビュー"
         case .settings: return "保存先と処理条件"
         case .activity: return "イベントログと状態"
         }
@@ -34,6 +37,7 @@ public enum AppSection: String, CaseIterable, Identifiable, Hashable {
         case .overview: return "sparkles"
         case .capture: return "tray.and.arrow.down"
         case .analysis: return "scope"
+        case .results: return "photo.on.rectangle.angled"
         case .settings: return "slider.horizontal.3"
         case .activity: return "waveform.path.ecg"
         }
@@ -165,6 +169,85 @@ public struct ActivityEntry: Identifiable, Equatable {
         self.date = date
         self.message = message
         self.level = level
+    }
+}
+
+public enum OutputCategory: String, CaseIterable, Identifiable, Hashable {
+    case meteor
+    case notMeteor
+
+    public var id: String { rawValue }
+
+    public var title: String {
+        switch self {
+        case .meteor: return "流星候補"
+        case .notMeteor: return "非流星候補"
+        }
+    }
+
+    public var symbol: String {
+        switch self {
+        case .meteor: return "sparkles"
+        case .notMeteor: return "archivebox"
+        }
+    }
+}
+
+public enum OutputKind: String, Hashable {
+    case image
+    case video
+    case data
+
+    public var symbol: String {
+        switch self {
+        case .image: return "photo"
+        case .video: return "film"
+        case .data: return "doc.text"
+        }
+    }
+
+    public static func from(fileExtension: String) -> OutputKind? {
+        switch fileExtension.lowercased() {
+        case "jpg", "jpeg", "png", "gif", "tif", "tiff", "webp": return .image
+        case "mp4", "mov", "avi", "m4v", "mkv": return .video
+        case "json", "txt", "csv": return .data
+        default: return nil
+        }
+    }
+}
+
+public struct OutputItem: Identifiable, Hashable {
+    public let id: String
+    public let url: URL
+    public let category: OutputCategory
+    public let kind: OutputKind
+    public let byteCount: Int64
+    public let modifiedAt: Date
+
+    public init(
+        url: URL,
+        category: OutputCategory,
+        kind: OutputKind,
+        byteCount: Int64 = 0,
+        modifiedAt: Date = .distantPast
+    ) {
+        self.id = url.standardizedFileURL.path
+        self.url = url
+        self.category = category
+        self.kind = kind
+        self.byteCount = byteCount
+        self.modifiedAt = modifiedAt
+    }
+
+    public var displayName: String { url.lastPathComponent }
+
+    public var relativeDisplayName: String {
+        let parent = url.deletingLastPathComponent().lastPathComponent
+        return parent.isEmpty ? displayName : "\(parent) / \(displayName)"
+    }
+
+    public var sizeLabel: String {
+        ByteCountFormatter.string(fromByteCount: byteCount, countStyle: .file)
     }
 }
 

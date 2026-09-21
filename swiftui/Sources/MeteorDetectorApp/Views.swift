@@ -26,6 +26,7 @@ struct RootView: View {
         case .overview: DashboardView()
         case .capture: SourceView()
         case .analysis: AnalysisView()
+        case .results: ResultsView()
         case .settings: SettingsView()
         case .activity: ActivityView()
         }
@@ -167,9 +168,10 @@ struct DashboardView: View {
                     }
                 }
 
-                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())], spacing: 16) {
+                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())], spacing: 16) {
                     MetricCard(symbol: "tray.full.fill", title: "入力ソース", value: "\(store.sources.count)", detail: "動画・フォルダ・RTSP")
                     MetricCard(symbol: "checkmark.seal.fill", title: "準備状態", value: readinessShort, detail: store.connection.title)
+                    MetricCard(symbol: "photo.on.rectangle.angled", title: "検出結果", value: "\(store.results.count)", detail: "候補ファイル")
                     MetricCard(symbol: "folder.fill", title: "保存先", value: outputFolderName, detail: "検出結果")
                 }
 
@@ -555,6 +557,15 @@ struct AnalysisView: View {
                                 .tint(AppTheme.accent)
                                 .disabled(store.connection != .connected || store.sources.isEmpty)
                             }
+                            if store.runState == .completed {
+                                Button {
+                                    store.refreshResults()
+                                    store.selection = .results
+                                } label: {
+                                    Label("結果を見る", systemImage: "photo.on.rectangle")
+                                }
+                                .buttonStyle(.bordered)
+                            }
                             Button("入力を見直す") { store.selection = .capture }
                                 .buttonStyle(.bordered)
                         }
@@ -605,6 +616,253 @@ struct AnalysisView: View {
         case .cancelled: return AppTheme.warning
         case .preparing, .running, .cancelling: return AppTheme.accent
         case .idle: return AppTheme.secondaryText
+        }
+    }
+}
+
+struct ResultsView: View {
+    @EnvironmentObject private var store: WorkspaceStore
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            PageHeader(
+                eyebrow: "Results",
+                title: "検出結果",
+                subtitle: "候補ファイルを一覧で確認し、画像はこの画面でプレビューできます。"
+            )
+            .padding(34)
+
+            HStack(alignment: .top, spacing: 16) {
+                GlassCard(padding: 16) {
+                    VStack(alignment: .leading, spacing: 14) {
+                        HStack {
+                            Picker("結果の種類", selection: $store.resultFilter) {
+                                ForEach(OutputCategory.allCases) { category in
+                                    Label(category.title, systemImage: category.symbol).tag(category)
+                                }
+                            }
+                            .pickerStyle(.segmented)
+                            Spacer()
+                            Button {
+                                store.refreshResults()
+                            } label: {
+                                Image(systemName: "arrow.clockwise")
+                            }
+                            .buttonStyle(.borderless)
+                            .help("結果を再読み込み")
+                        }
+
+                        HStack {
+                            Text("\(store.filteredResults.count)件")
+                                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                                .foregroundStyle(AppTheme.secondaryText)
+                            Spacer()
+                            Button("保存先を開く") {
+                                store.openOutputFolder(store.resultFilter == .meteor ? store.meteorSavePath : store.notMeteorSavePath)
+                            }
+                            .buttonStyle(.link)
+                            .foregroundStyle(AppTheme.accent)
+                        }
+
+                        Divider().overlay(AppTheme.border)
+
+                        if store.filteredResults.isEmpty {
+                            EmptyState(
+                                symbol: store.resultFilter.symbol,
+                                title: "まだ結果がありません",
+                                message: "解析が完了すると、候補ファイルがここに表示されます。"
+                            )
+                        } else {
+                            ScrollView {
+                                LazyVStack(alignment: .leading, spacing: 4) {
+                                    ForEach(store.filteredResults) { item in
+                                        ResultRow(
+                                            item: item,
+                                            isSelected: item.id == store.selectedResultID
+                                        ) {
+                                            store.selectedResultID = item.id
+                                        }
+                                    }
+                                }
+                            }
+                            .frame(minHeight: 360)
+                        }
+                    }
+                }
+                .frame(minWidth: 470, idealWidth: 540, maxWidth: 620)
+
+                GlassCard(padding: 20) {
+                    ResultPreviewPanel(item: store.results.first { $0.id == store.selectedResultID })
+                }
+                .frame(minWidth: 360, maxWidth: .infinity, minHeight: 470)
+            }
+            .padding(.horizontal, 34)
+            .padding(.bottom, 34)
+        }
+        .onAppear { store.refreshResults() }
+        .onChange(of: store.resultFilter) { _, _ in
+            store.selectedResultID = nil
+        }
+    }
+}
+
+struct ResultRow: View {
+    let item: OutputItem
+    let isSelected: Bool
+    let select: () -> Void
+
+    var body: some View {
+        Button(action: select) {
+            HStack(spacing: 10) {
+                Image(systemName: item.kind.symbol)
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(AppTheme.accent)
+                    .frame(width: 28, height: 28)
+                    .background(AppTheme.accent.opacity(0.12), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(item.displayName)
+                        .font(.system(size: 12, weight: .semibold, design: .rounded))
+                        .foregroundStyle(AppTheme.text)
+                        .lineLimit(1)
+                    Text(item.relativeDisplayName)
+                        .font(.system(size: 10))
+                        .foregroundStyle(AppTheme.tertiaryText)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 8)
+                VStack(alignment: .trailing, spacing: 3) {
+                    Text(item.sizeLabel)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(AppTheme.secondaryText)
+                    Text(item.modifiedAt, format: .dateTime.month().day().hour().minute())
+                        .font(.system(size: 10))
+                        .foregroundStyle(AppTheme.tertiaryText)
+                }
+            }
+            .padding(.horizontal, 9)
+            .padding(.vertical, 8)
+            .background(isSelected ? AppTheme.surfaceSelected : .clear, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+struct ResultPreviewPanel: View {
+    @EnvironmentObject private var store: WorkspaceStore
+    @StateObject private var imageLoader = ResultImageLoader()
+    let item: OutputItem?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            SectionTitle("プレビュー", subtitle: item?.category.title ?? "結果を選択してください")
+            if let item {
+                if item.kind == .image {
+                    if let image = imageLoader.image {
+                        Image(nsImage: image)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(maxWidth: .infinity, maxHeight: 330)
+                            .background(AppTheme.canvas, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    } else if imageLoader.isLoading {
+                        ProgressView()
+                            .controlSize(.large)
+                            .frame(maxWidth: .infinity, minHeight: 220)
+                    } else {
+                        previewPlaceholder(title: "画像を読み込めませんでした", message: "ファイルが移動または削除された可能性があります")
+                    }
+                } else {
+                    previewPlaceholder(
+                        title: item.kind == .video ? "動画ファイル" : "データファイル",
+                        message: "下のボタンから開けます",
+                        symbol: item.kind.symbol
+                    )
+                }
+
+                Text(item.url.path)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(AppTheme.tertiaryText)
+                    .textSelection(.enabled)
+                    .lineLimit(3)
+                HStack(spacing: 10) {
+                    Button {
+                        store.openResult(item)
+                    } label: {
+                        Label("ファイルを開く", systemImage: "arrow.up.right.square")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(AppTheme.accent)
+                    Button("Finderで表示") {
+                        store.revealResult(item)
+                    }
+                    .buttonStyle(.bordered)
+                }
+            } else {
+                EmptyState(symbol: "photo", title: "結果を選択してください", message: "左の一覧から候補ファイルを選ぶと、ここにプレビューが表示されます")
+                    .frame(maxHeight: .infinity)
+            }
+            Spacer(minLength: 0)
+        }
+        .onAppear { imageLoader.load(item: item) }
+        .onChange(of: item?.id) { _, _ in
+            imageLoader.load(item: item)
+        }
+    }
+
+    @ViewBuilder
+    private func previewPlaceholder(
+        title: String,
+        message: String,
+        symbol: String = "photo"
+    ) -> some View {
+        VStack(spacing: 12) {
+            Image(systemName: symbol)
+                .font(.system(size: 42, weight: .medium))
+                .foregroundStyle(AppTheme.accent)
+            Text(title)
+                .font(.system(size: 14, weight: .semibold, design: .rounded))
+                .foregroundStyle(AppTheme.text)
+            Text(message)
+                .font(.system(size: 12))
+                .foregroundStyle(AppTheme.secondaryText)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity, minHeight: 220)
+        .background(AppTheme.canvas, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+}
+
+@MainActor
+final class ResultImageLoader: ObservableObject {
+    @Published private(set) var image: NSImage?
+    @Published private(set) var isLoading = false
+
+    private var loadedID: String?
+    private var generation = 0
+
+    func load(item: OutputItem?) {
+        guard let item, item.kind == .image else {
+            generation &+= 1
+            loadedID = nil
+            image = nil
+            isLoading = false
+            return
+        }
+        guard loadedID != item.id || image == nil else { return }
+
+        generation &+= 1
+        let currentGeneration = generation
+        loadedID = item.id
+        image = nil
+        isLoading = true
+        let url = item.url
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let data = try? Data(contentsOf: url)
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.generation == currentGeneration else { return }
+                self.image = data.flatMap(NSImage.init(data:))
+                self.isLoading = false
+            }
         }
     }
 }
@@ -667,14 +925,28 @@ struct SettingsView: View {
                     VStack(alignment: .leading, spacing: 16) {
                         SectionTitle("保存先", subtitle: "既存のapp_settings.jsonと互換性を保って保存します")
                         OutputPathRow(title: "流星候補", path: $store.meteorSavePath) {
-                            chooseDirectory { store.meteorSavePath = $0; store.saveSettings() }
+                            chooseDirectory {
+                                store.meteorSavePath = $0
+                                store.saveSettings()
+                                store.refreshResults()
+                            }
                         } open: {
                             store.openOutputFolder(store.meteorSavePath)
+                        } commit: {
+                            store.saveSettings()
+                            store.refreshResults()
                         }
                         OutputPathRow(title: "非流星候補", path: $store.notMeteorSavePath) {
-                            chooseDirectory { store.notMeteorSavePath = $0; store.saveSettings() }
+                            chooseDirectory {
+                                store.notMeteorSavePath = $0
+                                store.saveSettings()
+                                store.refreshResults()
+                            }
                         } open: {
                             store.openOutputFolder(store.notMeteorSavePath)
+                        } commit: {
+                            store.saveSettings()
+                            store.refreshResults()
                         }
                     }
                 }
@@ -753,6 +1025,8 @@ struct OutputPathRow: View {
     @Binding var path: String
     let choose: () -> Void
     let open: () -> Void
+    let commit: () -> Void
+    @StateObject private var commitScheduler = PathCommitScheduler()
 
     var body: some View {
         HStack(spacing: 10) {
@@ -762,13 +1036,38 @@ struct OutputPathRow: View {
                     .foregroundStyle(AppTheme.text)
                 TextField("保存先", text: $path)
                     .textFieldStyle(.roundedBorder)
-                    .onSubmit { }
+                    .onSubmit { commitScheduler.commitNow(commit) }
+                    .onChange(of: path) { _, _ in
+                        commitScheduler.schedule(commit)
+                    }
             }
             Button("選択", action: choose)
                 .buttonStyle(.bordered)
             Button("開く", action: open)
                 .buttonStyle(.bordered)
         }
+    }
+}
+
+@MainActor
+final class PathCommitScheduler: ObservableObject {
+    private var pendingWork: DispatchWorkItem?
+
+    func schedule(_ action: @escaping () -> Void) {
+        pendingWork?.cancel()
+        let work = DispatchWorkItem(block: action)
+        pendingWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.75, execute: work)
+    }
+
+    func commitNow(_ action: @escaping () -> Void) {
+        pendingWork?.cancel()
+        pendingWork = nil
+        action()
+    }
+
+    deinit {
+        pendingWork?.cancel()
     }
 }
 
