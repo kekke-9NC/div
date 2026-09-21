@@ -52,6 +52,29 @@ def test_summary_config_fills_legacy_duration_defaults():
     ) == [{"name": "Composite Image", "enabled": True, "duration": 1.0}]
 
 
+def test_noise_twin_options_validate_temporal_mean_without_loading_a_model():
+    from swift_backend import Bridge
+
+    assert Bridge(Path("/tmp"))._validated_noise_twin_options(
+        {"temporalMeanFrames": 3, "saveTemporalMeanVideo": False}
+    ) == {
+        "enabled": False,
+        "model_path": "",
+        "require_validated": True,
+        "temporal_mean_frames": 3,
+        "save_temporal_mean_video": False,
+    }
+
+    try:
+        Bridge(Path("/tmp"))._validated_noise_twin_options(
+            {"temporalMeanFrames": 4}
+        )
+    except ValueError as exc:
+        assert "0, 3, or 5" in str(exc)
+    else:
+        raise AssertionError("unsupported temporal mean window should fail")
+
+
 def test_detection_mask_loads_legacy_npz(tmp_path):
     import numpy as np
 
@@ -385,6 +408,9 @@ def test_legacy_feature_settings_are_reported_to_the_swiftui_frontend(tmp_path):
                 "rtsp_notification_sound": False,
                 "rtsp_preset": "clear",
                 "rtsp_fps": "30",
+                "noise_twin_enabled": False,
+                "temporal_mean_frames": 3,
+                "rtsp_save_temporal_mean": True,
                 "video_concat_settings": {"codec": "h265"},
                 "periodic_scan_enabled": True,
                 "periodic_scan_directory": str(tmp_path),
@@ -408,6 +434,8 @@ def test_legacy_feature_settings_are_reported_to_the_swiftui_frontend(tmp_path):
     assert "RTSP検出通知音" not in unsupported
     assert "RTSPプリセット" not in unsupported
     assert "RTSPフレームレート" not in unsupported
+    assert "NoiseTwin / 時間平均" not in unsupported
+    assert "RTSP時間平均保存" not in unsupported
 
 
 def test_periodic_scan_accepts_a_directory_and_cancel_request(tmp_path):
@@ -523,6 +551,10 @@ def test_local_payload_is_normalized_before_worker_starts(tmp_path):
                 "summaryConfig": [
                     {"name": "Zoom Sequence", "enabled": True, "duration": 4.0}
                 ],
+                "noiseTwinOptions": {
+                    "temporalMeanFrames": 3,
+                    "saveTemporalMeanVideo": False,
+                },
             },
         }
     )
@@ -537,3 +569,10 @@ def test_local_payload_is_normalized_before_worker_starts(tmp_path):
     assert captured["summaryConfig"] == [
         {"name": "Zoom Sequence", "enabled": True, "duration": 4.0}
     ]
+    assert captured["noiseTwinOptions"] == {
+        "enabled": False,
+        "model_path": "",
+        "require_validated": True,
+        "temporal_mean_frames": 3,
+        "save_temporal_mean_video": False,
+    }

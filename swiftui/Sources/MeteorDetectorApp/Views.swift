@@ -218,7 +218,9 @@ struct DashboardView: View {
         case .completed: return "解析が完了しました"
         case .cancelled: return "解析を停止しました"
         case .failed: return "解析を開始できませんでした"
-        case .idle: return store.sources.isEmpty ? "夜空の変化を見つける準備をしましょう" : "観測データの準備ができています"
+        case .idle:
+            if store.periodicScanEnabled && store.canStart { return "定期スキャンを開始できます" }
+            return store.sources.isEmpty ? "夜空の変化を見つける準備をしましょう" : "観測データの準備ができています"
         }
     }
 
@@ -233,10 +235,9 @@ struct DashboardView: View {
     }
 
     private var readinessShort: String {
-        if store.connection != .connected { return "接続中" }
-        if store.sources.isEmpty { return "未準備" }
-        if store.sources.contains(where: { !$0.exists }) { return "要確認" }
-        return "準備完了"
+        if store.connection != .connected || !store.settingsLoaded { return "接続中" }
+        if store.isBusy { return "実行中" }
+        return store.canStart ? "準備完了" : "要確認"
     }
 
     private var outputFolderName: String {
@@ -300,6 +301,7 @@ struct WorkflowRow: View {
 struct SourceView: View {
     @EnvironmentObject private var store: WorkspaceStore
     @StateObject private var draft = RTSPDraft()
+    @StateObject private var viewState = SourceViewState()
 
     var body: some View {
         ScrollView {
@@ -322,7 +324,7 @@ struct SourceView: View {
                             .buttonStyle(.borderedProminent)
                             .tint(AppTheme.accent)
                             Button("入力をすべて消去", role: .destructive) {
-                                store.clearSources()
+                                viewState.showClearConfirmation = true
                             }
                             .buttonStyle(.bordered)
                             .disabled(store.sources.isEmpty)
@@ -331,7 +333,8 @@ struct SourceView: View {
                                 .font(.system(size: 11))
                                 .foregroundStyle(AppTheme.tertiaryText)
                         }
-                        ZStack {
+                        Button(action: openSourcePanel) {
+                            ZStack {
                             RoundedRectangle(cornerRadius: 16, style: .continuous)
                                 .fill(store.isDropTargeted ? AppTheme.accent.opacity(0.18) : AppTheme.surfaceRaised.opacity(0.55))
                                 .overlay {
@@ -349,11 +352,15 @@ struct SourceView: View {
                                     .font(.system(size: 12))
                                     .foregroundStyle(AppTheme.secondaryText)
                             }
+                            }
                         }
+                        .buttonStyle(.plain)
                         .frame(height: 132)
                         .onDrop(of: [.fileURL], isTargeted: $store.isDropTargeted) { providers in
                             acceptDrop(providers)
                         }
+                        .accessibilityLabel("動画やフォルダを追加")
+                        .accessibilityHint("クリックしてFinderを開くか、ファイルをここへドラッグします")
                     }
                 }
 
@@ -397,6 +404,25 @@ struct SourceView: View {
             .padding(34)
             .frame(maxWidth: 1100, alignment: .leading)
         }
+        .confirmationDialog(
+            "入力ソースをすべて削除しますか？",
+            isPresented: $viewState.showClearConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("すべて削除", role: .destructive) { store.clearSources() }
+            Button("キャンセル", role: .cancel) {}
+        } message: {
+            Text("登録済みの動画・フォルダ・RTSPカメラが一覧から削除されます。")
+        }
+        .allowsHitTesting(store.settingsLoaded)
+        .overlay {
+            if !store.settingsLoaded {
+                ProgressView("設定を読み込んでいます…")
+                    .controlSize(.small)
+                    .padding(18)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            }
+        }
     }
 
     private func openSourcePanel() {
@@ -431,6 +457,11 @@ struct SourceView: View {
 @MainActor
 final class RTSPDraft: ObservableObject {
     @Published var url = ""
+}
+
+@MainActor
+final class SourceViewState: ObservableObject {
+    @Published var showClearConfirmation = false
 }
 
 struct SourceRow: View {
@@ -474,6 +505,7 @@ struct SourceRow: View {
             }
             .buttonStyle(.borderless)
             .help("この入力を削除")
+            .accessibilityLabel("\(source.displayName)を削除")
         }
         .padding(.vertical, 5)
     }
@@ -555,7 +587,7 @@ struct AnalysisView: View {
                                 }
                                 .buttonStyle(.borderedProminent)
                                 .tint(AppTheme.accent)
-                                .disabled(store.connection != .connected || store.sources.isEmpty)
+                                .disabled(!store.canStart)
                             }
                             if store.runState == .completed {
                                 Button {
@@ -607,6 +639,15 @@ struct AnalysisView: View {
             .padding(34)
             .frame(maxWidth: 1100, alignment: .leading)
         }
+        .allowsHitTesting(store.settingsLoaded)
+        .overlay {
+            if !store.settingsLoaded {
+                ProgressView("設定を読み込んでいます…")
+                    .controlSize(.small)
+                    .padding(18)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            }
+        }
     }
 
     private var runStateColor: Color {
@@ -624,7 +665,8 @@ struct ResultsView: View {
     @EnvironmentObject private var store: WorkspaceStore
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
             PageHeader(
                 eyebrow: "Results",
                 title: "検出結果",
@@ -632,76 +674,102 @@ struct ResultsView: View {
             )
             .padding(34)
 
-            HStack(alignment: .top, spacing: 16) {
-                GlassCard(padding: 16) {
-                    VStack(alignment: .leading, spacing: 14) {
-                        HStack {
-                            Picker("結果の種類", selection: $store.resultFilter) {
-                                ForEach(OutputCategory.allCases) { category in
-                                    Label(category.title, systemImage: category.symbol).tag(category)
-                                }
-                            }
-                            .pickerStyle(.segmented)
-                            Spacer()
-                            Button {
-                                store.refreshResults()
-                            } label: {
-                                Image(systemName: "arrow.clockwise")
-                            }
-                            .buttonStyle(.borderless)
-                            .help("結果を再読み込み")
-                        }
-
-                        HStack {
-                            Text("\(store.filteredResults.count)件")
-                                .font(.system(size: 12, weight: .semibold, design: .rounded))
-                                .foregroundStyle(AppTheme.secondaryText)
-                            Spacer()
-                            Button("保存先を開く") {
-                                store.openOutputFolder(store.resultFilter == .meteor ? store.meteorSavePath : store.notMeteorSavePath)
-                            }
-                            .buttonStyle(.link)
-                            .foregroundStyle(AppTheme.accent)
-                        }
-
-                        Divider().overlay(AppTheme.border)
-
-                        if store.filteredResults.isEmpty {
-                            EmptyState(
-                                symbol: store.resultFilter.symbol,
-                                title: "まだ結果がありません",
-                                message: "解析が完了すると、候補ファイルがここに表示されます。"
-                            )
-                        } else {
-                            ScrollView {
-                                LazyVStack(alignment: .leading, spacing: 4) {
-                                    ForEach(store.filteredResults) { item in
-                                        ResultRow(
-                                            item: item,
-                                            isSelected: item.id == store.selectedResultID
-                                        ) {
-                                            store.selectedResultID = item.id
-                                        }
-                                    }
-                                }
-                            }
-                            .frame(minHeight: 360)
-                        }
-                    }
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .top, spacing: 16) {
+                    resultListPanel
+                        .frame(minWidth: 390, idealWidth: 520, maxWidth: 620)
+                    resultPreviewPanel
+                        .frame(minWidth: 320, maxWidth: .infinity, minHeight: 470)
                 }
-                .frame(minWidth: 470, idealWidth: 540, maxWidth: 620)
-
-                GlassCard(padding: 20) {
-                    ResultPreviewPanel(item: store.results.first { $0.id == store.selectedResultID })
+                VStack(spacing: 16) {
+                    resultListPanel
+                        .frame(minHeight: 300)
+                    resultPreviewPanel
+                        .frame(minHeight: 380)
                 }
-                .frame(minWidth: 360, maxWidth: .infinity, minHeight: 470)
             }
             .padding(.horizontal, 34)
             .padding(.bottom, 34)
+            }
         }
         .onAppear { store.refreshResults() }
         .onChange(of: store.resultFilter) { _, _ in
             store.selectedResultID = nil
+        }
+    }
+
+    private var resultListPanel: some View {
+        GlassCard(padding: 16) {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack {
+                    Picker("結果の種類", selection: $store.resultFilter) {
+                        ForEach(OutputCategory.allCases) { category in
+                            Label(category.title, systemImage: category.symbol).tag(category)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    Spacer()
+                    Button {
+                        store.refreshResults()
+                    } label: {
+                        if store.isRefreshingResults {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else {
+                            Image(systemName: "arrow.clockwise")
+                        }
+                    }
+                    .buttonStyle(.borderless)
+                    .help("結果を再読み込み")
+                    .accessibilityLabel("結果を再読み込み")
+                    .disabled(store.isRefreshingResults)
+                }
+
+                HStack {
+                    Text("\(store.filteredResults.count)件")
+                        .font(.system(size: 12, weight: .semibold, design: .rounded))
+                        .foregroundStyle(AppTheme.secondaryText)
+                    Spacer()
+                    Button("保存先を開く") {
+                        store.openOutputFolder(store.resultFilter == .meteor ? store.meteorSavePath : store.notMeteorSavePath)
+                    }
+                    .buttonStyle(.link)
+                    .foregroundStyle(AppTheme.accent)
+                }
+
+                Divider().overlay(AppTheme.border)
+
+                if store.isRefreshingResults && store.filteredResults.isEmpty {
+                    ProgressView("結果を読み込んでいます…")
+                        .frame(maxWidth: .infinity, minHeight: 160)
+                } else if store.filteredResults.isEmpty {
+                    EmptyState(
+                        symbol: store.resultFilter.symbol,
+                        title: "まだ結果がありません",
+                        message: "解析が完了すると、候補ファイルがここに表示されます。"
+                    )
+                } else {
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 4) {
+                            ForEach(store.filteredResults) { item in
+                                ResultRow(
+                                    item: item,
+                                    isSelected: item.id == store.selectedResultID
+                                ) {
+                                    store.selectedResultID = item.id
+                                }
+                            }
+                        }
+                    }
+                    .frame(minHeight: 300)
+                }
+            }
+        }
+    }
+
+    private var resultPreviewPanel: some View {
+        GlassCard(padding: 20) {
+            ResultPreviewPanel(item: store.results.first { $0.id == store.selectedResultID })
         }
     }
 }
@@ -968,6 +1036,62 @@ struct SettingsView: View {
 
                 GlassCard {
                     VStack(alignment: .leading, spacing: 14) {
+                        SectionTitle("ノイズ前処理", subtitle: "モデルまたは短い時間平均で、検出前の揺らぎを抑えます")
+                        Toggle("NoiseTwinモデルを適用する", isOn: $store.noiseTwinEnabled)
+                            .toggleStyle(.switch)
+                            .tint(AppTheme.accent)
+                            .onChange(of: store.noiseTwinEnabled) { _, enabled in
+                                if enabled { store.temporalMeanFrames = 0 }
+                                store.saveSettings()
+                            }
+                        if store.noiseTwinEnabled {
+                            HStack(spacing: 10) {
+                                TextField("NoiseTwinモデル (.pth)", text: $store.noiseTwinModelPath)
+                                    .textFieldStyle(.roundedBorder)
+                                    .disabled(true)
+                                Button("選択") {
+                                    chooseNoiseTwinModel {
+                                        store.noiseTwinModelPath = $0
+                                        store.saveSettings()
+                                    }
+                                }
+                                .buttonStyle(.bordered)
+                            }
+                        }
+                        HStack(spacing: 20) {
+                            Picker("時間平均", selection: $store.temporalMeanFrames) {
+                                Text("OFF").tag(0)
+                                Text("3フレーム").tag(3)
+                                Text("5フレーム").tag(5)
+                            }
+                            .pickerStyle(.segmented)
+                            .disabled(store.noiseTwinEnabled)
+                            .onChange(of: store.temporalMeanFrames) { _, frames in
+                                if frames != 0 { store.noiseTwinEnabled = false }
+                                store.saveSettings()
+                            }
+                            Toggle("RTSP保存動画にも適用", isOn: $store.saveTemporalMeanVideo)
+                                .toggleStyle(.switch)
+                                .tint(AppTheme.accent)
+                                .disabled(store.temporalMeanFrames == 0 || store.noiseTwinEnabled)
+                                .onChange(of: store.saveTemporalMeanVideo) { _, _ in
+                                    store.saveSettings()
+                                }
+                        }
+                        Label(
+                            store.noiseTwinStatusMessage,
+                            systemImage: store.noiseTwinConfigurationIsValid ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"
+                        )
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(store.noiseTwinConfigurationIsValid ? AppTheme.success : AppTheme.warning)
+                        Text("NoiseTwinと時間平均は同時に使用できません。NoiseTwinモデルは検証済みのものだけ実行できます。")
+                            .font(.system(size: 11))
+                            .foregroundStyle(AppTheme.tertiaryText)
+                    }
+                }
+
+                GlassCard {
+                    VStack(alignment: .leading, spacing: 14) {
                         SectionTitle("サマリー出力", subtitle: "検出後に保存する画像・動画を選びます")
                         Text("チェックを外した形式は作成されません。動画形式は候補を表示する時間も調整できます。")
                             .font(.system(size: 12))
@@ -1178,17 +1302,32 @@ struct SettingsView: View {
                 HStack {
                     Spacer()
                     Button {
-                        store.saveSettings()
-                        store.appendLog("設定を保存しました。")
+                        store.saveSettings(showSuccessLog: true)
                     } label: {
-                        Label("設定を保存", systemImage: "checkmark")
+                        if store.isSavingSettings {
+                            ProgressView()
+                                .controlSize(.small)
+                            Text("保存中…")
+                        } else {
+                            Label("設定を保存", systemImage: "checkmark")
+                        }
                     }
                     .buttonStyle(.borderedProminent)
                     .tint(AppTheme.accent)
+                    .disabled(store.isSavingSettings || !store.settingsLoaded)
                 }
             }
             .padding(34)
             .frame(maxWidth: 1100, alignment: .leading)
+        }
+        .allowsHitTesting(store.settingsLoaded)
+        .overlay {
+            if !store.settingsLoaded {
+                ProgressView("設定を読み込んでいます…")
+                    .controlSize(.small)
+                    .padding(18)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            }
         }
     }
 
@@ -1220,6 +1359,21 @@ struct SettingsView: View {
         panel.canChooseFiles = true
         panel.allowsMultipleSelection = false
         panel.allowedContentTypes = [UTType(filenameExtension: "npz")].compactMap { $0 }
+        panel.prompt = "選択"
+        if panel.runModal() == .OK, let url = panel.url {
+            completion(url.path)
+        }
+    }
+
+    private func chooseNoiseTwinModel(_ completion: @escaping (String) -> Void) {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [
+            UTType(filenameExtension: "pth"),
+            UTType(filenameExtension: "pt"),
+        ].compactMap { $0 }
         panel.prompt = "選択"
         if panel.runModal() == .OK, let url = panel.url {
             completion(url.path)

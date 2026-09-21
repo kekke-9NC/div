@@ -116,6 +116,7 @@ final class PythonBridge {
         child.terminationHandler = { [weak self] terminatedProcess in
             Task { @MainActor [weak self] in
                 guard let self else { return }
+                guard self.process === terminatedProcess else { return }
                 self.outputHandle?.readabilityHandler = nil
                 self.errorHandle?.readabilityHandler = nil
                 self.failPendingRequests(

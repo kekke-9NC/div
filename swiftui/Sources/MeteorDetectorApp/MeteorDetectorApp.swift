@@ -34,7 +34,7 @@ struct MeteorDetectorApp: App {
             }
         }
         .onChange(of: scenePhase) { _, phase in
-            if phase == .background || phase == .inactive {
+            if (phase == .background || phase == .inactive) && store.settingsLoaded {
                 store.saveSettings()
             }
         }

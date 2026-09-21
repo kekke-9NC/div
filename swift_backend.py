@@ -175,16 +175,10 @@ class Bridge:
     @staticmethod
     def _unsupported_features(settings: Dict[str, Any]) -> List[str]:
         unsupported: List[str] = []
-        try:
-            temporal_mean_frames = int(settings.get("temporal_mean_frames", 0) or 0)
-        except (TypeError, ValueError):
-            temporal_mean_frames = 0
         if settings.get("use_plate_solve") or settings.get("global_wcs_info"):
             unsupported.append("プレートソルブ / 座標注釈")
         if settings.get("apply_rtsp_dark"):
             unsupported.append("RTSP固定パターン補正")
-        if settings.get("noise_twin_enabled") or temporal_mean_frames in (3, 5):
-            unsupported.append("NoiseTwin / 時間平均")
         if settings.get("advanced_settings"):
             unsupported.append("詳細パラメータ")
         if settings.get("camera_control_base_url") or settings.get("camera_control_ev_target"):
@@ -197,8 +191,6 @@ class Bridge:
             unsupported.append("AIアシスタント設定")
         if settings.get("lm_studio_vlm_url") not in (None, "", "http://localhost:1234/v1"):
             unsupported.append("AIアシスタント設定")
-        if settings.get("rtsp_save_temporal_mean"):
-            unsupported.append("RTSP時間平均保存")
         concat_defaults = {
             "bitrate": "Auto",
             "codec": "h264",
@@ -301,6 +293,7 @@ class Bridge:
                 cancel_flag=cancel_event,
             )
             if cancel_event.is_set():
+                self._release_discovery_thread()
                 self.response(request_id, {"sources": [], "cancelled": True})
                 self.event("run_state", {"state": "cancelled"})
                 return
@@ -309,16 +302,24 @@ class Bridge:
                 for item in sources
                 if item.get("path")
             ]
+            self._release_discovery_thread()
             self.response(request_id, {"sources": serialized})
-            self.event("run_state", {"state": "idle"})
             if not serialized:
+                self.event("run_state", {"state": "idle"})
                 self.log("選択された場所に対応する動画が見つかりませんでした。", "warning")
             else:
+                self.event("run_state", {"state": "discovery_completed"})
                 self.log(f"{len(serialized)}本の動画を検出しました。")
         except Exception as exc:
+            self._release_discovery_thread()
             self.log(f"入力の走査中にエラーが発生しました: {exc}", "error")
             self.response(request_id, error=str(exc))
             self.event("run_state", {"state": "failed", "error": str(exc)})
+
+    def _release_discovery_thread(self) -> None:
+        with self._run_lock:
+            if self._run_thread is threading.current_thread():
+                self._run_thread = None
 
     def _start_run(self, request_id: str, payload: Dict[str, Any]) -> None:
         with self._run_lock:
@@ -342,6 +343,9 @@ class Bridge:
                 )
                 normalized_payload["maskPath"] = self._validated_path(
                     payload.get("maskPath"), name="maskPath"
+                )
+                normalized_payload["noiseTwinOptions"] = self._validated_noise_twin_options(
+                    payload.get("noiseTwinOptions")
                 )
             except ValueError as exc:
                 self.response(request_id, error=str(exc))
@@ -393,6 +397,9 @@ class Bridge:
                 normalized_payload["rtspFps"] = self._validated_int(
                     payload.get("rtspFps"), 1, 120, 25, "rtspFps"
                 )
+                normalized_payload["noiseTwinOptions"] = self._validated_noise_twin_options(
+                    payload.get("noiseTwinOptions")
+                )
                 for key, lower, upper, default in (
                     ("startHour", 0, 23, 17),
                     ("startMinute", 0, 59, 0),
@@ -443,6 +450,9 @@ class Bridge:
                 )
                 normalized_payload["maskPath"] = self._validated_path(
                     payload.get("maskPath"), name="maskPath"
+                )
+                normalized_payload["noiseTwinOptions"] = self._validated_noise_twin_options(
+                    payload.get("noiseTwinOptions")
                 )
                 normalized_payload["timeLimitEnabled"] = self._validated_bool(
                     payload.get("timeLimitEnabled"), default=False, name="timeLimitEnabled"
@@ -549,6 +559,57 @@ class Bridge:
             raise ValueError(f"{name} must be a non-empty string")
         return value.strip()
 
+    def _validated_noise_twin_options(self, value: Any) -> Dict[str, Any]:
+        if value is None:
+            return {
+                "enabled": False,
+                "model_path": "",
+                "require_validated": True,
+                "temporal_mean_frames": 0,
+                "save_temporal_mean_video": True,
+            }
+        if not isinstance(value, dict):
+            raise ValueError("noiseTwinOptions must be an object")
+
+        enabled = self._validated_bool(
+            value.get("enabled"), default=False, name="noiseTwinOptions.enabled"
+        )
+        temporal_mean_frames = self._validated_int(
+            value.get("temporalMeanFrames"), 0, 5, 0, "noiseTwinOptions.temporalMeanFrames"
+        )
+        if temporal_mean_frames not in (0, 3, 5):
+            raise ValueError("noiseTwinOptions.temporalMeanFrames must be 0, 3, or 5")
+        save_temporal_mean_video = self._validated_bool(
+            value.get("saveTemporalMeanVideo"),
+            default=True,
+            name="noiseTwinOptions.saveTemporalMeanVideo",
+        )
+        model_path = ""
+        if enabled:
+            model_path = self._validated_path(
+                value.get("modelPath"), name="noiseTwinOptions.modelPath"
+            )
+            model_file = self._safe_path(model_path, self.root)
+            if not model_file.is_file():
+                raise ValueError(f"NoiseTwinモデルが見つかりません: {model_file}")
+            try:
+                import noise_twin
+
+                metadata = noise_twin.load_metadata(str(model_file))
+            except Exception as exc:
+                raise ValueError(f"NoiseTwinモデルを読み込めませんでした: {exc}") from exc
+            if not metadata.validation.validated:
+                raise ValueError("NoiseTwinモデルが採用基準を満たしていません")
+        if enabled and temporal_mean_frames:
+            raise ValueError("NoiseTwinと時間平均は同時に使用できません")
+        return {
+            "enabled": enabled,
+            "model_path": model_path,
+            "require_validated": True,
+            "temporal_mean_frames": temporal_mean_frames,
+            "save_temporal_mean_video": save_temporal_mean_video,
+        }
+
     @staticmethod
     def _validated_choice(value: Any, choices: set[str], default: str, name: str) -> str:
         if value is None:
@@ -650,7 +711,7 @@ class Bridge:
                 tmp_root=str(tmp_root),
                 status_callback=status_callback,
                 fixed_pattern_correction=None,
-                noise_twin_options={"enabled": False},
+                noise_twin_options=payload.get("noiseTwinOptions") or {"enabled": False},
             )
             if cancel_event.is_set():
                 self.log("処理をキャンセルしました。", "warning")
@@ -721,7 +782,7 @@ class Bridge:
                 end_hour=self._bounded_int(payload.get("endHour", 7), 0, 23),
                 end_minute=self._bounded_int(payload.get("endMinute", 0), 0, 59),
                 fixed_pattern_correction=None,
-                noise_twin_options={"enabled": False},
+                noise_twin_options=payload.get("noiseTwinOptions") or {"enabled": False},
             )
             if cancel_event.is_set():
                 self.log("定期スキャンを停止しました。", "warning")
@@ -801,7 +862,7 @@ class Bridge:
                     preview_callback=None,
                     dark_frame=None,
                     notify_on_detection=bool(payload.get("notifyOnDetection", True)),
-                    noise_twin_options={"enabled": False},
+                    noise_twin_options=payload.get("noiseTwinOptions") or {"enabled": False},
                     rtsp_fps=self._bounded_int(payload.get("rtspFps", 25), 1, 120),
                 )
             if cancel_event.is_set():

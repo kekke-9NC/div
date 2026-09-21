@@ -23,8 +23,11 @@ final class WorkspaceStore: ObservableObject {
     @Published var selectedResultID: String?
     @Published var queueStatus = "待機中"
     @Published var isDropTargeted = false
+    @Published private(set) var isRefreshingResults = false
     @Published private(set) var unsupportedFeatures: [String] = []
     @Published var allowReducedFeatureRun = false
+    @Published private(set) var settingsLoaded = false
+    @Published private(set) var isSavingSettings = false
 
     @Published var meteorSavePath: String
     @Published var notMeteorSavePath: String
@@ -65,12 +68,18 @@ final class WorkspaceStore: ObservableObject {
     @Published var rtspNotificationSound = true
     @Published var rtspPreset = "cloudy"
     @Published var rtspFPS = 25
+    @Published var noiseTwinEnabled = false
+    @Published var noiseTwinModelPath = ""
+    @Published var temporalMeanFrames = 0
+    @Published var saveTemporalMeanVideo = true
 
     let rootURL: URL
     private let bridge: PythonBridge
     private var cancellables = Set<AnyCancellable>()
     private var resultsRefreshGeneration = 0
     private var detectionMaskValidationGeneration = 0
+    private var settingsSaveGeneration = 0
+    private var activeRunToken = UUID()
 
     private static var defaultSummaryVideoOptions: [SummaryVideoOption] {
         [
@@ -122,6 +131,7 @@ final class WorkspaceStore: ObservableObject {
                     unsupported: self?.stringArray(payload["unsupportedFeatures"]) ?? []
                 )
             case .failure(let error):
+                self?.settingsLoaded = true
                 self?.appendLog(error.localizedDescription, level: .error)
             }
         }
@@ -135,6 +145,22 @@ final class WorkspaceStore: ObservableObject {
     }
 
     var isBusy: Bool { runState.isActive }
+
+    var canStart: Bool {
+        guard settingsLoaded, connection == .connected, !isBusy else { return false }
+        guard detectionMaskIsValid, summaryVideoSelectionIsValid else { return false }
+        guard noiseTwinConfigurationIsValid else { return false }
+        guard unsupportedFeatures.isEmpty || allowReducedFeatureRun else { return false }
+        if periodicScanEnabled {
+            return sources.isEmpty && periodicDirectoryIsValid && periodicTimeWindowIsValid
+        }
+        guard !sources.isEmpty,
+              sources.allSatisfy({ $0.exists }),
+              localSourceCount == 0 || rtspSourceCount == 0,
+              rtspSourceCount <= 1,
+              rtspTimeWindowIsValid else { return false }
+        return true
+    }
 
     var localSourceCount: Int {
         sources.filter { $0.kind != .rtsp }.count
@@ -164,6 +190,28 @@ final class WorkspaceStore: ObservableObject {
 
     var summaryVideoSelectionIsValid: Bool {
         summaryVideoOptions.contains(where: { $0.enabled })
+    }
+
+    var noiseTwinConfigurationIsValid: Bool {
+        if noiseTwinEnabled {
+            return !noiseTwinModelPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                && FileManager.default.fileExists(atPath: noiseTwinModelPath)
+        }
+        return temporalMeanFrames == 0 || temporalMeanFrames == 3 || temporalMeanFrames == 5
+    }
+
+    var noiseTwinStatusMessage: String {
+        if noiseTwinEnabled {
+            guard !noiseTwinModelPath.isEmpty else { return "NoiseTwinモデルを選択してください" }
+            guard FileManager.default.fileExists(atPath: noiseTwinModelPath) else {
+                return "NoiseTwinモデルが見つかりません"
+            }
+            return "実行開始時にモデルの検証を確認します"
+        }
+        switch temporalMeanFrames {
+        case 3, 5: return "検出時に\(temporalMeanFrames)フレーム平均を使用します"
+        default: return "ノイズ前処理は無効です"
+        }
     }
 
     var detectionMaskIsValid: Bool {
@@ -201,6 +249,7 @@ final class WorkspaceStore: ObservableObject {
         if detectionMaskEnabled && !detectionMaskIsValid {
             return detectionMaskStatusMessage
         }
+        if !noiseTwinConfigurationIsValid { return noiseTwinStatusMessage }
         if !summaryVideoSelectionIsValid { return "出力構成を1つ以上選択してください" }
         if periodicScanEnabled {
             if !sources.isEmpty { return "定期スキャンと入力ソースは同時に実行できません" }
@@ -281,6 +330,10 @@ final class WorkspaceStore: ObservableObject {
     }
 
     func startDetection() {
+        guard settingsLoaded else {
+            appendLog("設定を読み込んでいます。少し待ってから再試行してください。", level: .warning)
+            return
+        }
         guard connection == .connected else {
             appendLog("処理エンジンに接続できていません。", level: .error)
             selection = .activity
@@ -357,6 +410,8 @@ final class WorkspaceStore: ObservableObject {
         runState = .preparing
         progress = nil
         queueStatus = "入力を確認しています"
+        let runToken = UUID()
+        activeRunToken = runToken
         saveSettings()
 
         let localPaths = sources.filter { $0.kind != .rtsp }.map(\.value)
@@ -375,6 +430,7 @@ final class WorkspaceStore: ObservableObject {
             ]
         ) { [weak self] result in
             guard let self else { return }
+            guard self.activeRunToken == runToken, self.runState != .cancelling else { return }
             switch result {
             case .failure(let error):
                 self.runState = .failed(error.localizedDescription)
@@ -402,6 +458,7 @@ final class WorkspaceStore: ObservableObject {
 
     func cancelDetection() {
         guard isBusy else { return }
+        activeRunToken = UUID()
         runState = .cancelling
         queueStatus = "停止要求を送信しました"
         bridge.request("cancel") { [weak self] result in
@@ -411,7 +468,14 @@ final class WorkspaceStore: ObservableObject {
         }
     }
 
-    func saveSettings() {
+    func saveSettings(showSuccessLog: Bool = false, completion: (() -> Void)? = nil) {
+        guard settingsLoaded else {
+            completion?()
+            return
+        }
+        settingsSaveGeneration &+= 1
+        let generation = settingsSaveGeneration
+        isSavingSettings = true
         let localPaths = sources.filter { $0.kind != .rtsp }.map(\.value)
         let rtspURLs = sources.filter { $0.kind == .rtsp }.map(\.value)
         bridge.request(
@@ -450,12 +514,21 @@ final class WorkspaceStore: ObservableObject {
                     "rtsp_notification_sound": rtspNotificationSound,
                     "rtsp_preset": rtspPreset,
                     "rtsp_fps": String(rtspFPS),
+                    "noise_twin_enabled": noiseTwinEnabled,
+                    "noise_twin_model_path": noiseTwinModelPath,
+                    "temporal_mean_frames": temporalMeanFrames,
+                    "rtsp_save_temporal_mean": saveTemporalMeanVideo,
                 ],
             ]
         ) { [weak self] result in
+            guard let self, self.settingsSaveGeneration == generation else { return }
+            self.isSavingSettings = false
             if case .failure(let error) = result {
-                self?.appendLog("設定を保存できませんでした: \(error.localizedDescription)", level: .warning)
+                self.appendLog("設定を保存できませんでした: \(error.localizedDescription)", level: .warning)
+            } else if showSuccessLog {
+                self.appendLog("設定を保存しました。")
             }
+            completion?()
         }
     }
 
@@ -508,6 +581,7 @@ final class WorkspaceStore: ObservableObject {
     func refreshResults() {
         resultsRefreshGeneration &+= 1
         let generation = resultsRefreshGeneration
+        isRefreshingResults = true
         let meteorPath = URL(fileURLWithPath: meteorSavePath)
         let notMeteorPath = URL(fileURLWithPath: notMeteorSavePath)
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -515,6 +589,7 @@ final class WorkspaceStore: ObservableObject {
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 guard self.resultsRefreshGeneration == generation else { return }
+                self.isRefreshingResults = false
                 self.results = items
                 if let selected = self.selectedResultID,
                    !items.contains(where: { $0.id == selected }) {
@@ -525,8 +600,14 @@ final class WorkspaceStore: ObservableObject {
     }
 
     func shutdown() {
-        saveSettings()
-        bridge.stop(after: 0.25)
+        guard settingsLoaded else {
+            bridge.stop()
+            return
+        }
+        saveSettings { [weak self] in
+            self?.bridge.stop()
+        }
+        bridge.stop(after: 1.0)
     }
 
     private func startLocalRun(sources: [[String: Any]]) {
@@ -600,6 +681,12 @@ final class WorkspaceStore: ObservableObject {
             "summaryConfig": summaryVideoConfigPayload,
             "applyMask": detectionMaskEnabled,
             "maskPath": detectionMaskPath,
+            "noiseTwinOptions": [
+                "enabled": noiseTwinEnabled,
+                "modelPath": noiseTwinModelPath,
+                "temporalMeanFrames": temporalMeanFrames,
+                "saveTemporalMeanVideo": saveTemporalMeanVideo,
+            ],
         ]
         for (key, value) in additional {
             payload[key] = value
@@ -679,15 +766,35 @@ final class WorkspaceStore: ObservableObject {
         case "run_state":
             let state = envelope.payload["state"] as? String ?? "idle"
             switch state {
-            case "preparing": runState = .preparing
+            case "preparing":
+                runState = .preparing
+                progress = nil
             case "running": runState = .running
             case "cancelling": runState = .cancelling
             case "completed":
                 runState = .completed
+                progress = nil
                 refreshResults()
-            case "cancelled": runState = .cancelled
-            case "failed": runState = .failed(envelope.payload["error"] as? String ?? "処理に失敗しました")
-            default: runState = .idle
+            case "cancelled":
+                runState = .cancelled
+                progress = nil
+            case "failed":
+                runState = .failed(envelope.payload["error"] as? String ?? "処理に失敗しました")
+                progress = nil
+            case "discovery_completed":
+                if case .cancelling = runState {
+                    runState = .cancelled
+                    progress = nil
+                }
+            case "idle":
+                if case .cancelling = runState {
+                    runState = .cancelled
+                } else {
+                    runState = .idle
+                }
+                progress = nil
+            default:
+                break
             }
         default:
             break
@@ -743,6 +850,12 @@ final class WorkspaceStore: ObservableObject {
         let savedPreset = settings["rtsp_preset"] as? String ?? "cloudy"
         rtspPreset = savedPreset == "clear" ? "clear" : "cloudy"
         rtspFPS = max(1, min(120, intValue(settings["rtsp_fps"], default: 25)))
+        noiseTwinModelPath = settings["noise_twin_model_path"] as? String ?? ""
+        noiseTwinEnabled = boolValue(settings["noise_twin_enabled"], default: false)
+        let savedMeanFrames = intValue(settings["temporal_mean_frames"], default: 0)
+        temporalMeanFrames = [0, 3, 5].contains(savedMeanFrames) ? savedMeanFrames : 0
+        saveTemporalMeanVideo = boolValue(settings["rtsp_save_temporal_mean"], default: true)
+        if noiseTwinEnabled { temporalMeanFrames = 0 }
         if let options = settings["save_options"] as? [String: Any] {
             for key in saveOptions.keys {
                 if let value = options[key] { saveOptions[key] = boolValue(value, default: saveOptions[key] ?? true) }
@@ -753,6 +866,7 @@ final class WorkspaceStore: ObservableObject {
         }
         validateDetectionMask()
         refreshResults()
+        settingsLoaded = true
     }
 
     private nonisolated static func collectResults(meteorPath: URL, notMeteorPath: URL) -> [OutputItem] {
