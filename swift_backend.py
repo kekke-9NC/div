@@ -131,6 +131,9 @@ class Bridge:
                         "width": int(mask.shape[1]),
                     },
                 )
+            elif command == "save_mask":
+                saved_path = self._save_mask_from_strokes(payload)
+                self.response(request_id, {"saved": True, "path": saved_path})
             elif command == "save_settings":
                 settings = payload.get("settings") or {}
                 self._save_settings(settings)
@@ -1024,6 +1027,112 @@ class Bridge:
         if not np.isfinite(mask).all():
             raise ValueError("検出マスクに有限でない画素があります")
         return np.clip(mask, 0, 255).astype(np.uint8)
+
+    def _save_mask_from_strokes(self, payload: Dict[str, Any]) -> str:
+        """Rasterize SwiftUI's normalized brush strokes into a legacy NPZ mask."""
+        output_value = payload.get("maskPath")
+        if not isinstance(output_value, str) or not output_value.strip():
+            raise ValueError("maskPath must be a non-empty string")
+        output_path = self._safe_path(output_value, self.root / "app_masks.npz")
+        if output_path.suffix.lower() != ".npz":
+            raise ValueError("検出マスクの保存先は.npz形式で指定してください")
+        width = self._validated_int(payload.get("width"), 1, 16_384, 1, "width")
+        height = self._validated_int(payload.get("height"), 1, 16_384, 1, "height")
+        if width * height > 100_000_000:
+            raise ValueError("検出マスクのサイズが大きすぎます")
+        brush_size = payload.get("brushSize", 0.03)
+        if isinstance(brush_size, bool) or not isinstance(brush_size, (int, float)):
+            raise ValueError("brushSize must be a number")
+        brush_size = float(brush_size)
+        if not math.isfinite(brush_size) or not 0.001 <= brush_size <= 0.5:
+            raise ValueError("brushSize is out of range")
+        raw_strokes = payload.get("strokes")
+        if raw_strokes is None:
+            raw_strokes = []
+        if not isinstance(raw_strokes, list):
+            raise ValueError("strokes must be an array")
+
+        try:
+            import cv2
+            import numpy as np
+
+            mask = np.full((height, width), 255, dtype=np.uint8)
+            radius = max(1, int(round(min(width, height) * brush_size / 2.0)))
+            for raw_stroke in raw_strokes:
+                if not isinstance(raw_stroke, dict):
+                    raise ValueError("strokesの形式が不正です")
+                mode = raw_stroke.get("mode", "exclude")
+                if mode not in {"exclude", "restore"}:
+                    raise ValueError("strokesのmodeが不正です")
+                raw_points = raw_stroke.get("points") or []
+                if not isinstance(raw_points, list) or not raw_points:
+                    continue
+                points = []
+                for raw_point in raw_points:
+                    if (
+                        not isinstance(raw_point, (list, tuple))
+                        or len(raw_point) != 2
+                    ):
+                        raise ValueError("strokesの座標が不正です")
+                    x = float(raw_point[0])
+                    y = float(raw_point[1])
+                    if not math.isfinite(x) or not math.isfinite(y):
+                        raise ValueError("strokesの座標が不正です")
+                    points.append(
+                        [
+                            max(0, min(width - 1, int(round(x * (width - 1))))),
+                            max(0, min(height - 1, int(round(y * (height - 1))))),
+                        ]
+                    )
+                color = 0 if mode == "exclude" else 255
+                polyline = np.asarray(points, dtype=np.int32).reshape(-1, 1, 2)
+                if len(points) == 1:
+                    cv2.circle(mask, tuple(points[0]), radius, color, -1)
+                else:
+                    cv2.polylines(mask, [polyline], False, color, radius * 2, cv2.LINE_AA)
+                    for point in points:
+                        cv2.circle(mask, tuple(point), radius, color, -1)
+
+            # The legacy settings file can contain more than the detection
+            # mask (for example ``plate_solve_mask_image``). Preserve every
+            # readable companion array when editing an existing NPZ so the
+            # SwiftUI editor cannot silently remove legacy state.
+            preserved_arrays: Dict[str, Any] = {}
+            if output_path.is_file():
+                try:
+                    with np.load(output_path, allow_pickle=False) as archive:
+                        preserved_arrays = {
+                            name: archive[name]
+                            for name in archive.files
+                            if name != "mask_image"
+                        }
+                except Exception as exc:
+                    raise ValueError(
+                        f"既存の検出マスクを読み込めないため上書きできません: {exc}"
+                    ) from exc
+
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            file_descriptor, temporary_name = tempfile.mkstemp(
+                prefix=f".{output_path.stem}.",
+                suffix=".npz",
+                dir=str(output_path.parent),
+            )
+            os.close(file_descriptor)
+            try:
+                preserved_arrays["mask_image"] = mask
+                np.savez_compressed(temporary_name, **preserved_arrays)
+                os.replace(temporary_name, output_path)
+            finally:
+                if os.path.exists(temporary_name):
+                    try:
+                        os.unlink(temporary_name)
+                    except OSError:
+                        pass
+        except ValueError:
+            raise
+        except Exception as exc:
+            raise ValueError(f"検出マスクを保存できませんでした: {exc}") from exc
+        return str(output_path)
 
     def _load_selected_model(self, payload: Dict[str, Any]) -> None:
         """Apply the optional SwiftUI-selected classifier before processing starts."""

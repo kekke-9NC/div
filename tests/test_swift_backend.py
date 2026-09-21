@@ -169,6 +169,52 @@ def test_detection_mask_rejects_missing_payload_file(tmp_path):
         raise AssertionError("missing detection mask should fail")
 
 
+def test_save_mask_from_strokes_writes_legacy_npz(tmp_path):
+    import numpy as np
+
+    from swift_backend import Bridge
+
+    mask_path = tmp_path / "app_masks.npz"
+    plate_mask = np.full((12, 20), 200, dtype=np.uint8)
+    companion = np.array([1, 2, 3], dtype=np.int16)
+    np.savez(mask_path, mask_image=plate_mask, plate_solve_mask_image=plate_mask, companion=companion)
+    saved = Bridge(tmp_path)._save_mask_from_strokes(
+        {
+            "maskPath": str(mask_path),
+            "width": 20,
+            "height": 12,
+            "brushSize": 0.2,
+            "strokes": [
+                {"mode": "exclude", "points": [[0.1, 0.5], [0.9, 0.5]]},
+                {"mode": "restore", "points": [[0.5, 0.5]]},
+            ],
+        }
+    )
+
+    assert saved == str(mask_path.resolve())
+    with np.load(mask_path, allow_pickle=False) as archive:
+        mask = archive["mask_image"]
+        assert np.array_equal(archive["plate_solve_mask_image"], plate_mask)
+        assert np.array_equal(archive["companion"], companion)
+    assert mask.shape == (12, 20)
+    assert mask.dtype == np.uint8
+    assert int(mask.min()) == 0
+    assert int(mask.max()) == 255
+
+
+def test_save_mask_from_strokes_rejects_non_npz_path(tmp_path):
+    from swift_backend import Bridge
+
+    try:
+        Bridge(tmp_path)._save_mask_from_strokes(
+            {"maskPath": str(tmp_path / "mask.png"), "width": 4, "height": 4}
+        )
+    except ValueError as exc:
+        assert ".npz" in str(exc)
+    else:
+        raise AssertionError("mask editor should only write NPZ masks")
+
+
 def test_validate_mask_command_reports_shape_and_errors(tmp_path):
     import numpy as np
 

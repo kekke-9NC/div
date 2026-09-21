@@ -83,6 +83,7 @@ final class WorkspaceStore: ObservableObject {
     private var resultsRefreshGeneration = 0
     private var detectionMaskValidationGeneration = 0
     private var settingsSaveGeneration = 0
+    private var settingsSaveCompletions: [(Result<Void, BridgeError>) -> Void] = []
     private var activeRunToken = UUID()
 
     private static let defaultSourcePriority = ["periodic", "rtsp", "folder"]
@@ -617,13 +618,19 @@ final class WorkspaceStore: ObservableObject {
         }
     }
 
-    func saveSettings(showSuccessLog: Bool = false, completion: (() -> Void)? = nil) {
+    func saveSettings(
+        showSuccessLog: Bool = false,
+        completion: ((Result<Void, BridgeError>) -> Void)? = nil
+    ) {
         guard settingsLoaded else {
-            completion?()
+            completion?(.success(()))
             return
         }
         settingsSaveGeneration &+= 1
         let generation = settingsSaveGeneration
+        if let completion {
+            settingsSaveCompletions.append(completion)
+        }
         isSavingSettings = true
         let localPaths = sources.filter { $0.kind != .rtsp }.map(\.value)
         let rtspURLs = sources.filter { $0.kind == .rtsp }.map(\.value)
@@ -676,12 +683,19 @@ final class WorkspaceStore: ObservableObject {
         ) { [weak self] result in
             guard let self, self.settingsSaveGeneration == generation else { return }
             self.isSavingSettings = false
+            let completionResult: Result<Void, BridgeError>
             if case .failure(let error) = result {
                 self.appendLog("設定を保存できませんでした: \(error.localizedDescription)", level: .warning)
+                completionResult = .failure(error)
             } else if showSuccessLog {
                 self.appendLog("設定を保存しました。")
+                completionResult = .success(())
+            } else {
+                completionResult = .success(())
             }
-            completion?()
+            let completions = self.settingsSaveCompletions
+            self.settingsSaveCompletions.removeAll()
+            completions.forEach { $0(completionResult) }
         }
     }
 
@@ -706,6 +720,38 @@ final class WorkspaceStore: ObservableObject {
                 self.detectionMaskValidation = .valid
             case .failure(let error):
                 self.detectionMaskValidation = .invalid(error.localizedDescription)
+            }
+        }
+    }
+
+    func saveMaskFromStrokes(
+        width: Int,
+        height: Int,
+        brushSize: Double,
+        strokes: [[String: Any]],
+        completion: @escaping (Result<Void, BridgeError>) -> Void
+    ) {
+        bridge.request(
+            "save_mask",
+            payload: [
+                "maskPath": detectionMaskPath,
+                "width": width,
+                "height": height,
+                "brushSize": brushSize,
+                "strokes": strokes,
+            ]
+        ) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success:
+                self.detectionMaskEnabled = true
+                self.validateDetectionMask()
+                self.saveSettings { settingsResult in
+                    completion(settingsResult)
+                }
+            case .failure(let error):
+                self.appendLog("検出マスクを保存できませんでした: \(error.localizedDescription)", level: .error)
+                completion(.failure(error))
             }
         }
     }
@@ -757,7 +803,7 @@ final class WorkspaceStore: ObservableObject {
             bridge.stop()
             return
         }
-        saveSettings { [weak self] in
+        saveSettings { [weak self] _ in
             self?.bridge.stop()
         }
         bridge.stop(after: 1.0)

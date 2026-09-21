@@ -955,6 +955,7 @@ struct KeyValueRow: View {
 
 struct SettingsView: View {
     @EnvironmentObject private var store: WorkspaceStore
+    @StateObject private var maskEditor = MaskEditorState()
 
     var body: some View {
         ScrollView {
@@ -1134,6 +1135,16 @@ struct SettingsView: View {
                                 store.saveSettings()
                                 store.validateDetectionMask()
                             }
+                        HStack {
+                            Text("動画の先頭フレーム上で、除外する領域を直接描けます。")
+                                .font(.system(size: 11))
+                                .foregroundStyle(AppTheme.tertiaryText)
+                            Spacer()
+                            Button("描く") {
+                                maskEditor.present()
+                            }
+                            .buttonStyle(.bordered)
+                        }
                         if store.detectionMaskEnabled {
                             HStack(spacing: 10) {
                                 TextField("app_masks.npz", text: $store.detectionMaskPath)
@@ -1463,6 +1474,10 @@ struct SettingsView: View {
                     .padding(18)
                     .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
             }
+        }
+        .sheet(isPresented: $maskEditor.isPresented) {
+            MaskEditorView(editor: maskEditor)
+                .environmentObject(store)
         }
     }
 
