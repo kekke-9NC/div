@@ -74,6 +74,8 @@ diff.txt
 # Build artifacts
 build/
 dist/
+.build/
+swiftui/.build/
 
 # Benchmark results and scripts
 meteor_vlm_benchmark.py
