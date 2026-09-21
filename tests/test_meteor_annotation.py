@@ -107,6 +107,35 @@ class MeteorAnnotationTests(unittest.TestCase):
             self.assertEqual(actual, expected)
             local_renderer.assert_called_once()
 
+    def test_fixed_camera_json_annotation_does_not_open_json_as_fits(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_path = root / "local_composite.png"
+            self.assertTrue(cv2.imwrite(
+                str(source_path), np.zeros((120, 160, 3), dtype=np.uint8)
+            ))
+            calibration_path = root / "camera_model.json"
+            calibration_path.write_text("{}", encoding="utf-8")
+            expected = str(root / "local_annotated.png")
+
+            with mock.patch.object(
+                astrometry, "_annotate_local_wideangle_image", return_value=expected
+            ) as local_renderer, mock.patch.object(
+                astrometry.fits, "open", side_effect=AssertionError("JSON must not be opened as FITS")
+            ):
+                actual = astrometry.annotate_image_with_wcs(
+                    str(source_path),
+                    {
+                        "wcs_file": str(calibration_path),
+                        "calibration_path": str(calibration_path),
+                        "job_id": "local-wideangle-camera-model",
+                    },
+                    timestamp=None,
+                )
+
+            self.assertEqual(actual, expected)
+            local_renderer.assert_called_once()
+
     def test_local_sip_does_not_report_coordinates_outside_support(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

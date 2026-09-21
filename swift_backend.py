@@ -175,8 +175,6 @@ class Bridge:
     @staticmethod
     def _unsupported_features(settings: Dict[str, Any]) -> List[str]:
         unsupported: List[str] = []
-        if settings.get("use_plate_solve") or settings.get("global_wcs_info"):
-            unsupported.append("プレートソルブ / 座標注釈")
         if settings.get("apply_rtsp_dark"):
             unsupported.append("RTSP固定パターン補正")
         if settings.get("advanced_settings"):
@@ -345,6 +343,9 @@ class Bridge:
                 normalized_payload["modelPath"] = self._validated_model_path(
                     payload.get("modelPath")
                 )
+                normalized_payload["globalWCSInfo"] = self._validated_wcs_info(
+                    payload.get("plateSolveWCSPath")
+                )
                 normalized_payload["noiseTwinOptions"] = self._validated_noise_twin_options(
                     payload.get("noiseTwinOptions")
                 )
@@ -394,6 +395,9 @@ class Bridge:
                 )
                 normalized_payload["modelPath"] = self._validated_model_path(
                     payload.get("modelPath")
+                )
+                normalized_payload["globalWCSInfo"] = self._validated_wcs_info(
+                    payload.get("plateSolveWCSPath")
                 )
                 normalized_payload["rtspPreset"] = self._validated_choice(
                     payload.get("rtspPreset"), {"cloudy", "clear"}, "cloudy", "rtspPreset"
@@ -457,6 +461,9 @@ class Bridge:
                 )
                 normalized_payload["modelPath"] = self._validated_model_path(
                     payload.get("modelPath")
+                )
+                normalized_payload["globalWCSInfo"] = self._validated_wcs_info(
+                    payload.get("plateSolveWCSPath")
                 )
                 normalized_payload["noiseTwinOptions"] = self._validated_noise_twin_options(
                     payload.get("noiseTwinOptions")
@@ -579,6 +586,29 @@ class Bridge:
         if not model_path.is_file():
             raise ValueError(f"検出モデルが見つかりません: {model_path}")
         return str(model_path)
+
+    def _validated_wcs_info(self, value: Any) -> Optional[Dict[str, Any]]:
+        """Validate an existing FITS WCS or fixed-camera JSON calibration."""
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError("plateSolveWCSPath must be a string")
+        raw_path = value.strip()
+        if not raw_path:
+            return None
+        wcs_path = self._safe_path(raw_path, self.root)
+        if not wcs_path.is_file():
+            raise ValueError(f"カメラ補正データが見つかりません: {wcs_path}")
+        if wcs_path.suffix.lower() not in {".json", ".wcs", ".fits", ".fit"}:
+            raise ValueError("カメラ補正データは .json / .wcs / .fits / .fit を選択してください")
+        info: Dict[str, Any] = {
+            "wcs_file": str(wcs_path),
+            "job_id": "local-wideangle-camera-model" if wcs_path.suffix.lower() == ".json" else "manual-wcs",
+        }
+        if wcs_path.suffix.lower() == ".json":
+            info["calibration_path"] = str(wcs_path)
+            info["model_path"] = str(wcs_path)
+        return info
 
     def _validated_noise_twin_options(self, value: Any) -> Dict[str, Any]:
         if value is None:
@@ -722,7 +752,7 @@ class Bridge:
                 interval=interval,
                 duration=duration,
                 mask=mask,
-                global_wcs_info=None,
+                global_wcs_info=payload.get("globalWCSInfo"),
                 plate_solve_mask=None,
                 meteor_save_path=str(meteor_path),
                 not_meteor_save_path=str(not_meteor_path),
@@ -792,7 +822,7 @@ class Bridge:
                 scan_interval=self._bounded_int(payload.get("scanInterval", 60), 5, 3600),
                 progress_callback=progress_callback,
                 mask=mask,
-                global_wcs_info=None,
+                global_wcs_info=payload.get("globalWCSInfo"),
                 plate_solve_mask=None,
                 meteor_save_path=str(meteor_path),
                 not_meteor_save_path=str(not_meteor_path),
@@ -873,7 +903,7 @@ class Bridge:
                     scan_interval=60,
                     progress_callback=progress_callback,
                     mask=mask,
-                    global_wcs_info=None,
+                    global_wcs_info=payload.get("globalWCSInfo"),
                     plate_solve_mask=None,
                     meteor_save_path=str(meteor_path),
                     not_meteor_save_path=str(not_meteor_path),

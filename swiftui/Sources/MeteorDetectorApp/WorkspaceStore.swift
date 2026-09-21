@@ -53,6 +53,8 @@ final class WorkspaceStore: ObservableObject {
         }
     }
     @Published private(set) var detectionMaskValidation: DetectionMaskValidation = .unknown
+    @Published var plateSolveEnabled = false
+    @Published var plateSolvePath = ""
     @Published var periodicScanEnabled = false
     @Published var periodicScanDirectory = ""
     @Published var periodicScanInterval = 60
@@ -167,6 +169,7 @@ final class WorkspaceStore: ObservableObject {
         guard settingsLoaded, connection == .connected, !isBusy else { return false }
         guard detectionMaskIsValid, summaryVideoSelectionIsValid else { return false }
         guard selectedModelConfigurationIsValid else { return false }
+        guard plateSolveConfigurationIsValid else { return false }
         guard noiseTwinConfigurationIsValid else { return false }
         guard unsupportedFeatures.isEmpty || allowReducedFeatureRun else { return false }
         guard let sourceType = selectedSourceType else { return false }
@@ -230,6 +233,25 @@ final class WorkspaceStore: ObservableObject {
             return "選択した検出モデルが見つかりません"
         }
         return "このモデルを実行時に適用します"
+    }
+
+    var plateSolveConfigurationIsValid: Bool {
+        guard plateSolveEnabled else { return true }
+        let path = plateSolvePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !path.isEmpty,
+              FileManager.default.fileExists(atPath: path),
+              (try? URL(fileURLWithPath: path)
+                  .resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true else {
+            return false
+        }
+        return ["json", "wcs", "fits", "fit"].contains(URL(fileURLWithPath: path).pathExtension.lowercased())
+    }
+
+    var plateSolveStatusMessage: String {
+        guard plateSolveEnabled else { return "座標注釈は無効です" }
+        guard !plateSolvePath.isEmpty else { return "既存のWCS／カメラ補正データを選択してください" }
+        guard plateSolveConfigurationIsValid else { return "カメラ補正データが見つからないか形式が不正です" }
+        return "解析結果に座標注釈を付けます"
     }
 
     func sourcePriorityTitle(for sourceType: String) -> String {
@@ -343,6 +365,7 @@ final class WorkspaceStore: ObservableObject {
             return detectionMaskStatusMessage
         }
         if !selectedModelConfigurationIsValid { return selectedModelStatusMessage }
+        if !plateSolveConfigurationIsValid { return plateSolveStatusMessage }
         if !noiseTwinConfigurationIsValid { return noiseTwinStatusMessage }
         if !summaryVideoSelectionIsValid { return "出力構成を1つ以上選択してください" }
         guard let sourceType = selectedSourceType else {
@@ -452,6 +475,11 @@ final class WorkspaceStore: ObservableObject {
         }
         guard selectedModelConfigurationIsValid else {
             appendLog(selectedModelStatusMessage, level: .warning)
+            selection = .settings
+            return
+        }
+        guard plateSolveConfigurationIsValid else {
+            appendLog(plateSolveStatusMessage, level: .warning)
             selection = .settings
             return
         }
@@ -620,6 +648,8 @@ final class WorkspaceStore: ObservableObject {
                     "detection_mask_path": detectionMaskPath,
                     "mask_path_or_status": detectionMaskPath,
                     "has_mask_image": FileManager.default.fileExists(atPath: detectionMaskPath),
+                    "use_plate_solve": plateSolveEnabled,
+                    "plate_solve_wcs_path": plateSolvePath,
                     "periodic_scan_enabled": periodicScanEnabled,
                     "periodic_scan_directory": periodicScanDirectory,
                     "periodic_scan_interval": String(periodicScanInterval),
@@ -805,6 +835,7 @@ final class WorkspaceStore: ObservableObject {
             "applyMask": detectionMaskEnabled,
             "maskPath": detectionMaskPath,
             "modelPath": selectedModelPath,
+            "plateSolveWCSPath": plateSolveEnabled ? plateSolvePath : "",
             "noiseTwinOptions": [
                 "enabled": noiseTwinEnabled,
                 "modelPath": noiseTwinModelPath,
@@ -957,6 +988,12 @@ final class WorkspaceStore: ObservableObject {
         } else if let legacyMaskPath = settings["mask_path_or_status"] as? String,
                   FileManager.default.fileExists(atPath: legacyMaskPath) {
             detectionMaskPath = legacyMaskPath
+        }
+        plateSolvePath = settings["plate_solve_wcs_path"] as? String ?? ""
+        plateSolveEnabled = boolValue(settings["use_plate_solve"], default: false)
+        if plateSolveEnabled && !plateSolveConfigurationIsValid {
+            plateSolveEnabled = false
+            appendLog("保存されていたカメラ補正データを利用できないため、座標注釈を無効にしました。", level: .warning)
         }
         periodicScanEnabled = boolValue(settings["periodic_scan_enabled"], default: false)
         periodicScanDirectory = settings["periodic_scan_directory"] as? String ?? ""

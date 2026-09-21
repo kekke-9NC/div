@@ -118,6 +118,29 @@ def test_selected_model_is_loaded_with_metadata_before_processing(tmp_path):
     assert calls["reload"]["metadata"] == {"architecture": "test"}
 
 
+def test_existing_wcs_path_is_validated_for_coordinate_annotations(tmp_path):
+    from swift_backend import Bridge
+
+    wcs_path = tmp_path / "camera.wcs"
+    wcs_path.write_text("placeholder", encoding="utf-8")
+    bridge = Bridge(tmp_path)
+
+    assert bridge._validated_wcs_info(str(wcs_path)) == {
+        "wcs_file": str(wcs_path.resolve()),
+        "job_id": "manual-wcs",
+    }
+    assert bridge._validated_wcs_info("") is None
+
+    invalid_path = tmp_path / "camera.txt"
+    invalid_path.write_text("placeholder", encoding="utf-8")
+    try:
+        bridge._validated_wcs_info(str(invalid_path))
+    except ValueError as exc:
+        assert "json" in str(exc)
+    else:
+        raise AssertionError("unsupported WCS extension should fail")
+
+
 def test_detection_mask_loads_legacy_npz(tmp_path):
     import numpy as np
 
@@ -586,6 +609,8 @@ def test_local_payload_is_normalized_before_worker_starts(tmp_path):
     captured = {}
     model_path = tmp_path / "custom_detector.pth"
     model_path.write_bytes(b"placeholder")
+    wcs_path = tmp_path / "camera.wcs"
+    wcs_path.write_text("placeholder", encoding="utf-8")
 
     def fake_run(payload, cancel_event):
         captured.update(payload)
@@ -598,6 +623,7 @@ def test_local_payload_is_normalized_before_worker_starts(tmp_path):
             "payload": {
                 "sources": [{"path": str(tmp_path / "sample.mp4")}],
                 "modelPath": str(model_path),
+                "plateSolveWCSPath": str(wcs_path),
                 "summaryConfig": [
                     {"name": "Zoom Sequence", "enabled": True, "duration": 4.0}
                 ],
@@ -617,6 +643,10 @@ def test_local_payload_is_normalized_before_worker_starts(tmp_path):
     response = next(message for message in messages if message.get("id") == "local")
     assert response["ok"] is True
     assert captured["modelPath"] == str(model_path.resolve())
+    assert captured["globalWCSInfo"] == {
+        "wcs_file": str(wcs_path.resolve()),
+        "job_id": "manual-wcs",
+    }
     assert captured["summaryConfig"] == [
         {"name": "Zoom Sequence", "enabled": True, "duration": 4.0}
     ]

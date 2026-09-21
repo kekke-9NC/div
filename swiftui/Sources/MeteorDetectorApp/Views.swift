@@ -1086,6 +1086,46 @@ struct SettingsView: View {
 
                 GlassCard {
                     VStack(alignment: .leading, spacing: 14) {
+                        SectionTitle("座標注釈", subtitle: "既存のWCS／固定カメラ補正データを検出結果へ適用します")
+                        Toggle("プレートソルブ補正を使用する", isOn: $store.plateSolveEnabled)
+                            .toggleStyle(.switch)
+                            .tint(AppTheme.accent)
+                            .onChange(of: store.plateSolveEnabled) { _, _ in
+                                store.saveSettings()
+                            }
+                        HStack(spacing: 10) {
+                            TextField("補正データ (.json / .wcs / .fits)", text: $store.plateSolvePath)
+                                .textFieldStyle(.roundedBorder)
+                                .disabled(true)
+                            Button("選択") {
+                                choosePlateSolveFile {
+                                    store.plateSolvePath = $0
+                                    store.plateSolveEnabled = true
+                                    store.saveSettings()
+                                }
+                            }
+                            .buttonStyle(.bordered)
+                            Button("開く") {
+                                guard store.plateSolveConfigurationIsValid else { return }
+                                NSWorkspace.shared.open(URL(fileURLWithPath: store.plateSolvePath))
+                            }
+                            .buttonStyle(.bordered)
+                            .disabled(!store.plateSolveConfigurationIsValid || !store.plateSolveEnabled)
+                        }
+                        Label(
+                            store.plateSolveStatusMessage,
+                            systemImage: store.plateSolveConfigurationIsValid ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"
+                        )
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(store.plateSolveConfigurationIsValid ? AppTheme.success : AppTheme.warning)
+                        Text("新しい補正データの作成は、対象動画を選んで旧UIで実行できます。既存データの適用はこの画面で完結します。")
+                            .font(.system(size: 11))
+                            .foregroundStyle(AppTheme.tertiaryText)
+                    }
+                }
+
+                GlassCard {
+                    VStack(alignment: .leading, spacing: 14) {
                         SectionTitle("検出マスク", subtitle: "空やノイズの多い領域を解析対象から外します")
                         Toggle("検出マスクを適用する", isOn: $store.detectionMaskEnabled)
                             .toggleStyle(.switch)
@@ -1483,6 +1523,23 @@ struct SettingsView: View {
         panel.allowedContentTypes = [
             UTType(filenameExtension: "pth"),
             UTType(filenameExtension: "pt"),
+        ].compactMap { $0 }
+        panel.prompt = "選択"
+        if panel.runModal() == .OK, let url = panel.url {
+            completion(url.path)
+        }
+    }
+
+    private func choosePlateSolveFile(_ completion: @escaping (String) -> Void) {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [
+            UTType(filenameExtension: "json"),
+            UTType(filenameExtension: "wcs"),
+            UTType(filenameExtension: "fits"),
+            UTType(filenameExtension: "fit"),
         ].compactMap { $0 }
         panel.prompt = "選択"
         if panel.runModal() == .OK, let url = panel.url {

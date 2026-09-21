@@ -762,12 +762,17 @@ def annotate_image_with_wcs(
         if cancel_flag and cancel_flag.is_set(): return None
 
         wcs_file_path = wcs_info['wcs_file']
+        # Fixed-camera calibration records are JSON files.  They carry their
+        # own projection metadata and must reach the distortion-aware renderer
+        # without being opened as FITS first.
+        if str(wcs_info.get("job_id", "")).startswith("local-wideangle") or str(wcs_file_path).lower().endswith(".json"):
+            return _annotate_local_wideangle_image(
+                image_path, wcs_info, line_centers, detection_datetime, timestamp,
+                flip_vertically, detected_line,
+            )
         with fits.open(wcs_file_path) as hdul:
             calibration_type = hdul[0].header.get("CALTYPE")
-        if (
-            calibration_type == "LOCAL-SIP"
-            or str(wcs_info.get("job_id", "")).startswith("local-wideangle")
-        ):
+        if calibration_type == "LOCAL-SIP":
             return _annotate_local_wideangle_image(
                 image_path, wcs_info, line_centers, detection_datetime, timestamp,
                 flip_vertically, detected_line,
