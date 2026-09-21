@@ -31,4 +31,4 @@ swift run --package-path swiftui MeteorDetectorCoreValidation
 .venv-mac/bin/python -m pytest -q tests/test_swift_backend.py
 ```
 
-旧Tkinter UIは、機能移行中のフォールバックとして `./run_legacy_mac.sh` から起動できます。マスク編集、プレートソルブ、NoiseTwin、定期スキャン、解析ツール、AIアシスタントなどは、既存動作を壊さず順次SwiftUIへ移行します。
+旧Tkinter UIは、機能移行中のフォールバックとして `./run_legacy_mac.sh` から起動できます。サマリー出力、定期スキャン、RTSP運用はSwiftUI版で扱えます。マスク編集、プレートソルブ、NoiseTwin、RTSP固定パターン補正、解析ツール、AIアシスタントなどは、既存動作を壊さず順次SwiftUIへ移行します。

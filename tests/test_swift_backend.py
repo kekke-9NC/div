@@ -41,6 +41,14 @@ def test_ping_and_empty_settings_are_json_lines(tmp_path):
     assert responses["settings"]["payload"]["settings"] == {}
 
 
+def test_summary_config_fills_legacy_duration_defaults():
+    from swift_backend import Bridge
+
+    assert Bridge._validated_summary_config(
+        [{"name": "Composite Image", "enabled": True}]
+    ) == [{"name": "Composite Image", "enabled": True, "duration": 1.0}]
+
+
 def test_settings_are_written_atomically_and_unknown_commands_fail(tmp_path):
     messages = run_bridge(
         tmp_path,
@@ -55,6 +63,9 @@ def test_settings_are_written_atomically_and_unknown_commands_fail(tmp_path):
                     "rtsp_start_hour": 18,
                     "rtsp_end_hour": 6,
                     "rtsp_notification_sound": False,
+                    "summary_video_config": [
+                        {"name": "Composite Image", "enabled": False, "duration": 3.5}
+                    ],
                 }
             },
         },
@@ -71,6 +82,9 @@ def test_settings_are_written_atomically_and_unknown_commands_fail(tmp_path):
     assert settings["rtsp_start_hour"] == 18
     assert settings["rtsp_end_hour"] == 6
     assert settings["rtsp_notification_sound"] is False
+    assert settings["summary_video_config"] == [
+        {"name": "Composite Image", "enabled": False, "duration": 3.5}
+    ]
     assert responses["bad"]["ok"] is False
     assert (tmp_path / "app_settings.json").read_text(encoding="utf-8").endswith("\n")
 
@@ -104,6 +118,33 @@ def test_invalid_run_requests_return_errors_without_starting_processing(tmp_path
             },
         },
         {
+            "id": "bad_summary",
+            "command": "run_detection",
+            "payload": {
+                "sources": [{"path": str(tmp_path / "sample.mp4")}],
+                "summaryConfig": [{"name": "Composite Image", "enabled": "yes"}],
+            },
+        },
+        {
+            "id": "bad_summary_name",
+            "command": "run_detection",
+            "payload": {
+                "sources": [{"path": str(tmp_path / "sample.mp4")}],
+                "summaryConfig": [{"name": "Unknown Output", "enabled": True}],
+            },
+        },
+        {
+            "id": "bad_summary_empty",
+            "command": "run_detection",
+            "payload": {
+                "sources": [{"path": str(tmp_path / "sample.mp4")}],
+                "summaryConfig": [
+                    {"name": "Composite Image", "enabled": False},
+                    {"name": "Full Size Video", "enabled": False},
+                ],
+            },
+        },
+        {
             "id": "bad_rtsp_window",
             "command": "run_rtsp",
             "payload": {
@@ -124,6 +165,9 @@ def test_invalid_run_requests_return_errors_without_starting_processing(tmp_path
     assert responses["rtsp"]["ok"] is False
     assert responses["bad_rtsp_options"]["ok"] is False
     assert responses["bad_periodic_window"]["ok"] is False
+    assert responses["bad_summary"]["ok"] is False
+    assert responses["bad_summary_name"]["ok"] is False
+    assert responses["bad_summary_empty"]["ok"] is False
     assert responses["bad_rtsp_window"]["ok"] is False
 
 
@@ -183,7 +227,7 @@ def test_legacy_feature_settings_are_reported_to_the_swiftui_frontend(tmp_path):
 
     response = next(message for message in messages if message.get("id") == "load")
     unsupported = response["payload"]["unsupportedFeatures"]
-    assert "サマリー構成" in unsupported
+    assert "サマリー構成" not in unsupported
     assert "動画連結設定" in unsupported
     assert "定期スキャン" not in unsupported
     assert "RTSP時間制限" not in unsupported
@@ -217,7 +261,7 @@ def test_periodic_scan_emits_cancelled_state(tmp_path):
     bridge.handle({"id": "cancel", "command": "cancel", "payload": {}})
     worker = bridge._run_thread
     assert worker is not None
-    worker.join(timeout=3)
+    worker.join(timeout=10)
     assert not worker.is_alive()
     messages = [json.loads(line) for line in output.getvalue().splitlines() if line.strip()]
     assert any(
@@ -251,6 +295,10 @@ def test_rtsp_payload_is_normalized_before_worker_starts(tmp_path):
                 "endHour": 6,
                 "endMinute": 40,
                 "notifyOnDetection": False,
+                "summaryConfig": [
+                    {"name": "Composite Image", "enabled": False, "duration": 3.5},
+                    {"name": "Full Size Video", "enabled": True},
+                ],
             },
         }
     )
@@ -269,3 +317,43 @@ def test_rtsp_payload_is_normalized_before_worker_starts(tmp_path):
     assert captured["endHour"] == 6
     assert captured["endMinute"] == 40
     assert captured["notifyOnDetection"] is False
+    assert captured["summaryConfig"] == [
+        {"name": "Composite Image", "enabled": False, "duration": 3.5},
+        {"name": "Full Size Video", "enabled": True},
+    ]
+
+
+def test_local_payload_is_normalized_before_worker_starts(tmp_path):
+    from swift_backend import Bridge
+
+    output = io.StringIO()
+    bridge = Bridge(tmp_path, protocol_stdout=output)
+    captured = {}
+
+    def fake_run(payload, cancel_event):
+        captured.update(payload)
+
+    bridge._run_pipeline = fake_run
+    bridge.handle(
+        {
+            "id": "local",
+            "command": "run_detection",
+            "payload": {
+                "sources": [{"path": str(tmp_path / "sample.mp4")}],
+                "summaryConfig": [
+                    {"name": "Zoom Sequence", "enabled": True, "duration": 4.0}
+                ],
+            },
+        }
+    )
+
+    worker = bridge._run_thread
+    assert worker is not None
+    worker.join(timeout=3)
+    assert not worker.is_alive()
+    messages = [json.loads(line) for line in output.getvalue().splitlines() if line.strip()]
+    response = next(message for message in messages if message.get("id") == "local")
+    assert response["ok"] is True
+    assert captured["summaryConfig"] == [
+        {"name": "Zoom Sequence", "enabled": True, "duration": 4.0}
+    ]

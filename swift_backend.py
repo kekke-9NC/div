@@ -195,8 +195,6 @@ class Bridge:
             unsupported.append("AIアシスタント設定")
         if settings.get("rtsp_save_temporal_mean"):
             unsupported.append("RTSP時間平均保存")
-        if settings.get("summary_video_config") not in (None, Bridge._default_summary_config()):
-            unsupported.append("サマリー構成")
         concat_defaults = {
             "bitrate": "Auto",
             "codec": "h264",
@@ -327,11 +325,22 @@ class Bridge:
             if not isinstance(sources, list) or not sources:
                 self.response(request_id, error="処理対象の動画がありません")
                 return
+            try:
+                normalized_payload = dict(payload)
+                normalized_payload["saveOptions"] = self._validated_save_options(
+                    payload.get("saveOptions")
+                )
+                normalized_payload["summaryConfig"] = self._validated_summary_config(
+                    payload.get("summaryConfig")
+                )
+            except ValueError as exc:
+                self.response(request_id, error=str(exc))
+                return
             self._cancel_event = threading.Event()
             cancel_event = self._cancel_event
             self._run_thread = threading.Thread(
                 target=self._run_pipeline,
-                args=(payload, cancel_event),
+                args=(normalized_payload, cancel_event),
                 name="swiftui-detection-pipeline",
                 daemon=True,
             )
@@ -458,6 +467,19 @@ class Bridge:
         if not isinstance(value, list):
             raise ValueError("summaryConfig must be an array")
         normalized: List[Dict[str, Any]] = []
+        allowed_names = {
+            "Composite Image",
+            "Annotated Image",
+            "Full Size Video",
+            "Zoom Sequence",
+            "Cutout Video",
+        }
+        duration_defaults = {
+            "Composite Image": 1.0,
+            "Annotated Image": 2.0,
+            "Zoom Sequence": 2.0,
+        }
+        seen_names = set()
         for item in value:
             if not isinstance(item, dict):
                 raise ValueError("summaryConfigの形式が不正です")
@@ -465,6 +487,8 @@ class Bridge:
             enabled = item.get("enabled")
             if not isinstance(name, str) or not name.strip() or not isinstance(enabled, bool):
                 raise ValueError("summaryConfigの形式が不正です")
+            if name not in allowed_names or name in seen_names:
+                raise ValueError("summaryConfigに未対応または重複した項目があります")
             entry: Dict[str, Any] = {"name": name, "enabled": enabled}
             if "duration" in item:
                 duration = item["duration"]
@@ -473,7 +497,12 @@ class Bridge:
                 if not math.isfinite(float(duration)) or not 0.05 <= float(duration) <= 60:
                     raise ValueError("summaryConfigのdurationが範囲外です")
                 entry["duration"] = float(duration)
+            elif name in duration_defaults:
+                entry["duration"] = duration_defaults[name]
             normalized.append(entry)
+            seen_names.add(name)
+        if not normalized or not any(item["enabled"] for item in normalized):
+            raise ValueError("summaryConfigは1つ以上の出力を有効にしてください")
         return normalized
 
     @staticmethod

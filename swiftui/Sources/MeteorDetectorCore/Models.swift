@@ -274,3 +274,46 @@ public struct LegacySettings {
 
     public init() {}
 }
+
+public struct SummaryVideoOption: Identifiable, Equatable {
+    public let id: String
+    public let name: String
+    public let supportsDuration: Bool
+    public var enabled: Bool
+    public var duration: Double
+
+    public init(
+        name: String,
+        enabled: Bool,
+        duration: Double = 1.0,
+        supportsDuration: Bool
+    ) {
+        self.id = name
+        self.name = name
+        self.enabled = enabled
+        self.duration = duration
+        self.supportsDuration = supportsDuration
+    }
+
+    public var title: String {
+        switch name {
+        case "Composite Image": return "合成画像"
+        case "Annotated Image": return "注釈付き画像"
+        case "Full Size Video": return "全体動画"
+        case "Zoom Sequence": return "ズームシーケンス"
+        case "Cutout Video": return "切り抜き動画"
+        default: return name
+        }
+    }
+
+    public var subtitle: String {
+        switch name {
+        case "Composite Image": return "検出候補を1枚にまとめた画像"
+        case "Annotated Image": return "検出位置を重ねた画像"
+        case "Full Size Video": return "元の画角を保った短い動画"
+        case "Zoom Sequence": return "候補部分を拡大した動画"
+        case "Cutout Video": return "候補部分だけを切り出した動画"
+        default: return "追加された出力形式"
+        }
+    }
+}

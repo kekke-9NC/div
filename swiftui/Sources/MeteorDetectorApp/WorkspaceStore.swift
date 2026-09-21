@@ -28,6 +28,7 @@ final class WorkspaceStore: ObservableObject {
     @Published var latitude = 35.0
     @Published var longitude = 135.0
     @Published var saveOptions: [String: Bool]
+    @Published var summaryVideoOptions: [SummaryVideoOption] = WorkspaceStore.defaultSummaryVideoOptions
     @Published var periodicScanEnabled = false
     @Published var periodicScanDirectory = ""
     @Published var periodicScanInterval = 60
@@ -47,6 +48,16 @@ final class WorkspaceStore: ObservableObject {
     private let bridge: PythonBridge
     private var cancellables = Set<AnyCancellable>()
     private var resultsRefreshGeneration = 0
+
+    private static var defaultSummaryVideoOptions: [SummaryVideoOption] {
+        [
+            SummaryVideoOption(name: "Composite Image", enabled: true, duration: 1.0, supportsDuration: true),
+            SummaryVideoOption(name: "Annotated Image", enabled: false, duration: 2.0, supportsDuration: true),
+            SummaryVideoOption(name: "Full Size Video", enabled: true, supportsDuration: false),
+            SummaryVideoOption(name: "Zoom Sequence", enabled: false, duration: 2.0, supportsDuration: true),
+            SummaryVideoOption(name: "Cutout Video", enabled: true, supportsDuration: false),
+        ]
+    }
 
     init(rootURL: URL? = nil) {
         let resolvedRoot = rootURL ?? Self.resolveRoot()
@@ -127,11 +138,16 @@ final class WorkspaceStore: ObservableObject {
         !rtspTimeLimitEnabled || rtspStartHour != rtspEndHour || rtspStartMinute != rtspEndMinute
     }
 
+    var summaryVideoSelectionIsValid: Bool {
+        summaryVideoOptions.contains(where: { $0.enabled })
+    }
+
     var readinessMessage: String {
         if connection != .connected { return "処理エンジンを接続しています" }
         if !unsupportedFeatures.isEmpty && !allowReducedFeatureRun {
             return "旧UIの未対応設定を確認してください"
         }
+        if !summaryVideoSelectionIsValid { return "出力構成を1つ以上選択してください" }
         if periodicScanEnabled {
             if !sources.isEmpty { return "定期スキャンと入力ソースは同時に実行できません" }
             if periodicScanDirectory.isEmpty { return "監視フォルダを設定してください" }
@@ -217,6 +233,11 @@ final class WorkspaceStore: ObservableObject {
             return
         }
         guard !isBusy else { return }
+        guard summaryVideoSelectionIsValid else {
+            appendLog("出力構成を1つ以上選択してください。", level: .warning)
+            selection = .settings
+            return
+        }
         guard unsupportedFeatures.isEmpty || allowReducedFeatureRun else {
             appendLog("未対応設定があるため停止しました。確認後に基本解析モードを許可してください。", level: .warning)
             selection = .analysis
@@ -349,6 +370,7 @@ final class WorkspaceStore: ObservableObject {
                     "observation_latitude": String(latitude),
                     "observation_longitude": String(longitude),
                     "save_options": saveOptions,
+                    "summary_video_config": summaryVideoConfigPayload,
                     "periodic_scan_enabled": periodicScanEnabled,
                     "periodic_scan_directory": periodicScanDirectory,
                     "periodic_scan_interval": String(periodicScanInterval),
@@ -483,18 +505,62 @@ final class WorkspaceStore: ObservableObject {
             "meteorSavePath": meteorSavePath,
             "notMeteorSavePath": notMeteorSavePath,
             "saveOptions": saveOptions,
-            "summaryConfig": [
-                ["name": "Composite Image", "enabled": true, "duration": 1.0],
-                ["name": "Annotated Image", "enabled": false, "duration": 2.0],
-                ["name": "Full Size Video", "enabled": true],
-                ["name": "Zoom Sequence", "enabled": false, "duration": 2.0],
-                ["name": "Cutout Video", "enabled": true],
-            ],
+            "summaryConfig": summaryVideoConfigPayload,
         ]
         for (key, value) in additional {
             payload[key] = value
         }
         return payload
+    }
+
+    private var summaryVideoConfigPayload: [[String: Any]] {
+        summaryVideoOptions.map { option in
+            var item: [String: Any] = [
+                "name": option.name,
+                "enabled": option.enabled,
+            ]
+            if option.supportsDuration {
+                item["duration"] = option.duration
+            }
+            return item
+        }
+    }
+
+    private func applySummaryVideoConfig(_ value: Any?) {
+        guard let rawItems = value as? [[String: Any]] else { return }
+        var restored: [SummaryVideoOption] = []
+        var seen = Set<String>()
+
+        for item in rawItems {
+            guard let name = item["name"] as? String,
+                  !name.isEmpty,
+                  !seen.contains(name) else { continue }
+            guard let template = Self.defaultSummaryVideoOptions.first(where: { $0.name == name }) else {
+                appendLog("未対応のサマリー出力をスキップしました: \(name)", level: .warning)
+                continue
+            }
+            let supportsDuration = template.supportsDuration
+            let duration = max(
+                0.05,
+                min(60, doubleValue(item["duration"], default: template.duration))
+            )
+            restored.append(
+                SummaryVideoOption(
+                    name: name,
+                    enabled: boolValue(item["enabled"], default: template.enabled),
+                    duration: duration,
+                    supportsDuration: supportsDuration
+                )
+            )
+            seen.insert(name)
+        }
+
+        for option in Self.defaultSummaryVideoOptions where !seen.contains(option.name) {
+            restored.append(option)
+        }
+        if !restored.isEmpty {
+            summaryVideoOptions = restored
+        }
     }
 
     private func handle(_ envelope: BridgeEnvelope) {
@@ -557,6 +623,7 @@ final class WorkspaceStore: ObservableObject {
         twilightFilterEnabled = boolValue(settings["date_folder_twilight_filter_enabled"], default: true)
         latitude = doubleValue(settings["observation_latitude"], default: latitude)
         longitude = doubleValue(settings["observation_longitude"], default: longitude)
+        applySummaryVideoConfig(settings["summary_video_config"])
         periodicScanEnabled = boolValue(settings["periodic_scan_enabled"], default: false)
         periodicScanDirectory = settings["periodic_scan_directory"] as? String ?? ""
         periodicScanInterval = max(5, min(3600, intValue(settings["periodic_scan_interval"], default: 60)))

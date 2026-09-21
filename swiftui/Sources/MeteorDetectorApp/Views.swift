@@ -922,6 +922,64 @@ struct SettingsView: View {
                 }
 
                 GlassCard {
+                    VStack(alignment: .leading, spacing: 14) {
+                        SectionTitle("サマリー出力", subtitle: "検出後に保存する画像・動画を選びます")
+                        Text("チェックを外した形式は作成されません。動画形式は候補を表示する時間も調整できます。")
+                            .font(.system(size: 12))
+                            .foregroundStyle(AppTheme.secondaryText)
+
+                        ForEach($store.summaryVideoOptions) { $option in
+                            VStack(alignment: .leading, spacing: 10) {
+                                HStack(alignment: .top, spacing: 12) {
+                                    Image(systemName: option.supportsDuration ? "film.stack" : "photo.stack")
+                                        .font(.system(size: 16, weight: .medium))
+                                        .foregroundStyle(AppTheme.accent)
+                                        .frame(width: 30, height: 30)
+                                        .background(AppTheme.accent.opacity(0.13), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        Text(option.title)
+                                            .font(.system(size: 13, weight: .semibold, design: .rounded))
+                                            .foregroundStyle(AppTheme.text)
+                                        Text(option.subtitle)
+                                            .font(.system(size: 11))
+                                            .foregroundStyle(AppTheme.tertiaryText)
+                                    }
+                                    Spacer()
+                                    Toggle("", isOn: $option.enabled)
+                                        .labelsHidden()
+                                        .toggleStyle(.switch)
+                                        .tint(AppTheme.accent)
+                                }
+                                if option.supportsDuration && option.enabled {
+                                    HStack {
+                                        Text("表示時間")
+                                            .font(.system(size: 11, weight: .medium))
+                                            .foregroundStyle(AppTheme.secondaryText)
+                                        Spacer()
+                                        Stepper(value: $option.duration, in: 0.05...60, step: 0.05) {
+                                            Text(String(format: "%.2f 秒", option.duration))
+                                                .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                                                .foregroundStyle(AppTheme.text)
+                                        }
+                                    }
+                                    .padding(.leading, 42)
+                                }
+                            }
+                            .padding(.vertical, 5)
+                        }
+
+                        if !store.summaryVideoSelectionIsValid {
+                            Label("少なくとも1つの出力形式を選択してください。", systemImage: "exclamationmark.triangle.fill")
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(AppTheme.warning)
+                        }
+                    }
+                    .onChange(of: store.summaryVideoOptions) { _, _ in
+                        store.saveSettings()
+                    }
+                }
+
+                GlassCard {
                     VStack(alignment: .leading, spacing: 16) {
                         SectionTitle("定期スキャン", subtitle: "指定したフォルダを監視し、新しい動画を自動で解析します")
                         Toggle("定期スキャンを有効にする", isOn: $store.periodicScanEnabled)
