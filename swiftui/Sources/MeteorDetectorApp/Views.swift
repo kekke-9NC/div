@@ -956,6 +956,7 @@ struct KeyValueRow: View {
 struct SettingsView: View {
     @EnvironmentObject private var store: WorkspaceStore
     @StateObject private var maskEditor = MaskEditorState()
+    @StateObject private var cameraModelBuilder = CameraModelBuilderDraft()
 
     var body: some View {
         ScrollView {
@@ -1106,6 +1107,11 @@ struct SettingsView: View {
                                 }
                             }
                             .buttonStyle(.bordered)
+                            Button("新規作成") {
+                                cameraModelBuilder.isPresented = true
+                            }
+                            .buttonStyle(.bordered)
+                            .disabled(store.cameraModelBuildActive)
                             Button("開く") {
                                 guard store.plateSolveConfigurationIsValid else { return }
                                 NSWorkspace.shared.open(URL(fileURLWithPath: store.plateSolvePath))
@@ -1119,7 +1125,7 @@ struct SettingsView: View {
                         )
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(store.plateSolveConfigurationIsValid ? AppTheme.success : AppTheme.warning)
-                        Text("新しい補正データの作成は、対象動画を選んで旧UIで実行できます。既存データの適用はこの画面で完結します。")
+                        Text("既存データの適用と、高精度カメラ補正データの新規作成をSwiftUIから実行できます。")
                             .font(.system(size: 11))
                             .foregroundStyle(AppTheme.tertiaryText)
                     }
@@ -1477,6 +1483,10 @@ struct SettingsView: View {
         }
         .sheet(isPresented: $maskEditor.isPresented) {
             MaskEditorView(editor: maskEditor)
+                .environmentObject(store)
+        }
+        .sheet(isPresented: $cameraModelBuilder.isPresented) {
+            CameraModelBuilderView(draft: cameraModelBuilder)
                 .environmentObject(store)
         }
     }

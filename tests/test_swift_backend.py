@@ -5,7 +5,7 @@ import subprocess
 import sys
 import threading
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest import mock
 
 
@@ -139,6 +139,83 @@ def test_existing_wcs_path_is_validated_for_coordinate_annotations(tmp_path):
         assert "json" in str(exc)
     else:
         raise AssertionError("unsupported WCS extension should fail")
+
+
+def test_camera_model_payload_validates_source_and_bounds(tmp_path):
+    from swift_backend import Bridge
+
+    source = tmp_path / "sample.mp4"
+    source.write_bytes(b"placeholder")
+    bridge = Bridge(tmp_path)
+    payload = bridge._validated_camera_model_payload(
+        {
+            "source": str(source),
+            "autoSelect": False,
+            "cloudThreshold": 0.2,
+            "useCloudFilter": True,
+            "maximumVideos": 4,
+            "observationLatitude": 35.5,
+            "observationLongitude": 139.7,
+        }
+    )
+    assert payload["source"] == str(source.resolve())
+    assert payload["autoSelect"] is False
+    assert payload["maximumVideos"] == 4
+    assert payload["observationLatitude"] == 35.5
+    assert payload["observationLongitude"] == 139.7
+
+    try:
+        bridge._validated_camera_model_payload(
+            {"source": str(source), "observationLatitude": 91}
+        )
+    except ValueError as exc:
+        assert "observationLatitude" in str(exc)
+    else:
+        raise AssertionError("invalid camera-model coordinates should fail")
+
+
+def test_camera_model_cancellation_emits_a_terminal_result(tmp_path):
+    from swift_backend import Bridge
+
+    source = tmp_path / "sample.mp4"
+    source.write_bytes(b"placeholder")
+    fake_module = ModuleType("camera_model_builder")
+
+    class FakeRequest:
+        def __init__(self, **_kwargs):
+            pass
+
+    def fake_build(_request, progress_callback=None):
+        try:
+            progress_callback("処理中")
+        except RuntimeError:
+            # Match the production builder's failure notification path.
+            progress_callback("高精度モデル作成失敗")
+        return SimpleNamespace(
+            success=False,
+            model_path="",
+            error="停止要求",
+            as_dict=lambda: {"success": False, "error": "停止要求"},
+        )
+
+    fake_module.CameraModelBuildRequest = FakeRequest
+    fake_module.build_camera_model = fake_build
+    protocol = io.StringIO()
+    bridge = Bridge(tmp_path, protocol_stdout=protocol)
+    cancel_event = threading.Event()
+    cancel_event.set()
+    payload = bridge._validated_camera_model_payload({"source": str(source)})
+    with mock.patch.dict(sys.modules, {"camera_model_builder": fake_module}):
+        bridge._build_camera_model_worker("camera-model", payload, cancel_event)
+
+    messages = [json.loads(line) for line in protocol.getvalue().splitlines()]
+    result_events = [message for message in messages if message.get("event") == "camera_model_result"]
+    assert len(result_events) == 1
+    assert result_events[0]["payload"]["cancelled"] is True
+    assert any(
+        message.get("event") == "run_state" and message["payload"].get("state") == "cancelled"
+        for message in messages
+    )
 
 
 def test_detection_mask_loads_legacy_npz(tmp_path):

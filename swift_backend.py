@@ -146,6 +146,8 @@ class Bridge:
                 self._start_periodic_run(request_id, payload)
             elif command == "run_rtsp":
                 self._start_rtsp_run(request_id, payload)
+            elif command == "build_camera_model":
+                self._start_camera_model_build(request_id, payload)
             elif command == "cancel":
                 self._cancel()
                 self.response(request_id, {"accepted": True})
@@ -500,6 +502,152 @@ class Bridge:
             )
             self._run_thread.start()
         self.response(request_id, {"accepted": True, "directory": str(directory)})
+
+    def _validated_camera_model_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        source_value = payload.get("source")
+        if not isinstance(source_value, str) or not source_value.strip():
+            raise ValueError("モデル作成対象の動画またはフォルダを選択してください")
+        source = self._safe_path(source_value, self.root)
+        if not source.is_file() and not source.is_dir():
+            raise ValueError(f"モデル作成対象が見つかりません: {source}")
+
+        def text_value(name: str, default: str = "") -> str:
+            value = payload.get(name)
+            if value is None:
+                return default
+            if not isinstance(value, str) or len(value) > 128:
+                raise ValueError(f"{name} must be a short string")
+            return value.strip()
+
+        cloud_threshold = payload.get("cloudThreshold", 0.10)
+        if isinstance(cloud_threshold, bool) or not isinstance(cloud_threshold, (int, float)):
+            raise ValueError("cloudThreshold must be a number")
+        cloud_threshold = float(cloud_threshold)
+        if not math.isfinite(cloud_threshold) or not 0.0 <= cloud_threshold <= 1.0:
+            raise ValueError("cloudThreshold is out of range")
+
+        def finite_float(name: str, lower: float, upper: float, default: float) -> float:
+            value = payload.get(name, default)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(f"{name} must be a number")
+            value = float(value)
+            if not math.isfinite(value) or not lower <= value <= upper:
+                raise ValueError(f"{name} is out of range")
+            return value
+
+        cache_root = text_value("cacheRoot")
+        return {
+            "source": str(source),
+            "start": text_value("start"),
+            "end": text_value("end"),
+            "autoSelect": self._validated_bool(
+                payload.get("autoSelect"), default=True, name="autoSelect"
+            ),
+            "cloudThreshold": cloud_threshold,
+            "useCloudFilter": self._validated_bool(
+                payload.get("useCloudFilter"), default=False, name="useCloudFilter"
+            ),
+            "maximumVideos": self._validated_int(
+                payload.get("maximumVideos"), 1, 50, 12, "maximumVideos"
+            ),
+            "observationLatitude": finite_float(
+                "observationLatitude", -90.0, 90.0, 35.0
+            ),
+            "observationLongitude": finite_float(
+                "observationLongitude", -180.0, 180.0, 135.0
+            ),
+            "cacheRoot": str(self._safe_path(cache_root, self.root)) if cache_root else "",
+            "backend": text_value("backend", "lmstudio_qwen3_5_2b"),
+            "lmStudioURL": text_value("lmStudioURL", "http://localhost:1234/v1"),
+            "lmStudioModelID": text_value("lmStudioModelID", "qwen/qwen3-vl-4b"),
+            "lmStudioAPIKey": text_value("lmStudioAPIKey"),
+        }
+
+    def _start_camera_model_build(self, request_id: str, payload: Dict[str, Any]) -> None:
+        with self._run_lock:
+            if self._run_thread is not None and self._run_thread.is_alive():
+                self.response(request_id, error="別の処理が実行中です")
+                return
+            try:
+                normalized_payload = self._validated_camera_model_payload(payload)
+            except ValueError as exc:
+                self.response(request_id, error=str(exc))
+                return
+            self._cancel_event = threading.Event()
+            cancel_event = self._cancel_event
+            self._run_thread = threading.Thread(
+                target=self._build_camera_model_worker,
+                args=(request_id, normalized_payload, cancel_event),
+                name="swiftui-camera-model-builder",
+                daemon=True,
+            )
+            self._run_thread.start()
+        self.response(request_id, {"accepted": True, "source": normalized_payload["source"]})
+
+    def _build_camera_model_worker(
+        self,
+        request_id: str,
+        payload: Dict[str, Any],
+        cancel_event: threading.Event,
+    ) -> None:
+        self.event("run_state", {"state": "preparing"})
+        try:
+            from camera_model_builder import CameraModelBuildRequest, build_camera_model
+
+            cancellation_abort_sent = False
+
+            def progress(message: str) -> None:
+                nonlocal cancellation_abort_sent
+                if cancel_event.is_set():
+                    if cancellation_abort_sent:
+                        return
+                    cancellation_abort_sent = True
+                    raise RuntimeError("高精度カメラ補正の停止が要求されました")
+                self.event(
+                    "progress",
+                    {
+                        "current": 0,
+                        "total": 0,
+                        "message": f"高精度モデル: {message}",
+                    },
+                )
+
+            self.event("run_state", {"state": "running"})
+            request = CameraModelBuildRequest(
+                source=payload["source"],
+                start=payload["start"],
+                end=payload["end"],
+                auto_select=payload["autoSelect"],
+                cache_root=payload["cacheRoot"] or None,
+                cloud_threshold=payload["cloudThreshold"],
+                use_cloud_filter=payload["useCloudFilter"],
+                backend=payload["backend"],
+                lm_studio_url=payload["lmStudioURL"],
+                lm_studio_model_id=payload["lmStudioModelID"],
+                lm_studio_api_key=payload["lmStudioAPIKey"],
+                maximum_videos=payload["maximumVideos"],
+                observation_latitude=payload["observationLatitude"],
+                observation_longitude=payload["observationLongitude"],
+            )
+            result = build_camera_model(request, progress_callback=progress)
+            result_payload = result.as_dict()
+            result_payload["cancelled"] = cancel_event.is_set()
+            self.event("camera_model_result", result_payload)
+            if cancel_event.is_set():
+                self.log("高精度カメラ補正の作成を停止しました。", "warning")
+                self.event("run_state", {"state": "cancelled"})
+            elif result.success:
+                self.log(f"高精度カメラ補正を登録しました: {result.model_path}")
+                self.event("run_state", {"state": "completed"})
+            else:
+                self.log(f"高精度カメラ補正を作成できませんでした: {result.error}", "error")
+                self.event("run_state", {"state": "failed", "error": result.error})
+            self._release_run_thread()
+        except Exception as exc:
+            self.log(f"高精度カメラ補正中にエラーが発生しました: {exc}", "error")
+            traceback.print_exc(file=sys.stderr)
+            self.event("run_state", {"state": "failed", "error": str(exc)})
+            self._release_run_thread()
 
     @classmethod
     def _validated_save_options(cls, value: Any) -> Dict[str, bool]:

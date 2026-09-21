@@ -76,6 +76,14 @@ final class WorkspaceStore: ObservableObject {
     @Published var noiseTwinModelPath = ""
     @Published var temporalMeanFrames = 0
     @Published var saveTemporalMeanVideo = true
+    @Published private(set) var cameraModelBuildActive = false
+    @Published private(set) var cameraModelBuildStatus = "未実行"
+    @Published private(set) var cameraModelBuildProgress = ""
+    @Published private(set) var cameraModelBuildModelPath = ""
+    @Published private(set) var cameraModelBuildTargetMet = false
+    @Published private(set) var cameraModelBuildSupportFraction = 0.0
+    @Published private(set) var cameraModelBuildResidualP95 = 0.0
+    @Published private(set) var cameraModelBuildSavingSettings = false
 
     let rootURL: URL
     private let bridge: PythonBridge
@@ -756,6 +764,57 @@ final class WorkspaceStore: ObservableObject {
         }
     }
 
+    func startCameraModelBuild(
+        source: String,
+        autoSelect: Bool,
+        start: String,
+        end: String,
+        cloudThreshold: Double,
+        useCloudFilter: Bool
+    ) {
+        guard !cameraModelBuildActive else { return }
+        cameraModelBuildActive = true
+        cameraModelBuildSavingSettings = false
+        cameraModelBuildStatus = "高精度モデルの作成を準備しています…"
+        cameraModelBuildProgress = ""
+        cameraModelBuildModelPath = ""
+        cameraModelBuildTargetMet = false
+        cameraModelBuildSupportFraction = 0
+        cameraModelBuildResidualP95 = 0
+        bridge.request(
+            "build_camera_model",
+            payload: [
+                "source": source,
+                "autoSelect": autoSelect,
+                "start": autoSelect ? "" : start,
+                "end": autoSelect ? "" : end,
+                "cloudThreshold": cloudThreshold,
+                "useCloudFilter": useCloudFilter,
+                "maximumVideos": 12,
+                "observationLatitude": latitude,
+                "observationLongitude": longitude,
+            ]
+        ) { [weak self] result in
+            guard let self else { return }
+            if case .failure(let error) = result {
+                self.cameraModelBuildActive = false
+                self.cameraModelBuildSavingSettings = false
+                self.cameraModelBuildStatus = "作成を開始できませんでした: \(error.localizedDescription)"
+                self.appendLog(self.cameraModelBuildStatus, level: .error)
+            }
+        }
+    }
+
+    func cancelCameraModelBuild() {
+        guard cameraModelBuildActive else { return }
+        cameraModelBuildStatus = "停止要求を送信しました…"
+        bridge.request("cancel") { [weak self] result in
+            if case .failure(let error) = result {
+                self?.appendLog(error.localizedDescription, level: .warning)
+            }
+        }
+    }
+
     func openOutputFolder(_ path: String) {
         let url = URL(fileURLWithPath: path)
         if !FileManager.default.fileExists(atPath: url.path) {
@@ -959,29 +1018,59 @@ final class WorkspaceStore: ObservableObject {
             let message = envelope.payload["message"] as? String ?? ""
             progress = PipelineProgress(current: current, total: total, message: message)
             queueStatus = message.isEmpty ? "\(current)/\(total) 本" : message
+            if cameraModelBuildActive, !message.isEmpty {
+                cameraModelBuildProgress = message
+                cameraModelBuildStatus = message
+            }
         case "status":
             let pending = intValue(envelope.payload["pending_sources"], default: 0)
             let queue = intValue(envelope.payload["download_queue_size"], default: 0)
             let busy = (envelope.payload["processors_busy"] as? [Any] ?? []).filter { boolValue($0) }.count
             queueStatus = "処理中 \(busy) / 待機 \(pending + queue)"
+        case "camera_model_result":
+            handleCameraModelResult(envelope.payload)
         case "run_state":
             let state = envelope.payload["state"] as? String ?? "idle"
             switch state {
             case "preparing":
                 runState = .preparing
                 progress = nil
-            case "running": runState = .running
-            case "cancelling": runState = .cancelling
+                if cameraModelBuildActive {
+                    cameraModelBuildStatus = "高精度モデルの作成を準備しています…"
+                }
+            case "running":
+                runState = .running
+                if cameraModelBuildActive && cameraModelBuildProgress.isEmpty {
+                    cameraModelBuildStatus = "高精度モデルを作成しています…"
+                }
+            case "cancelling":
+                runState = .cancelling
+                if cameraModelBuildActive {
+                    cameraModelBuildStatus = "高精度モデルの停止を待っています…"
+                }
             case "completed":
                 runState = .completed
                 progress = nil
+                if !cameraModelBuildSavingSettings {
+                    cameraModelBuildActive = false
+                }
                 refreshResults()
             case "cancelled":
                 runState = .cancelled
                 progress = nil
+                if cameraModelBuildActive {
+                    cameraModelBuildActive = false
+                    cameraModelBuildSavingSettings = false
+                    cameraModelBuildStatus = "高精度モデルの作成を停止しました"
+                }
             case "failed":
                 runState = .failed(envelope.payload["error"] as? String ?? "処理に失敗しました")
                 progress = nil
+                if cameraModelBuildActive {
+                    cameraModelBuildActive = false
+                    cameraModelBuildSavingSettings = false
+                    cameraModelBuildStatus = envelope.payload["error"] as? String ?? "高精度モデルの作成に失敗しました"
+                }
             case "discovery_completed":
                 if case .cancelling = runState {
                     runState = .cancelled
@@ -999,6 +1088,53 @@ final class WorkspaceStore: ObservableObject {
             }
         default:
             break
+        }
+    }
+
+    private func handleCameraModelResult(_ payload: [String: Any]) {
+        let success = boolValue(payload["success"], default: false)
+        let cancelled = boolValue(payload["cancelled"], default: false)
+        let enabled = boolValue(payload["enabled"], default: false)
+        let targetMet = boolValue(payload["target_met"], default: false)
+        let modelPath = payload["model_path"] as? String ?? ""
+        cameraModelBuildModelPath = modelPath
+        cameraModelBuildTargetMet = targetMet
+        cameraModelBuildSupportFraction = doubleValue(payload["support_fraction"], default: 0)
+        cameraModelBuildResidualP95 = doubleValue(payload["residual_p95_px"], default: 0)
+
+        if cancelled {
+            cameraModelBuildSavingSettings = false
+            cameraModelBuildStatus = "高精度モデルの作成を停止しました"
+            return
+        }
+        guard success else {
+            cameraModelBuildSavingSettings = false
+            cameraModelBuildStatus = "高精度モデルを作成できませんでした: \(payload["error"] as? String ?? "不明なエラー")"
+            return
+        }
+        guard enabled, !modelPath.isEmpty else {
+            cameraModelBuildSavingSettings = false
+            cameraModelBuildStatus = "候補を保存しましたが、安全基準未達のため自動適用しません"
+            return
+        }
+
+        plateSolvePath = modelPath
+        plateSolveEnabled = true
+        cameraModelBuildSavingSettings = true
+        cameraModelBuildStatus = "高精度モデルを登録し、座標注釈へ適用しています…"
+        saveSettings { [weak self] result in
+            guard let self else { return }
+            self.cameraModelBuildSavingSettings = false
+            self.cameraModelBuildActive = false
+            switch result {
+            case .success:
+                self.cameraModelBuildStatus = targetMet
+                    ? "高精度モデルを登録しました（目標基準達成）"
+                    : "高精度モデルを登録しました（候補基準で適用）"
+            case .failure(let error):
+                self.cameraModelBuildStatus = "モデルは作成されましたが設定保存に失敗しました: \(error.localizedDescription)"
+                self.appendLog(self.cameraModelBuildStatus, level: .warning)
+            }
         }
     }
 
