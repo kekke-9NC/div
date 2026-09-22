@@ -7,7 +7,7 @@ struct MeteorDetectorApp: App {
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
-        WindowGroup {
+        WindowGroup("Meteor Detector") {
             RootView()
                 .environmentObject(store)
                 .background(AppTheme.canvas)

@@ -96,9 +96,6 @@ struct SidebarView: View {
                         .foregroundStyle(AppTheme.secondaryText)
                         .lineLimit(1)
                 }
-                Text("SwiftUI フロントエンド")
-                    .font(.system(size: 10, weight: .medium, design: .rounded))
-                    .foregroundStyle(AppTheme.tertiaryText)
             }
             .padding(.horizontal, 18)
             .padding(.bottom, 18)
