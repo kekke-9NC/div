@@ -64,6 +64,7 @@ class Bridge:
         self._run_lock = threading.Lock()
         self._cancel_event = threading.Event()
         self._run_thread: Optional[threading.Thread] = None
+        self._video_concat_process: Optional[subprocess.Popen] = None
 
     def emit(self, payload: Dict[str, Any]) -> None:
         line = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
@@ -156,6 +157,8 @@ class Bridge:
                 self._start_camera_model_build(request_id, payload)
             elif command == "build_fixed_pattern":
                 self._start_fixed_pattern_build(request_id, payload)
+            elif command == "run_video_concat":
+                self._start_video_concat(request_id, payload)
             elif command == "cancel":
                 self._cancel()
                 self.response(request_id, {"accepted": True})
@@ -198,19 +201,6 @@ class Bridge:
             unsupported.append("AIアシスタント設定")
         if settings.get("lm_studio_vlm_url") not in (None, "", "http://localhost:1234/v1"):
             unsupported.append("AIアシスタント設定")
-        concat_defaults = {
-            "bitrate": "Auto",
-            "codec": "h264",
-            "fps": "Auto",
-            "safe_mode": True,
-            "apply_enhancement": False,
-            "timestamp_enabled": True,
-            "timestamp_position": "右下",
-            "timestamp_size_percent": "1.8",
-            "timestamp_offset_seconds": "0.0",
-        }
-        if settings.get("video_concat_settings") not in (None, concat_defaults):
-            unsupported.append("動画連結設定")
         timestamp_defaults = {
             "enabled": True,
             "position": "右下",
@@ -1006,6 +996,269 @@ class Bridge:
                 reader_thread.join(timeout=2)
             self._release_run_thread()
 
+    def _validated_video_concat_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Validate and normalize the SwiftUI video-concatenation request."""
+        raw_files = payload.get("inputFiles", payload.get("files"))
+        if not isinstance(raw_files, list) or len(raw_files) < 2:
+            raise ValueError("動画連結には2つ以上の動画ファイルが必要です")
+        if len(raw_files) > 500:
+            raise ValueError("一度に連結できる動画は500本までです")
+
+        input_files: List[str] = []
+        seen_paths = set()
+        for raw_file in raw_files:
+            if not isinstance(raw_file, str) or not raw_file.strip():
+                raise ValueError("連結対象の動画パスが不正です")
+            path = self._safe_path(raw_file, self.root)
+            if not path.is_file():
+                raise ValueError(f"連結対象の動画が見つかりません: {path}")
+            normalized_path = str(path)
+            if normalized_path in seen_paths:
+                raise ValueError(f"同じ動画が重複しています: {path.name}")
+            seen_paths.add(normalized_path)
+            input_files.append(normalized_path)
+
+        raw_output = payload.get("outputPath", payload.get("output"))
+        if not isinstance(raw_output, str) or not raw_output.strip():
+            raise ValueError("連結後の保存先を選択してください")
+        output_path = self._safe_path(raw_output, self.root)
+        if output_path.suffix.lower() not in {".mp4", ".mov", ".mkv", ".avi"}:
+            raise ValueError("連結後の保存先は動画形式（.mp4 / .mov / .mkv / .avi）で指定してください")
+        if str(output_path) in seen_paths:
+            raise ValueError("連結後の保存先に入力動画と同じファイルは指定できません")
+
+        bitrate = payload.get("bitrate", "Auto")
+        if not isinstance(bitrate, str) or bitrate not in {
+            "Auto", "1000k", "2000k", "4000k", "8000k",
+            "12000k", "16000k", "20000k",
+        }:
+            raise ValueError("bitrateの指定が不正です")
+
+        codec = payload.get("codec", "h264")
+        if not isinstance(codec, str) or codec not in {"h264", "h265"}:
+            raise ValueError("codecの指定が不正です")
+
+        raw_fps = payload.get("fps", "Auto")
+        if raw_fps in (None, "", "Auto"):
+            fps: Optional[float] = None
+        elif isinstance(raw_fps, (int, float)) and not isinstance(raw_fps, bool):
+            fps = float(raw_fps)
+        elif isinstance(raw_fps, str):
+            try:
+                fps = float(raw_fps)
+            except ValueError as exc:
+                raise ValueError("fpsの指定が不正です") from exc
+        else:
+            raise ValueError("fpsの指定が不正です")
+        if fps is not None and (not math.isfinite(fps) or not 1.0 <= fps <= 120.0):
+            raise ValueError("fpsは1〜120の範囲で指定してください")
+
+        safe_mode = self._validated_bool(
+            payload.get("safeMode", payload.get("safe_mode")),
+            default=True,
+            name="safeMode",
+        )
+        apply_enhancement = self._validated_bool(
+            payload.get("applyEnhancement", payload.get("apply_enhancement")),
+            default=False,
+            name="applyEnhancement",
+        )
+        fixed_pattern_path = ""
+        if apply_enhancement:
+            fixed_pattern_path = self._validated_fixed_pattern_path(
+                payload.get("fixedPatternPath"), True
+            )
+
+        raw_timestamp = payload.get("timestampSettings", payload.get("timestamp_settings"))
+        if raw_timestamp is None:
+            raw_timestamp = {}
+        if not isinstance(raw_timestamp, dict):
+            raise ValueError("timestampSettings must be an object")
+        timestamp_enabled = self._validated_bool(
+            raw_timestamp.get("enabled"), default=True, name="timestampSettings.enabled"
+        )
+        position = raw_timestamp.get("position", "右下")
+        if not isinstance(position, str) or position not in {"右下", "左下", "右上", "左上"}:
+            raise ValueError("timestampSettings.positionの指定が不正です")
+
+        def finite_number(value: Any, default: float, name: str, lower: float, upper: float) -> float:
+            if value is None:
+                return default
+            if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+                raise ValueError(f"{name} must be a number")
+            try:
+                parsed = float(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"{name} must be a number") from exc
+            if not math.isfinite(parsed) or not lower <= parsed <= upper:
+                raise ValueError(f"{name} is out of range")
+            return parsed
+
+        timestamp_size = finite_number(
+            raw_timestamp.get("size_percent"), 1.8,
+            "timestampSettings.size_percent", 0.8, 4.0,
+        )
+        timestamp_offset = finite_number(
+            raw_timestamp.get("offset_seconds"), 0.0,
+            "timestampSettings.offset_seconds", -86_400.0, 86_400.0,
+        )
+
+        return {
+            "inputFiles": input_files,
+            "outputPath": str(output_path),
+            "bitrate": bitrate,
+            "codec": codec,
+            "fps": fps,
+            "safeMode": safe_mode,
+            "applyEnhancement": apply_enhancement,
+            "fixedPatternPath": fixed_pattern_path,
+            "timestampSettings": {
+                "enabled": timestamp_enabled,
+                "position": position,
+                "size_percent": timestamp_size,
+                "offset_seconds": timestamp_offset,
+            },
+        }
+
+    def _start_video_concat(self, request_id: str, payload: Dict[str, Any]) -> None:
+        with self._run_lock:
+            if self._run_thread is not None and self._run_thread.is_alive():
+                self.response(request_id, error="別の処理が実行中です")
+                return
+            try:
+                normalized_payload = self._validated_video_concat_payload(payload)
+            except ValueError as exc:
+                self.response(request_id, error=str(exc))
+                return
+            self._cancel_event = threading.Event()
+            cancel_event = self._cancel_event
+            self._run_thread = threading.Thread(
+                target=self._run_video_concat,
+                args=(normalized_payload, cancel_event),
+                name="swiftui-video-concat",
+                daemon=True,
+            )
+            self._run_thread.start()
+        self.response(
+            request_id,
+            {
+                "accepted": True,
+                "count": len(normalized_payload["inputFiles"]),
+                "outputPath": normalized_payload["outputPath"],
+            },
+        )
+
+    def _run_video_concat(
+        self,
+        payload: Dict[str, Any],
+        cancel_event: threading.Event,
+    ) -> None:
+        self.event("video_concat_state", {"state": "preparing"})
+        try:
+            import video_processor
+
+            output_path = Path(payload["outputPath"])
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary_output = output_path.with_name(
+                f".{output_path.stem}.swiftui-{time.time_ns()}{output_path.suffix}"
+            )
+            temporary_timeline = Path(
+                os.path.splitext(str(temporary_output))[0] + ".timeline.json"
+            )
+
+            def progress_callback(fraction: float, message: str) -> None:
+                self.event(
+                    "video_concat_progress",
+                    {
+                        "fraction": max(0.0, min(1.0, float(fraction))),
+                        "message": str(message),
+                    },
+                )
+
+            def process_callback(_process: Optional[subprocess.Popen]) -> None:
+                # video_processor owns the child lifecycle and checks
+                # cancel_event through cancel_check. Keep the callback wired
+                # so its existing cancellation path remains active.
+                self._video_concat_process = _process
+
+            self.event("video_concat_state", {"state": "running"})
+            self.log(f"動画連結を開始しました（{len(payload['inputFiles'])}本）。")
+            success, message = video_processor.concatenate_videos(
+                input_files=payload["inputFiles"],
+                output_path=str(temporary_output),
+                bitrate=payload["bitrate"],
+                codec=payload["codec"],
+                fps=payload["fps"],
+                safe_mode=payload["safeMode"],
+                progress_callback=progress_callback,
+                cancel_check=cancel_event.is_set,
+                process_callback=process_callback,
+                apply_enhancement=payload["applyEnhancement"],
+                fixed_pattern_path=payload["fixedPatternPath"] or None,
+                timestamp_settings=payload["timestampSettings"],
+            )
+            cancelled = cancel_event.is_set()
+            if success and not cancelled:
+                # A cancel request can arrive after video_processor returns
+                # but before the final atomic replacement. Re-check immediately
+                # before publishing so cancellation never publishes stale work.
+                cancelled = cancel_event.is_set()
+                if not cancelled:
+                    final_timeline = Path(
+                        os.path.splitext(str(output_path))[0] + ".timeline.json"
+                    )
+                    os.replace(temporary_output, output_path)
+                    if temporary_timeline.is_file():
+                        try:
+                            os.replace(temporary_timeline, final_timeline)
+                        except OSError:
+                            self.log("解析用タイムラインを最終保存先へ移動できませんでした。", "warning")
+                    message = str(message).replace(str(temporary_output), str(output_path))
+                    message = message.replace(str(temporary_timeline), str(final_timeline))
+            self.event(
+                "video_concat_result",
+                {
+                    "success": bool(success) and not cancelled,
+                    "cancelled": cancelled,
+                    "outputPath": str(output_path) if success and not cancelled else "",
+                    "message": str(message),
+                },
+            )
+            if cancelled:
+                self.log("動画連結を停止しました。", "warning")
+                self.event("video_concat_state", {"state": "cancelled"})
+            elif success:
+                self.log(f"動画連結が完了しました: {output_path}")
+                self.event("video_concat_state", {"state": "completed"})
+            else:
+                self.log(f"動画連結に失敗しました: {message}", "error")
+                self.event("video_concat_state", {"state": "failed", "error": str(message)})
+        except Exception as exc:
+            self.log(f"動画連結中にエラーが発生しました: {exc}", "error")
+            traceback.print_exc(file=sys.stderr)
+            self.event(
+                "video_concat_result",
+                {
+                    "success": False,
+                    "cancelled": cancel_event.is_set(),
+                    "outputPath": "",
+                    "message": str(exc),
+                },
+            )
+            self.event(
+                "video_concat_state",
+                {"state": "cancelled" if cancel_event.is_set() else "failed", "error": str(exc)},
+            )
+        finally:
+            self._video_concat_process = None
+            for temporary_path in (locals().get("temporary_output"), locals().get("temporary_timeline")):
+                if isinstance(temporary_path, Path):
+                    try:
+                        temporary_path.unlink()
+                    except OSError:
+                        pass
+            self._release_run_thread()
+
     @classmethod
     def _validated_save_options(cls, value: Any) -> Dict[str, bool]:
         defaults = cls._default_save_options()
@@ -1452,7 +1705,16 @@ class Bridge:
     def _cancel(self) -> None:
         self._cancel_event.set()
         self.log("キャンセルを要求しました。")
-        self.event("run_state", {"state": "cancelling"})
+        if self._run_thread is not None and self._run_thread.name == "swiftui-video-concat":
+            process = self._video_concat_process
+            if process is not None and process.poll() is None:
+                try:
+                    process.terminate()
+                except OSError:
+                    pass
+            self.event("video_concat_state", {"state": "cancelling"})
+        else:
+            self.event("run_state", {"state": "cancelling"})
 
     def _safe_path(self, value: Any, fallback: Path) -> Path:
         if not isinstance(value, str) or not value.strip():

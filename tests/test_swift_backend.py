@@ -691,7 +691,7 @@ def test_legacy_feature_settings_are_reported_to_the_swiftui_frontend(tmp_path):
     response = next(message for message in messages if message.get("id") == "load")
     unsupported = response["payload"]["unsupportedFeatures"]
     assert "サマリー構成" not in unsupported
-    assert "動画連結設定" in unsupported
+    assert "動画連結設定" not in unsupported
     assert "定期スキャン" not in unsupported
     assert "RTSP時間制限" not in unsupported
     assert "RTSP固定パターン補正" not in unsupported
@@ -859,3 +859,137 @@ def test_local_payload_is_normalized_before_worker_starts(tmp_path):
         "temporal_mean_frames": 3,
         "save_temporal_mean_video": False,
     }
+
+
+def test_video_concat_payload_validates_ordered_files_and_options(tmp_path):
+    from swift_backend import Bridge
+
+    first = tmp_path / "first.mp4"
+    second = tmp_path / "second.mov"
+    first.write_bytes(b"placeholder")
+    second.write_bytes(b"placeholder")
+    output = tmp_path / "joined.mp4"
+    bridge = Bridge(tmp_path)
+
+    normalized = bridge._validated_video_concat_payload(
+        {
+            "inputFiles": [str(first), str(second)],
+            "outputPath": str(output),
+            "bitrate": "4000k",
+            "codec": "h265",
+            "fps": "30",
+            "safeMode": False,
+            "timestampSettings": {
+                "enabled": True,
+                "position": "左上",
+                "size_percent": "2.2",
+                "offset_seconds": "-1.5",
+            },
+        }
+    )
+
+    assert normalized["inputFiles"] == [str(first.resolve()), str(second.resolve())]
+    assert normalized["outputPath"] == str(output.resolve())
+    assert normalized["codec"] == "h265"
+    assert normalized["fps"] == 30.0
+    assert normalized["safeMode"] is False
+    assert normalized["timestampSettings"]["position"] == "左上"
+    assert normalized["timestampSettings"]["offset_seconds"] == -1.5
+
+    try:
+        bridge._validated_video_concat_payload(
+            {
+                "inputFiles": [str(first), str(first)],
+                "outputPath": str(output),
+            }
+        )
+    except ValueError as exc:
+        assert "重複" in str(exc)
+    else:
+        raise AssertionError("duplicate video inputs should fail")
+
+    try:
+        bridge._validated_video_concat_payload(
+            {
+                "inputFiles": [str(first), str(second)],
+                "outputPath": str(tmp_path / "joined.txt"),
+            }
+        )
+    except ValueError as exc:
+        assert "動画形式" in str(exc)
+    else:
+        raise AssertionError("non-video output should fail")
+
+
+def test_video_concat_worker_emits_progress_and_terminal_result(tmp_path):
+    from swift_backend import Bridge
+
+    first = tmp_path / "first.mp4"
+    second = tmp_path / "second.mp4"
+    first.write_bytes(b"placeholder")
+    second.write_bytes(b"placeholder")
+    payload = Bridge(tmp_path)._validated_video_concat_payload(
+        {
+            "inputFiles": [str(first), str(second)],
+            "outputPath": str(tmp_path / "joined.mp4"),
+        }
+    )
+    fake_module = ModuleType("video_processor")
+    captured = {}
+
+    def fake_concatenate_videos(**kwargs):
+        captured.update(kwargs)
+        kwargs["progress_callback"](0.4, "検証中")
+        kwargs["progress_callback"](1.0, "完了")
+        Path(kwargs["output_path"]).write_bytes(b"fake-video")
+        return True, "fake output"
+
+    fake_module.concatenate_videos = fake_concatenate_videos
+    protocol = io.StringIO()
+    bridge = Bridge(tmp_path, protocol_stdout=protocol)
+    with mock.patch.dict(sys.modules, {"video_processor": fake_module}):
+        bridge._run_video_concat(payload, threading.Event())
+
+    messages = [json.loads(line) for line in protocol.getvalue().splitlines() if line.strip()]
+    progress = [message for message in messages if message.get("event") == "video_concat_progress"]
+    result = [message for message in messages if message.get("event") == "video_concat_result"]
+    assert [item["payload"]["fraction"] for item in progress] == [0.4, 1.0]
+    assert result[0]["payload"]["success"] is True
+    assert result[0]["payload"]["outputPath"] == str((tmp_path / "joined.mp4").resolve())
+    assert captured["safe_mode"] is True
+    assert captured["timestamp_settings"]["enabled"] is True
+
+
+def test_video_concat_cancellation_does_not_delete_existing_output(tmp_path):
+    from swift_backend import Bridge
+
+    first = tmp_path / "first.mp4"
+    second = tmp_path / "second.mp4"
+    output_path = tmp_path / "joined.mp4"
+    first.write_bytes(b"placeholder")
+    second.write_bytes(b"placeholder")
+    output_path.write_bytes(b"existing-user-output")
+    payload = Bridge(tmp_path)._validated_video_concat_payload(
+        {
+            "inputFiles": [str(first), str(second)],
+            "outputPath": str(output_path),
+        }
+    )
+    fake_module = ModuleType("video_processor")
+
+    def fake_concatenate_videos(**kwargs):
+        assert kwargs["output_path"] != str(output_path.resolve())
+        return False, "処理がキャンセルされました"
+
+    fake_module.concatenate_videos = fake_concatenate_videos
+    cancel_event = threading.Event()
+    cancel_event.set()
+    protocol = io.StringIO()
+    bridge = Bridge(tmp_path, protocol_stdout=protocol)
+    with mock.patch.dict(sys.modules, {"video_processor": fake_module}):
+        bridge._run_video_concat(payload, cancel_event)
+
+    assert output_path.read_bytes() == b"existing-user-output"
+    messages = [json.loads(line) for line in protocol.getvalue().splitlines() if line.strip()]
+    result = next(message for message in messages if message.get("event") == "video_concat_result")
+    assert result["payload"]["cancelled"] is True

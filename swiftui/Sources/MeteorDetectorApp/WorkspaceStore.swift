@@ -110,6 +110,22 @@ final class WorkspaceStore: ObservableObject {
     @Published private(set) var cameraModelBuildSupportFraction = 0.0
     @Published private(set) var cameraModelBuildResidualP95 = 0.0
     @Published private(set) var cameraModelBuildSavingSettings = false
+    @Published var videoConcatFiles: [String] = []
+    @Published var videoConcatOutputPath = ""
+    @Published var videoConcatBitrate = "Auto"
+    @Published var videoConcatCodec = "h264"
+    @Published var videoConcatFPS = "Auto"
+    @Published var videoConcatSafeMode = true
+    @Published var videoConcatEnhancement = false
+    @Published var videoConcatTimestampEnabled = true
+    @Published var videoConcatTimestampPosition = "右下"
+    @Published var videoConcatTimestampSizePercent = 1.8
+    @Published var videoConcatTimestampOffsetSeconds = 0.0
+    @Published private(set) var videoConcatActive = false
+    @Published private(set) var videoConcatStatus = "待機中"
+    @Published private(set) var videoConcatProgress = 0.0
+    @Published private(set) var videoConcatProgressMessage = ""
+    @Published private(set) var videoConcatLastResult = ""
 
     let rootURL: URL
     private let bridge: PythonBridge
@@ -200,7 +216,50 @@ final class WorkspaceStore: ObservableObject {
         }
     }
 
-    var isBusy: Bool { runState.isActive || cameraModelBuildActive || fixedPatternBuildActive }
+    var isBusy: Bool {
+        runState.isActive || cameraModelBuildActive || fixedPatternBuildActive || videoConcatActive
+    }
+
+    var videoConcatCanStart: Bool {
+        guard settingsLoaded, connection == .connected, !isBusy else { return false }
+        guard videoConcatFiles.count >= 2 else { return false }
+        let output = videoConcatOutputPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !output.isEmpty else { return false }
+        guard videoConcatFiles.allSatisfy({ FileManager.default.fileExists(atPath: $0) }) else { return false }
+        guard ["mp4", "mov", "mkv", "avi"].contains(URL(fileURLWithPath: output).pathExtension.lowercased()) else {
+            return false
+        }
+        guard !videoConcatFiles.contains(where: { URL(fileURLWithPath: $0).standardizedFileURL.path == URL(fileURLWithPath: output).standardizedFileURL.path }) else {
+            return false
+        }
+        return videoConcatEnhancementConfigurationIsValid
+    }
+
+    var videoConcatEnhancementConfigurationIsValid: Bool {
+        !videoConcatEnhancement || (rtspFixedPatternEnabled && fixedPatternConfigurationIsValid)
+    }
+
+    var videoConcatReadinessMessage: String {
+        if connection != .connected { return "処理エンジンを接続しています" }
+        if videoConcatActive { return videoConcatStatus }
+        if videoConcatFiles.count < 2 { return "2本以上の動画を追加してください" }
+        if videoConcatOutputPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "連結後の保存先を選択してください"
+        }
+        if !["mp4", "mov", "mkv", "avi"].contains(URL(fileURLWithPath: videoConcatOutputPath).pathExtension.lowercased()) {
+            return "保存先は .mp4 / .mov / .mkv / .avi のいずれかを指定してください"
+        }
+        if videoConcatFiles.contains(where: { !FileManager.default.fileExists(atPath: $0) }) {
+            return "見つからない動画入力があります"
+        }
+        if !videoConcatEnhancementConfigurationIsValid {
+            return "保存物補正を使うには、設定で有効な補正マップを選択してください"
+        }
+        if videoConcatFiles.contains(where: { URL(fileURLWithPath: $0).standardizedFileURL.path == URL(fileURLWithPath: videoConcatOutputPath).standardizedFileURL.path }) {
+            return "保存先に入力動画と同じファイルは指定できません"
+        }
+        return "連結を開始できます"
+    }
 
     var canStart: Bool {
         guard settingsLoaded, connection == .connected, !isBusy else { return false }
@@ -518,6 +577,97 @@ final class WorkspaceStore: ObservableObject {
         saveSettings()
     }
 
+    func addVideoConcatFiles(_ urls: [URL]) {
+        var added = 0
+        for url in urls {
+            let path = url.standardizedFileURL.path
+            guard !url.hasDirectoryPath, FileManager.default.fileExists(atPath: path) else { continue }
+            guard !videoConcatFiles.contains(path) else { continue }
+            videoConcatFiles.append(path)
+            added += 1
+        }
+        if added > 0 {
+            appendLog("動画連結リストに\(added)本追加しました。")
+            if videoConcatOutputPath.isEmpty {
+                videoConcatOutputPath = URL(fileURLWithPath: videoConcatFiles[0])
+                    .deletingPathExtension()
+                    .appendingPathExtension("mp4")
+                    .deletingLastPathComponent()
+                    .appendingPathComponent("concatenated.mp4")
+                    .path
+            }
+            saveSettings()
+        }
+    }
+
+    func removeVideoConcatFile(at index: Int) {
+        guard videoConcatFiles.indices.contains(index), !videoConcatActive else { return }
+        videoConcatFiles.remove(at: index)
+    }
+
+    func moveVideoConcatFile(from index: Int, by offset: Int) {
+        guard !videoConcatActive else { return }
+        let target = index + offset
+        guard videoConcatFiles.indices.contains(index), videoConcatFiles.indices.contains(target) else { return }
+        videoConcatFiles.swapAt(index, target)
+    }
+
+    func clearVideoConcatFiles() {
+        guard !videoConcatActive else { return }
+        videoConcatFiles.removeAll()
+    }
+
+    func startVideoConcat() {
+        guard !videoConcatActive else { return }
+        guard videoConcatCanStart else {
+            appendLog(videoConcatReadinessMessage, level: .warning)
+            return
+        }
+        videoConcatActive = true
+        videoConcatStatus = "連結を準備しています…"
+        videoConcatProgress = 0
+        videoConcatProgressMessage = ""
+        videoConcatLastResult = ""
+        saveSettings()
+        bridge.request(
+            "run_video_concat",
+            payload: [
+                "inputFiles": videoConcatFiles,
+                "outputPath": videoConcatOutputPath.trimmingCharacters(in: .whitespacesAndNewlines),
+                "bitrate": videoConcatBitrate,
+                "codec": videoConcatCodec,
+                "fps": videoConcatFPS,
+                "safeMode": videoConcatSafeMode,
+                "applyEnhancement": videoConcatEnhancement,
+                "fixedPatternPath": videoConcatEnhancement ? rtspFixedPatternPath : "",
+                "timestampSettings": [
+                    "enabled": videoConcatTimestampEnabled,
+                    "position": videoConcatTimestampPosition,
+                    "size_percent": videoConcatTimestampSizePercent,
+                    "offset_seconds": videoConcatTimestampOffsetSeconds,
+                ],
+            ]
+        ) { [weak self] result in
+            guard let self else { return }
+            if case .failure(let error) = result {
+                self.videoConcatActive = false
+                self.videoConcatStatus = "連結を開始できませんでした: \(error.localizedDescription)"
+                self.videoConcatLastResult = self.videoConcatStatus
+                self.appendLog(self.videoConcatStatus, level: .error)
+            }
+        }
+    }
+
+    func cancelVideoConcat() {
+        guard videoConcatActive else { return }
+        videoConcatStatus = "停止要求を送信しました…"
+        bridge.request("cancel") { [weak self] result in
+            if case .failure(let error) = result {
+                self?.appendLog(error.localizedDescription, level: .warning)
+            }
+        }
+    }
+
     func startDetection() {
         guard settingsLoaded else {
             appendLog("設定を読み込んでいます。少し待ってから再試行してください。", level: .warning)
@@ -751,6 +901,18 @@ final class WorkspaceStore: ObservableObject {
                     "noise_twin_model_path": noiseTwinModelPath,
                     "temporal_mean_frames": temporalMeanFrames,
                     "rtsp_save_temporal_mean": saveTemporalMeanVideo,
+                    "video_concat_settings": [
+                        "bitrate": videoConcatBitrate,
+                        "codec": videoConcatCodec,
+                        "fps": videoConcatFPS,
+                        "safe_mode": videoConcatSafeMode,
+                        "apply_enhancement": videoConcatEnhancement,
+                        "timestamp_enabled": videoConcatTimestampEnabled,
+                        "timestamp_position": videoConcatTimestampPosition,
+                        "timestamp_size_percent": String(videoConcatTimestampSizePercent),
+                        "timestamp_offset_seconds": String(videoConcatTimestampOffsetSeconds),
+                    ],
+                    "video_concat_output_path": videoConcatOutputPath,
                 ],
             ]
         ) { [weak self] result in
@@ -1180,6 +1342,27 @@ final class WorkspaceStore: ObservableObject {
             handleCameraModelResult(envelope.payload)
         case "fixed_pattern_result":
             handleFixedPatternResult(envelope.payload)
+        case "video_concat_progress":
+            videoConcatProgress = max(0, min(1, doubleValue(envelope.payload["fraction"], default: 0)))
+            videoConcatProgressMessage = envelope.payload["message"] as? String ?? ""
+            if !videoConcatProgressMessage.isEmpty {
+                videoConcatStatus = videoConcatProgressMessage
+            }
+        case "video_concat_result":
+            let success = boolValue(envelope.payload["success"], default: false)
+            let cancelled = boolValue(envelope.payload["cancelled"], default: false)
+            let message = envelope.payload["message"] as? String ?? ""
+            if let outputPath = envelope.payload["outputPath"] as? String, !outputPath.isEmpty {
+                videoConcatOutputPath = outputPath
+            }
+            videoConcatProgress = success ? 1 : videoConcatProgress
+            videoConcatLastResult = message
+            videoConcatStatus = cancelled ? "連結を停止しました" : success ? "連結が完了しました" : "連結に失敗しました"
+            if !message.isEmpty {
+                appendLog(message, level: success ? .info : cancelled ? .warning : .error)
+            }
+        case "video_concat_state":
+            handleVideoConcatState(envelope.payload)
         case "run_state":
             let state = envelope.payload["state"] as? String ?? "idle"
             switch state {
@@ -1259,6 +1442,35 @@ final class WorkspaceStore: ObservableObject {
             default:
                 break
             }
+        default:
+            break
+        }
+    }
+
+    private func handleVideoConcatState(_ payload: [String: Any]) {
+        let state = payload["state"] as? String ?? "idle"
+        switch state {
+        case "preparing":
+            videoConcatActive = true
+            videoConcatStatus = "連結を準備しています…"
+        case "running":
+            videoConcatActive = true
+            if videoConcatProgressMessage.isEmpty {
+                videoConcatStatus = "連結を開始しました…"
+            }
+        case "cancelling":
+            videoConcatActive = true
+            videoConcatStatus = "停止処理を実行しています…"
+        case "completed":
+            videoConcatActive = false
+            videoConcatProgress = 1
+            videoConcatStatus = "連結が完了しました"
+        case "cancelled":
+            videoConcatActive = false
+            videoConcatStatus = "連結を停止しました"
+        case "failed":
+            videoConcatActive = false
+            videoConcatStatus = payload["error"] as? String ?? "連結に失敗しました"
         default:
             break
         }
@@ -1428,6 +1640,26 @@ final class WorkspaceStore: ObservableObject {
         if let options = settings["save_options"] as? [String: Any] {
             for key in saveOptions.keys {
                 if let value = options[key] { saveOptions[key] = boolValue(value, default: saveOptions[key] ?? true) }
+            }
+        }
+        if let concat = settings["video_concat_settings"] as? [String: Any] {
+            let savedBitrate = concat["bitrate"] as? String ?? "Auto"
+            let allowedBitrates = ["Auto", "1000k", "2000k", "4000k", "8000k", "12000k", "16000k", "20000k"]
+            videoConcatBitrate = allowedBitrates.contains(savedBitrate) ? savedBitrate : "Auto"
+            let savedCodec = concat["codec"] as? String ?? "h264"
+            videoConcatCodec = ["h264", "h265"].contains(savedCodec) ? savedCodec : "h264"
+            let savedFPS = concat["fps"] as? String ?? "Auto"
+            videoConcatFPS = savedFPS == "Auto" || ["15", "24", "25", "30", "60"].contains(savedFPS) ? savedFPS : "Auto"
+            videoConcatSafeMode = boolValue(concat["safe_mode"], default: true)
+            videoConcatEnhancement = boolValue(concat["apply_enhancement"], default: false)
+            videoConcatTimestampEnabled = boolValue(concat["timestamp_enabled"], default: true)
+            let savedPosition = concat["timestamp_position"] as? String ?? "右下"
+            videoConcatTimestampPosition = ["右下", "左下", "右上", "左上"].contains(savedPosition) ? savedPosition : "右下"
+            videoConcatTimestampSizePercent = max(0.8, min(4.0, doubleValue(concat["timestamp_size_percent"], default: 1.8)))
+            videoConcatTimestampOffsetSeconds = max(-86_400, min(86_400, doubleValue(concat["timestamp_offset_seconds"], default: 0)))
+            if let savedOutputPath = settings["video_concat_output_path"] as? String,
+               !savedOutputPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                videoConcatOutputPath = savedOutputPath
             }
         }
         if !restored.isEmpty {

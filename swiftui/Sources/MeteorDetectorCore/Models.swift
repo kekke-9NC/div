@@ -4,6 +4,7 @@ public enum AppSection: String, CaseIterable, Identifiable, Hashable {
     case overview
     case capture
     case analysis
+    case tools
     case results
     case settings
     case activity
@@ -15,6 +16,7 @@ public enum AppSection: String, CaseIterable, Identifiable, Hashable {
         case .overview: return "概要"
         case .capture: return "入力ソース"
         case .analysis: return "検出と解析"
+        case .tools: return "ツール"
         case .results: return "結果"
         case .settings: return "設定"
         case .activity: return "アクティビティ"
@@ -26,6 +28,7 @@ public enum AppSection: String, CaseIterable, Identifiable, Hashable {
         case .overview: return "観測ワークスペース"
         case .capture: return "動画・フォルダ・RTSP"
         case .analysis: return "処理の開始と進捗"
+        case .tools: return "動画編集・解析"
         case .results: return "候補一覧とプレビュー"
         case .settings: return "保存先と処理条件"
         case .activity: return "イベントログと状態"
@@ -37,6 +40,7 @@ public enum AppSection: String, CaseIterable, Identifiable, Hashable {
         case .overview: return "sparkles"
         case .capture: return "tray.and.arrow.down"
         case .analysis: return "scope"
+        case .tools: return "hammer"
         case .results: return "photo.on.rectangle.angled"
         case .settings: return "slider.horizontal.3"
         case .activity: return "waveform.path.ecg"

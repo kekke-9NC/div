@@ -26,6 +26,7 @@ struct RootView: View {
         case .overview: DashboardView()
         case .capture: SourceView()
         case .analysis: AnalysisView()
+        case .tools: ToolsView()
         case .results: ResultsView()
         case .settings: SettingsView()
         case .activity: ActivityView()
