@@ -246,6 +246,69 @@ def test_detection_mask_rejects_missing_payload_file(tmp_path):
         raise AssertionError("missing detection mask should fail")
 
 
+def test_fixed_pattern_validation_accepts_current_and_legacy_npz(tmp_path):
+    import numpy as np
+
+    from swift_backend import Bridge
+
+    current_path = tmp_path / "current.npz"
+    np.savez(current_path, fixed_correction=np.zeros((5, 7), dtype=np.int16))
+    current = Bridge(tmp_path)._validate_fixed_pattern_payload({"path": str(current_path)})
+    assert current["valid"] is True
+    assert current["width"] == 7
+    assert current["height"] == 5
+    assert current["method"] == "fixed_correction"
+
+    legacy_path = tmp_path / "legacy.npz"
+    np.savez(legacy_path, dark_frame=np.zeros((3, 4), dtype=np.uint8))
+    legacy = Bridge(tmp_path)._validate_fixed_pattern_payload({"path": str(legacy_path)})
+    assert legacy["method"] == "dark_frame"
+    assert legacy["width"] == 4
+    assert legacy["height"] == 3
+    correction, key = Bridge(tmp_path)._read_fixed_pattern_correction(str(legacy_path))
+    assert key == "dark_frame"
+    assert correction.dtype == np.uint8
+
+
+def test_fixed_pattern_validation_rejects_missing_array(tmp_path):
+    import numpy as np
+
+    from swift_backend import Bridge
+
+    path = tmp_path / "invalid.npz"
+    np.savez(path, unrelated=np.zeros((2, 2), dtype=np.uint8))
+    try:
+        Bridge(tmp_path)._validate_fixed_pattern_payload({"path": str(path)})
+    except ValueError as exc:
+        assert "fixed_correction" in str(exc)
+    else:
+        raise AssertionError("invalid fixed-pattern archive should fail")
+
+
+def test_fixed_pattern_build_payload_validates_source_modes(tmp_path):
+    from swift_backend import Bridge
+
+    video = tmp_path / "dark.mp4"
+    video.write_bytes(b"placeholder")
+    bridge = Bridge(tmp_path)
+    payload = bridge._validated_fixed_pattern_build_payload(
+        {"mode": "video", "source": str(video), "samples": 90}
+    )
+    assert payload["mode"] == "video"
+    assert payload["source"] == str(video.resolve())
+    assert payload["samples"] == 90
+    assert payload["output"].endswith("rtsp_dark_frame.npz")
+
+    try:
+        bridge._validated_fixed_pattern_build_payload(
+            {"mode": "url", "source": "https://example.invalid/live"}
+        )
+    except ValueError as exc:
+        assert "RTSP" in str(exc)
+    else:
+        raise AssertionError("non-RTSP calibration source should fail")
+
+
 def test_save_mask_from_strokes_writes_legacy_npz(tmp_path):
     import numpy as np
 
@@ -325,6 +388,8 @@ def test_detection_mask_is_passed_to_all_run_modes(tmp_path):
 
     mask_path = tmp_path / "app_masks.npz"
     np.savez(mask_path, mask_image=np.full((2, 2), 255, dtype=np.uint8))
+    fixed_pattern_path = tmp_path / "rtsp_dark_frame.npz"
+    np.savez(fixed_pattern_path, fixed_correction=np.ones((2, 2), dtype=np.int16))
     calls = {}
 
     def fake_pipeline(**kwargs):
@@ -345,6 +410,8 @@ def test_detection_mask_is_passed_to_all_run_modes(tmp_path):
     payload = {
         "applyMask": True,
         "maskPath": str(mask_path),
+        "applyFixedPattern": True,
+        "fixedPatternPath": str(fixed_pattern_path),
         "saveOptions": Bridge._default_save_options(),
         "summaryConfig": Bridge._default_summary_config(),
         "meteorSavePath": str(tmp_path / "meteor"),
@@ -377,6 +444,8 @@ def test_detection_mask_is_passed_to_all_run_modes(tmp_path):
 
     for call in calls.values():
         assert call["mask"].tolist() == [[255, 255], [255, 255]]
+        correction = call.get("fixed_pattern_correction", call.get("dark_frame"))
+        assert correction.tolist() == [[1, 1], [1, 1]]
 
 
 def test_rtsp_preset_and_fps_are_applied_temporarily():
@@ -597,6 +666,7 @@ def test_legacy_feature_settings_are_reported_to_the_swiftui_frontend(tmp_path):
         json.dumps(
             {
                 "summary_video_config": [{"name": "Composite Image", "enabled": False}],
+                "apply_rtsp_dark": True,
                 "rtsp_time_limit_enabled": True,
                 "rtsp_notification_sound": False,
                 "rtsp_preset": "clear",
@@ -624,6 +694,7 @@ def test_legacy_feature_settings_are_reported_to_the_swiftui_frontend(tmp_path):
     assert "動画連結設定" in unsupported
     assert "定期スキャン" not in unsupported
     assert "RTSP時間制限" not in unsupported
+    assert "RTSP固定パターン補正" not in unsupported
     assert "RTSP検出通知音" not in unsupported
     assert "RTSPプリセット" not in unsupported
     assert "RTSPフレームレート" not in unsupported
@@ -670,11 +741,15 @@ def test_periodic_scan_emits_cancelled_state(tmp_path):
 
 
 def test_rtsp_payload_is_normalized_before_worker_starts(tmp_path):
+    import numpy as np
+
     from swift_backend import Bridge
 
     output = io.StringIO()
     bridge = Bridge(tmp_path, protocol_stdout=output)
     captured = {}
+    fixed_pattern_path = tmp_path / "rtsp_dark_frame.npz"
+    np.savez(fixed_pattern_path, fixed_correction=np.zeros((2, 2), dtype=np.int16))
 
     def fake_run(payload, cancel_event):
         captured.update(payload)
@@ -692,6 +767,8 @@ def test_rtsp_payload_is_normalized_before_worker_starts(tmp_path):
                 "endHour": 6,
                 "endMinute": 40,
                 "notifyOnDetection": False,
+                "applyFixedPattern": True,
+                "fixedPatternPath": str(fixed_pattern_path),
                 "summaryConfig": [
                     {"name": "Composite Image", "enabled": False, "duration": 3.5},
                     {"name": "Full Size Video", "enabled": True},
@@ -718,6 +795,8 @@ def test_rtsp_payload_is_normalized_before_worker_starts(tmp_path):
     assert captured["notifyOnDetection"] is False
     assert captured["rtspPreset"] == "clear"
     assert captured["rtspFps"] == 30
+    assert captured["applyFixedPattern"] is True
+    assert captured["fixedPatternPath"] == str(fixed_pattern_path.resolve())
     assert captured["summaryConfig"] == [
         {"name": "Composite Image", "enabled": False, "duration": 3.5},
         {"name": "Full Size Video", "enabled": True},

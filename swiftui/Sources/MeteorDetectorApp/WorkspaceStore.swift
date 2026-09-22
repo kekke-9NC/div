@@ -10,6 +10,13 @@ enum DetectionMaskValidation: Equatable {
     case invalid(String)
 }
 
+enum FixedPatternValidation: Equatable {
+    case unknown
+    case validating
+    case valid
+    case invalid(String)
+}
+
 @MainActor
 final class WorkspaceStore: ObservableObject {
     @Published var selection: AppSection = .overview
@@ -71,6 +78,25 @@ final class WorkspaceStore: ObservableObject {
     @Published var rtspNotificationSound = true
     @Published var rtspPreset = "cloudy"
     @Published var rtspFPS = 25
+    @Published var rtspFixedPatternEnabled = false {
+        didSet {
+            rtspFixedPatternValidation = .unknown
+            fixedPatternValidationGeneration &+= 1
+        }
+    }
+    @Published var rtspFixedPatternPath: String {
+        didSet {
+            rtspFixedPatternValidation = .unknown
+            fixedPatternValidationGeneration &+= 1
+        }
+    }
+    @Published var rtspFixedPatternSamples = 360
+    @Published private(set) var rtspFixedPatternValidation: FixedPatternValidation = .unknown
+    @Published private(set) var fixedPatternBuildActive = false
+    @Published private(set) var fixedPatternBuildStatus = "未実行"
+    @Published private(set) var fixedPatternBuildProgress = ""
+    @Published private(set) var fixedPatternBuildPreviewPath = ""
+    @Published private(set) var fixedPatternBuildSavingSettings = false
     @Published var selectedModelPath = ""
     @Published var noiseTwinEnabled = false
     @Published var noiseTwinModelPath = ""
@@ -90,6 +116,7 @@ final class WorkspaceStore: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
     private var resultsRefreshGeneration = 0
     private var detectionMaskValidationGeneration = 0
+    private var fixedPatternValidationGeneration = 0
     private var settingsSaveGeneration = 0
     private var settingsSaveCompletions: [(Result<Void, BridgeError>) -> Void] = []
     private var activeRunToken = UUID()
@@ -126,6 +153,7 @@ final class WorkspaceStore: ObservableObject {
         self.notMeteorSavePath = resolvedRoot.appendingPathComponent("not_meteor").path
         self.saveOptions = LegacySettings().saveOptions
         self.detectionMaskPath = resolvedRoot.appendingPathComponent("app_masks.npz").path
+        self.rtspFixedPatternPath = resolvedRoot.appendingPathComponent("rtsp_dark_frame.npz").path
 
         let bridge = PythonBridge(rootURL: resolvedRoot)
         self.bridge = bridge
@@ -172,13 +200,14 @@ final class WorkspaceStore: ObservableObject {
         }
     }
 
-    var isBusy: Bool { runState.isActive }
+    var isBusy: Bool { runState.isActive || cameraModelBuildActive || fixedPatternBuildActive }
 
     var canStart: Bool {
         guard settingsLoaded, connection == .connected, !isBusy else { return false }
         guard detectionMaskIsValid, summaryVideoSelectionIsValid else { return false }
         guard selectedModelConfigurationIsValid else { return false }
         guard plateSolveConfigurationIsValid else { return false }
+        guard fixedPatternConfigurationIsValid else { return false }
         guard noiseTwinConfigurationIsValid else { return false }
         guard unsupportedFeatures.isEmpty || allowReducedFeatureRun else { return false }
         guard let sourceType = selectedSourceType else { return false }
@@ -365,6 +394,33 @@ final class WorkspaceStore: ObservableObject {
         }
     }
 
+    var fixedPatternConfigurationIsValid: Bool {
+        guard rtspFixedPatternEnabled else { return true }
+        guard URL(fileURLWithPath: rtspFixedPatternPath).pathExtension.lowercased() == "npz",
+              FileManager.default.fileExists(atPath: rtspFixedPatternPath) else {
+            return false
+        }
+        return rtspFixedPatternValidation == .valid
+    }
+
+    var fixedPatternStatusMessage: String {
+        guard rtspFixedPatternEnabled else { return "無効" }
+        guard URL(fileURLWithPath: rtspFixedPatternPath).pathExtension.lowercased() == "npz" else {
+            return ".npz形式の補正マップを選択してください"
+        }
+        guard FileManager.default.fileExists(atPath: rtspFixedPatternPath) else {
+            return "固定パターン補正ファイルが見つかりません"
+        }
+        switch rtspFixedPatternValidation {
+        case .unknown, .validating:
+            return "固定パターン補正を確認しています…"
+        case .valid:
+            return "固定パターン補正を使用できます"
+        case .invalid(let message):
+            return message
+        }
+    }
+
     var readinessMessage: String {
         if connection != .connected { return "処理エンジンを接続しています" }
         if !unsupportedFeatures.isEmpty && !allowReducedFeatureRun {
@@ -375,6 +431,7 @@ final class WorkspaceStore: ObservableObject {
         }
         if !selectedModelConfigurationIsValid { return selectedModelStatusMessage }
         if !plateSolveConfigurationIsValid { return plateSolveStatusMessage }
+        if !fixedPatternConfigurationIsValid { return fixedPatternStatusMessage }
         if !noiseTwinConfigurationIsValid { return noiseTwinStatusMessage }
         if !summaryVideoSelectionIsValid { return "出力構成を1つ以上選択してください" }
         guard let sourceType = selectedSourceType else {
@@ -489,6 +546,11 @@ final class WorkspaceStore: ObservableObject {
         }
         guard plateSolveConfigurationIsValid else {
             appendLog(plateSolveStatusMessage, level: .warning)
+            selection = .settings
+            return
+        }
+        guard fixedPatternConfigurationIsValid else {
+            appendLog(fixedPatternStatusMessage, level: .warning)
             selection = .settings
             return
         }
@@ -681,6 +743,9 @@ final class WorkspaceStore: ObservableObject {
                     "rtsp_notification_sound": rtspNotificationSound,
                     "rtsp_preset": rtspPreset,
                     "rtsp_fps": String(rtspFPS),
+                    "apply_rtsp_dark": rtspFixedPatternEnabled,
+                    "rtsp_fixed_pattern_path": rtspFixedPatternPath,
+                    "rtsp_fixed_pattern_samples": rtspFixedPatternSamples,
                     "selected_model_path": selectedModelPath,
                     "noise_twin_enabled": noiseTwinEnabled,
                     "noise_twin_model_path": noiseTwinModelPath,
@@ -728,6 +793,84 @@ final class WorkspaceStore: ObservableObject {
                 self.detectionMaskValidation = .valid
             case .failure(let error):
                 self.detectionMaskValidation = .invalid(error.localizedDescription)
+            }
+        }
+    }
+
+    func validateFixedPattern() {
+        guard rtspFixedPatternEnabled else {
+            rtspFixedPatternValidation = .valid
+            return
+        }
+        guard URL(fileURLWithPath: rtspFixedPatternPath).pathExtension.lowercased() == "npz",
+              FileManager.default.fileExists(atPath: rtspFixedPatternPath) else {
+            disableInvalidFixedPattern(fixedPatternStatusMessage)
+            return
+        }
+        rtspFixedPatternValidation = .validating
+        fixedPatternValidationGeneration &+= 1
+        let generation = fixedPatternValidationGeneration
+        bridge.request("validate_fixed_pattern", payload: ["path": rtspFixedPatternPath]) { [weak self] result in
+            guard let self, self.fixedPatternValidationGeneration == generation else { return }
+            switch result {
+            case .success:
+                self.rtspFixedPatternValidation = .valid
+            case .failure(let error):
+                self.disableInvalidFixedPattern(error.localizedDescription)
+            }
+        }
+    }
+
+    private func disableInvalidFixedPattern(_ message: String) {
+        let wasEnabled = rtspFixedPatternEnabled
+        rtspFixedPatternEnabled = false
+        rtspFixedPatternValidation = .invalid(message)
+        guard wasEnabled else { return }
+        appendLog("固定パターン補正を無効にしました: \(message)", level: .warning)
+        if settingsLoaded {
+            saveSettings()
+        }
+    }
+
+    func startFixedPatternBuild(mode: String, source: String) {
+        guard !fixedPatternBuildActive else { return }
+        let trimmedSource = source.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedSource.isEmpty else {
+            fixedPatternBuildStatus = "固定パターン作成の入力を選択してください"
+            return
+        }
+        fixedPatternBuildActive = true
+        fixedPatternBuildSavingSettings = false
+        fixedPatternBuildStatus = "固定パターン補正の作成を準備しています…"
+        fixedPatternBuildProgress = ""
+        fixedPatternBuildPreviewPath = ""
+        bridge.request(
+            "build_fixed_pattern",
+            payload: [
+                "mode": mode,
+                "source": trimmedSource,
+                "output": rtspFixedPatternPath,
+                "samples": rtspFixedPatternSamples,
+                "duration": 30.0,
+                "randomSeed": 0,
+            ]
+        ) { [weak self] result in
+            guard let self else { return }
+            if case .failure(let error) = result {
+                self.fixedPatternBuildActive = false
+                self.fixedPatternBuildSavingSettings = false
+                self.fixedPatternBuildStatus = "作成を開始できませんでした: \(error.localizedDescription)"
+                self.appendLog(self.fixedPatternBuildStatus, level: .error)
+            }
+        }
+    }
+
+    func cancelFixedPatternBuild() {
+        guard fixedPatternBuildActive else { return }
+        fixedPatternBuildStatus = "停止要求を送信しました…"
+        bridge.request("cancel") { [weak self] result in
+            if case .failure(let error) = result {
+                self?.appendLog(error.localizedDescription, level: .warning)
             }
         }
     }
@@ -941,6 +1084,8 @@ final class WorkspaceStore: ObservableObject {
             "maskPath": detectionMaskPath,
             "modelPath": selectedModelPath,
             "plateSolveWCSPath": plateSolveEnabled ? plateSolvePath : "",
+            "applyFixedPattern": rtspFixedPatternEnabled,
+            "fixedPatternPath": rtspFixedPatternPath,
             "noiseTwinOptions": [
                 "enabled": noiseTwinEnabled,
                 "modelPath": noiseTwinModelPath,
@@ -1022,6 +1167,10 @@ final class WorkspaceStore: ObservableObject {
                 cameraModelBuildProgress = message
                 cameraModelBuildStatus = message
             }
+            if fixedPatternBuildActive, !message.isEmpty {
+                fixedPatternBuildProgress = message
+                fixedPatternBuildStatus = message
+            }
         case "status":
             let pending = intValue(envelope.payload["pending_sources"], default: 0)
             let queue = intValue(envelope.payload["download_queue_size"], default: 0)
@@ -1029,6 +1178,8 @@ final class WorkspaceStore: ObservableObject {
             queueStatus = "処理中 \(busy) / 待機 \(pending + queue)"
         case "camera_model_result":
             handleCameraModelResult(envelope.payload)
+        case "fixed_pattern_result":
+            handleFixedPatternResult(envelope.payload)
         case "run_state":
             let state = envelope.payload["state"] as? String ?? "idle"
             switch state {
@@ -1038,21 +1189,33 @@ final class WorkspaceStore: ObservableObject {
                 if cameraModelBuildActive {
                     cameraModelBuildStatus = "高精度モデルの作成を準備しています…"
                 }
+                if fixedPatternBuildActive {
+                    fixedPatternBuildStatus = "固定パターン補正の作成を準備しています…"
+                }
             case "running":
                 runState = .running
                 if cameraModelBuildActive && cameraModelBuildProgress.isEmpty {
                     cameraModelBuildStatus = "高精度モデルを作成しています…"
+                }
+                if fixedPatternBuildActive && fixedPatternBuildProgress.isEmpty {
+                    fixedPatternBuildStatus = "固定パターン補正を作成しています…"
                 }
             case "cancelling":
                 runState = .cancelling
                 if cameraModelBuildActive {
                     cameraModelBuildStatus = "高精度モデルの停止を待っています…"
                 }
+                if fixedPatternBuildActive {
+                    fixedPatternBuildStatus = "固定パターン補正の停止を待っています…"
+                }
             case "completed":
                 runState = .completed
                 progress = nil
                 if !cameraModelBuildSavingSettings {
                     cameraModelBuildActive = false
+                }
+                if !fixedPatternBuildSavingSettings {
+                    fixedPatternBuildActive = false
                 }
                 refreshResults()
             case "cancelled":
@@ -1063,6 +1226,11 @@ final class WorkspaceStore: ObservableObject {
                     cameraModelBuildSavingSettings = false
                     cameraModelBuildStatus = "高精度モデルの作成を停止しました"
                 }
+                if fixedPatternBuildActive {
+                    fixedPatternBuildActive = false
+                    fixedPatternBuildSavingSettings = false
+                    fixedPatternBuildStatus = "固定パターン補正の作成を停止しました"
+                }
             case "failed":
                 runState = .failed(envelope.payload["error"] as? String ?? "処理に失敗しました")
                 progress = nil
@@ -1070,6 +1238,11 @@ final class WorkspaceStore: ObservableObject {
                     cameraModelBuildActive = false
                     cameraModelBuildSavingSettings = false
                     cameraModelBuildStatus = envelope.payload["error"] as? String ?? "高精度モデルの作成に失敗しました"
+                }
+                if fixedPatternBuildActive {
+                    fixedPatternBuildActive = false
+                    fixedPatternBuildSavingSettings = false
+                    fixedPatternBuildStatus = envelope.payload["error"] as? String ?? "固定パターン補正の作成に失敗しました"
                 }
             case "discovery_completed":
                 if case .cancelling = runState {
@@ -1138,6 +1311,38 @@ final class WorkspaceStore: ObservableObject {
         }
     }
 
+    private func handleFixedPatternResult(_ payload: [String: Any]) {
+        let path = payload["path"] as? String ?? ""
+        guard !path.isEmpty else {
+            fixedPatternBuildStatus = "固定パターン補正の保存先を確認できませんでした"
+            return
+        }
+        rtspFixedPatternPath = path
+        rtspFixedPatternEnabled = true
+        fixedPatternBuildPreviewPath = payload["preview_path"] as? String ?? ""
+        rtspFixedPatternValidation = .valid
+        fixedPatternBuildSavingSettings = true
+        let width = intValue(payload["width"], default: 0)
+        let height = intValue(payload["height"], default: 0)
+        fixedPatternBuildStatus = width > 0 && height > 0
+            ? "固定パターン補正を登録し、設定を保存しています（\(width)×\(height)）…"
+            : "固定パターン補正を登録し、設定を保存しています…"
+        saveSettings { [weak self] result in
+            guard let self else { return }
+            self.fixedPatternBuildSavingSettings = false
+            self.fixedPatternBuildActive = false
+            switch result {
+            case .success:
+                self.fixedPatternBuildStatus = width > 0 && height > 0
+                    ? "固定パターン補正を登録しました（\(width)×\(height)）"
+                    : "固定パターン補正を登録しました"
+            case .failure(let error):
+                self.fixedPatternBuildStatus = "補正マップは作成されましたが設定保存に失敗しました: \(error.localizedDescription)"
+                self.appendLog(self.fixedPatternBuildStatus, level: .warning)
+            }
+        }
+    }
+
     private func applySettings(_ settings: [String: Any], unsupported: [String]) {
         unsupportedFeatures = unsupported
         if !unsupported.isEmpty {
@@ -1194,6 +1399,14 @@ final class WorkspaceStore: ObservableObject {
         let savedPreset = settings["rtsp_preset"] as? String ?? "cloudy"
         rtspPreset = savedPreset == "clear" ? "clear" : "cloudy"
         rtspFPS = max(1, min(120, intValue(settings["rtsp_fps"], default: 25)))
+        if let savedFixedPatternPath = settings["rtsp_fixed_pattern_path"] as? String,
+           !savedFixedPatternPath.isEmpty {
+            rtspFixedPatternPath = savedFixedPatternPath
+        }
+        rtspFixedPatternSamples = [90, 180, 360].contains(intValue(settings["rtsp_fixed_pattern_samples"], default: 360))
+            ? intValue(settings["rtsp_fixed_pattern_samples"], default: 360)
+            : 360
+        rtspFixedPatternEnabled = boolValue(settings["apply_rtsp_dark"], default: false)
         let savedModelPath = (settings["selected_model_path"] as? String ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         if !savedModelPath.isEmpty,
@@ -1221,6 +1434,7 @@ final class WorkspaceStore: ObservableObject {
             appendLog("前回の入力設定を復元しました。")
         }
         validateDetectionMask()
+        validateFixedPattern()
         refreshResults()
         settingsLoaded = true
     }

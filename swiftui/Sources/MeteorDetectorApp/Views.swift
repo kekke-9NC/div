@@ -957,6 +957,7 @@ struct SettingsView: View {
     @EnvironmentObject private var store: WorkspaceStore
     @StateObject private var maskEditor = MaskEditorState()
     @StateObject private var cameraModelBuilder = CameraModelBuilderDraft()
+    @StateObject private var fixedPatternBuilder = FixedPatternBuilderDraft()
 
     var body: some View {
         ScrollView {
@@ -1405,6 +1406,60 @@ struct SettingsView: View {
                         Toggle("流星検出時に通知音を鳴らす", isOn: $store.rtspNotificationSound)
                             .toggleStyle(.switch)
                             .tint(AppTheme.accent)
+
+                        Divider().overlay(AppTheme.border)
+                        HStack(alignment: .top) {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("固定パターン補正")
+                                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                                    .foregroundStyle(AppTheme.text)
+                                Text("センサーの細かなムラを検出前に補正します。既存の旧形式NPZも利用できます。")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(AppTheme.tertiaryText)
+                            }
+                            Spacer()
+                            Toggle("適用", isOn: $store.rtspFixedPatternEnabled)
+                                .labelsHidden()
+                                .toggleStyle(.switch)
+                                .tint(AppTheme.accent)
+                                .onChange(of: store.rtspFixedPatternEnabled) { _, _ in
+                                    store.saveSettings()
+                                    store.validateFixedPattern()
+                                }
+                        }
+                        HStack(spacing: 10) {
+                            TextField("rtsp_dark_frame.npz", text: $store.rtspFixedPatternPath)
+                                .textFieldStyle(.roundedBorder)
+                                .disabled(true)
+                            Button("選択") {
+                                chooseFixedPatternFile {
+                                    store.rtspFixedPatternPath = $0
+                                    store.rtspFixedPatternEnabled = true
+                                    store.saveSettings()
+                                    store.validateFixedPattern()
+                                }
+                            }
+                            .buttonStyle(.bordered)
+                            .disabled(store.fixedPatternBuildActive)
+                            Button("作成") {
+                                fixedPatternBuilder.mode = store.rtspSourceCount > 0 ? .url : .directory
+                                fixedPatternBuilder.isPresented = true
+                            }
+                            .buttonStyle(.bordered)
+                            .disabled(store.fixedPatternBuildActive)
+                            Button("開く") {
+                                guard store.fixedPatternConfigurationIsValid else { return }
+                                NSWorkspace.shared.open(URL(fileURLWithPath: store.rtspFixedPatternPath))
+                            }
+                            .buttonStyle(.bordered)
+                            .disabled(store.fixedPatternBuildActive || !store.fixedPatternConfigurationIsValid)
+                        }
+                        Label(
+                            store.fixedPatternStatusMessage,
+                            systemImage: store.fixedPatternConfigurationIsValid ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"
+                        )
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(store.fixedPatternConfigurationIsValid ? AppTheme.success : AppTheme.warning)
                     }
                 }
 
@@ -1489,6 +1544,10 @@ struct SettingsView: View {
             CameraModelBuilderView(draft: cameraModelBuilder)
                 .environmentObject(store)
         }
+        .sheet(isPresented: $fixedPatternBuilder.isPresented) {
+            FixedPatternBuilderView(draft: fixedPatternBuilder)
+                .environmentObject(store)
+        }
     }
 
     private func coordinateField(title: String, value: Binding<Double>) -> some View {
@@ -1514,6 +1573,18 @@ struct SettingsView: View {
     }
 
     private func chooseMaskFile(_ completion: @escaping (String) -> Void) {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [UTType(filenameExtension: "npz")].compactMap { $0 }
+        panel.prompt = "選択"
+        if panel.runModal() == .OK, let url = panel.url {
+            completion(url.path)
+        }
+    }
+
+    private func chooseFixedPatternFile(_ completion: @escaping (String) -> Void) {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = false
         panel.canChooseFiles = true
@@ -1695,9 +1766,10 @@ struct ActivityView: View {
                 Spacer()
                 Button("ログを消去", role: .destructive) {
                     store.logs.removeAll()
-                }
-                .buttonStyle(.bordered)
-            }
+                            }
+                            .buttonStyle(.bordered)
+                            .disabled(store.fixedPatternBuildActive)
+                        }
             .padding(34)
             Divider().overlay(AppTheme.border)
             if store.logs.isEmpty {

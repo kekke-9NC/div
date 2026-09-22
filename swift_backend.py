@@ -20,9 +20,12 @@ import argparse
 import json
 import math
 import os
+import queue
+import subprocess
 import sys
 import tempfile
 import threading
+import time
 import traceback
 from contextlib import contextmanager
 from urllib.parse import urlparse
@@ -134,6 +137,9 @@ class Bridge:
             elif command == "save_mask":
                 saved_path = self._save_mask_from_strokes(payload)
                 self.response(request_id, {"saved": True, "path": saved_path})
+            elif command == "validate_fixed_pattern":
+                details = self._validate_fixed_pattern_payload(payload)
+                self.response(request_id, details)
             elif command == "save_settings":
                 settings = payload.get("settings") or {}
                 self._save_settings(settings)
@@ -148,6 +154,8 @@ class Bridge:
                 self._start_rtsp_run(request_id, payload)
             elif command == "build_camera_model":
                 self._start_camera_model_build(request_id, payload)
+            elif command == "build_fixed_pattern":
+                self._start_fixed_pattern_build(request_id, payload)
             elif command == "cancel":
                 self._cancel()
                 self.response(request_id, {"accepted": True})
@@ -180,8 +188,6 @@ class Bridge:
     @staticmethod
     def _unsupported_features(settings: Dict[str, Any]) -> List[str]:
         unsupported: List[str] = []
-        if settings.get("apply_rtsp_dark"):
-            unsupported.append("RTSP固定パターン補正")
         if settings.get("advanced_settings"):
             unsupported.append("詳細パラメータ")
         if settings.get("camera_control_base_url") or settings.get("camera_control_ev_target"):
@@ -351,6 +357,12 @@ class Bridge:
                 normalized_payload["globalWCSInfo"] = self._validated_wcs_info(
                     payload.get("plateSolveWCSPath")
                 )
+                normalized_payload["applyFixedPattern"] = self._validated_bool(
+                    payload.get("applyFixedPattern"), default=False, name="applyFixedPattern"
+                )
+                normalized_payload["fixedPatternPath"] = self._validated_fixed_pattern_path(
+                    payload.get("fixedPatternPath"), normalized_payload["applyFixedPattern"]
+                )
                 normalized_payload["noiseTwinOptions"] = self._validated_noise_twin_options(
                     payload.get("noiseTwinOptions")
                 )
@@ -403,6 +415,12 @@ class Bridge:
                 )
                 normalized_payload["globalWCSInfo"] = self._validated_wcs_info(
                     payload.get("plateSolveWCSPath")
+                )
+                normalized_payload["applyFixedPattern"] = self._validated_bool(
+                    payload.get("applyFixedPattern"), default=False, name="applyFixedPattern"
+                )
+                normalized_payload["fixedPatternPath"] = self._validated_fixed_pattern_path(
+                    payload.get("fixedPatternPath"), normalized_payload["applyFixedPattern"]
                 )
                 normalized_payload["rtspPreset"] = self._validated_choice(
                     payload.get("rtspPreset"), {"cloudy", "clear"}, "cloudy", "rtspPreset"
@@ -469,6 +487,12 @@ class Bridge:
                 )
                 normalized_payload["globalWCSInfo"] = self._validated_wcs_info(
                     payload.get("plateSolveWCSPath")
+                )
+                normalized_payload["applyFixedPattern"] = self._validated_bool(
+                    payload.get("applyFixedPattern"), default=False, name="applyFixedPattern"
+                )
+                normalized_payload["fixedPatternPath"] = self._validated_fixed_pattern_path(
+                    payload.get("fixedPatternPath"), normalized_payload["applyFixedPattern"]
                 )
                 normalized_payload["noiseTwinOptions"] = self._validated_noise_twin_options(
                     payload.get("noiseTwinOptions")
@@ -647,6 +671,339 @@ class Bridge:
             self.log(f"高精度カメラ補正中にエラーが発生しました: {exc}", "error")
             traceback.print_exc(file=sys.stderr)
             self.event("run_state", {"state": "failed", "error": str(exc)})
+            self._release_run_thread()
+
+    def _validated_fixed_pattern_path(self, value: Any, enabled: bool) -> str:
+        """Validate a fixed-pattern NPZ selected by SwiftUI."""
+        if not enabled:
+            return ""
+        if value is None:
+            raw_path = str(self.root / "rtsp_dark_frame.npz")
+        elif isinstance(value, str) and value.strip():
+            raw_path = value.strip()
+        else:
+            raise ValueError("fixedPatternPath must be a non-empty string")
+        path = self._safe_path(raw_path, self.root)
+        if path.suffix.lower() != ".npz":
+            raise ValueError("固定パターン補正ファイルは.npz形式で指定してください")
+        if not path.is_file():
+            raise ValueError(f"固定パターン補正ファイルが見つかりません: {path}")
+        return str(path)
+
+    def _read_fixed_pattern_correction(self, path_value: Any) -> tuple[Any, str]:
+        """Read either the current signed correction or the legacy dark frame."""
+        path = self._safe_path(path_value, self.root / "rtsp_dark_frame.npz")
+        if not path.is_file():
+            raise ValueError(f"固定パターン補正ファイルが見つかりません: {path}")
+        try:
+            import numpy as np
+
+            with np.load(path, allow_pickle=False) as archive:
+                if "fixed_correction" in archive.files:
+                    key = "fixed_correction"
+                elif "dark_frame" in archive.files:
+                    key = "dark_frame"
+                else:
+                    raise ValueError(
+                        "固定パターン補正ファイルにfixed_correctionまたはdark_frameがありません"
+                    )
+                correction = np.asarray(archive[key]).copy()
+        except ValueError:
+            raise
+        except Exception as exc:
+            raise ValueError(f"固定パターン補正を読み込めませんでした: {exc}") from exc
+
+        if correction.ndim not in (2, 3) or correction.size == 0:
+            raise ValueError("固定パターン補正は空でない2次元または3次元画像である必要があります")
+        if correction.shape[0] > 16_384 or correction.shape[1] > 16_384:
+            raise ValueError("固定パターン補正のサイズが大きすぎます")
+        if int(correction.size) > 100_000_000:
+            raise ValueError("固定パターン補正のサイズが大きすぎます")
+        if not np.issubdtype(correction.dtype, np.number):
+            raise ValueError("固定パターン補正の画素形式が不正です")
+        if not np.isfinite(correction).all():
+            raise ValueError("固定パターン補正に有限でない画素があります")
+        if key == "dark_frame":
+            # The legacy UI explicitly converted old unsigned dark frames to
+            # uint8 before subtracting them. Keep that behavior for existing
+            # calibration files, including float/uint16 archives.
+            correction = correction.astype(np.uint8)
+        return correction, key
+
+    def _validate_fixed_pattern_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        raw_path = payload.get("path", payload.get("fixedPatternPath"))
+        path = self._validated_fixed_pattern_path(raw_path, True)
+        correction, key = self._read_fixed_pattern_correction(path)
+        return {
+            "valid": True,
+            "path": path,
+            "width": int(correction.shape[1]),
+            "height": int(correction.shape[0]),
+            "method": key,
+        }
+
+    def _validated_fixed_pattern_build_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        mode = payload.get("mode", "directory")
+        if not isinstance(mode, str) or mode not in {"url", "video", "directory"}:
+            raise ValueError("固定パターン作成の入力形式が不正です")
+        source_value = payload.get("source")
+        if not isinstance(source_value, str) or not source_value.strip():
+            raise ValueError("固定パターン作成の入力を選択してください")
+        if mode == "url":
+            parsed = urlparse(source_value.strip())
+            if parsed.scheme.lower() not in {"rtsp", "rtsps"} or not parsed.hostname:
+                raise ValueError("有効なRTSP URLがありません")
+            source = source_value.strip()
+        else:
+            source_path = self._safe_path(source_value, self.root)
+            if mode == "video" and not source_path.is_file():
+                raise ValueError(f"固定パターン動画が見つかりません: {source_path}")
+            if mode == "directory" and not source_path.is_dir():
+                raise ValueError(f"固定パターン動画フォルダが見つかりません: {source_path}")
+            source = str(source_path)
+
+        output_value = payload.get("output")
+        if output_value is None or not isinstance(output_value, str) or not output_value.strip():
+            output_path = self.root / "rtsp_dark_frame.npz"
+        else:
+            output_path = self._safe_path(output_value, self.root)
+        if output_path.suffix.lower() != ".npz":
+            raise ValueError("固定パターンの保存先は.npz形式で指定してください")
+
+        preview_value = payload.get("preview")
+        if preview_value is None or not isinstance(preview_value, str) or not preview_value.strip():
+            preview_path = output_path.with_name(f"{output_path.stem}_preview.jpg")
+        else:
+            preview_path = self._safe_path(preview_value, self.root)
+
+        samples = self._validated_int(payload.get("samples"), 10, 2_000, 360, "samples")
+        if samples not in {90, 180, 360}:
+            raise ValueError("samples must be 90, 180, or 360")
+        duration = payload.get("duration", 30.0)
+        if isinstance(duration, bool) or not isinstance(duration, (int, float)):
+            raise ValueError("duration must be a number")
+        duration = float(duration)
+        if not math.isfinite(duration) or not 5.0 <= duration <= 300.0:
+            raise ValueError("duration is out of range")
+        random_seed = self._validated_int(payload.get("randomSeed"), -1_000_000, 1_000_000, 0, "randomSeed")
+        return {
+            "mode": mode,
+            "source": source,
+            "output": str(output_path),
+            "preview": str(preview_path),
+            "samples": samples,
+            "duration": duration,
+            "randomSeed": random_seed,
+        }
+
+    def _start_fixed_pattern_build(self, request_id: str, payload: Dict[str, Any]) -> None:
+        with self._run_lock:
+            if self._run_thread is not None and self._run_thread.is_alive():
+                self.response(request_id, error="別の処理が実行中です")
+                return
+            try:
+                normalized_payload = self._validated_fixed_pattern_build_payload(payload)
+            except ValueError as exc:
+                self.response(request_id, error=str(exc))
+                return
+            self._cancel_event = threading.Event()
+            cancel_event = self._cancel_event
+            self._run_thread = threading.Thread(
+                target=self._build_fixed_pattern_worker,
+                args=(normalized_payload, cancel_event),
+                name="swiftui-fixed-pattern-builder",
+                daemon=True,
+            )
+            self._run_thread.start()
+        self.response(request_id, {"accepted": True, "output": normalized_payload["output"]})
+
+    def _build_fixed_pattern_worker(
+        self,
+        payload: Dict[str, Any],
+        cancel_event: threading.Event,
+    ) -> None:
+        process: Optional[subprocess.Popen[str]] = None
+        capture_path: Optional[Path] = None
+        temporary_output: Optional[Path] = None
+        temporary_preview: Optional[Path] = None
+        reader_thread: Optional[threading.Thread] = None
+        succeeded = False
+        self.event("run_state", {"state": "preparing"})
+        try:
+            worker_path = self.root / "rtsp_dark_capture_worker.py"
+            if not worker_path.is_file():
+                raise ValueError(f"固定パターン作成ワーカーが見つかりません: {worker_path}")
+            output_path = Path(payload["output"])
+            preview_path = Path(payload["preview"])
+            temporary_output = output_path.with_name(
+                f".{output_path.stem}.{time.time_ns()}.npz"
+            )
+            temporary_preview = preview_path.with_name(
+                f".{preview_path.stem}.{time.time_ns()}.jpg"
+            )
+            temporary_output.parent.mkdir(parents=True, exist_ok=True)
+            temporary_preview.parent.mkdir(parents=True, exist_ok=True)
+            command = [
+                sys.executable,
+                str(worker_path),
+                "--output", str(temporary_output),
+                "--preview", str(temporary_preview),
+                "--samples", str(payload["samples"]),
+            ]
+            if payload["mode"] == "url":
+                capture_path = (
+                    self.root
+                    / "rtsp_fixed_pattern_captures"
+                    / f"rtsp_fixed_pattern_{time.time_ns()}.mp4"
+                )
+                command.extend(
+                    [
+                        "--url", payload["source"],
+                        "--video", str(capture_path),
+                        "--duration", str(payload["duration"]),
+                    ]
+                )
+            elif payload["mode"] == "video":
+                command.extend(["--input-video", payload["source"]])
+            else:
+                command.extend([
+                    "--input-directory", payload["source"],
+                    "--random-seed", str(payload["randomSeed"]),
+                ])
+
+            process = subprocess.Popen(
+                command,
+                cwd=str(self.root),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+            self.event("run_state", {"state": "running"})
+            self.log("固定パターン補正の作成を開始しました。")
+            worker_error = ""
+            termination_requested_at: Optional[float] = None
+            output_queue: queue.Queue[Optional[str]] = queue.Queue()
+
+            def read_worker_output() -> None:
+                try:
+                    if process is not None and process.stdout is not None:
+                        for output_line in process.stdout:
+                            output_queue.put(output_line)
+                finally:
+                    output_queue.put(None)
+
+            reader_thread = threading.Thread(
+                target=read_worker_output,
+                name="swiftui-fixed-pattern-output-reader",
+                daemon=True,
+            )
+            reader_thread.start()
+            reader_finished = False
+            while True:
+                if cancel_event.is_set() and process.poll() is None:
+                    if termination_requested_at is None:
+                        process.terminate()
+                        termination_requested_at = time.monotonic()
+                    elif time.monotonic() - termination_requested_at > 2.0:
+                        process.kill()
+                try:
+                    line = output_queue.get(timeout=0.1)
+                except queue.Empty:
+                    if reader_finished and process.poll() is not None:
+                        break
+                    continue
+                if line is None:
+                    reader_finished = True
+                    if process.poll() is not None:
+                        break
+                    continue
+                if line:
+                    line = line.strip()
+                    if line.startswith("PROGRESS "):
+                        parts = line.split()
+                        if len(parts) >= 3:
+                            current = int(parts[1])
+                            total = int(parts[2])
+                            self.event(
+                                "progress",
+                                {
+                                    "current": current,
+                                    "total": total,
+                                    "message": f"固定パターンを解析中 {current}/{total}",
+                                },
+                            )
+                    elif line.startswith("CAPTURE "):
+                        parts = line.split()
+                        if len(parts) >= 5:
+                            self.event(
+                                "progress",
+                                {
+                                    "current": int(parts[1]),
+                                    "total": int(parts[2]),
+                                    "message": f"固定パターン用動画を録画中 {parts[1]}/{parts[2]}秒",
+                                },
+                            )
+                    elif line.startswith("STATUS "):
+                        self.log(f"固定パターン: {line[7:]}")
+                    elif line.startswith("RESULT "):
+                        self.log(f"固定パターン: {line[7:]}")
+                    elif line.startswith("ERROR "):
+                        worker_error = line[6:]
+                    else:
+                        self.log(f"固定パターン: {line}")
+
+            return_code = process.wait()
+            if cancel_event.is_set():
+                self.log("固定パターン補正の作成を停止しました。", "warning")
+                self.event("run_state", {"state": "cancelled"})
+                return
+            if return_code != 0:
+                raise RuntimeError(worker_error or f"固定パターン作成に失敗しました (exit={return_code})")
+
+            details = self._validate_fixed_pattern_payload({"path": str(temporary_output)})
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            preview_path.parent.mkdir(parents=True, exist_ok=True)
+            if not temporary_preview.is_file():
+                raise RuntimeError("固定パターンのプレビューを保存できませんでした")
+            os.replace(temporary_preview, preview_path)
+            os.replace(temporary_output, output_path)
+            details["path"] = str(output_path)
+            details["preview_path"] = str(preview_path)
+            details["samples"] = payload["samples"]
+            self.event("fixed_pattern_result", details)
+            self.log(
+                f"固定パターン補正を保存しました: {details['width']}x{details['height']}"
+            )
+            succeeded = True
+            self.event("run_state", {"state": "completed"})
+        except Exception as exc:
+            if cancel_event.is_set():
+                self.log("固定パターン補正の作成を停止しました。", "warning")
+                self.event("run_state", {"state": "cancelled"})
+            else:
+                self.log(f"固定パターン補正中にエラーが発生しました: {exc}", "error")
+                self.event("run_state", {"state": "failed", "error": str(exc)})
+        finally:
+            if process is not None and process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+            if not succeeded and capture_path is not None:
+                try:
+                    capture_path.unlink()
+                except OSError:
+                    pass
+            for temporary_path in (temporary_output, temporary_preview):
+                if temporary_path is not None:
+                    try:
+                        temporary_path.unlink()
+                    except OSError:
+                        pass
+            if reader_thread is not None:
+                reader_thread.join(timeout=2)
             self._release_run_thread()
 
     @classmethod
@@ -848,6 +1205,7 @@ class Bridge:
 
             self._load_selected_model(payload)
             mask = self._load_detection_mask(payload)
+            fixed_pattern = self._load_fixed_pattern_correction(payload)
 
             sources = [
                 {"path": str(item.get("path", "")), "is_rtsp": False}
@@ -913,7 +1271,7 @@ class Bridge:
                 summary_video_config=summary_config,
                 tmp_root=str(tmp_root),
                 status_callback=status_callback,
-                fixed_pattern_correction=None,
+                fixed_pattern_correction=fixed_pattern,
                 noise_twin_options=payload.get("noiseTwinOptions") or {"enabled": False},
             )
             if cancel_event.is_set():
@@ -939,6 +1297,7 @@ class Bridge:
 
             self._load_selected_model(payload)
             mask = self._load_detection_mask(payload)
+            fixed_pattern = self._load_fixed_pattern_correction(payload)
 
             directory = self._safe_path(payload.get("directory"), self.root)
             meteor_path = self._safe_path(
@@ -988,7 +1347,7 @@ class Bridge:
                 start_minute=self._bounded_int(payload.get("startMinute", 0), 0, 59),
                 end_hour=self._bounded_int(payload.get("endHour", 7), 0, 23),
                 end_minute=self._bounded_int(payload.get("endMinute", 0), 0, 59),
-                fixed_pattern_correction=None,
+                fixed_pattern_correction=fixed_pattern,
                 noise_twin_options=payload.get("noiseTwinOptions") or {"enabled": False},
             )
             if cancel_event.is_set():
@@ -1012,6 +1371,7 @@ class Bridge:
 
             self._load_selected_model(payload)
             mask = self._load_detection_mask(payload)
+            fixed_pattern = self._load_fixed_pattern_correction(payload)
 
             url = str(payload.get("url", "")).strip()
             meteor_path = self._safe_path(
@@ -1071,7 +1431,7 @@ class Bridge:
                     end_minute=self._bounded_int(payload.get("endMinute", 0), 0, 59),
                     max_workers=self._bounded_int(payload.get("maxWorkers", 1), 1, 6),
                     preview_callback=None,
-                    dark_frame=None,
+                    dark_frame=fixed_pattern,
                     notify_on_detection=bool(payload.get("notifyOnDetection", True)),
                     noise_twin_options=payload.get("noiseTwinOptions") or {"enabled": False},
                     rtsp_fps=self._bounded_int(payload.get("rtspFps", 25), 1, 120),
@@ -1175,6 +1535,14 @@ class Bridge:
         if not np.isfinite(mask).all():
             raise ValueError("検出マスクに有限でない画素があります")
         return np.clip(mask, 0, 255).astype(np.uint8)
+
+    def _load_fixed_pattern_correction(self, payload: Dict[str, Any]) -> Any:
+        if not payload.get("applyFixedPattern", False):
+            return None
+        path = payload.get("fixedPatternPath") or str(self.root / "rtsp_dark_frame.npz")
+        correction, _key = self._read_fixed_pattern_correction(path)
+        self.log(f"固定パターン補正を適用します: {Path(str(path)).name}")
+        return correction
 
     def _save_mask_from_strokes(self, payload: Dict[str, Any]) -> str:
         """Rasterize SwiftUI's normalized brush strokes into a legacy NPZ mask."""
