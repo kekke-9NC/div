@@ -10,7 +10,34 @@ final class CameraModelBuilderDraft: ObservableObject {
     @Published var end = ""
     @Published var useCloudFilter = false
     @Published var cloudThreshold = 0.10
+    @Published var method = "動画の星の動き（推奨）"
+    @Published var interval = "60"
     @Published var isPresented = false
+
+    var persistenceToken: [String] {
+        [sourcePath, String(autoSelect), start, end, String(useCloudFilter), String(cloudThreshold), method, interval]
+    }
+
+    func restore(from store: WorkspaceStore) {
+        sourcePath = store.legacyString(["camera_model_source"])
+        if sourcePath.isEmpty { sourcePath = store.sources.first(where: { $0.kind != .rtsp })?.value ?? "" }
+        autoSelect = store.legacyBool(["camera_model_auto_select"], default: true)
+        start = store.legacyString(["camera_model_start"])
+        end = store.legacyString(["camera_model_end"])
+        useCloudFilter = store.legacyBool(["camera_model_cloud_filter"], default: true)
+        cloudThreshold = Double(store.legacyString(["camera_model_cloud_threshold"], default: "0.10")) ?? 0.10
+        method = store.legacyString(["camera_model_method"], default: "動画の星の動き（推奨）")
+        interval = store.legacyString(["camera_model_interval"], default: "60")
+    }
+
+    func persist(to store: WorkspaceStore) {
+        for (key, value): (String, Any) in [
+            ("camera_model_source", sourcePath), ("camera_model_auto_select", autoSelect),
+            ("camera_model_start", start), ("camera_model_end", end),
+            ("camera_model_cloud_filter", useCloudFilter), ("camera_model_cloud_threshold", String(cloudThreshold)),
+            ("camera_model_method", method), ("camera_model_interval", interval),
+        ] { store.setLegacyValue(value, at: [key]) }
+    }
 }
 
 struct CameraModelBuilderView: View {
@@ -72,10 +99,8 @@ struct CameraModelBuilderView: View {
                         .tint(AppTheme.accent)
                         .disabled(store.cameraModelBuildActive)
                         .onChange(of: draft.autoSelect) { _, enabled in
-                            if enabled {
-                                draft.start = ""
-                                draft.end = ""
-                            }
+                            // Keep the manual range available when switching back.
+                            draft.persist(to: store)
                         }
                     if draft.autoSelect {
                         Label("タイムラプスの範囲外も含め、同じ撮影日の動画を調べます。", systemImage: "wand.and.stars")
@@ -91,6 +116,18 @@ struct CameraModelBuilderView: View {
                         .disabled(store.cameraModelBuildActive)
                     }
                 }
+            }
+
+            GlassCard {
+                VStack(alignment: .leading, spacing: 12) {
+                    Picker("作成方法", selection: $draft.method) {
+                        Text("動画の星の動き（推奨）").tag("動画の星の動き（推奨）")
+                        Text("静止画プレートソルブ").tag("静止画プレートソルブ")
+                    }
+                    TextField("RTSP補正の更新間隔（秒）", text: $draft.interval)
+                        .textFieldStyle(.roundedBorder)
+                }
+                .disabled(store.cameraModelBuildActive)
             }
 
             GlassCard {
@@ -171,7 +208,9 @@ struct CameraModelBuilderView: View {
                             start: draft.start,
                             end: draft.end,
                             cloudThreshold: draft.cloudThreshold,
-                            useCloudFilter: draft.useCloudFilter
+                            useCloudFilter: draft.useCloudFilter,
+                            method: draft.method,
+                            monitorInterval: draft.interval
                         )
                     } label: {
                         Label("作成を開始", systemImage: "wand.and.stars")
@@ -186,10 +225,11 @@ struct CameraModelBuilderView: View {
         .frame(minWidth: 720, minHeight: 720)
         .background(AppTheme.canvas)
         .interactiveDismissDisabled(store.cameraModelBuildActive)
-        .onAppear {
-            if draft.sourcePath.isEmpty {
-                draft.sourcePath = store.sources.first(where: { $0.kind != .rtsp })?.value ?? ""
-            }
+        .onAppear { draft.restore(from: store) }
+        .onChange(of: draft.persistenceToken) { _, _ in draft.persist(to: store) }
+        .onDisappear {
+            draft.persist(to: store)
+            store.saveSettings()
         }
     }
 

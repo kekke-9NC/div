@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 import threading
+import pytest
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from unittest import mock
@@ -11,6 +12,11 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 PYTHON = sys.executable
+
+
+@pytest.fixture(autouse=True)
+def isolated_legacy_home(tmp_path, monkeypatch):
+    monkeypatch.setenv("METEOR_LEGACY_SETTINGS_HOME", str(tmp_path / "test-home"))
 
 
 def run_bridge(tmp_path: Path, *requests):
@@ -42,6 +48,31 @@ def test_ping_and_empty_settings_are_json_lines(tmp_path):
     assert responses["ping"]["ok"] is True
     assert responses["ping"]["payload"]["bridgeVersion"] == 1
     assert responses["settings"]["payload"]["settings"] == {}
+
+
+def test_import_settings_command_keeps_unmapped_values_across_reload(tmp_path):
+    root_settings = tmp_path / "app_settings.json"
+    root_settings.write_text(json.dumps({"advanced_settings": {"future": 9}}))
+    source = tmp_path / "old-app" / "app_settings.json"
+    source.parent.mkdir()
+    source.write_text(json.dumps({
+        "advanced_settings": {"meteor_prob": "0.8"},
+        "camera_control_ev_target": "112",
+        "lm_studio_vlm_api_key": "fixture-secret",
+    }))
+    messages = run_bridge(
+        tmp_path,
+        {"id": "import", "command": "import_settings", "payload": {"sourcePath": str(source)}},
+        {"id": "reload", "command": "load_settings", "payload": {}},
+    )
+    responses = {item["id"]: item for item in messages if item["type"] == "response"}
+    assert responses["import"]["ok"] is True
+    imported = responses["import"]["payload"]["settings"]
+    assert imported["advanced_settings"] == {"future": 9, "meteor_prob": "0.8"}
+    assert imported["camera_control_ev_target"] == "112"
+    assert imported["lm_studio_vlm_api_key"] == "fixture-secret"
+    assert responses["reload"]["payload"]["settings"] == imported
+    assert list((tmp_path / ".legacy-settings-backup").glob("*/app_settings.json"))
 
 
 def test_summary_config_fills_legacy_duration_defaults():

@@ -414,12 +414,7 @@ struct SourceView: View {
         }
         .allowsHitTesting(store.settingsLoaded)
         .overlay {
-            if !store.settingsLoaded {
-                ProgressView("設定を読み込んでいます…")
-                    .controlSize(.small)
-                    .padding(18)
-                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-            }
+            SettingsLoadOverlay()
         }
     }
 
@@ -639,12 +634,7 @@ struct AnalysisView: View {
         }
         .allowsHitTesting(store.settingsLoaded)
         .overlay {
-            if !store.settingsLoaded {
-                ProgressView("設定を読み込んでいます…")
-                    .controlSize(.small)
-                    .padding(18)
-                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-            }
+            SettingsLoadOverlay()
         }
     }
 
@@ -970,13 +960,13 @@ struct SettingsView: View {
                     VStack(alignment: .leading, spacing: 18) {
                         SectionTitle("解析条件", subtitle: "まずは初期値のままでも動作します")
                         HStack(spacing: 28) {
-                            Stepper(value: $store.maxWorkers, in: 1...6) {
+                            Stepper(value: $store.maxWorkers, in: 1...max(6, ProcessInfo.processInfo.activeProcessorCount)) {
                                 SettingValue(title: "並列ワーカー", value: "\(store.maxWorkers)")
                             }
                             Stepper(value: $store.interval, in: 0.05...60, step: 0.05) {
                                 SettingValue(title: "フレーム間隔", value: String(format: "%.2f 秒", store.interval))
                             }
-                            Stepper(value: $store.duration, in: 0.05...30, step: 0.05) {
+                            Stepper(value: $store.duration, in: 0.05...60, step: 0.05) {
                                 SettingValue(title: "クリップ長", value: String(format: "%.2f 秒", store.duration))
                             }
                         }
@@ -1112,11 +1102,11 @@ struct SettingsView: View {
                             .buttonStyle(.bordered)
                             .disabled(store.cameraModelBuildActive)
                             Button("開く") {
-                                guard store.plateSolveConfigurationIsValid else { return }
+                                guard FileManager.default.fileExists(atPath: store.plateSolvePath) else { return }
                                 NSWorkspace.shared.open(URL(fileURLWithPath: store.plateSolvePath))
                             }
                             .buttonStyle(.bordered)
-                            .disabled(!store.plateSolveConfigurationIsValid || !store.plateSolveEnabled)
+                            .disabled(!FileManager.default.fileExists(atPath: store.plateSolvePath) || !store.plateSolveEnabled)
                         }
                         Label(
                             store.plateSolveStatusMessage,
@@ -1327,7 +1317,7 @@ struct SettingsView: View {
                                 .buttonStyle(.bordered)
                             }
                             HStack(spacing: 28) {
-                                Stepper(value: $store.periodicScanInterval, in: 5...3600, step: 5) {
+                                Stepper(value: $store.periodicScanInterval, in: 1...3600, step: 1) {
                                     SettingValue(title: "監視間隔", value: "\(store.periodicScanInterval) 秒")
                                 }
                                 Toggle("時間帯を制限", isOn: $store.periodicTimeLimitEnabled)
@@ -1504,6 +1494,8 @@ struct SettingsView: View {
                     }
                 }
 
+                InheritedSettingsView()
+
                 HStack {
                     Spacer()
                     Button {
@@ -1527,12 +1519,7 @@ struct SettingsView: View {
         }
         .allowsHitTesting(store.settingsLoaded)
         .overlay {
-            if !store.settingsLoaded {
-                ProgressView("設定を読み込んでいます…")
-                    .controlSize(.small)
-                    .padding(18)
-                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-            }
+            SettingsLoadOverlay()
         }
         .sheet(isPresented: $maskEditor.isPresented) {
             MaskEditorView(editor: maskEditor)

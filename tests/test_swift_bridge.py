@@ -34,8 +34,9 @@ def test_live_bridge_responses(swift_bridge_validation, tmp_path, monkeypatch, m
     # The backend deliberately stays alive with stdin open after each response.
     # subprocess.run(input=...) tests close stdin and cannot expose this deadlock.
     monkeypatch.setenv("METEOR_PYTHON", sys.executable)
+    monkeypatch.setenv("METEOR_LEGACY_SETTINGS_HOME", str(tmp_path / "test-home"))
     if mode == "real_backend":
-        for name in ("swift_backend.py", "process_lock.py"):
+        for name in ("swift_backend.py", "process_lock.py", "legacy_settings.py", "settings_runtime.py"):
             shutil.copy2(ROOT / name, tmp_path / name)
         (tmp_path / "app_settings.json").write_text(
             json.dumps({"interval": 2.5}), encoding="utf-8"

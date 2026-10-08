@@ -17,6 +17,7 @@ can safely parse every stdout line.
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
 import json
 import math
 import os
@@ -33,6 +34,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, TextIO
 
 from process_lock import AppProcessLock
+from settings_runtime import RuntimeSettings, from_legacy_settings
 
 
 VIDEO_EXTENSIONS = (".mp4", ".avi", ".mov")
@@ -65,6 +67,10 @@ class Bridge:
         self._cancel_event = threading.Event()
         self._run_thread: Optional[threading.Thread] = None
         self._video_concat_process: Optional[subprocess.Popen] = None
+        self._settings_lock = threading.RLock()
+        self._runtime_config_lock = threading.Lock()
+        self._auto_updater: Any = None
+        self._camera_model_monitor: Any = None
 
     def emit(self, payload: Dict[str, Any]) -> None:
         line = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
@@ -115,6 +121,7 @@ class Bridge:
                 )
             elif command == "load_settings":
                 settings = self._load_settings()
+                self._sync_auto_time_updater(settings)
                 self.response(
                     request_id,
                     {
@@ -145,6 +152,27 @@ class Bridge:
                 settings = payload.get("settings") or {}
                 self._save_settings(settings)
                 self.response(request_id, {"saved": True})
+            elif command == "import_settings":
+                raw_path = payload.get("sourcePath")
+                if not isinstance(raw_path, str) or not raw_path.strip():
+                    raise ValueError("移行元の設定ファイルを選択してください")
+                import legacy_settings
+
+                with self._settings_lock:
+                    settings = legacy_settings.import_settings(
+                        self.root, Path(raw_path).expanduser().resolve()
+                    )
+                self._sync_auto_time_updater(settings)
+                self.response(request_id, {
+                    "settings": settings,
+                    "unsupportedFeatures": self._unsupported_features(settings),
+                })
+            elif command == "camera_control":
+                self._camera_control(request_id, payload)
+            elif command == "start_camera_model_monitor":
+                self._start_camera_model_monitor(request_id, payload)
+            elif command == "stop_camera_model_monitor":
+                self._stop_camera_model_monitor(request_id)
             elif command == "discover_sources":
                 self._discover(request_id, payload)
             elif command == "run_detection":
@@ -172,76 +200,169 @@ class Bridge:
         return self.root / "app_settings.json"
 
     def _load_settings(self) -> Dict[str, Any]:
-        path = self._settings_path()
-        if not path.exists():
-            return {}
-        try:
-            with path.open("r", encoding="utf-8") as handle:
-                data = json.load(handle)
-            if not isinstance(data, dict):
-                raise ValueError("設定ファイルのトップレベルはオブジェクトである必要があります")
-            return data
-        except (OSError, json.JSONDecodeError) as exc:
-            self.log(f"設定を読み込めませんでした: {exc}", "error")
-            raise ValueError("app_settings.jsonが壊れているため、設定を保存せずに停止しました") from exc
-        except ValueError as exc:
-            self.log(f"設定を読み込めませんでした: {exc}", "error")
-            raise ValueError("app_settings.jsonの形式が不正なため、設定を保存せずに停止しました") from exc
+        import legacy_settings
+
+        with self._settings_lock:
+            return legacy_settings.load_settings(self.root)
 
     @staticmethod
     def _unsupported_features(settings: Dict[str, Any]) -> List[str]:
-        unsupported: List[str] = []
-        if settings.get("advanced_settings"):
-            unsupported.append("詳細パラメータ")
-        if settings.get("camera_control_base_url") or settings.get("camera_control_ev_target"):
-            unsupported.append("カメラ制御")
-        if settings.get("ml_training_export_enabled") or settings.get("auto_video_mask_enabled"):
-            unsupported.append("学習データ / 自動マスク")
-        if settings.get("ai_vlm_backend") not in (None, "", "local_qwen3_vl_4b", "lmstudio_qwen3_5_2b"):
-            unsupported.append("AIアシスタント設定")
-        if settings.get("lm_studio_vlm_url") not in (None, "", "http://localhost:1234/v1"):
-            unsupported.append("AIアシスタント設定")
-        timestamp_defaults = {
-            "enabled": True,
-            "position": "右下",
-            "size_percent": "1.8",
-        }
-        if settings.get("full_video_timestamp") not in (None, timestamp_defaults):
-            unsupported.append("フルサイズ動画の時刻表示")
-        encoding_defaults = {
-            "codec": "H.265 / HEVC (推奨)",
-            "quality": "入力品質基準（推奨）",
-            "bitrate_mbps": "40",
-        }
-        if settings.get("processed_video_encoding") not in (None, encoding_defaults):
-            unsupported.append("動画エンコード設定")
-        return list(dict.fromkeys(unsupported))
+        # Runtime settings are validated when a run is requested.  Unknown
+        # keys remain in JSON for the legacy interface and are not disclosed.
+        return []
 
     def _save_settings(self, settings: Dict[str, Any]) -> None:
         if not isinstance(settings, dict):
             raise ValueError("settings must be an object")
-        path = self._settings_path()
-        existing = self._load_settings()
-        existing.update(settings)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        # Replace atomically so a quit or power loss cannot leave a truncated
-        # app_settings.json that the legacy UI can no longer read.
-        fd, temporary_name = tempfile.mkstemp(
-            prefix=".app_settings.", suffix=".json", dir=str(path.parent)
-        )
+        import legacy_settings
+
+        with self._settings_lock:
+            saved = legacy_settings.save_settings(self.root, settings)
+        self._sync_auto_time_updater(saved)
+
+    def _sync_auto_time_updater(self, settings: Dict[str, Any]) -> None:
+        enabled = settings.get("auto_time_updater_enabled", False)
+        if not isinstance(enabled, bool):
+            raise ValueError("auto_time_updater_enabledは真偽値で指定してください")
+        if enabled:
+            if self._auto_updater is None:
+                from auto_time_updater import AutoTimeUpdater
+
+                updater = AutoTimeUpdater()
+                updater.set_update_callback(self._on_auto_time_update)
+                updater.set_log_callback(self.log)
+                self._auto_updater = updater
+            if not self._auto_updater.enabled:
+                self._auto_updater.start()
+        elif self._auto_updater is not None and self._auto_updater.enabled:
+            self._auto_updater.stop()
+
+    def _on_auto_time_update(
+        self, start_hour: int, start_minute: int, end_hour: int, end_minute: int
+    ) -> None:
+        # The legacy GUI updates its periodic time controls (the RTSP window
+        # is separate).  Persist the new values and notify the Swift store.
+        updates = {
+            "periodic_start_hour": f"{start_hour:02d}",
+            "periodic_start_minute": f"{start_minute:02d}",
+            "periodic_end_hour": f"{end_hour:02d}",
+            "periodic_end_minute": f"{end_minute:02d}",
+        }
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump(existing, handle, ensure_ascii=False, indent=2)
-                handle.write("\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary_name, path)
-        finally:
-            if os.path.exists(temporary_name):
-                try:
-                    os.unlink(temporary_name)
-                except OSError:
-                    pass
+            self._save_settings(updates)
+            self.event("settings_updated", {"settings": updates})
+        except Exception as exc:
+            self.log(f"夜間時間帯の自動更新を保存できませんでした: {exc}", "error")
+
+    def _camera_control(self, request_id: str, payload: Dict[str, Any]) -> None:
+        """Run only after an explicit UI action; never contact cameras on load."""
+        action = payload.get("action")
+        if action not in {"fetch", "apply"}:
+            raise ValueError("camera_control.actionはfetchまたはapplyを指定してください")
+        base_url = payload.get("baseURL")
+        if not isinstance(base_url, str) or not base_url.strip():
+            raise ValueError("カメラ制御URLを指定してください")
+        parsed = urlparse(base_url if "://" in base_url else "http://" + base_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise ValueError("カメラ制御URLの形式が不正です")
+        basic = payload.get("basic", {})
+        extra = payload.get("extra", {})
+        if not isinstance(basic, dict) or not isinstance(extra, dict):
+            raise ValueError("カメラ設定の形式が不正です")
+        from camera_control import CameraControlClient
+
+        allowed_basic = set(CameraControlClient.IMAGE_ADJUSTMENT_KEYS)
+        allowed_extra = set(CameraControlClient.IMAGE_ADJUSTMENT_EX_KEYS)
+        if any(key not in allowed_basic or isinstance(value, bool) or not isinstance(value, int)
+               for key, value in basic.items()):
+            raise ValueError("カメラ基本設定の項目または値が不正です")
+        if any(key not in allowed_extra or isinstance(value, bool) or not isinstance(value, int)
+               for key, value in extra.items()):
+            raise ValueError("カメラ追加設定の項目または値が不正です")
+
+        def worker() -> None:
+            try:
+                client = CameraControlClient(base_url)
+                if action == "fetch":
+                    values = {**client.get_image_adjustment_ex(), **client.get_image_adjustment()}
+                    self.response(request_id, {"values": values})
+                else:
+                    if basic:
+                        client.set_image_adjustment(basic)
+                    if extra:
+                        client.set_image_adjustment_ex(extra)
+                    self.response(request_id, {"applied": True})
+            except Exception:
+                # CameraControlClient/requests exceptions can include a URL
+                # with credentials, so never serialize or log their text.
+                self.response(request_id, error="カメラとの通信に失敗しました。URLと接続状態を確認してください")
+
+        threading.Thread(target=worker, name="swiftui-camera-control", daemon=True).start()
+
+    def _start_camera_model_monitor(self, request_id: str, payload: Dict[str, Any]) -> None:
+        url = payload.get("url")
+        if not isinstance(url, str):
+            raise ValueError("RTSP URLを指定してください")
+        parsed = urlparse(url)
+        if parsed.scheme.lower() not in {"rtsp", "rtsps"} or not parsed.hostname:
+            raise ValueError("有効なRTSP URLを指定してください")
+        if self._camera_model_monitor is not None:
+            raise ValueError("カメラモデルの自動監視は既に実行中です")
+        legacy = payload.get("legacySettings", {})
+        runtime = from_legacy_settings(legacy, self.root)
+        interval = self._validated_float(
+            payload.get("interval", legacy.get("camera_model_interval", "60")),
+            1, 86_400, 60, "camera_model_interval",
+        )
+        cloud_threshold = self._validated_float(
+            payload.get("cloudThreshold", legacy.get("camera_model_cloud_threshold", 0.1)),
+            0, 1, 0.1, "camera_model_cloud_threshold",
+        )
+        from camera_model_monitor import RTSPCameraModelMonitor
+
+        def on_result(result: Any) -> None:
+            self.event("camera_model_result", self._json_safe(result.as_dict()))
+
+        def on_status(message: str) -> None:
+            safe = str(message).replace(url, "[RTSP URL]")
+            if runtime.lm_studio_api_key:
+                safe = safe.replace(runtime.lm_studio_api_key, "[APIキー]")
+            self.log(safe)
+
+        monitor = RTSPCameraModelMonitor(
+            url,
+            save_root=str(self.root / "rtsp"),
+            interval_seconds=max(10, int(interval)),
+            cloud_threshold=cloud_threshold,
+            backend=runtime.ai_backend,
+            lm_studio_url=runtime.lm_studio_url,
+            lm_studio_model_id=runtime.lm_studio_model_id,
+            lm_studio_api_key=runtime.lm_studio_api_key,
+            status_callback=on_status,
+            progress_callback=lambda progress: self.event("camera_model_monitor_progress", progress),
+            result_callback=on_result,
+        )
+        self._camera_model_monitor = monitor
+        try:
+            monitor.start()
+        except Exception:
+            self._camera_model_monitor = None
+            raise
+        self.response(request_id, {"started": True})
+
+    def _stop_camera_model_monitor(self, request_id: str) -> None:
+        monitor = self._camera_model_monitor
+        self._camera_model_monitor = None
+        if monitor is not None:
+            monitor.stop()
+        self.response(request_id, {"stopped": True})
+
+    def close(self) -> None:
+        if self._camera_model_monitor is not None:
+            self._camera_model_monitor.stop()
+            self._camera_model_monitor = None
+        if self._auto_updater is not None and self._auto_updater.enabled:
+            self._auto_updater.stop()
 
     def _discover(self, request_id: str, payload: Dict[str, Any]) -> None:
         selected_paths = [str(item) for item in payload.get("paths", []) if str(item)]
@@ -345,7 +466,7 @@ class Bridge:
                     payload.get("modelPath")
                 )
                 normalized_payload["globalWCSInfo"] = self._validated_wcs_info(
-                    payload.get("plateSolveWCSPath")
+                    self._wcs_path_from_payload(payload)
                 )
                 normalized_payload["applyFixedPattern"] = self._validated_bool(
                     payload.get("applyFixedPattern"), default=False, name="applyFixedPattern"
@@ -356,6 +477,8 @@ class Bridge:
                 normalized_payload["noiseTwinOptions"] = self._validated_noise_twin_options(
                     payload.get("noiseTwinOptions")
                 )
+                self._prepare_runtime_payload(normalized_payload)
+                self._validate_processing_numbers(normalized_payload)
             except ValueError as exc:
                 self.response(request_id, error=str(exc))
                 return
@@ -404,7 +527,7 @@ class Bridge:
                     payload.get("modelPath")
                 )
                 normalized_payload["globalWCSInfo"] = self._validated_wcs_info(
-                    payload.get("plateSolveWCSPath")
+                    self._wcs_path_from_payload(payload)
                 )
                 normalized_payload["applyFixedPattern"] = self._validated_bool(
                     payload.get("applyFixedPattern"), default=False, name="applyFixedPattern"
@@ -421,6 +544,8 @@ class Bridge:
                 normalized_payload["noiseTwinOptions"] = self._validated_noise_twin_options(
                     payload.get("noiseTwinOptions")
                 )
+                self._prepare_runtime_payload(normalized_payload)
+                self._validate_processing_numbers(normalized_payload)
                 for key, lower, upper, default in (
                     ("startHour", 0, 23, 17),
                     ("startMinute", 0, 59, 0),
@@ -476,7 +601,7 @@ class Bridge:
                     payload.get("modelPath")
                 )
                 normalized_payload["globalWCSInfo"] = self._validated_wcs_info(
-                    payload.get("plateSolveWCSPath")
+                    self._wcs_path_from_payload(payload)
                 )
                 normalized_payload["applyFixedPattern"] = self._validated_bool(
                     payload.get("applyFixedPattern"), default=False, name="applyFixedPattern"
@@ -487,11 +612,13 @@ class Bridge:
                 normalized_payload["noiseTwinOptions"] = self._validated_noise_twin_options(
                     payload.get("noiseTwinOptions")
                 )
+                self._prepare_runtime_payload(normalized_payload)
+                self._validate_processing_numbers(normalized_payload)
                 normalized_payload["timeLimitEnabled"] = self._validated_bool(
                     payload.get("timeLimitEnabled"), default=False, name="timeLimitEnabled"
                 )
                 normalized_payload["scanInterval"] = self._validated_int(
-                    payload.get("scanInterval"), 5, 3600, 60, "scanInterval"
+                    payload.get("scanInterval"), 1, 3600, 60, "scanInterval"
                 )
                 for key, lower, upper, default in (
                     ("startHour", 0, 23, 17),
@@ -518,6 +645,9 @@ class Bridge:
         self.response(request_id, {"accepted": True, "directory": str(directory)})
 
     def _validated_camera_model_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        legacy = payload.get("legacySettings", {})
+        if not isinstance(legacy, dict):
+            raise ValueError("legacySettingsはオブジェクト形式で指定してください")
         source_value = payload.get("source")
         if not isinstance(source_value, str) or not source_value.strip():
             raise ValueError("モデル作成対象の動画またはフォルダを選択してください")
@@ -550,6 +680,24 @@ class Bridge:
             return value
 
         cache_root = text_value("cacheRoot")
+        method = payload.get("method", legacy.get("camera_model_method", "静止画プレートソルブ"))
+        if method not in {"動画の星の動き（推奨）", "静止画プレートソルブ"}:
+            raise ValueError("camera_model_methodの指定が不正です")
+        saved_wcs = legacy.get("global_wcs_info")
+        if not isinstance(saved_wcs, dict):
+            saved_wcs = {}
+        initial_model_path = payload.get("initialModelPath") or (
+            legacy.get("plate_solve_model_path")
+            or saved_wcs.get("model_path")
+            or saved_wcs.get("calibration_path")
+            or ""
+        )
+        if not isinstance(initial_model_path, str):
+            raise ValueError("initialModelPathは文字列で指定してください")
+        if initial_model_path.strip() and not Path(initial_model_path).expanduser().is_file():
+            # The legacy builder falls back to generating a fresh seed when a
+            # previously selected model has since been moved or removed.
+            initial_model_path = ""
         return {
             "source": str(source),
             "start": text_value("start"),
@@ -571,10 +719,16 @@ class Bridge:
                 "observationLongitude", -180.0, 180.0, 135.0
             ),
             "cacheRoot": str(self._safe_path(cache_root, self.root)) if cache_root else "",
-            "backend": text_value("backend", "lmstudio_qwen3_5_2b"),
-            "lmStudioURL": text_value("lmStudioURL", "http://localhost:1234/v1"),
-            "lmStudioModelID": text_value("lmStudioModelID", "qwen/qwen3-vl-4b"),
-            "lmStudioAPIKey": text_value("lmStudioAPIKey"),
+            "backend": text_value("backend", str(legacy.get("ai_vlm_backend", "lmstudio_qwen3_5_2b"))),
+            "lmStudioURL": text_value("lmStudioURL", str(legacy.get("lm_studio_vlm_url", "http://localhost:1234/v1"))),
+            "lmStudioModelID": text_value("lmStudioModelID", str(legacy.get("lm_studio_vlm_model_id", "qwen/qwen3-vl-4b"))),
+            "lmStudioAPIKey": text_value("lmStudioAPIKey", str(legacy.get("lm_studio_vlm_api_key", ""))),
+            "method": method,
+            "initialModelPath": initial_model_path.strip(),
+            "monitorInterval": max(10, int(self._validated_float(
+                payload.get("monitorInterval", payload.get("interval", legacy.get("camera_model_interval", "60"))),
+                1, 86_400, 60, "monitorInterval"
+            ))),
         }
 
     def _start_camera_model_build(self, request_id: str, payload: Dict[str, Any]) -> None:
@@ -643,8 +797,50 @@ class Bridge:
                 observation_latitude=payload["observationLatitude"],
                 observation_longitude=payload["observationLongitude"],
             )
-            result = build_camera_model(request, progress_callback=progress)
-            result_payload = result.as_dict()
+            if payload["method"] == "静止画プレートソルブ":
+                result = build_camera_model(request, progress_callback=progress)
+            else:
+                from camera_model_builder import automatic_model_source
+                from camera_plate_model import MODEL_TYPE as FIXED_CAMERA_MODEL_TYPE
+                from trajectory_camera_model import TrajectoryBuildRequest, build_trajectory_camera_model
+
+                seed_path = payload["initialModelPath"]
+                if seed_path:
+                    try:
+                        seed = json.loads(Path(seed_path).read_text(encoding="utf-8"))
+                        if not (
+                            seed.get("model_type") == FIXED_CAMERA_MODEL_TYPE
+                            and seed.get("stg_parameters")
+                            and seed.get("correction_coefficients") is not None
+                            and seed.get("reference_datetime")
+                        ):
+                            seed_path = ""
+                    except (OSError, ValueError, TypeError):
+                        seed_path = ""
+                if not seed_path:
+                    progress("絶対座標の基準となる初期モデルを作成中...")
+                    seed_result = build_camera_model(request, progress_callback=progress)
+                    if not seed_result.success or not seed_result.model_path:
+                        result = seed_result
+                    else:
+                        seed_path = seed_result.model_path
+                if seed_path:
+                    progress("動画内の恒星を追跡して投影モデルを学習中...")
+                    trajectory_source = automatic_model_source(request.source) if request.auto_select else request.source
+                    result = build_trajectory_camera_model(
+                        TrajectoryBuildRequest(
+                            source=trajectory_source,
+                            initial_model_path=seed_path,
+                            start="" if request.auto_select else request.start,
+                            end="" if request.auto_select else request.end,
+                            auto_select=request.auto_select,
+                            cache_root=request.cache_root,
+                            observation_latitude=request.observation_latitude,
+                            observation_longitude=request.observation_longitude,
+                        ),
+                        progress_callback=progress,
+                    )
+            result_payload = self._json_safe(result.as_dict())
             result_payload["cancelled"] = cancel_event.is_set()
             self.event("camera_model_result", result_payload)
             if cancel_event.is_set():
@@ -1371,6 +1567,100 @@ class Bridge:
             info["model_path"] = str(wcs_path)
         return info
 
+    @staticmethod
+    def _wcs_path_from_payload(payload: Dict[str, Any]) -> Any:
+        legacy = payload.get("legacySettings")
+        if isinstance(legacy, dict) and legacy.get("use_plate_solve") is False:
+            return None
+        explicit = payload.get("plateSolveWCSPath")
+        if isinstance(explicit, str) and explicit.strip() and Path(explicit).expanduser().is_file():
+            return explicit
+        if not isinstance(legacy, dict):
+            return explicit
+        saved_wcs = legacy.get("global_wcs_info")
+        saved_wcs = saved_wcs if isinstance(saved_wcs, dict) else {}
+        for value in (
+            legacy.get("plate_solve_wcs_path"),
+            legacy.get("plate_solve_model_path"),
+            saved_wcs.get("wcs_file"),
+            saved_wcs.get("model_path"),
+            saved_wcs.get("calibration_path"),
+        ):
+            if isinstance(value, str) and value.strip() and Path(value).expanduser().is_file():
+                return value
+        if legacy.get("plate_solve_mode", "local") == "local":
+            return None
+        return explicit
+
+    def _prepare_runtime_payload(self, payload: Dict[str, Any]) -> None:
+        raw = payload.get("legacySettings", {})
+        runtime = from_legacy_settings(raw, self.root)
+        payload["_runtimeSettings"] = runtime
+        if "legacySettings" in payload:
+            payload["saveOptions"] = {
+                **payload["saveOptions"],
+                **runtime.save_option_extras,
+            }
+            payload["noiseTwinOptions"] = {
+                **payload["noiseTwinOptions"],
+                "encoding": runtime.encoding,
+            }
+        if isinstance(raw, dict) and "use_plate_solve" in raw and not runtime.use_plate_solve:
+            payload["globalWCSInfo"] = None
+        info = payload.get("globalWCSInfo")
+        saved_info = raw.get("global_wcs_info") if isinstance(raw, dict) else None
+        if isinstance(info, dict) and isinstance(saved_info, dict):
+            saved_paths = (saved_info.get(key) for key in ("wcs_file", "model_path", "calibration_path"))
+            if any(
+                isinstance(path, str) and path.strip()
+                and Path(path).expanduser().resolve() == Path(info["wcs_file"])
+                for path in saved_paths
+            ):
+                # Keep calibrated metadata from the legacy solve.  The path
+                # itself remains the validated candidate above.
+                validated_paths = {
+                    key: info[key]
+                    for key in ("wcs_file", "calibration_path", "model_path")
+                    if key in info
+                }
+                info.update(saved_info)
+                info.update(validated_paths)
+                value = info.get("plate_solve_datetime")
+                if isinstance(value, str):
+                    try:
+                        info["plate_solve_datetime"] = datetime.fromisoformat(
+                            value.replace("Z", "+00:00")
+                        )
+                    except ValueError as exc:
+                        raise ValueError("global_wcs_info.plate_solve_datetimeの形式が不正です") from exc
+                job_id = info.get("job_id")
+                if not isinstance(job_id, str) or not job_id or len(job_id) > 128:
+                    raise ValueError("global_wcs_info.job_idの形式が不正です")
+
+    def _load_plate_solve_mask(self, payload: Dict[str, Any]) -> Any:
+        raw = payload.get("legacySettings")
+        if not isinstance(raw, dict) or not raw.get("has_plate_solve_mask_image", False):
+            return None
+        mask_path = raw.get("detection_mask_path") or str(self.root / "app_masks.npz")
+        if not isinstance(mask_path, str):
+            raise ValueError("プレートソルブ用マスクのパスが不正です")
+        path = self._safe_path(mask_path, self.root / "app_masks.npz")
+        if not path.is_file():
+            raise ValueError(f"プレートソルブ用マスクが見つかりません: {path}")
+        import numpy as np
+
+        with np.load(path, allow_pickle=False) as archive:
+            if "plate_solve_mask_image" not in archive.files:
+                raise ValueError("プレートソルブ用マスクが設定ファイルにありません")
+            mask = archive["plate_solve_mask_image"]
+        if mask.ndim != 2 or mask.size == 0 or not np.issubdtype(mask.dtype, np.number):
+            raise ValueError("プレートソルブ用マスクの形式が不正です")
+        if mask.shape[0] > 16_384 or mask.shape[1] > 16_384 or mask.size > 100_000_000:
+            raise ValueError("プレートソルブ用マスクが大きすぎます")
+        if not np.isfinite(mask).all():
+            raise ValueError("プレートソルブ用マスクに有限でない画素があります")
+        return np.clip(mask, 0, 255).astype(np.uint8)
+
     def _validated_noise_twin_options(self, value: Any) -> Dict[str, Any]:
         if value is None:
             return {
@@ -1450,14 +1740,57 @@ class Bridge:
             raise ValueError(f"{name} is out of range")
         return parsed
 
+    @staticmethod
+    def _validated_float(value: Any, lower: float, upper: float, default: float, name: str) -> float:
+        if value is None:
+            return default
+        if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+            raise ValueError(f"{name} must be a number")
+        try:
+            parsed = float(value)
+        except ValueError as exc:
+            raise ValueError(f"{name} must be a number") from exc
+        if not math.isfinite(parsed) or not lower <= parsed <= upper:
+            raise ValueError(f"{name} is out of range")
+        return parsed
+
+    def _validate_processing_numbers(self, payload: Dict[str, Any]) -> None:
+        payload["maxWorkers"] = self._validated_int(
+            payload.get("maxWorkers"), 1, max(6, os.cpu_count() or 1), 4, "maxWorkers"
+        )
+        payload["interval"] = self._validated_float(
+            payload.get("interval"), 0.05, 60.0, 1.0, "interval"
+        )
+        payload["duration"] = self._validated_float(
+            payload.get("duration"), 0.05, 60.0, 1.0, "duration"
+        )
+
     def _run_pipeline(self, payload: Dict[str, Any], cancel_event: threading.Event) -> None:
+        import config
+
+        runtime = payload.get("_runtimeSettings") or from_legacy_settings(
+            payload.get("legacySettings", {}), self.root
+        )
+        try:
+            with self._runtime_config_lock, runtime.applied_config(config):
+                terminal = self._run_pipeline_body(payload, cancel_event, runtime)
+        finally:
+            self._release_run_thread()
+        self.event("run_state", terminal)
+
+    def _run_pipeline_body(
+        self, payload: Dict[str, Any], cancel_event: threading.Event, runtime: RuntimeSettings
+    ) -> Dict[str, Any]:
         self.event("run_state", {"state": "running"})
         try:
             import config
             import download_pipeline
 
+            if "legacySettings" in payload:
+                runtime.configure_ai_backend()
             self._load_selected_model(payload)
             mask = self._load_detection_mask(payload)
+            plate_solve_mask = self._load_plate_solve_mask(payload)
             fixed_pattern = self._load_fixed_pattern_correction(payload)
 
             sources = [
@@ -1477,10 +1810,12 @@ class Bridge:
             meteor_path.mkdir(parents=True, exist_ok=True)
             not_meteor_path.mkdir(parents=True, exist_ok=True)
 
-            max_workers = self._bounded_int(payload.get("maxWorkers", 4), 1, 6)
+            max_workers = self._bounded_int(payload.get("maxWorkers", 4), 1, max(6, os.cpu_count() or 1))
             interval = self._bounded_float(payload.get("interval", 1.0), 0.05, 60.0)
-            duration = self._bounded_float(payload.get("duration", 1.0), 0.05, 30.0)
+            duration = self._bounded_float(payload.get("duration", 1.0), 0.05, 60.0)
             save_options = payload.get("saveOptions") or self._default_save_options()
+            if save_options.get("ml_training_export_enabled"):
+                Path(save_options["ml_training_data_root"]).mkdir(parents=True, exist_ok=True)
             summary_config = payload.get("summaryConfig") or self._default_summary_config()
             tmp_root = self.root / "temp_video"
             tmp_root.mkdir(parents=True, exist_ok=True)
@@ -1508,14 +1843,34 @@ class Bridge:
                 self.event("status", status)
 
             self.log(f"{len(sources)}本の動画の解析を開始しました。")
+            global_wcs_info = payload.get("globalWCSInfo")
+            if runtime.use_plate_solve and runtime.plate_solve_mode == "local":
+                if not str((global_wcs_info or {}).get("job_id", "")).startswith("local-wideangle"):
+                    global_wcs_info = None
+                if global_wcs_info is None:
+                    import local_wideangle_astrometry
+
+                    for index in sorted({0, len(sources) // 2, len(sources) - 1}):
+                        if cancel_event.is_set():
+                            break
+                        try:
+                            global_wcs_info = local_wideangle_astrometry.solve_video_local(
+                                sources[index]["path"], progress_callback=self.log
+                            )
+                            self.log("当晩のローカル広角カメラ補正を作成しました。")
+                            break
+                        except Exception as exc:
+                            self.log(f"別の動画でカメラ補正を試します: {exc}", "warning")
+                    if global_wcs_info is None and not cancel_event.is_set():
+                        self.log("ローカル広角較正を作成できませんでした。注釈なしで解析を続けます。", "warning")
             download_pipeline.run_pipeline(
                 sources=sources,
                 max_workers=max_workers,
                 interval=interval,
                 duration=duration,
                 mask=mask,
-                global_wcs_info=payload.get("globalWCSInfo"),
-                plate_solve_mask=None,
+                global_wcs_info=global_wcs_info,
+                plate_solve_mask=plate_solve_mask,
                 meteor_save_path=str(meteor_path),
                 not_meteor_save_path=str(not_meteor_path),
                 cancel_flag=cancel_event,
@@ -1529,27 +1884,42 @@ class Bridge:
             )
             if cancel_event.is_set():
                 self.log("処理をキャンセルしました。", "warning")
-                self._release_run_thread()
-                self.event("run_state", {"state": "cancelled"})
+                return {"state": "cancelled"}
             else:
                 self.event("progress", {"current": len(sources), "total": len(sources), "message": "完了"})
                 self.log("すべての処理が完了しました。")
-                self._release_run_thread()
-                self.event("run_state", {"state": "completed"})
+                return {"state": "completed"}
         except Exception as exc:
             self.log(f"処理中にエラーが発生しました: {exc}", "error")
             traceback.print_exc(file=sys.stderr)
-            self._release_run_thread()
-            self.event("run_state", {"state": "failed", "error": str(exc)})
+            return {"state": "failed", "error": str(exc)}
 
     def _run_periodic(self, payload: Dict[str, Any], cancel_event: threading.Event) -> None:
+        import config
+
+        runtime = payload.get("_runtimeSettings") or from_legacy_settings(
+            payload.get("legacySettings", {}), self.root
+        )
+        try:
+            with self._runtime_config_lock, runtime.applied_config(config):
+                terminal = self._run_periodic_body(payload, cancel_event, runtime)
+        finally:
+            self._release_run_thread()
+        self.event("run_state", terminal)
+
+    def _run_periodic_body(
+        self, payload: Dict[str, Any], cancel_event: threading.Event, runtime: RuntimeSettings
+    ) -> Dict[str, Any]:
         self.event("run_state", {"state": "running"})
         try:
             import config
             import file_utils
 
+            if "legacySettings" in payload:
+                runtime.configure_ai_backend()
             self._load_selected_model(payload)
             mask = self._load_detection_mask(payload)
+            plate_solve_mask = self._load_plate_solve_mask(payload)
             fixed_pattern = self._load_fixed_pattern_correction(payload)
 
             directory = self._safe_path(payload.get("directory"), self.root)
@@ -1561,6 +1931,8 @@ class Bridge:
             )
             meteor_path.mkdir(parents=True, exist_ok=True)
             not_meteor_path.mkdir(parents=True, exist_ok=True)
+            if payload.get("saveOptions", {}).get("ml_training_export_enabled"):
+                Path(payload["saveOptions"]["ml_training_data_root"]).mkdir(parents=True, exist_ok=True)
 
             def progress_callback(item: Any) -> None:
                 message = None
@@ -1582,17 +1954,17 @@ class Bridge:
             self.log(f"定期スキャンを開始しました: {directory}")
             file_utils.monitor_directory(
                 directory=str(directory),
-                scan_interval=self._bounded_int(payload.get("scanInterval", 60), 5, 3600),
+                scan_interval=self._bounded_int(payload.get("scanInterval", 60), 1, 3600),
                 progress_callback=progress_callback,
                 mask=mask,
                 global_wcs_info=payload.get("globalWCSInfo"),
-                plate_solve_mask=None,
+                plate_solve_mask=plate_solve_mask,
                 meteor_save_path=str(meteor_path),
                 not_meteor_save_path=str(not_meteor_path),
                 cancel_flag=cancel_event,
                 save_options=payload.get("saveOptions") or self._default_save_options(),
                 interval=self._bounded_float(payload.get("interval", 1.0), 0.05, 60.0),
-                duration=self._bounded_float(payload.get("duration", 1.0), 0.05, 30.0),
+                duration=self._bounded_float(payload.get("duration", 1.0), 0.05, 60.0),
                 min_length=config.MIN_LINE_LENGTH,
                 summary_video_config=payload.get("summaryConfig") or self._default_summary_config(),
                 time_limit_enabled=bool(payload.get("timeLimitEnabled", False)),
@@ -1605,25 +1977,40 @@ class Bridge:
             )
             if cancel_event.is_set():
                 self.log("定期スキャンを停止しました。", "warning")
-                self._release_run_thread()
-                self.event("run_state", {"state": "cancelled"})
+                return {"state": "cancelled"}
             else:
-                self._release_run_thread()
-                self.event("run_state", {"state": "completed"})
+                return {"state": "completed"}
         except Exception as exc:
             self.log(f"定期スキャン中にエラーが発生しました: {exc}", "error")
             traceback.print_exc(file=sys.stderr)
-            self._release_run_thread()
-            self.event("run_state", {"state": "failed", "error": str(exc)})
+            return {"state": "failed", "error": str(exc)}
 
     def _run_rtsp(self, payload: Dict[str, Any], cancel_event: threading.Event) -> None:
+        import config
+
+        runtime = payload.get("_runtimeSettings") or from_legacy_settings(
+            payload.get("legacySettings", {}), self.root
+        )
+        try:
+            with self._runtime_config_lock, runtime.applied_config(config):
+                terminal = self._run_rtsp_body(payload, cancel_event, runtime)
+        finally:
+            self._release_run_thread()
+        self.event("run_state", terminal)
+
+    def _run_rtsp_body(
+        self, payload: Dict[str, Any], cancel_event: threading.Event, runtime: RuntimeSettings
+    ) -> Dict[str, Any]:
         self.event("run_state", {"state": "running"})
         try:
             import config
             import file_utils
 
+            if "legacySettings" in payload:
+                runtime.configure_ai_backend()
             self._load_selected_model(payload)
             mask = self._load_detection_mask(payload)
+            plate_solve_mask = self._load_plate_solve_mask(payload)
             fixed_pattern = self._load_fixed_pattern_correction(payload)
 
             url = str(payload.get("url", "")).strip()
@@ -1637,6 +2024,8 @@ class Bridge:
             meteor_path.mkdir(parents=True, exist_ok=True)
             not_meteor_path.mkdir(parents=True, exist_ok=True)
             rtsp_root.mkdir(parents=True, exist_ok=True)
+            if payload.get("saveOptions", {}).get("ml_training_export_enabled"):
+                Path(payload["saveOptions"]["ml_training_data_root"]).mkdir(parents=True, exist_ok=True)
 
             def progress_callback(item: Any) -> None:
                 message = None
@@ -1668,13 +2057,13 @@ class Bridge:
                     progress_callback=progress_callback,
                     mask=mask,
                     global_wcs_info=payload.get("globalWCSInfo"),
-                    plate_solve_mask=None,
+                    plate_solve_mask=plate_solve_mask,
                     meteor_save_path=str(meteor_path),
                     not_meteor_save_path=str(not_meteor_path),
                     cancel_flag=cancel_event,
                     save_options=payload.get("saveOptions") or self._default_save_options(),
                     interval=self._bounded_float(payload.get("interval", 1.0), 0.05, 60.0),
-                    duration=self._bounded_float(payload.get("duration", 1.0), 0.05, 30.0),
+                    duration=self._bounded_float(payload.get("duration", 1.0), 0.05, 60.0),
                     min_length=config.MIN_LINE_LENGTH,
                     summary_video_config=payload.get("summaryConfig") or self._default_summary_config(),
                     time_limit_enabled=bool(payload.get("timeLimitEnabled", False)),
@@ -1682,7 +2071,7 @@ class Bridge:
                     start_minute=self._bounded_int(payload.get("startMinute", 0), 0, 59),
                     end_hour=self._bounded_int(payload.get("endHour", 7), 0, 23),
                     end_minute=self._bounded_int(payload.get("endMinute", 0), 0, 59),
-                    max_workers=self._bounded_int(payload.get("maxWorkers", 1), 1, 6),
+                    max_workers=self._bounded_int(payload.get("maxWorkers", 1), 1, max(6, os.cpu_count() or 1)),
                     preview_callback=None,
                     dark_frame=fixed_pattern,
                     notify_on_detection=bool(payload.get("notifyOnDetection", True)),
@@ -1691,16 +2080,13 @@ class Bridge:
             )
             if cancel_event.is_set():
                 self.log("RTSP処理を停止しました。")
-                self._release_run_thread()
-                self.event("run_state", {"state": "cancelled"})
+                return {"state": "cancelled"}
             else:
-                self._release_run_thread()
-                self.event("run_state", {"state": "completed"})
+                return {"state": "completed"}
         except Exception as exc:
             self.log(f"RTSP処理中にエラーが発生しました: {exc}", "error")
             traceback.print_exc(file=sys.stderr)
-            self._release_run_thread()
-            self.event("run_state", {"state": "failed", "error": str(exc)})
+            return {"state": "failed", "error": str(exc)}
 
     def _cancel(self) -> None:
         self._cancel_event.set()
@@ -1721,6 +2107,17 @@ class Bridge:
             return fallback
         path = Path(os.path.expanduser(value)).resolve()
         return path
+
+    @staticmethod
+    def _json_safe(value: Any) -> Any:
+        """Camera-model failures use infinite residuals; JSON clients require finite values."""
+        if isinstance(value, float) and not math.isfinite(value):
+            return None
+        if isinstance(value, dict):
+            return {key: Bridge._json_safe(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [Bridge._json_safe(item) for item in value]
+        return value
 
     @staticmethod
     @contextmanager
@@ -2002,6 +2399,8 @@ def main() -> int:
                 bridge.log(f"リクエストを解釈できませんでした: {exc}", "error")
         return 0
     finally:
+        if "bridge" in locals():
+            bridge.close()
         process_lock.release()
 
 

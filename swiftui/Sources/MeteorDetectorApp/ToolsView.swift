@@ -277,12 +277,7 @@ struct ToolsView: View {
         }
         .allowsHitTesting(store.settingsLoaded)
         .overlay {
-            if !store.settingsLoaded {
-                ProgressView("設定を読み込んでいます…")
-                    .controlSize(.small)
-                    .padding(18)
-                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-            }
+            SettingsLoadOverlay()
         }
     }
 

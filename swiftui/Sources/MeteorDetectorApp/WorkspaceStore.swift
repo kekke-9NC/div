@@ -35,6 +35,16 @@ final class WorkspaceStore: ObservableObject {
     @Published private(set) var unsupportedFeatures: [String] = []
     @Published var allowReducedFeatureRun = false
     @Published private(set) var settingsLoaded = false
+    @Published private(set) var settingsLoadError: String?
+    @Published private(set) var isImportingSettings = false
+    @Published var inheritedSettings = LegacySettingsDocument()
+    @Published private(set) var cameraModelMonitorActive = false
+    @Published private(set) var cameraModelMonitorChanging = false
+    @Published private(set) var cameraModelMonitorStatus = "停止中"
+    @Published private(set) var cameraControlBusy = false
+    @Published private(set) var cameraControlStatus = "未接続"
+    @Published var cameraControlDraft: [String: String] = [:]
+    @Published private(set) var cameraControlOriginal: [String: String] = [:]
     @Published private(set) var isSavingSettings = false
 
     @Published var meteorSavePath: String
@@ -195,16 +205,128 @@ final class WorkspaceStore: ObservableObject {
                 self?.appendLog(error.localizedDescription, level: .error)
             }
         }
+        reloadSettings()
+    }
+
+    func reloadSettings() {
+        guard !isBusy, !isSavingSettings, !isImportingSettings, !cameraModelMonitorActive, !cameraModelMonitorChanging else { return }
+        settingsLoaded = false
+        settingsLoadError = nil
         bridge.request("load_settings") { [weak self] result in
+            guard let self else { return }
             switch result {
             case .success(let payload):
-                self?.applySettings(
+                self.connection = .connected
+                self.applySettings(
                     payload["settings"] as? [String: Any] ?? [:],
-                    unsupported: self?.stringArray(payload["unsupportedFeatures"]) ?? []
+                    unsupported: self.stringArray(payload["unsupportedFeatures"])
                 )
             case .failure(let error):
-                self?.settingsLoaded = true
-                self?.appendLog(error.localizedDescription, level: .error)
+                self.settingsLoadError = error.localizedDescription
+                self.appendLog(error.localizedDescription, level: .error)
+            }
+        }
+    }
+
+    func importLegacySettings(from url: URL) {
+        guard !isBusy, !isSavingSettings, !isImportingSettings, !cameraModelMonitorActive, !cameraModelMonitorChanging else { return }
+        isImportingSettings = true
+        bridge.request("import_settings", payload: ["sourcePath": url.path]) { [weak self] result in
+            guard let self else { return }
+            self.isImportingSettings = false
+            switch result {
+            case .success(let payload):
+                self.settingsLoadError = nil
+                self.connection = .connected
+                self.applySettings(
+                    payload["settings"] as? [String: Any] ?? [:],
+                    unsupported: self.stringArray(payload["unsupportedFeatures"])
+                )
+                self.appendLog("旧アプリの設定を取り込みました。取り込み前の設定はバックアップされています。")
+            case .failure(let error):
+                self.appendLog("設定を取り込めませんでした: \(error.localizedDescription)", level: .error)
+            }
+        }
+    }
+
+    func legacyValue(_ path: [String]) -> Any? { inheritedSettings.value(at: path) }
+
+    func legacyString(_ path: [String], default fallback: String = "") -> String {
+        let value = legacyValue(path)
+        if let string = value as? String { return string }
+        if let number = value as? NSNumber { return number.stringValue }
+        return fallback
+    }
+
+    func legacyBool(_ path: [String], default fallback: Bool = false) -> Bool {
+        boolValue(legacyValue(path), default: fallback)
+    }
+
+    func setLegacyValue(_ value: Any, at path: [String]) {
+        inheritedSettings.set(value, at: path)
+        if path == ["plate_solve_model_path"], let selected = value as? String {
+            plateSolvePath = selected
+        }
+    }
+
+    func toggleCameraModelMonitor() {
+        guard !cameraModelMonitorChanging else { return }
+        if cameraModelMonitorActive {
+            cameraModelMonitorChanging = true
+            bridge.request("stop_camera_model_monitor") { [weak self] result in
+                self?.cameraModelMonitorChanging = false
+                switch result {
+                case .success:
+                    self?.cameraModelMonitorActive = false
+                    self?.cameraModelMonitorStatus = "停止中"
+                case .failure(let error): self?.cameraModelMonitorStatus = error.localizedDescription
+                }
+            }
+            return
+        }
+        guard let source = sources.first(where: { $0.kind == .rtsp }) else {
+            cameraModelMonitorStatus = "入力ソースにRTSPカメラを追加してください"
+            return
+        }
+        cameraModelMonitorStatus = "開始しています…"
+        cameraModelMonitorChanging = true
+        bridge.request("start_camera_model_monitor", payload: ["url": source.value, "legacySettings": settingsSnapshot]) { [weak self] result in
+            self?.cameraModelMonitorChanging = false
+            switch result {
+            case .success:
+                self?.cameraModelMonitorActive = true
+                self?.cameraModelMonitorStatus = "補正データを自動監視しています"
+            case .failure(let error): self?.cameraModelMonitorStatus = error.localizedDescription
+            }
+        }
+    }
+
+    func controlCamera(apply: Bool, basic: [String: Int] = [:], extra: [String: Int] = [:]) {
+        guard !cameraControlBusy else { return }
+        cameraControlBusy = true
+        cameraControlStatus = apply ? "反映しています…" : "読み込んでいます…"
+        bridge.request("camera_control", payload: [
+            "action": apply ? "apply" : "fetch",
+            "baseURL": legacyString(["camera_control_base_url"]),
+            "basic": basic, "extra": extra,
+        ]) { [weak self] result in
+            guard let self else { return }
+            self.cameraControlBusy = false
+            switch result {
+            case .success(let payload):
+                if let values = payload["values"] as? [String: Any] {
+                    self.cameraControlDraft = values.compactMapValues { value in
+                        if let number = value as? NSNumber { return number.stringValue }
+                        return value as? String
+                    }
+                    self.cameraControlOriginal = self.cameraControlDraft
+                } else if apply {
+                    for (key, value) in basic.merging(extra, uniquingKeysWith: { _, updated in updated }) {
+                        self.cameraControlOriginal[key] = String(value)
+                    }
+                }
+                self.cameraControlStatus = apply ? "カメラへ反映しました" : "カメラ設定を読み込みました"
+            case .failure(let error): self.cameraControlStatus = error.localizedDescription
             }
         }
     }
@@ -335,6 +457,8 @@ final class WorkspaceStore: ObservableObject {
     var plateSolveConfigurationIsValid: Bool {
         guard plateSolveEnabled else { return true }
         let path = plateSolvePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        if legacyString(["plate_solve_mode"], default: "local") == "local",
+           path.isEmpty || !FileManager.default.fileExists(atPath: path) { return true }
         guard !path.isEmpty,
               FileManager.default.fileExists(atPath: path),
               (try? URL(fileURLWithPath: path)
@@ -346,6 +470,10 @@ final class WorkspaceStore: ObservableObject {
 
     var plateSolveStatusMessage: String {
         guard plateSolveEnabled else { return "座標注釈は無効です" }
+        if legacyString(["plate_solve_mode"], default: "local") == "local",
+           plateSolvePath.isEmpty || !FileManager.default.fileExists(atPath: plateSolvePath) {
+            return "当晩の動画からカメラ補正データを自動作成します"
+        }
         guard !plateSolvePath.isEmpty else { return "既存のWCS／カメラ補正データを選択してください" }
         guard plateSolveConfigurationIsValid else { return "カメラ補正データが見つからないか形式が不正です" }
         return "解析結果に座標注釈を付けます"
@@ -632,6 +760,7 @@ final class WorkspaceStore: ObservableObject {
         bridge.request(
             "run_video_concat",
             payload: [
+                "legacySettings": settingsSnapshot,
                 "inputFiles": videoConcatFiles,
                 "outputPath": videoConcatOutputPath.trimmingCharacters(in: .whitespacesAndNewlines),
                 "bitrate": videoConcatBitrate,
@@ -838,26 +967,10 @@ final class WorkspaceStore: ObservableObject {
         }
     }
 
-    func saveSettings(
-        showSuccessLog: Bool = false,
-        completion: ((Result<Void, BridgeError>) -> Void)? = nil
-    ) {
-        guard settingsLoaded else {
-            completion?(.success(()))
-            return
-        }
-        settingsSaveGeneration &+= 1
-        let generation = settingsSaveGeneration
-        if let completion {
-            settingsSaveCompletions.append(completion)
-        }
-        isSavingSettings = true
+    var settingsSnapshot: [String: Any] {
         let localPaths = sources.filter { $0.kind != .rtsp }.map(\.value)
         let rtspURLs = sources.filter { $0.kind == .rtsp }.map(\.value)
-        bridge.request(
-            "save_settings",
-            payload: [
-                "settings": [
+        let updates: [String: Any] = [
                     "folder_paths": localPaths,
                     "rtsp_urls": rtspURLs,
                     "processing_source_priority": sourcePriority,
@@ -870,7 +983,7 @@ final class WorkspaceStore: ObservableObject {
                     "observation_latitude": String(latitude),
                     "observation_longitude": String(longitude),
                     "save_options": saveOptions,
-                    "summary_video_config": summaryVideoConfigPayload,
+                    "summary_video_config": persistedSummaryVideoConfigPayload,
                     "apply_mask": detectionMaskEnabled,
                     "detection_mask_path": detectionMaskPath,
                     "mask_path_or_status": detectionMaskPath,
@@ -913,8 +1026,27 @@ final class WorkspaceStore: ObservableObject {
                         "timestamp_offset_seconds": String(videoConcatTimestampOffsetSeconds),
                     ],
                     "video_concat_output_path": videoConcatOutputPath,
-                ],
-            ]
+                ]
+        return inheritedSettings.merging(updates)
+    }
+
+    func saveSettings(
+        showSuccessLog: Bool = false,
+        completion: ((Result<Void, BridgeError>) -> Void)? = nil
+    ) {
+        guard settingsLoaded else {
+            completion?(.failure(.unavailable(settingsLoadError ?? "設定の読み込みが完了していません。")))
+            return
+        }
+        settingsSaveGeneration &+= 1
+        let generation = settingsSaveGeneration
+        if let completion {
+            settingsSaveCompletions.append(completion)
+        }
+        isSavingSettings = true
+        bridge.request(
+            "save_settings",
+            payload: ["settings": settingsSnapshot]
         ) { [weak self] result in
             guard let self, self.settingsSaveGeneration == generation else { return }
             self.isSavingSettings = false
@@ -985,13 +1117,9 @@ final class WorkspaceStore: ObservableObject {
 
     private func disableInvalidFixedPattern(_ message: String) {
         let wasEnabled = rtspFixedPatternEnabled
-        rtspFixedPatternEnabled = false
         rtspFixedPatternValidation = .invalid(message)
         guard wasEnabled else { return }
-        appendLog("固定パターン補正を無効にしました: \(message)", level: .warning)
-        if settingsLoaded {
-            saveSettings()
-        }
+        appendLog("固定パターン補正を利用できません: \(message)", level: .warning)
     }
 
     func startFixedPatternBuild(mode: String, source: String) {
@@ -1075,7 +1203,9 @@ final class WorkspaceStore: ObservableObject {
         start: String,
         end: String,
         cloudThreshold: Double,
-        useCloudFilter: Bool
+        useCloudFilter: Bool,
+        method: String = "動画の星の動き（推奨）",
+        monitorInterval: String = "60"
     ) {
         guard !cameraModelBuildActive else { return }
         cameraModelBuildActive = true
@@ -1089,7 +1219,10 @@ final class WorkspaceStore: ObservableObject {
         bridge.request(
             "build_camera_model",
             payload: [
+                "legacySettings": settingsSnapshot,
                 "source": source,
+                "method": method,
+                "interval": monitorInterval,
                 "autoSelect": autoSelect,
                 "start": autoSelect ? "" : start,
                 "end": autoSelect ? "" : end,
@@ -1235,6 +1368,7 @@ final class WorkspaceStore: ObservableObject {
 
     private func runPayload(merging additional: [String: Any]) -> [String: Any] {
         var payload: [String: Any] = [
+            "legacySettings": settingsSnapshot,
             "maxWorkers": maxWorkers,
             "interval": interval,
             "duration": duration,
@@ -1272,6 +1406,20 @@ final class WorkspaceStore: ObservableObject {
             }
             return item
         }
+    }
+
+    private var persistedSummaryVideoConfigPayload: [[String: Any]] {
+        let updates = summaryVideoConfigPayload
+        let original = legacyValue(["summary_video_config"]) as? [[String: Any]] ?? []
+        var updatedNames = Set<String>()
+        var merged = original.map { item -> [String: Any] in
+            guard let name = item["name"] as? String,
+                  let update = updates.first(where: { $0["name"] as? String == name }) else { return item }
+            updatedNames.insert(name)
+            return LegacySettingsDocument(item).merging(update)
+        }
+        merged.append(contentsOf: updates.filter { !updatedNames.contains($0["name"] as? String ?? "") })
+        return merged
     }
 
     private func applySummaryVideoConfig(_ value: Any?) {
@@ -1314,6 +1462,21 @@ final class WorkspaceStore: ObservableObject {
     private func handle(_ envelope: BridgeEnvelope) {
         guard envelope.type == "event" else { return }
         switch envelope.event {
+        case "camera_model_monitor_progress":
+            cameraModelMonitorStatus = envelope.payload["message"] as? String
+                ?? envelope.payload["stage"] as? String ?? "補正データを確認しています"
+        case "settings_updated":
+            if let updates = envelope.payload["settings"] as? [String: Any] {
+                inheritedSettings = LegacySettingsDocument(inheritedSettings.merging(updates))
+                if let value = updates["periodic_start_hour"] { periodicStartHour = intValue(value, default: periodicStartHour) }
+                if let value = updates["periodic_start_minute"] { periodicStartMinute = intValue(value, default: periodicStartMinute) }
+                if let value = updates["periodic_end_hour"] { periodicEndHour = intValue(value, default: periodicEndHour) }
+                if let value = updates["periodic_end_minute"] { periodicEndMinute = intValue(value, default: periodicEndMinute) }
+                if let value = updates["rtsp_start_hour"] { rtspStartHour = intValue(value, default: rtspStartHour) }
+                if let value = updates["rtsp_start_minute"] { rtspStartMinute = intValue(value, default: rtspStartMinute) }
+                if let value = updates["rtsp_end_hour"] { rtspEndHour = intValue(value, default: rtspEndHour) }
+                if let value = updates["rtsp_end_minute"] { rtspEndMinute = intValue(value, default: rtspEndMinute) }
+            }
         case "log":
             let message = envelope.payload["message"] as? String ?? ""
             let levelString = envelope.payload["level"] as? String ?? "info"
@@ -1504,6 +1667,12 @@ final class WorkspaceStore: ObservableObject {
         }
 
         plateSolvePath = modelPath
+        setLegacyValue(modelPath, at: ["plate_solve_model_path"])
+        var wcs = legacyValue(["global_wcs_info"]) as? [String: Any] ?? [:]
+        wcs["model_path"] = modelPath
+        wcs["wcs_file"] = modelPath
+        if let path = payload["calibration_path"] as? String { wcs["calibration_path"] = path }
+        setLegacyValue(wcs, at: ["global_wcs_info"])
         plateSolveEnabled = true
         cameraModelBuildSavingSettings = true
         cameraModelBuildStatus = "高精度モデルを登録し、座標注釈へ適用しています…"
@@ -1556,6 +1725,7 @@ final class WorkspaceStore: ObservableObject {
     }
 
     private func applySettings(_ settings: [String: Any], unsupported: [String]) {
+        inheritedSettings = LegacySettingsDocument(settings)
         unsupportedFeatures = unsupported
         if !unsupported.isEmpty {
             appendLog("SwiftUI版では未対応の旧設定があります: \(unsupported.joined(separator: "、"))", level: .warning)
@@ -1573,9 +1743,9 @@ final class WorkspaceStore: ObservableObject {
 
         if let value = settings["meteor_save_path"] as? String, !value.isEmpty { meteorSavePath = value }
         if let value = settings["not_meteor_save_path"] as? String, !value.isEmpty { notMeteorSavePath = value }
-        maxWorkers = max(1, min(6, intValue(settings["concurrency"], default: 4)))
+        maxWorkers = max(1, min(max(6, ProcessInfo.processInfo.activeProcessorCount), intValue(settings["concurrency"], default: 4)))
         interval = max(0.05, min(60, doubleValue(settings["interval"], default: 1)))
-        duration = max(0.05, min(30, doubleValue(settings["duration"], default: 1)))
+        duration = max(0.05, min(60, doubleValue(settings["duration"], default: 1)))
         twilightFilterEnabled = boolValue(settings["date_folder_twilight_filter_enabled"], default: true)
         latitude = doubleValue(settings["observation_latitude"], default: latitude)
         longitude = doubleValue(settings["observation_longitude"], default: longitude)
@@ -1588,15 +1758,17 @@ final class WorkspaceStore: ObservableObject {
                   FileManager.default.fileExists(atPath: legacyMaskPath) {
             detectionMaskPath = legacyMaskPath
         }
-        plateSolvePath = settings["plate_solve_wcs_path"] as? String ?? ""
+        let wcs = settings["global_wcs_info"] as? [String: Any] ?? [:]
+        let candidates = [settings["plate_solve_wcs_path"], settings["plate_solve_model_path"], wcs["wcs_file"], wcs["model_path"], wcs["calibration_path"]]
+            .compactMap { $0 as? String }.filter { !$0.isEmpty }
+        plateSolvePath = candidates.first { FileManager.default.fileExists(atPath: $0) } ?? candidates.first ?? ""
         plateSolveEnabled = boolValue(settings["use_plate_solve"], default: false)
         if plateSolveEnabled && !plateSolveConfigurationIsValid {
-            plateSolveEnabled = false
-            appendLog("保存されていたカメラ補正データを利用できないため、座標注釈を無効にしました。", level: .warning)
+            appendLog("保存されていたカメラ補正データが見つかりません。設定から参照先を選び直してください。", level: .warning)
         }
         periodicScanEnabled = boolValue(settings["periodic_scan_enabled"], default: false)
         periodicScanDirectory = settings["periodic_scan_directory"] as? String ?? ""
-        periodicScanInterval = max(5, min(3600, intValue(settings["periodic_scan_interval"], default: 60)))
+        periodicScanInterval = max(1, min(3600, intValue(settings["periodic_scan_interval"], default: 60)))
         periodicTimeLimitEnabled = boolValue(settings["periodic_time_limit_enabled"], default: false)
         periodicStartHour = max(0, min(23, intValue(settings["periodic_start_hour"], default: 17)))
         periodicStartMinute = max(0, min(59, intValue(settings["periodic_start_minute"], default: 0)))
@@ -1621,15 +1793,9 @@ final class WorkspaceStore: ObservableObject {
         rtspFixedPatternEnabled = boolValue(settings["apply_rtsp_dark"], default: false)
         let savedModelPath = (settings["selected_model_path"] as? String ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        if !savedModelPath.isEmpty,
-           (try? URL(fileURLWithPath: savedModelPath)
-               .resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true {
-            selectedModelPath = savedModelPath
-        } else {
-            selectedModelPath = ""
-            if !savedModelPath.isEmpty {
-                appendLog("保存されていた検出モデルが見つからないため、標準モデルへ戻しました。", level: .warning)
-            }
+        selectedModelPath = savedModelPath
+        if !savedModelPath.isEmpty && !FileManager.default.fileExists(atPath: savedModelPath) {
+            appendLog("保存されていた検出モデルが見つかりません。設定から参照先を選び直してください。", level: .warning)
         }
         noiseTwinModelPath = settings["noise_twin_model_path"] as? String ?? ""
         noiseTwinEnabled = boolValue(settings["noise_twin_enabled"], default: false)

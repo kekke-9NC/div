@@ -77,6 +77,9 @@ dist/
 .build/
 swiftui/.build/
 .meteor_detector.lock
+.legacy-settings-migration.json
+.legacy-settings-backup/
+.legacy-import-assets/
 
 # Benchmark results and scripts
 meteor_vlm_benchmark.py
