@@ -88,28 +88,29 @@ final class PythonBridge {
         let stdout = output.fileHandleForReading
         let stderr = errorOutput.fileHandleForReading
         stdout.readabilityHandler = { [weak self] handle in
-            do {
-                guard let data = try handle.read(upToCount: 64 * 1024), !data.isEmpty else { return }
-                Task { @MainActor [weak self] in
-                    self?.consume(data)
-                }
-            } catch {
-                Task { @MainActor [weak self] in
-                    self?.onDiagnostic?("Python出力の読み取りに失敗しました: \(error.localizedDescription)")
-                }
+            // A bounded FileHandle read can wait for its full byte count on a
+            // pipe. The backend stays alive between short NDJSON responses,
+            // so drain only the bytes currently available and frame them below.
+            let data = handle.availableData
+            guard !data.isEmpty else {
+                handle.readabilityHandler = nil
+                return
+            }
+            Task { @MainActor [weak self] in
+                self?.consume(data)
             }
         }
         stderr.readabilityHandler = { [weak self] handle in
-            do {
-                guard let data = try handle.read(upToCount: 64 * 1024), !data.isEmpty else { return }
-                let message = String(decoding: data, as: UTF8.self)
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !message.isEmpty else { return }
-                Task { @MainActor [weak self] in
-                    self?.onDiagnostic?(message)
-                }
-            } catch {
-                // The JSON stdout channel remains authoritative for UI state.
+            let data = handle.availableData
+            guard !data.isEmpty else {
+                handle.readabilityHandler = nil
+                return
+            }
+            let message = String(decoding: data, as: UTF8.self)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !message.isEmpty else { return }
+            Task { @MainActor [weak self] in
+                self?.onDiagnostic?(message)
             }
         }
 
