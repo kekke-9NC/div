@@ -12,9 +12,13 @@ let focusTimer = null;
 let metadataBusy = false;
 let statisticsBusy = false;
 let statsUpdatedEpoch = null;
+let skyBusy = false;
+let skyGeneration = null;
+let skyUpdatedEpoch = null;
 
 function updateClock() {
     const now = new Date();
+    if (skyUpdatedEpoch === null || now.getTime() / 1000 - skyUpdatedEpoch > 20) byId('sky').hidden = true;
     byId('current-clock').textContent = jstClock.format(now);
     byId('current-date').textContent = jstDate.format(now);
     if (displayedEpoch !== null) {
@@ -23,6 +27,32 @@ function updateClock() {
     }
     if (statsUpdatedEpoch !== null) {
         byId('stats-state').textContent = now.getTime() / 1000 - statsUpdatedEpoch > 90 ? '更新が遅れています' : '訂正反映・未確認は自動判定';
+    }
+}
+
+async function refreshSky() {
+    if (skyBusy) return;
+    skyBusy = true;
+    try {
+        const data = await localJSON('sky_overlay.json');
+        const fresh = Number.isFinite(data.updated_at_epoch) && Math.abs(Date.now() / 1000 - data.updated_at_epoch) < 20;
+        if (!data.enabled || !fresh || data.width !== 1920 || data.height !== 1080) {
+            byId('sky').hidden = true;
+            skyUpdatedEpoch = null;
+            return;
+        }
+        if (data.generation !== skyGeneration) {
+            const source = await loadImage('sky_overlay.png', data.generation);
+            if (Date.now() / 1000 - data.updated_at_epoch > 20) return;
+            byId('sky-lines').src = source;
+            skyGeneration = data.generation;
+        }
+        skyUpdatedEpoch = data.updated_at_epoch;
+        byId('sky').hidden = false;
+    } catch (_) {
+        // The clock hides an expired layer if its renderer stops.
+    } finally {
+        skyBusy = false;
     }
 }
 
@@ -168,6 +198,8 @@ async function refreshStatistics() {
 updateClock();
 refreshMetadata();
 refreshStatistics();
+refreshSky();
 setInterval(updateClock, 1000);
 setInterval(refreshMetadata, 2500);
 setInterval(refreshStatistics, 2500);
+setInterval(refreshSky, 2500);

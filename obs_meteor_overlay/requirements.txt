@@ -1,3 +1,6 @@
 numpy
 opencv-python
 Pillow
+astropy
+scipy
+astrometry

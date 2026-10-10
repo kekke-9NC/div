@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 from datetime import datetime, time as datetime_time, timedelta
 import json
 import os
@@ -417,7 +418,30 @@ def main() -> int:
     args.output_dir.mkdir(parents=True, exist_ok=True)
     print(f"[OBS meteor overlay] watching {args.meteor_dir}", flush=True)
 
+    sky_process = None
+    sky_log = None
+    def stop_sky():
+        if sky_process is not None and sky_process.poll() is None:
+            sky_process.terminate()
+            try:
+                sky_process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                sky_process.kill()
+                sky_process.wait()
+        if sky_log is not None:
+            sky_log.close()
+    atexit.register(stop_sky)
+
     while not STOP:
+        # Render astronomy separately so it cannot delay replay/statistics.
+        if (args.output_dir / 'sky_config.json').exists() and (sky_process is None or sky_process.poll() is not None):
+            if sky_log is None:
+                sky_log = (args.output_dir / 'sky_overlay.log').open('a', encoding='utf-8')
+            sky_process = subprocess.Popen([
+                sys.executable, str(Path(__file__).with_name('sky_overlay.py')),
+                '--output-dir', str(args.output_dir), '--parent-pid', str(os.getpid()),
+                '--legacy-settings', str(args.legacy_settings),
+            ], stdout=sky_log, stderr=sky_log)
         now = datetime.now()
         try:
             events = catalog.refresh()
@@ -532,6 +556,8 @@ def main() -> int:
         time.sleep(max(0.5, args.poll_seconds))
 
     print("[OBS meteor overlay] stopped", flush=True)
+    stop_sky()
+    atexit.unregister(stop_sky)
     return 0
 
 

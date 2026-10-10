@@ -18,9 +18,10 @@ OBSの「シーン」に次の変換を設定します。ブラウザソース�
 
 双方とも左上基準、回転0、境界枠なしです。
 ライブ映像は約1594×837pxで、右側のリプレイ領域（X1630〜1904、Y16〜853）と
-下段（Y872〜1064）には重なりません。リプレイ枠は通常82％、新しいイベントを表示したときに
-12秒間100％に拡大します。連続検出時は12秒を延長し、拡大中も専用領域に収まります。
-初回読み込みやマスク変更だけでは拡大しません。GIFはイベント・マスク変更時だけ読み直し、
+下段（Y872〜1064）には重なりません。リプレイ枠は常に274×837pxで表示します。
+新しいイベントを表示したときは、12秒間、外枠が金色になり「新しい検出」と表示します。
+連続検出時は12秒を延長します。初回読み込みやマスク変更だけでは外枠の色を変えません。
+GIFはイベント・マスク変更時だけ読み直し、
 定期確認による再生の巻き戻りを避けます。
 
 時計は日本時間で毎秒更新します。`hourly_stats.json` と今夜の合計は、旧UIの設定にある
@@ -92,3 +93,51 @@ Python環境には `requirements.txt` のライブラリとffmpeg/ffprobeが必�
 
 旧UIを実行中にコードを更新した場合、即時保存を有効にするには旧UIの再起動が一度必要です。
 OBS側はLuaスクリプトの再読み込みで反映できます。
+
+## このカメラ専用の星座線
+
+`build_sky_model.py` は録画の平均画像から中央の明るい恒星を照合し、
+Tycho-2の全天星表から画面周辺まで対応を広げます。固定カメラのSTG投影と
+5次の歪み補正を、実際に観測された恒星の位置へ直接フィットします。
+汎用SIPの逆変換を画面の端まで外挿する方法には頼りません。
+`refine_sky_model.py` は15分以上にわたる異なる時刻の3本以上の録画で、恒星時に従って移動する
+対応だけを残し、ノイズや固定画素を除いて補正を再推定します。
+確認した恒星の通過範囲から表示範囲を作り、その外側には線を出しません。
+
+候補モデルは `calibration/camera_models/obs-camera-full-field/camera_model.json`、
+配信で使う確認済みモデルは `calibration/approved/camera_model.json`、
+目視確認用画像と数値は `validation/` に保存します。
+旧UIの設定やプレートソルブ用キャッシュには登録しません。
+以下は配信に表示されない候補作成・確認の例です。動画は同じカメラの完成済み録画を使います。
+
+```bash
+.venv-mac/bin/python obs_meteor_overlay/build_sky_model.py /path/to/rtsp/20261011/00/30.mp4
+.venv-mac/bin/python obs_meteor_overlay/refine_sky_model.py \
+  obs_meteor_overlay/calibration/camera_models/obs-camera-full-field/camera_model.json \
+  /path/to/rtsp/20261011/00/00.mp4 /path/to/rtsp/20261011/00/30.mp4 /path/to/rtsp/20261011/00/45.mp4
+.venv-mac/bin/python obs_meteor_overlay/verify_sky_model.py \
+  obs_meteor_overlay/calibration/camera_models/obs-camera-full-field/camera_model.json \
+  /path/to/rtsp/20261011/00/15.mp4 /path/to/rtsp/20261011/00/46.mp4
+```
+
+初回はAstrometry.net公式データ配布先 `https://data.astrometry.net/4100/` の
+4100シリーズ15〜19（Tycho-2）をローカルへ保存します。映像の外部送信は行いません。
+星座線の座標はプロジェクトの `assets/constellations.lines.json` を使います。
+上記処理には既存の `.venv-mac` のastrometry・astropy・scipyも必要です。
+
+適用前に、作成に使っていない録画の確認画像と、現在のカメラの確認画像で、
+中央・周辺の星に線の端点が合っていることを目視で確認します。
+目視確認後、候補モデルを `calibration/approved/camera_model.json` へコピーします。
+これで次の候補作成が現在の配信モデルを上書きしません。
+その後 `sky_config.json` に `enabled: true`、`model_path`、モデルファイルのSHA-256を
+`approved_model_sha256`、目視確認日時を `visually_verified_at` として保存します。
+`line_opacity` は不透明度0〜1で、現在は0.45（55％透過）の細い水色線です。
+必要なら `video_delay_seconds` で配信映像の遅延秒数を指定します（初期値0）。
+JSONは生成物でありGitには登録しません。モデルを書き換えるとハッシュが不一致になり、
+再度確認するまで線を表示しません。`enabled: false` で星座線だけを停止できます。
+カメラの向き・ズーム・解像度・OBSのライブ映像配置を変えたら、モデルと配置の再確認が必要です。
+
+更新処理は別の低優先度プロセスで、時刻に合わせて5秒ごとに透過画像を作ります。
+ブラウザは2.5秒ごとに読み込みます。表示範囲は旧UIの検出マスクにも追従します。
+画像の更新が20秒以上止まった場合や確認済みモデルを読めない場合は、線を隠します。
+ライブ映像や検出処理への新たなRTSP接続は作りません。
