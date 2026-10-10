@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: transparent; }
+    #card {
+      position: fixed;
+      right: 28px;
+      bottom: 28px;
+      width: 820px;
+      height: 260px;
+      display: flex;
+      border: 3px solid rgba(255, 255, 255, 0.92);
+      border-radius: 12px;
+      overflow: hidden;
+      background: rgba(0, 0, 0, 0.72);
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.55);
+      opacity: 0;
+      transition: opacity 180ms ease;
+    }
+    #card.ready { opacity: 1; }
+    #media { display: flex; width: 500px; height: 180px; flex: 0 0 500px; align-self: center; }
+    .tile { position: relative; background: #05070d; overflow: hidden; }
+    #meteor { display: block; width: 320px; height: 180px; object-fit: contain; }
+    #zoom { display: block; width: 180px; height: 180px; object-fit: contain; border-left: 1px solid rgba(255,255,255,.22); }
+    .tile-label {
+      position: absolute;
+      top: 10px;
+      left: 12px;
+      padding: 5px 10px;
+      color: white;
+      background: rgba(0, 0, 0, 0.62);
+      border-radius: 5px;
+      font: 800 16px/1.2 -apple-system, BlinkMacSystemFont, "Hiragino Sans", sans-serif;
+      letter-spacing: .03em;
+    }
+    #details {
+      width: 320px;
+      height: 260px;
+      padding: 10px 20px 9px;
+      color: rgba(255,255,255,.94);
+      background: rgba(5, 9, 20, .92);
+      font: 800 18px/1.25 -apple-system, BlinkMacSystemFont, "Hiragino Sans", sans-serif;
+      box-sizing: border-box;
+      text-align: center;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+    }
+    .caption { color: rgba(255,255,255,.78); font-size: 14px; margin-bottom: 2px; }
+    .value { color: #ffe48a; font-weight: 800; white-space: nowrap; }
+    #last-date { color: rgba(255,255,255,.88); font-size: 16px; }
+    #last-clock { display: block; font-size: 44px; line-height: 1.0; letter-spacing: .02em; }
+    #elapsed { color: #8ee8ff; font-size: 24px; margin: 3px 0 8px; }
+    #count { font-size: 48px; line-height: .95; margin: 2px 0 4px; }
+    #window { color: rgba(255,255,255,.82); font-size: 13px; white-space: nowrap; }
+    .divider { height: 1px; margin: 0 18px 7px; background: rgba(255,255,255,.26); }
+  </style>
+</head>
+<body>
+  <div id="card">
+    <div id="media">
+      <div class="tile">
+        <img id="meteor" alt="直近の流星 全体映像">
+        <div class="tile-label">全体</div>
+      </div>
+      <div class="tile">
+        <img id="zoom" alt="直近の流星 拡大映像">
+        <div class="tile-label">流星拡大</div>
+      </div>
+    </div>
+    <div id="details">
+      <div class="caption">前回の流星</div>
+      <div id="last-date" class="value">--</div>
+      <div id="last-clock" class="value">--:--:--</div>
+      <div id="elapsed">--分前</div>
+      <div class="divider"></div>
+      <div class="caption">今夜の検出</div>
+      <div id="count" class="value">--</div>
+      <div id="window">18:00–翌06:00</div>
+    </div>
+  </div>
+  <script>
+    const card = document.getElementById('card');
+    const image = document.getElementById('meteor');
+    const zoomImage = document.getElementById('zoom');
+    const lastDate = document.getElementById('last-date');
+    const lastClock = document.getElementById('last-clock');
+    const elapsed = document.getElementById('elapsed');
+    const count = document.getElementById('count');
+    const windowLabel = document.getElementById('window');
+    const gif = new URL('latest_meteor.gif', document.location.href);
+    const zoomGif = new URL('latest_meteor_zoom.gif', document.location.href);
+    const metadata = new URL('latest_meteor.json', document.location.href);
+    let latestDetectedEpoch = null;
+
+    function refresh() {
+      gif.search = `v=${Date.now()}`;
+      zoomGif.search = `v=${Date.now()}`;
+      const fullProbe = new Image();
+      fullProbe.onload = () => {
+        image.src = fullProbe.src;
+        card.classList.add('ready');
+      };
+      fullProbe.src = gif.href;
+      const zoomProbe = new Image();
+      zoomProbe.onload = () => { zoomImage.src = zoomProbe.src; };
+      zoomProbe.onerror = () => { zoomImage.src = gif.href; };
+      zoomProbe.src = zoomGif.href;
+    }
+
+    async function refreshMetadata() {
+      try {
+        metadata.search = `v=${Date.now()}`;
+        const response = await fetch(metadata.href, { cache: 'no-store' });
+        const data = await response.json();
+        lastDate.textContent = data.detected_at_date ? data.detected_at_date.slice(5) : '--';
+        lastClock.textContent = data.detected_at_clock || '--:--:--';
+        latestDetectedEpoch = Number.isFinite(Number(data.detected_at_epoch)) ? Number(data.detected_at_epoch) : null;
+        count.textContent = Number.isFinite(Number(data.tonight_count)) ? `${data.tonight_count}件` : '--';
+        windowLabel.textContent = data.tonight_window || '18:00–翌06:00';
+        updateElapsed();
+      } catch (_) {
+        // The image remains usable even if local metadata is temporarily locked while updating.
+      }
+    }
+
+    function updateElapsed() {
+      if (latestDetectedEpoch === null) {
+        elapsed.textContent = '--分前';
+        return;
+      }
+      const minutes = Math.max(0, Math.floor((Date.now() / 1000 - latestDetectedEpoch) / 60));
+      elapsed.textContent = minutes < 1 ? 'たった今' : `${minutes}分前`;
+    }
+
+    refresh();
+    refreshMetadata();
+    setInterval(refresh, 2500);
+    setInterval(refreshMetadata, 2500);
+    setInterval(updateElapsed, 30000);
+  </script>
+</body>
+</html>

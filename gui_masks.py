@@ -2,6 +2,26 @@ from gui_common import *
 
 
 class MaskMixin:
+    def _init_detection_mask_persistence(self):
+        # The mask dialogs set apply_mask_var after replacing mask_image.
+        # Coalesce writes until the current UI action (including load) ends.
+        self._mask_persist_pending = None
+        def changed(*_):
+            if self._mask_persist_pending is None:
+                self._mask_persist_pending = self.after_idle(self._persist_detection_mask)
+        self._mask_persist_trace = self.apply_mask_var.trace_add("write", changed)
+
+    def _persist_detection_mask(self):
+        from legacy_mask_sync import persist_detection_mask
+        self._mask_persist_pending = None
+        try:
+            persist_detection_mask(
+                self.settings_file, self.masks_file, self.mask_image,
+                self.plate_solve_mask_image, self.apply_mask_var.get(),
+            )
+        except Exception as exc:
+            self.append_log(f"検出マスクの自動保存に失敗しました: {exc}")
+
     def create_summary_settings_window(self):
         win = Toplevel(self)
         win.title("概要動画設定")

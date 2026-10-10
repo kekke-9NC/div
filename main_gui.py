@@ -82,6 +82,7 @@ class App(
         self.setup_ui()
         self.update_start_button_state()
         self.load_settings()
+        self._init_detection_mask_persistence()
         # Populate the in-app fixed-camera model selector after persisted
         # settings have restored the previously selected model path.
         if hasattr(self, "_refresh_plate_solve_model_choices"):

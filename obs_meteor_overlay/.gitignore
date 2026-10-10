@@ -1,0 +1,7 @@
+__pycache__/
+*.gif
+*.png
+*.json
+*.log
+*.pid
+*.tmp
