@@ -37,6 +37,8 @@ body { color: var(--ink); font-family: -apple-system, BlinkMacSystemFont, 'Hirag
 #last-date { font-size: 22px; margin-top: 12px; }
 #last-clock { color: var(--gold); font-weight: 750; font-size: 43px; margin-top: 4px; }
 #elapsed { color: var(--cyan); font-size: 25px; margin-top: 8px; }
+#time-basis { font-size: 16px; }
+#visible-window { color: var(--muted); font-size: 14px; margin-top: 8px; min-height: 18px; }
 #bottom { position: absolute; left: 16px; right: 16px; top: 872px; height: 192px; display: grid; grid-template-columns: 288px 1fr 288px; gap: 16px; }
 .summary { text-align: center; padding: 17px 10px; display: flex; flex-direction: column; align-items: center; justify-content: center; }
 #current-clock { font-size: 49px; line-height: 1.2; font-weight: 750; letter-spacing: .015em; }
@@ -44,10 +46,24 @@ body { color: var(--ink); font-family: -apple-system, BlinkMacSystemFont, 'Hirag
 #count { font-size: 60px; color: var(--gold); line-height: 1.15; font-weight: 750; }
 .unit { font-size: 24px; font-weight: 600; margin-left: 5px; }
 #window { font-size: 14px; color: var(--muted); margin-top: 5px; white-space: nowrap; }
-#statistics { display: grid; grid-template-columns: 190px 1fr; padding: 14px 18px; gap: 16px; }
+#statistics { position: relative; }
+.board-page { position: absolute; inset: 0; padding: 14px 18px; opacity: 0; transform: translateY(22px); transition: opacity 650ms ease, transform 650ms ease; pointer-events: none; }
+.board-page.active { opacity: 1; transform: translateY(0); }
+#graph-page { display: grid; grid-template-columns: 190px 1fr; gap: 16px; }
+#history-page { display: flex; flex-direction: column; gap: 10px; }
+.history-heading { display: flex; align-items: center; justify-content: space-between; height: 26px; color: var(--muted); font-size: 16px; }
+.history-heading strong { color: var(--cyan); font-size: 20px; }
+#history-viewport { flex: 1; min-height: 0; overflow: hidden; position: relative; mask-image: linear-gradient(to right, transparent, black 12px, black calc(100% - 12px), transparent); }
+#history-track { display: flex; gap: 18px; width: max-content; height: 128px; will-change: transform; }
+.history-card { flex: 0 0 218px; height: 128px; display: grid; grid-template-columns: 112px 1fr; gap: 8px; padding: 6px; background: #141f30; border: 1px solid #364355; border-radius: 7px; }
+.history-card img { width: 112px; height: 112px; object-fit: contain; background: #02050a; border-radius: 3px; }
+.history-card .history-info { display: flex; flex-direction: column; justify-content: center; gap: 8px; font-size: 12px; color: var(--muted); }
+.history-card time { display: block; font-size: 16px; font-weight: 750; color: var(--gold); writing-mode: horizontal-tb; white-space: nowrap; }
+.history-empty { padding: 35px 12px; color: var(--muted); font-size: 20px; }
 .hour-count { display: flex; flex-direction: column; justify-content: center; align-items: center; }
 #hour-count { font-size: 60px; font-weight: 750; color: var(--cyan); line-height: 1.2; }
 #stats-state { font-size: 13px; color: var(--muted); margin-top: 4px; }
+#board-next { font-size: 13px; color: var(--cyan); margin-top: 5px; }
 .trend { min-width: 0; display: flex; flex-direction: column; }
 .trend-heading { height: 30px; display: flex; justify-content: space-between; align-items: center; font-size: 17px; color: var(--muted); }
 #hour-window { font-size: 15px; }
@@ -65,13 +81,19 @@ body { color: var(--ink); font-family: -apple-system, BlinkMacSystemFont, 'Hirag
  <div class="tile full"><span class="placeholder">検出を待っています</span><img id="meteor" alt="流星の全体映像"><svg id="zoom-region" viewBox="0 0 320 180" role="img" aria-label="拡大している範囲"><path id="zoom-brackets"></path></svg><span class="tile-label">全体</span></div>
  <span class="location-link">水色の範囲を拡大 ↓</span>
  <div class="tile zoom"><span class="placeholder">流星拡大</span><img id="zoom" alt="流星の拡大映像"><span class="tile-label" id="zoom-label">流星拡大</span></div>
- <div class="replay-details"><span class="caption">検出時刻</span><span id="last-date">--/--</span><span id="last-clock">--:--:--</span><span id="elapsed">--</span></div>
+ <div class="replay-details"><span class="caption" id="time-basis">検出記録の時刻</span><span id="last-date">--/--</span><span id="last-clock">--:--:--</span><span id="visible-window"></span><span id="elapsed">--</span></div>
 </section>
 <div id="bottom">
  <section class="panel summary" aria-label="現在時刻"><span class="caption">現在時刻 · JST</span><span id="current-clock">--:--:--</span><span id="current-date">----/--/--</span></section>
  <section id="statistics" class="panel" aria-label="直近1時間の検出数と推移">
-  <div class="hour-count"><span class="caption">直近1時間</span><div><span id="hour-count">--</span><span class="unit">件</span></div><span id="stats-state">集計を読み込み中</span></div>
+  <div id="graph-page" class="board-page active">
+  <div class="hour-count"><span class="caption">直近1時間</span><div><span id="hour-count">--</span><span class="unit">件</span></div><span id="stats-state">集計を読み込み中</span><span id="board-next">次：流星一覧</span></div>
   <div class="trend"><div class="trend-heading"><span>検出数の推移 <span style="font-size:14px">/ 10分ごと</span></span><span id="hour-window">--:-- – --:--</span></div><svg id="graph" viewBox="0 0 1000 130" role="img" aria-label="直近1時間の検出推移"></svg></div>
+  </div>
+  <div id="history-page" class="board-page" aria-label="直近10件の流星">
+   <div class="history-heading"><strong id="history-title">直近10件の流星</strong><span id="history-state">新しい順 · 拡大リプレイ</span></div>
+   <div id="history-viewport"><div id="history-track"><span class="history-empty">リプレイを準備しています</span></div></div>
+  </div>
  </section>
  <section class="panel summary" aria-label="今夜の検出数"><span class="caption">今夜の検出</span><div><span id="count">--</span><span class="unit">件</span></div><span id="window">18:00–翌06:00</span></section>
 </div>

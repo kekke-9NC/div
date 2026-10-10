@@ -19,6 +19,7 @@ from pathlib import Path
 
 from legacy_detection_mask import LegacyDetectionMask, default_settings_path
 from reviewed_events import ReviewedMeteorCatalog, identity
+from event_timing import EventTiming
 
 
 STOP = False
@@ -156,7 +157,7 @@ def render_gif(source, output, ffmpeg, video_filter, mask=None, input_options=()
         temporary = Path(handle.name)
     mask_png = temporary.with_suffix(".png")
     try:
-        command = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+        command = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-threads", "1", "-filter_threads", "1", "-filter_complex_threads", "1",
                    *input_options, "-i", str(source)]
         if mask is not None and mask.mask is not None:
             width, height, _ = probe_video_geometry(ffmpeg, source)
@@ -166,7 +167,7 @@ def render_gif(source, output, ffmpeg, video_filter, mask=None, input_options=()
                         "[video][mask]blend=all_mode=multiply:repeatlast=1," + video_filter]
         else:
             command += ["-vf", video_filter]
-        command += [*output_options, "-an", "-loop", "0", str(temporary)]
+        command += [*output_options, "-an", "-threads", "1", "-loop", "0", str(temporary)]
         subprocess.run(command, check=True, timeout=90)
         os.replace(temporary, output)
     finally:
@@ -356,6 +357,7 @@ def write_metadata(
     mask_revision: str | None,
     mask_enabled: bool,
     zoom_region: dict | None = None,
+    timing: dict | None = None,
 ) -> None:
     detected = event_datetime(source) if source is not None else None
     payload = {
@@ -374,6 +376,7 @@ def write_metadata(
         "zoom_region": zoom_region,
         "classification_basis": "dataset_review_then_prediction",
         "replay_version": 2,
+        **(timing or {}),
     }
     temporary = metadata_path.with_suffix(metadata_path.suffix + ".tmp")
     temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -396,6 +399,7 @@ def main() -> int:
     last_metadata = None
     mask = LegacyDetectionMask(args.legacy_settings)
     catalog = ReviewedMeteorCatalog(args.legacy_settings, args.meteor_dir)
+    event_timing = EventTiming(args.output_dir)
     exported_revision = None
     last_mask_error = None
     display_source = display_zoom = None
@@ -431,8 +435,31 @@ def main() -> int:
         if sky_log is not None:
             sky_log.close()
     atexit.register(stop_sky)
+    workers = {}
+    def stop_workers():
+        for process, log in workers.values():
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+            log.close()
+    atexit.register(stop_workers)
 
     while not STOP:
+        for script in ('broadcast_timing', 'recent_meteors'):
+            worker = workers.get(script)
+            if worker is None or worker[0].poll() is not None:
+                if worker:
+                    worker[1].close()
+                log = (args.output_dir / f'{script}.log').open('a', encoding='utf-8')
+                command = [sys.executable, str(Path(__file__).with_name(f'{script}.py')),
+                           '--output-dir', str(args.output_dir), '--parent-pid', str(os.getpid())]
+                if script == 'recent_meteors':
+                    command += ['--meteor-dir', str(args.meteor_dir), '--legacy-settings', str(args.legacy_settings), '--ffmpeg', args.ffmpeg]
+                workers[script] = (subprocess.Popen(command, stdout=log, stderr=log), log)
         # Render astronomy separately so it cannot delay replay/statistics.
         if (args.output_dir / 'sky_config.json').exists() and (sky_process is None or sky_process.poll() is not None):
             if sky_log is None:
@@ -522,6 +549,7 @@ def main() -> int:
                     next_full.unlink(missing_ok=True)
                     next_zoom.unlink(missing_ok=True)
         source, current_zoom_source = display_source, display_zoom
+        timing = event_timing.resolve(source) if source is not None else {}
         metadata_snapshot = json.dumps(
             {
                 "source": str(source) if source is not None else None,
@@ -535,6 +563,7 @@ def main() -> int:
                 "tonight_count": count,
                 "mask_revision": display_mask_revision,
                 "zoom_region": display_zoom_region,
+                "timing": timing,
                 "tonight_window": f"{window_start.strftime('%m/%d %H:%M')}–{window_end.strftime('%m/%d %H:%M')}",
             },
             ensure_ascii=False,
@@ -551,12 +580,15 @@ def main() -> int:
                 display_mask_revision,
                 display_mask_enabled,
                 display_zoom_region,
+                timing,
             )
             last_metadata = metadata_snapshot
         time.sleep(max(0.5, args.poll_seconds))
 
     print("[OBS meteor overlay] stopped", flush=True)
     stop_sky()
+    stop_workers()
+    atexit.unregister(stop_workers)
     atexit.unregister(stop_sky)
     return 0
 

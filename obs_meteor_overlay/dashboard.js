@@ -6,6 +6,7 @@ const jstDate = new Intl.DateTimeFormat('ja-JP', {timeZone: 'Asia/Tokyo', year: 
 const jstMinute = new Intl.DateTimeFormat('ja-JP', {timeZone: 'Asia/Tokyo', hour: '2-digit', minute: '2-digit', hourCycle: 'h23'});
 let displayedEvent = null;
 let displayedEpoch = null;
+let displayedReplayEpoch = null;
 let imageKey = null;
 let pendingKey = null;
 let focusTimer = null;
@@ -15,14 +16,21 @@ let statsUpdatedEpoch = null;
 let skyBusy = false;
 let skyGeneration = null;
 let skyUpdatedEpoch = null;
+let historyBusy = false;
+let historyKey = null;
+let historyData = null;
+let historyAnimation = null;
+let boardTimer = null;
+let historyActive = false;
+let renderedHistoryEvents = [];
 
 function updateClock() {
     const now = new Date();
     if (skyUpdatedEpoch === null || now.getTime() / 1000 - skyUpdatedEpoch > 20) byId('sky').hidden = true;
     byId('current-clock').textContent = jstClock.format(now);
     byId('current-date').textContent = jstDate.format(now);
-    if (displayedEpoch !== null) {
-        const seconds = Math.max(0, now.getTime() / 1000 - displayedEpoch);
+    if (displayedReplayEpoch !== null) {
+        const seconds = Math.max(0, now.getTime() / 1000 - displayedReplayEpoch);
         byId('elapsed').textContent = seconds < 60 ? 'たった今' : seconds < 3600 ? `${Math.floor(seconds / 60)}分前` : seconds < 86400 ? `${Math.floor(seconds / 3600)}時間前` : `${Math.floor(seconds / 86400)}日前`;
     }
     if (statsUpdatedEpoch !== null) {
@@ -92,14 +100,19 @@ async function refreshMetadata() {
             byId('last-clock').textContent = '--:--:--';
             byId('elapsed').textContent = '--';
             byId('replay-state').textContent = '自動リプレイ';
-            displayedEvent = displayedEpoch = imageKey = null;
+            displayedEvent = displayedEpoch = displayedReplayEpoch = imageKey = null;
+            byId('visible-window').textContent = '';
             return;
         }
         const epoch = Number(data.detected_at_epoch);
         if (!Number.isFinite(epoch)) return;
         const key = `${data.event}:${data.mask_revision || ''}:${JSON.stringify(data.zoom_region || null)}`;
         // Reload only when the event or mask changes; polling must not restart GIFs.
-        if (key === imageKey || key === pendingKey) return;
+        if (key === imageKey) {
+            showReplayTime(data);
+            return;
+        }
+        if (key === pendingKey) return;
         pendingKey = key;
         const [full, zoom] = await Promise.all([
             loadImage('latest_meteor.gif', key),
@@ -111,8 +124,7 @@ async function refreshMetadata() {
         displayedEvent = data.event;
         displayedEpoch = epoch;
         imageKey = key;
-        byId('last-date').textContent = jstDate.format(new Date(epoch * 1000));
-        byId('last-clock').textContent = jstClock.format(new Date(epoch * 1000));
+        showReplayTime(data);
         replay.classList.add('ready');
         showZoomRegion(data.zoom_region);
         if (newDetection) {
@@ -130,6 +142,109 @@ async function refreshMetadata() {
     } finally {
         pendingKey = null;
         metadataBusy = false;
+    }
+}
+
+function showReplayTime(data) {
+    const epoch = Number(data.replay_at_epoch ?? data.detected_at_epoch);
+    if (!Number.isFinite(epoch)) return;
+    displayedReplayEpoch = epoch;
+    byId('last-date').textContent = jstDate.format(new Date(epoch * 1000));
+    byId('last-clock').textContent = jstClock.format(new Date(epoch * 1000));
+    const aligned = data.timestamp_basis === 'obs_frame_match';
+    byId('time-basis').textContent = aligned ? '配信映像の時刻 · JST' : data.timestamp_basis === 'recording_frame' ? '録画時刻 · 配信照合待ち' : '検出記録の時刻';
+    const validRange = Number.isFinite(data.visible_start_epoch) && Number.isFinite(data.visible_end_epoch);
+    byId('visible-window').textContent = validRange ? `流星 ${jstClock.format(new Date(data.visible_start_epoch * 1000))}–${jstClock.format(new Date(data.visible_end_epoch * 1000))}` : '';
+}
+
+function renderHistory(data) {
+    renderedHistoryEvents = data.events.map(event => event.event);
+    const track = byId('history-track');
+    const cards = data.events.map((event, index) => {
+        const card = document.createElement('div');
+        card.className = 'history-card';
+        const image = document.createElement('img');
+        image.alt = `流星 ${index + 1} の拡大映像`;
+        if (event.image && /^recent_cache\/[a-f0-9]{20}\.gif$/.test(event.image)) image.src = new URL(event.image, document.location.href).href;
+        const info = document.createElement('div');
+        info.className = 'history-info';
+        const rank = document.createElement('span');
+        rank.textContent = index === 0 ? '最新' : `${index + 1}番目`;
+        const clock = document.createElement('time');
+        const epoch = Number(event.replay_at_epoch ?? event.detected_at_epoch);
+        clock.textContent = Number.isFinite(epoch) ? jstClock.format(new Date(epoch * 1000)) : '--:--:--';
+        const date = document.createElement('span');
+        date.textContent = Number.isFinite(epoch) ? jstDate.format(new Date(epoch * 1000)).slice(5) : '';
+        const basis = document.createElement('span');
+        basis.textContent = !event.image ? '映像準備中' : event.timestamp_basis === 'obs_frame_match' ? '配信時刻' : '録画時刻';
+        info.append(rank, clock, date, basis);
+        card.append(image, info);
+        return card;
+    });
+    if (!cards.length) {
+        const empty = document.createElement('span');
+        empty.className = 'history-empty';
+        empty.textContent = '流星の検出を待っています';
+        cards.push(empty);
+    }
+    track.replaceChildren(...cards);
+    byId('history-title').textContent = `直近${data.events.length || 10}件の流星`;
+    byId('history-state').textContent = '新しい順 · 拡大リプレイ · 訂正反映';
+}
+
+function switchBoard() {
+    clearTimeout(boardTimer);
+    historyActive = !historyActive && Boolean(historyData && historyData.events.length);
+    byId('graph-page').classList.toggle('active', !historyActive);
+    byId('history-page').classList.toggle('active', historyActive);
+    byId('graph-page').setAttribute('aria-hidden', String(historyActive));
+    byId('history-page').setAttribute('aria-hidden', String(!historyActive));
+    if (historyAnimation) historyAnimation.cancel();
+    if (historyActive) {
+        renderHistory(historyData);
+        const distance = Math.max(0, byId('history-track').scrollWidth - byId('history-viewport').clientWidth);
+        const duration = Math.max(18000, distance / 24 * 1000 + 10000);
+        historyAnimation = byId('history-track').animate([
+            {transform: 'translateX(0)', offset: 0},
+            {transform: 'translateX(0)', offset: 4000 / duration},
+            {transform: `translateX(-${distance}px)`, offset: 1 - 6000 / duration},
+            {transform: `translateX(-${distance}px)`, offset: 1},
+        ], {duration, easing: 'linear', fill: 'forwards'});
+        boardTimer = setTimeout(switchBoard, duration);
+    } else {
+        boardTimer = setTimeout(switchBoard, 24000);
+    }
+}
+
+async function refreshHistory() {
+    if (historyBusy) return;
+    historyBusy = true;
+    try {
+        const data = await localJSON('recent_meteors.json');
+        if (!Array.isArray(data.events) || data.events.length > 10) return;
+        if (!Number.isFinite(data.updated_at_epoch) || Date.now() / 1000 - data.updated_at_epoch > 90) {
+            historyData = null;
+            if (historyActive) switchBoard();
+            byId('board-next').textContent = '流星一覧の更新待ち';
+            return;
+        }
+        byId('board-next').textContent = data.events.length ? `次：直近${data.events.length}件の流星` : '流星の検出を待っています';
+        const key = JSON.stringify([data.mask_revision, data.events.map(event => [event.event, event.image]), data.excluded_events]);
+        if (key !== historyKey) {
+            // Newly detected items join on the next cycle, without interrupting
+            // scrolling. Removed reviews/masks hide the affected list at once.
+            const invalidated = historyData && (data.mask_revision !== historyData.mask_revision || renderedHistoryEvents.some(event => (data.excluded_events || []).includes(event)));
+            historyData = data;
+            historyKey = key;
+            if (historyActive && invalidated) switchBoard();
+        } else {
+            historyData = data;
+        }
+    } catch (_) {
+        byId('board-next').textContent = '流星一覧を準備しています';
+        if (historyData && Date.now() / 1000 - historyData.updated_at_epoch > 90 && historyActive) switchBoard();
+    } finally {
+        historyBusy = false;
     }
 }
 
@@ -199,7 +314,10 @@ updateClock();
 refreshMetadata();
 refreshStatistics();
 refreshSky();
+refreshHistory();
+boardTimer = setTimeout(switchBoard, 24000);
 setInterval(updateClock, 1000);
 setInterval(refreshMetadata, 2500);
 setInterval(refreshStatistics, 2500);
 setInterval(refreshSky, 2500);
+setInterval(refreshHistory, 5000);

@@ -4,3 +4,4 @@ Pillow
 astropy
 scipy
 astrometry
+websocket-client
