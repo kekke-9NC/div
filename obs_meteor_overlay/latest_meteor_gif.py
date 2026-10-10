@@ -263,6 +263,38 @@ def night_count(meteor_dir: Path, now: datetime) -> tuple[int, datetime, datetim
     return count, start, end
 
 
+def write_hourly_statistics(meteor_dir: Path, output: Path, now: datetime) -> None:
+    """Count unique saved events in the rolling hour, in six ten-minute bins.
+
+    Filename timestamps are local camera times, just as for the night count.
+    The left edge is exclusive and the right edge inclusive so adjacent bins
+    partition the hour exactly, including events detected at the current time.
+    """
+    end = now.timestamp()
+    start = end - 3600
+    bins = [0] * 6
+    for path in event_files(meteor_dir):
+        stamp = event_datetime(path)
+        if stamp is None:
+            continue
+        epoch = stamp.timestamp()
+        if start < epoch <= end:
+            # An exact boundary belongs to the interval ending at that boundary.
+            index = min(5, max(0, int((epoch - start - 0.000001) / 600)))
+            bins[index] += 1
+    payload = {
+        "updated_at_epoch": end,
+        "window_start_epoch": start,
+        "window_end_epoch": end,
+        "last_hour_count": sum(bins),
+        "bin_minutes": 10,
+        "bins": bins,
+    }
+    temporary = output.with_suffix(output.suffix + ".tmp")
+    temporary.write_text(json.dumps(payload, ensure_ascii=False) + "\n", encoding="utf-8")
+    os.replace(temporary, output)
+
+
 def stable_file(path: Path, wait_seconds: float) -> bool:
     try:
         first = path.stat()
@@ -351,6 +383,12 @@ def main() -> int:
     print(f"[OBS meteor overlay] watching {args.meteor_dir}", flush=True)
 
     while not STOP:
+        # Publish counts independently of GIF conversion and mask availability.
+        # A conversion failure must not freeze the rolling observation window.
+        try:
+            write_hourly_statistics(args.meteor_dir, args.output_dir / "hourly_stats.json", datetime.now())
+        except (OSError, ValueError) as exc:
+            print(f"[OBS meteor overlay] statistics update failed: {exc}", file=sys.stderr, flush=True)
         try:
             mask.refresh()
             if mask.revision != exported_revision:
