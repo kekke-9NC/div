@@ -108,11 +108,13 @@ def _sample_line_corridor(
 
     values = []
     for frame in frames:
-        gray = _grayscale(frame)
-        height, width = gray.shape[:2]
+        height, width = frame.shape[:2]
         xi = np.clip(np.rint(xs).astype(np.int32), 0, width - 1)
         yi = np.clip(np.rint(ys).astype(np.int32), 0, height - 1)
-        values.append(gray[yi, xi])
+        # Sample first: the color conversion is pixel-local, and only these
+        # corridor pixels enter the direction fit (no interpolation here).
+        samples = frame[yi, xi]
+        values.append(_grayscale(samples))
     return np.stack(values, axis=0).astype(np.float32)
 
 

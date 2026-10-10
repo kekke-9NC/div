@@ -71,12 +71,16 @@ class ShortFlashDetector:
         self.border = max(0, int(border))
         self.background = None
         self.threshold = None
+        self.threshold_u8 = None
         self.active = []
         self.last_frame = -1
 
     def consume(self, frames: Sequence[np.ndarray], first_frame: int, mask=None, roi=None,
                 final=False):
         result = []
+        allowed = permitted = None
+        excluded = binary = None
+        permitted_shape = None
         for offset, frame in enumerate(frames):
             index = first_frame + offset
             if index <= self.last_frame:
@@ -98,25 +102,41 @@ class ShortFlashDetector:
                 contrast = cv2.subtract(base, cv2.GaussianBlur(base, (0, 0), 3))
                 contrast = cv2.dilate(contrast, np.ones((9, 9), np.uint8))
                 self.threshold = np.minimum(25., 3.5 + contrast.astype(np.float32) * .18)
-            binary = (residual >= self.threshold).astype(np.uint8)
+                # Residual pixels are uint8 integers. r >= t is exactly
+                # r >= ceil(t); thresholds stay in [3.5, 25]. Compare uint8
+                # arrays without promoting every full frame to float32.
+                self.threshold_u8 = np.ceil(self.threshold).astype(np.uint8)
+            if binary is None or binary.shape != gray.shape:
+                binary = np.empty_like(residual)
+            np.greater_equal(residual, self.threshold_u8, out=binary)
             b = self.border
             if b:
                 binary[:b] = binary[-b:] = 0
                 binary[:, :b] = binary[:, -b:] = 0
             if mask is not None:
-                allowed = cv2.resize(mask, (width, height), interpolation=cv2.INTER_NEAREST)
-                binary[allowed <= 0] = 0
+                if allowed is None or allowed.shape != gray.shape:
+                    allowed = cv2.resize(mask, (width, height), interpolation=cv2.INTER_NEAREST)
+                    excluded = allowed <= 0
+                binary[excluded] = 0
             if roi is not None:
-                x1, y1, x2, y2 = [int(v) for v in roi]
-                permitted = np.zeros_like(binary)
-                permitted[max(0, y1):min(height, y2), max(0, x1):min(width, x2)] = 1
+                if permitted_shape != gray.shape:
+                    x1, y1, x2, y2 = [int(v) for v in roi]
+                    permitted = np.zeros_like(binary)
+                    permitted[max(0, y1):min(height, y2), max(0, x1):min(width, x2)] = 1
+                    permitted_shape = gray.shape
                 binary &= permitted
             count, labels, stats, centers = cv2.connectedComponentsWithStats(binary, 8)
             detections = []
-            for k in range(1, count):
+            # Keep label order (including stable signal-score ties). Only
+            # components passing the existing size tests need a Python loop.
+            eligible = np.flatnonzero(
+                (stats[1:, cv2.CC_STAT_AREA] >= 3)
+                & (stats[1:, cv2.CC_STAT_AREA] <= 1000)
+                & (stats[1:, cv2.CC_STAT_WIDTH] <= 350)
+                & (stats[1:, cv2.CC_STAT_HEIGHT] <= 350)
+            ) + 1
+            for k in eligible:
                 x, y, w, h, area = map(int, stats[k])
-                if area < 3 or area > 1000 or max(w, h) > 350:
-                    continue
                 values = residual[y:y+h, x:x+w][labels[y:y+h, x:x+w] == k]
                 peak, score = int(values.max()), int(values.sum())
                 if peak >= 5 and score >= 20:
@@ -127,6 +147,7 @@ class ShortFlashDetector:
             if detections:
                 tree = cKDTree(np.asarray(detections)[:, :2])
                 choices = []
+                positions, gates = [], []
                 for tid, tr in enumerate(self.active):
                     last = tr[-1]
                     gap = index - last[0]
@@ -134,10 +155,15 @@ class ShortFlashDetector:
                     if len(tr) >= 2:
                         previous = tr[-2]
                         velocity = (np.asarray(last[1:3]) - previous[1:3]) / max(1, last[0] - previous[0])
-                    distance, di = tree.query(np.asarray(last[1:3]) + velocity * gap)
                     gate = 40 if len(tr) < 2 else max(12, min(90, np.linalg.norm(velocity) * gap * .7 + 12))
-                    if distance < gate:
-                        choices.append((float(distance), tid, int(di)))
+                    positions.append(np.asarray(last[1:3]) + velocity * gap)
+                    gates.append(gate)
+                if positions:
+                    # Exact nearest-neighbour queries, with the same tree,
+                    # arithmetic, and greedy tie ordering as individual calls.
+                    distances, indices = tree.query(np.asarray(positions))
+                    for tid in np.flatnonzero(distances < gates):
+                        choices.append((float(distances[tid]), int(tid), int(indices[tid])))
                 used_tracks, used_detections = set(), set()
                 for _, tid, di in sorted(choices):
                     if tid in used_tracks or di in used_detections:

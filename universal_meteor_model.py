@@ -35,16 +35,18 @@ def _crop_square(
     rect: Optional[Sequence[int]],
     size: int = 256,
 ) -> np.ndarray:
-    gray = _gray(frame)
     if rect is None:
-        crop = gray
+        crop = frame
     else:
         x1, y1, x2, y2 = (int(v) for v in rect)
         x1, y1 = max(0, x1), max(0, y1)
-        x2, y2 = min(gray.shape[1], x2), min(gray.shape[0], y2)
-        crop = gray[y1:y2, x1:x2]
+        x2, y2 = min(frame.shape[1], x2), min(frame.shape[0], y2)
+        crop = frame[y1:y2, x1:x2]
     if crop.size == 0:
         return np.zeros((size, size), dtype=np.uint8)
+    # BGR-to-gray is pixel-local. Convert only the requested pixels, retaining
+    # the original conversion-before-resize order and exact uint8 values.
+    crop = _gray(crop)
     if crop.shape != (size, size):
         crop = cv2.resize(crop, (size, size), interpolation=cv2.INTER_AREA)
     return crop
@@ -77,7 +79,10 @@ def _line_in_crop(
 def _robust_residual_cube(stack: np.ndarray) -> Tuple[np.ndarray, float]:
     """Return positive temporal residuals in local noise-sigma units."""
     values = stack.astype(np.float32)
-    background = np.median(values, axis=0)
+    # uint8 medians are exact integers/half-integers in float32, including
+    # even-length clips. Partition one-byte pixels rather than a float cube.
+    background = (np.median(stack, axis=0).astype(np.float32)
+                  if stack.dtype == np.uint8 else np.median(values, axis=0))
     abs_deviation = np.abs(values - background)
     temporal_sigma = 1.4826 * np.median(abs_deviation, axis=0)
 

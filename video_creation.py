@@ -5,6 +5,7 @@ import subprocess
 import sys
 import os
 import shutil
+from video_io import open_video_capture
 
 def create_summary_video(
     summary_video_config: List[Dict[str, Any]],
@@ -88,7 +89,7 @@ def create_summary_video(
         num_frames = int(duration_sec * frame_rate)
         for _ in range(num_frames):
             if proc_handle.stdin:
-                proc_handle.stdin.write(final_frame.tobytes())
+                proc_handle.stdin.write(memoryview(final_frame))
 
     def _add_zoom_sequence(img_path, duration_sec, proc_handle):
         annotated_img = cv2.imread(img_path)
@@ -121,7 +122,7 @@ def create_summary_video(
                 frame = cv2.resize(cropped, (W, H), interpolation=cv2.INTER_LANCZOS4)
             
             if proc_handle.stdin:
-                proc_handle.stdin.write(frame.tobytes())
+                proc_handle.stdin.write(memoryview(frame))
     
     def _draw_detection_marker(frame):
         """概要動画のフルサイズ映像で流星位置を黄色い枠で示す。"""
@@ -142,7 +143,7 @@ def create_summary_video(
         return output
 
     def _add_video_clip(video_path, proc_handle, highlight_detection=False):
-        cap = cv2.VideoCapture(video_path)
+        cap = open_video_capture(video_path)
         if not cap.isOpened():
             print(f"警告: カットアウト動画を読み込めませんでした: {video_path}")
             return
@@ -163,7 +164,7 @@ def create_summary_video(
             
             final_frame = cv2.copyMakeBorder(resized_frame, top, bottom, left, right, cv2.BORDER_CONSTANT, value=[0, 0, 0])
             if proc_handle.stdin:
-                proc_handle.stdin.write(final_frame.tobytes())
+                proc_handle.stdin.write(memoryview(final_frame))
         cap.release()
 
     generation_error = None

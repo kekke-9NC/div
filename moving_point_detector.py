@@ -86,7 +86,11 @@ def _frame_detections(
             or y + component_height >= height - border
         ):
             continue
-        component_values = smoothed[labels == index]
+        # The component's bounding rectangle contains every matching label.
+        # Preserve their row-major order, including float32 summation order,
+        # without scanning the whole image for each small component.
+        region = np.s_[y:y + component_height, x:x + component_width]
+        component_values = smoothed[region][labels[region] == index]
         peak = float(component_values.max())
         total = float(component_values.sum())
         if peak < float(threshold) + 1.0:
@@ -193,10 +197,14 @@ def detect_moving_point_tracks(
     if not 0.25 <= scale <= 1.0:
         raise ValueError("scale must be between 0.25 and 1.0")
 
-    gray_frames = np.stack([_gray_small(frame, scale) for frame in frames]).astype(
-        np.float32
-    )
-    background = np.median(gray_frames, axis=0)
+    gray_frames = np.stack([_gray_small(frame, scale) for frame in frames])
+    if gray_frames.dtype == np.uint8:
+        # Integer medians (including the mean of two middle values) are exact
+        # half-integers in float32. Partition the smaller uint8 cube first.
+        background = np.median(gray_frames, axis=0).astype(np.float32)
+    else:
+        gray_frames = gray_frames.astype(np.float32)
+        background = np.median(gray_frames, axis=0)
     residuals = np.maximum(gray_frames - background[None, :, :], 0.0)
     small_border = max(3, int(round(border * scale)))
     detections = [
@@ -273,4 +281,3 @@ def detect_moving_point_tracks(
         if completed is not None:
             tracks.append(completed)
     return _deduplicate_tracks(tracks)[:max_candidates]
-

@@ -23,6 +23,7 @@ import astrometry
 import tracking
 import utils
 import video_creation
+from video_io import open_video_capture as _open_video_capture
 import video_denoising
 import video_enhancement
 import ml_training_data
@@ -195,37 +196,6 @@ def _write_motion_info(
         handle.write(f"Motion Dec End (deg): {dec_end}\n")
 
 
-def _open_video_capture(source: str, decoder_threads: int = 2) -> cv2.VideoCapture:
-    """Open a capture without letting FFmpeg create a CPU-sized pool.
-
-    OpenCV's macOS FFmpeg backend defaults to 16 codec threads for each H.264
-    capture on the current machine, plus another helper pool after the first
-    read.  Several videos in parallel therefore created around one hundred
-    native threads.  ``CAP_PROP_N_THREADS`` is an *open-only* property, so it
-    must be supplied to the constructor rather than set afterwards.
-    """
-    try:
-        thread_count = max(1, min(8, int(decoder_threads)))
-    except (TypeError, ValueError):
-        thread_count = 2
-
-    thread_property = getattr(cv2, "CAP_PROP_N_THREADS", None)
-    ffmpeg_backend = getattr(cv2, "CAP_FFMPEG", None)
-    if thread_property is not None and ffmpeg_backend is not None:
-        try:
-            capture = cv2.VideoCapture(
-                source,
-                ffmpeg_backend,
-                [thread_property, thread_count],
-            )
-            if capture.isOpened():
-                return capture
-            capture.release()
-        except (cv2.error, TypeError, ValueError):
-            pass
-    return cv2.VideoCapture(source)
-
-
 def _read_video_frame_range(
     source: str,
     start_frame: int,
@@ -270,6 +240,89 @@ def _read_video_frame_range(
     return frames
 
 
+class _VideoFrameRangeCache:
+    """Reuse one decoded evidence window within a single file operation.
+
+    The main sequential capture remains independent. Only complete reads are
+    cached; misses retain the original seek/decode path. Consumers replace or
+    crop frames, never modify these raw arrays in place. The byte limit keeps
+    large/high-resolution windows from accumulating across candidates/files.
+    """
+
+    def __init__(self, max_bytes: int = 1536 * 1024 * 1024):
+        self.max_bytes = max_bytes
+        self.key = None
+        self.frames = []
+        self.masked = {}
+        self.mask_snapshot = None
+        self.resized_masks = {}
+
+    def read(self, source, start_frame, end_frame, decoder_threads=2):
+        start = max(0, int(start_frame))
+        end = max(start - 1, int(end_frame))
+        if end < start:
+            return []
+        if self.key is not None:
+            cached_source, cached_threads, first, last = self.key
+            if (source == cached_source and decoder_threads == cached_threads
+                    and first <= start and end <= last):
+                return self.frames[start - first:end - first + 1]
+            if (source == cached_source and decoder_threads == cached_threads
+                    and first <= start <= last and end > last):
+                tail = _read_video_frame_range(source, last + 1, end, decoder_threads)
+                if len(tail) == end - last:
+                    frames = self.frames[start - first:] + tail
+                else:
+                    # A failed tail read must behave exactly like a fresh seek.
+                    frames = _read_video_frame_range(source, start, end, decoder_threads)
+            else:
+                frames = _read_video_frame_range(source, start, end, decoder_threads)
+        else:
+            frames = _read_video_frame_range(source, start, end, decoder_threads)
+        if len(frames) == end - start + 1:
+            # Drop the previous window before retaining another full-HD range.
+            self.key = None
+            self.frames = []
+            if sum(frame.nbytes for frame in frames) <= self.max_bytes // 2:
+                self.key = (source, decoder_threads, start, end)
+                self.frames = frames
+            retained = {id(frame) for frame in self.frames}
+            self.masked = {key: value for key, value in self.masked.items() if key in retained}
+        # Enhancement may replace entries in the caller's list. Keep the
+        # retained raw list private even when this request filled the cache.
+        return list(frames)
+
+    def mask_frames(self, frames, mask):
+        """Apply the same resized uint8 mask once per retained raw frame."""
+        if (self.mask_snapshot is None
+                or mask.dtype != self.mask_snapshot.dtype
+                or not np.array_equal(mask, self.mask_snapshot)):
+            self.mask_snapshot = mask.copy()
+            self.masked.clear()
+            self.resized_masks.clear()
+        retained = {id(frame) for frame in self.frames}
+        result = []
+        for frame in frames:
+            key = id(frame)
+            if key in self.masked:
+                result.append(self.masked[key])
+                continue
+            try:
+                shape = frame.shape[:2]
+                if shape not in self.resized_masks:
+                    self.resized_masks[shape] = cv2.resize(
+                        mask, (shape[1], shape[0])
+                    ).astype(np.uint8)
+                masked = cv2.bitwise_and(frame, frame, mask=self.resized_masks[shape])
+                if key in retained:
+                    self.masked[key] = masked
+                result.append(masked)
+            except cv2.error as exc:
+                print(f"フレームへのマスク適用中にエラー: {exc}")
+                result.append(frame)
+        return result
+
+
 _FULL_VIDEO_TIMESTAMP_POSITIONS = {
     "右下": "bottom_right",
     "左下": "bottom_left",
@@ -280,6 +333,51 @@ _FULL_VIDEO_TIMESTAMP_POSITIONS = {
     "top_right": "top_right",
     "top_left": "top_left",
 }
+
+
+class _SummaryVideoWriter:
+    """Overlap summary encoding with detection, retaining at most two jobs.
+
+    Only the owner thread updates saved_paths and calls the UI callback. All
+    jobs finish before the pipeline returns, including cancellation and errors.
+    Detection, frame order, codecs, and summary contents are unchanged.
+    """
+
+    def __init__(self, progress_callback=None):
+        self.executor = None
+        self.pending = deque()
+        self.progress_callback = progress_callback
+
+    def _collect(self, wait=False):
+        while self.pending and (wait or self.pending[0][0].done()):
+            future, saved_paths, output_path = self.pending.popleft()
+            try:
+                if future.result():
+                    saved_paths['summary'] = output_path
+                    print(f"概要動画を保存しました: {output_path}")
+                    if self.progress_callback:
+                        self.progress_callback((f"  -> Summary: {os.path.basename(output_path)}", None))
+                else:
+                    print("警告: 概要動画を作成できなかったため、保存結果には追加しません。")
+            except Exception as exc:
+                print(f"エラー: 概要動画の生成に失敗しました: {exc}")
+            if wait:
+                break
+
+    def submit(self, saved_paths, **kwargs):
+        self._collect()
+        if len(self.pending) >= 2:
+            self._collect(wait=True)
+        if self.executor is None:
+            self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="summary-video")
+        future = self.executor.submit(video_creation.create_summary_video, **kwargs)
+        self.pending.append((future, saved_paths, kwargs['output_video_path']))
+
+    def finish(self):
+        while self.pending:
+            self._collect(wait=True)
+        if self.executor is not None:
+            self.executor.shutdown(wait=True)
 
 
 def _get_full_video_timestamp_settings(save_options: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -933,6 +1031,8 @@ def create_line_video_clips(
     processed_clips_info: List[Dict[str, Any]] = []
     detection_counter = 0
     flash_detector = short_flash_detector.ShortFlashDetector(frame_rate, config.BORDER_SIZE)
+    frame_range_cache = _VideoFrameRangeCache()
+    summary_writer = _SummaryVideoWriter(progress_callback)
 
     try:
         evidence_cap = _open_video_capture(evidence_path, decoder_threads) if evidence_path else None
@@ -1116,7 +1216,7 @@ def create_line_video_clips(
                         else:
                             # 動画ファイルから取得
                             print(f"動画ファイルから詳細検出用フレームを取得: {start_frame_finer} - {end_frame_finer}")
-                            frames_for_finer_detect = _read_video_frame_range(
+                            frames_for_finer_detect = frame_range_cache.read(
                                 analysis_source,
                                 start_frame_finer,
                                 end_frame_finer,
@@ -1131,14 +1231,7 @@ def create_line_video_clips(
                         else:
                             # 並列処理実行
                             if mask is not None:
-                                masked_frames_finer = []
-                                for frame in frames_for_finer_detect:
-                                    try:
-                                        mask_resized = cv2.resize(mask, (frame.shape[1], frame.shape[0])).astype(np.uint8)
-                                        masked_frames_finer.append(cv2.bitwise_and(frame, frame, mask=mask_resized))
-                                    except cv2.error:
-                                        masked_frames_finer.append(frame)
-                                frames_for_finer_detect = masked_frames_finer
+                                frames_for_finer_detect = frame_range_cache.mask_frames(frames_for_finer_detect, mask)
                         
                             img_h, img_w = diff_img.shape[:2]
                         
@@ -1266,7 +1359,7 @@ def create_line_video_clips(
                                     print(f"RTSPバッファから最終クリップフレームを取得: {actual_start_final} - {actual_end_final}, {len(final_frames_for_clip)} フレーム")
                                 else:
                                     print(f"動画ファイルから最終クリップフレームを取得: {adjusted_start_frame} - {adjusted_end_frame}")
-                                    final_frames_for_clip = _read_video_frame_range(
+                                    final_frames_for_clip = frame_range_cache.read(
                                         analysis_source,
                                         adjusted_start_frame,
                                         adjusted_end_frame,
@@ -1278,15 +1371,7 @@ def create_line_video_clips(
                                     continue
                             
                                 if mask is not None:
-                                    masked_frames_final = []
-                                    for frame in final_frames_for_clip:
-                                        try:
-                                            mask_resized = cv2.resize(mask, (frame.shape[1], frame.shape[0])).astype(np.uint8)
-                                            masked_frames_final.append(cv2.bitwise_and(frame, frame, mask=mask_resized))
-                                        except cv2.error as e:
-                                            print(f"最終クリップフレームへのマスク適用中にエラー: {e}")
-                                            masked_frames_final.append(frame)
-                                    final_frames_for_clip = masked_frames_final
+                                    final_frames_for_clip = frame_range_cache.mask_frames(final_frames_for_clip, mask)
 
                                 # Keep the detector's original one-second difference image for
                                 # inference.  The classifier was trained on this representation;
@@ -1504,7 +1589,10 @@ def create_line_video_clips(
                             
                                 if save_options.get('composite', False) and final_frames_for_clip:
                                     try:
-                                        composite_image, _ = _brightness_composite_and_diff(final_frames_for_clip)
+                                        composite_image = _max_composite_cutout(
+                                            final_frames_for_clip,
+                                            (0, 0, final_frames_for_clip[0].shape[1], final_frames_for_clip[0].shape[0]),
+                                        )
                                         composite_path = os.path.join(save_dir, f"{base_filename}_composite.jpg")
                                         if cv2.imwrite(composite_path, composite_image):
                                             saved_paths['composite'] = composite_path
@@ -1587,31 +1675,23 @@ def create_line_video_clips(
                                 if save_options.get('summary', False):
                                     if all(key in saved_paths for key in ['composite', 'annotated', 'video']):
                                         summary_video_path = os.path.join(save_dir, f"{base_filename}_summary.mp4")
-                                        try:
-                                            orig_h, orig_w = final_frames_for_clip[0].shape[:2]
-                                            summary_created = video_creation.create_summary_video(
-                                                summary_video_config=summary_video_config,
-                                                composite_image_path=saved_paths['composite'],
-                                                annotated_image_path=saved_paths['annotated'],
-                                                cutout_video_path=saved_paths['video'],
-                                                output_video_path=summary_video_path,
-                                                cutout_rect=cutout_rect,
-                                                frame_rate=frame_rate,
-                                                output_resolution=(orig_w, orig_h),
-                                                full_video_path=(
-                                                    saved_paths.get('denoised_full_video')
-                                                    or saved_paths.get('full_video')
-                                                ),
-                                                detected_line=((x1, y1), (x2, y2)),
-                                            )
-                                            if summary_created:
-                                                saved_paths['summary'] = summary_video_path
-                                                print(f"概要動画を保存しました: {summary_video_path}")
-                                            else:
-                                                print("警告: 概要動画を作成できなかったため、保存結果には追加しません。")
-                                        except Exception as e_summary:
-                                            print(f"エラー: 概要動画の生成に失敗しました: {e_summary}")
-                                            import traceback; traceback.print_exc()
+                                        orig_h, orig_w = final_frames_for_clip[0].shape[:2]
+                                        summary_writer.submit(
+                                            saved_paths,
+                                            summary_video_config=summary_video_config,
+                                            composite_image_path=saved_paths['composite'],
+                                            annotated_image_path=saved_paths['annotated'],
+                                            cutout_video_path=saved_paths['video'],
+                                            output_video_path=summary_video_path,
+                                            cutout_rect=cutout_rect,
+                                            frame_rate=frame_rate,
+                                            output_resolution=(orig_w, orig_h),
+                                            full_video_path=(
+                                                saved_paths.get('denoised_full_video')
+                                                or saved_paths.get('full_video')
+                                            ),
+                                            detected_line=((x1, y1), (x2, y2)),
+                                        )
                                     else:
                                         print("警告: 概要動画の作成に必要なファイルが不足しているため、スキップします。")
                             
@@ -1698,7 +1778,7 @@ def create_line_video_clips(
 
                     else:
                         print(f"動画ファイルから詳細検出用フレームを取得: {start_frame_finer} - {end_frame_finer}")
-                        frames_for_finer_detect = _read_video_frame_range(
+                        frames_for_finer_detect = frame_range_cache.read(
                             analysis_source,
                             start_frame_finer,
                             end_frame_finer,
@@ -1710,15 +1790,7 @@ def create_line_video_clips(
                         continue
 
                     if mask is not None:
-                        masked_frames_finer = []
-                        for frame in frames_for_finer_detect:
-                            try:
-                                mask_resized = cv2.resize(mask, (frame.shape[1], frame.shape[0])).astype(np.uint8)
-                                masked_frames_finer.append(cv2.bitwise_and(frame, frame, mask=mask_resized))
-                            except cv2.error as e:
-                                print(f"詳細検出フレームへのマスク適用中にエラー: {e}")
-                                masked_frames_finer.append(frame)
-                        frames_for_finer_detect = masked_frames_finer
+                        frames_for_finer_detect = frame_range_cache.mask_frames(frames_for_finer_detect, mask)
 
                     # 詳細検出の実行（RTSPで並列処理が有効な場合はワーカー関数を使用）
                     img_h, img_w = diff_img.shape[:2]
@@ -1857,7 +1929,7 @@ def create_line_video_clips(
 
                     else:
                         print(f"動画ファイルから最終クリップフレームを取得: {adjusted_start_frame} - {adjusted_end_frame}")
-                        final_frames_for_clip = _read_video_frame_range(
+                        final_frames_for_clip = frame_range_cache.read(
                             analysis_source,
                             adjusted_start_frame,
                             adjusted_end_frame,
@@ -1869,15 +1941,7 @@ def create_line_video_clips(
                         continue
 
                     if mask is not None:
-                        masked_frames_final = []
-                        for frame in final_frames_for_clip:
-                            try:
-                                mask_resized = cv2.resize(mask, (frame.shape[1], frame.shape[0])).astype(np.uint8)
-                                masked_frames_final.append(cv2.bitwise_and(frame, frame, mask=mask_resized))
-                            except cv2.error as e:
-                                print(f"最終クリップフレームへのマスク適用中にエラー: {e}")
-                                masked_frames_final.append(frame)
-                        final_frames_for_clip = masked_frames_final
+                        final_frames_for_clip = frame_range_cache.mask_frames(final_frames_for_clip, mask)
 
                     # The classifier sees the same detector evidence: legacy
                     # max/min difference when OFF, innovation when NoiseTwin is ON.
@@ -2095,7 +2159,10 @@ def create_line_video_clips(
 
                     if save_options.get('composite', False) and final_frames_for_clip:
                         try:
-                            composite_image, _ = _brightness_composite_and_diff(final_frames_for_clip)
+                            composite_image = _max_composite_cutout(
+                                final_frames_for_clip,
+                                (0, 0, final_frames_for_clip[0].shape[1], final_frames_for_clip[0].shape[0]),
+                            )
                             composite_path = os.path.join(save_dir, f"{base_filename}_composite.jpg")
                             if cv2.imwrite(composite_path, composite_image):
                                 saved_paths['composite'] = composite_path
@@ -2178,31 +2245,23 @@ def create_line_video_clips(
                     if save_options.get('summary', False):
                         if all(key in saved_paths for key in ['composite', 'annotated', 'video']):
                             summary_video_path = os.path.join(save_dir, f"{base_filename}_summary.mp4")
-                            try:
-                                orig_h, orig_w = final_frames_for_clip[0].shape[:2]
-                                summary_created = video_creation.create_summary_video(
-                                    summary_video_config=summary_video_config,
-                                    composite_image_path=saved_paths['composite'],
-                                    annotated_image_path=saved_paths['annotated'],
-                                    cutout_video_path=saved_paths['video'],
-                                    output_video_path=summary_video_path,
-                                    cutout_rect=cutout_rect,
-                                    frame_rate=frame_rate,
-                                    output_resolution=(orig_w, orig_h),
-                                    full_video_path=(
-                                        saved_paths.get('denoised_full_video')
-                                        or saved_paths.get('full_video')
-                                    ),
-                                    detected_line=((x1, y1), (x2, y2)),
-                                )
-                                if summary_created:
-                                    saved_paths['summary'] = summary_video_path
-                                    print(f"概要動画を保存しました: {summary_video_path}")
-                                else:
-                                    print("警告: 概要動画を作成できなかったため、保存結果には追加しません。")
-                            except Exception as e_summary:
-                                print(f"エラー: 概要動画の生成に失敗しました: {e_summary}")
-                                import traceback; traceback.print_exc()
+                            orig_h, orig_w = final_frames_for_clip[0].shape[:2]
+                            summary_writer.submit(
+                                saved_paths,
+                                summary_video_config=summary_video_config,
+                                composite_image_path=saved_paths['composite'],
+                                annotated_image_path=saved_paths['annotated'],
+                                cutout_video_path=saved_paths['video'],
+                                output_video_path=summary_video_path,
+                                cutout_rect=cutout_rect,
+                                frame_rate=frame_rate,
+                                output_resolution=(orig_w, orig_h),
+                                full_video_path=(
+                                    saved_paths.get('denoised_full_video')
+                                    or saved_paths.get('full_video')
+                                ),
+                                detected_line=((x1, y1), (x2, y2)),
+                            )
                         else:
                             print("警告: 概要動画の作成に必要なファイルが不足しているため、スキップします。")
 
@@ -2242,6 +2301,7 @@ def create_line_video_clips(
         print(f"動画処理ループ中に予期せぬエラーが発生しました: {e_main_loop}")
         import traceback; traceback.print_exc()
     finally:
+        summary_writer.finish()
         if cap.isOpened():
             cap.release()
             print("動画キャプチャを解放しました。")
