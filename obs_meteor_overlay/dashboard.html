@@ -19,6 +19,13 @@ body { color: var(--ink); font-family: -apple-system, BlinkMacSystemFont, 'Hirag
 .tile.full { height: 144px; }
 .tile.zoom { height: 256px; }
 .tile img { display: block; width: 100%; height: 100%; object-fit: contain; opacity: 0; }
+#zoom-region { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; display: none; }
+#zoom-region path { fill: none; stroke: var(--cyan); stroke-width: 2; stroke-linecap: square; filter: drop-shadow(0 1px 1px #000); }
+#replay.located #zoom-region { display: block; }
+.location-link { display: none; font-size: 17px; color: var(--cyan); height: 22px; }
+#replay.located .location-link { display: block; }
+#replay.located .tile.zoom { outline: 1px solid var(--cyan); outline-offset: -1px; }
+#replay.located .tile.zoom .tile-label { color: var(--cyan); }
 #replay.ready .tile img { opacity: 1; }
 .tile-label { position: absolute; top: 6px; left: 6px; background: #000a; padding: 4px 7px; border-radius: 4px; font-size: 15px; font-weight: 650; }
 .placeholder { position: absolute; inset: 0; display: grid; place-content: center; color: var(--muted); font-size: 18px; }
@@ -51,8 +58,9 @@ body { color: var(--ink); font-family: -apple-system, BlinkMacSystemFont, 'Hirag
 <body>
 <section id="replay" class="panel" aria-label="直近の流星リプレイ">
  <div class="replay-heading">直近の流星<span id="replay-state">自動リプレイ</span></div>
- <div class="tile full"><span class="placeholder">検出を待っています</span><img id="meteor" alt="流星の全体映像"><span class="tile-label">全体</span></div>
- <div class="tile zoom"><span class="placeholder">流星拡大</span><img id="zoom" alt="流星の拡大映像"><span class="tile-label">流星拡大</span></div>
+ <div class="tile full"><span class="placeholder">検出を待っています</span><img id="meteor" alt="流星の全体映像"><svg id="zoom-region" viewBox="0 0 320 180" role="img" aria-label="拡大している範囲"><path id="zoom-brackets"></path></svg><span class="tile-label">全体</span></div>
+ <span class="location-link">水色の範囲を拡大 ↓</span>
+ <div class="tile zoom"><span class="placeholder">流星拡大</span><img id="zoom" alt="流星の拡大映像"><span class="tile-label" id="zoom-label">流星拡大</span></div>
  <div class="replay-details"><span class="caption">検出時刻</span><span id="last-date">--/--</span><span id="last-clock">--:--:--</span><span id="elapsed">--</span></div>
 </section>
 <div id="bottom">

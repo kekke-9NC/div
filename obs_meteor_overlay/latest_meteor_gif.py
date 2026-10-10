@@ -17,10 +17,11 @@ from zipfile import BadZipFile
 from pathlib import Path
 
 from legacy_detection_mask import LegacyDetectionMask, default_settings_path
+from reviewed_events import ReviewedMeteorCatalog, identity
 
 
 STOP = False
-EVENT_STAMP_RE = re.compile(r"^(\d{8}_\d{9})_meteor_")
+EVENT_STAMP_RE = re.compile(r"^(\d{8}_\d{9})_(?:not_)?meteor_")
 
 
 def stop_handler(_signum: int, _frame: object) -> None:
@@ -29,11 +30,17 @@ def stop_handler(_signum: int, _frame: object) -> None:
 
 
 def event_id(path: Path) -> str:
-    name = path.name
-    for suffix in ("_summary.mp4", "_full_denoised.mp4", "_full.mp4", "_info.txt", ".mp4"):
-        if name.endswith(suffix):
-            return name[: -len(suffix)]
-    return path.stem
+    return identity(path.name)
+
+
+def saved_media_path(folder: Path, source: Path, suffix: str) -> Path:
+    """Find artifacts also renamed with collision UUIDs during review moves."""
+    exact = folder / f"{event_id(source)}{suffix}"
+    if exact.is_file():
+        return exact
+    pattern = re.compile(re.escape(exact.stem) + r"(?:_[0-9a-fA-F]{8})+$")
+    matches = [p for p in folder.glob(f"{exact.stem}_*{exact.suffix}") if pattern.fullmatch(p.stem) and p.is_file()]
+    return max(matches, key=lambda p: p.name) if matches else exact
 
 
 def event_datetime(path: Path) -> datetime | None:
@@ -83,7 +90,7 @@ def zoom_source_for(source: Path, meteor_dir: Path) -> Path:
 
 def raw_zoom_request(source: Path, meteor_dir: Path, require_video: bool = True) -> tuple[Path, int, int, float, float] | None:
     """Read the original video and detection coordinates saved with an event."""
-    info_path = meteor_dir / f"{event_id(source)}_info.txt"
+    info_path = saved_media_path(meteor_dir, source, "_info.txt")
     try:
         text = info_path.read_text(encoding="utf-8")
     except (OSError, UnicodeError):
@@ -178,9 +185,7 @@ def convert_raw_to_gif(event_source, meteor_dir, output, ffmpeg, mask=None, zoom
     start_frame = max(0, clip_start - padding_frames)
     duration_seconds = max(0.25, (clip_end + padding_frames - start_frame + 1) / fps)
     if zoom:
-        crop_size = min(256, source_width, source_height)
-        x = max(0, min(source_width - crop_size, int(round(center_x - crop_size / 2))))
-        y = max(0, min(source_height - crop_size, int(round(center_y - crop_size / 2))))
+        x, y, crop_size = zoom_crop(source_width, source_height, center_x, center_y)
         video_filter = (f"crop={crop_size}:{crop_size}:{x}:{y},"
                         "tpad=start_mode=clone:start_duration=0.25:stop_mode=clone:stop_duration=0.5,"
                         "fps=12,scale=180:180:flags=lanczos,")
@@ -200,8 +205,8 @@ def convert_raw_zoom_to_gif(event_source, meteor_dir, output, ffmpeg, mask=None)
 
 
 def fallback_sources(source, meteor_dir, mask):
-    full = meteor_dir / f"{event_id(source)}_full.mp4"
-    cutout = meteor_dir / f"{event_id(source)}.mp4"
+    full = saved_media_path(meteor_dir, source, "_full.mp4")
+    cutout = saved_media_path(meteor_dir, source, ".mp4")
     if mask.mask is None:
         return full if full.is_file() else source, cutout if cutout.is_file() else source, mask
     if not full.is_file():
@@ -218,9 +223,7 @@ def convert_saved_zoom_to_gif(full, event_source, meteor_dir, output, ffmpeg, ma
         return
     _, _, _, center_x, center_y = request
     width, height, _ = probe_video_geometry(ffmpeg, full)
-    size = min(256, width, height)
-    x = max(0, min(width - size, int(round(center_x - size / 2))))
-    y = max(0, min(height - size, int(round(center_y - size / 2))))
+    x, y, size = zoom_crop(width, height, center_x, center_y)
     video_filter = (
         f"crop={size}:{size}:{x}:{y},"
         "tpad=start_mode=clone:start_duration=0.25:stop_mode=clone:stop_duration=0.5,"
@@ -230,15 +233,39 @@ def convert_saved_zoom_to_gif(full, event_source, meteor_dir, output, ffmpeg, ma
     render_gif(full, output, ffmpeg, video_filter, mask)
 
 
+def zoom_crop(width, height, center_x, center_y):
+    size = min(256, width, height)
+    x = max(0, min(width - size, int(round(center_x - size / 2))))
+    y = max(0, min(height - size, int(round(center_y - size / 2))))
+    return x, y, size
+
+
+def replay_region(event_source, full_source, ffmpeg):
+    """Map the exact zoom crop into the padded 320×180 overview GIF."""
+    request = raw_zoom_request(event_source, event_source.parent, require_video=False)
+    if request is None:
+        return None
+    width, height, _ = probe_video_geometry(ffmpeg, full_source)
+    x, y, size = zoom_crop(width, height, request[3], request[4])
+    scale = min(320 / width, 180 / height)
+    return {
+        "x": (320 - width * scale) / 2 + x * scale,
+        "y": (180 - height * scale) / 2 + y * scale,
+        "width": size * scale,
+        "height": size * scale,
+    }
+
+
 def event_files(meteor_dir: Path) -> list[Path]:
     """Return one completed video per detected event for the night count."""
     candidates: dict[str, Path] = {}
     for path in meteor_dir.glob("*_meteor_*.mp4"):
-        if not path.is_file() or path.name.endswith(("_full.mp4", "_full_denoised.mp4")):
+        media_stem = re.sub(r"(?:_[0-9a-fA-F]{8})+$", "", path.stem)
+        if not path.is_file() or media_stem.endswith(("_full", "_full_denoised")):
             continue
         key = event_id(path)
         existing = candidates.get(key)
-        if existing is None or path.name.endswith("_summary.mp4"):
+        if existing is None or media_stem.endswith("_summary"):
             candidates[key] = path
     return list(candidates.values())
 
@@ -253,19 +280,20 @@ def night_window(now: datetime) -> tuple[datetime, datetime]:
     return start, end
 
 
-def night_count(meteor_dir: Path, now: datetime) -> tuple[int, datetime, datetime]:
+def night_count(meteor_dir: Path, now: datetime, event_times=None) -> tuple[int, datetime, datetime]:
     start, end = night_window(now)
     count = sum(
         1
-        for path in event_files(meteor_dir)
-        if (stamp := event_datetime(path)) is not None and start <= stamp < end and stamp <= now
+        for stamp in (event_times if event_times is not None else (event_datetime(path) for path in event_files(meteor_dir)))
+        if stamp is not None and start <= stamp < end and stamp <= now
     )
     return count, start, end
 
 
-def write_hourly_statistics(meteor_dir: Path, output: Path, now: datetime) -> None:
-    """Count unique saved events in the rolling hour, in six ten-minute bins.
+def write_hourly_statistics(meteor_dir: Path, output: Path, now: datetime, event_times=None) -> None:
+    """Count effective events in the rolling hour, in six ten-minute bins.
 
+    The worker supplies event_times from the corrected dataset catalog.
     Filename timestamps are local camera times, just as for the night count.
     The left edge is exclusive and the right edge inclusive so adjacent bins
     partition the hour exactly, including events detected at the current time.
@@ -273,8 +301,7 @@ def write_hourly_statistics(meteor_dir: Path, output: Path, now: datetime) -> No
     end = now.timestamp()
     start = end - 3600
     bins = [0] * 6
-    for path in event_files(meteor_dir):
-        stamp = event_datetime(path)
+    for stamp in (event_times if event_times is not None else (event_datetime(path) for path in event_files(meteor_dir))):
         if stamp is None:
             continue
         epoch = stamp.timestamp()
@@ -289,6 +316,7 @@ def write_hourly_statistics(meteor_dir: Path, output: Path, now: datetime) -> No
         "last_hour_count": sum(bins),
         "bin_minutes": 10,
         "bins": bins,
+        "classification_basis": "dataset_review_then_prediction",
     }
     temporary = output.with_suffix(output.suffix + ".tmp")
     temporary.write_text(json.dumps(payload, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -326,6 +354,7 @@ def write_metadata(
     window_end: datetime,
     mask_revision: str | None,
     mask_enabled: bool,
+    zoom_region: dict | None = None,
 ) -> None:
     detected = event_datetime(source) if source is not None else None
     payload = {
@@ -341,6 +370,9 @@ def write_metadata(
         "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "mask_revision": mask_revision,
         "mask_enabled": mask_enabled,
+        "zoom_region": zoom_region,
+        "classification_basis": "dataset_review_then_prediction",
+        "replay_version": 2,
     }
     temporary = metadata_path.with_suffix(metadata_path.suffix + ".tmp")
     temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -362,11 +394,13 @@ def main() -> int:
     last_rendered = None
     last_metadata = None
     mask = LegacyDetectionMask(args.legacy_settings)
+    catalog = ReviewedMeteorCatalog(args.legacy_settings, args.meteor_dir)
     exported_revision = None
     last_mask_error = None
     display_source = display_zoom = None
     display_mask_revision = None
     display_mask_enabled = False
+    display_zoom_region = None
     if metadata_path.exists():
         try:
             previous = json.loads(metadata_path.read_text(encoding="utf-8"))
@@ -374,6 +408,7 @@ def main() -> int:
             display_zoom = Path(previous["zoom_source"]) if previous.get("zoom_source") else None
             display_mask_revision = previous.get("mask_revision")
             display_mask_enabled = bool(previous.get("mask_enabled", False))
+            display_zoom_region = previous.get("zoom_region")
         except (OSError, ValueError):
             pass
 
@@ -383,10 +418,23 @@ def main() -> int:
     print(f"[OBS meteor overlay] watching {args.meteor_dir}", flush=True)
 
     while not STOP:
+        now = datetime.now()
+        try:
+            events = catalog.refresh()
+        except (OSError, ValueError) as exc:
+            print(f"[OBS meteor overlay] dataset sync failed; retaining previous display: {exc}", file=sys.stderr, flush=True)
+            time.sleep(max(0.5, args.poll_seconds))
+            continue
+        event_times = [event.detected for event in events]
+        accepted = {event.key for event in events}
+        if display_source is not None and identity(display_source.name) not in accepted:
+            # A replay explicitly corrected to non-meteor must not remain on
+            # screen, even if rendering the previous valid meteor later fails.
+            display_source = display_zoom = display_zoom_region = None
         # Publish counts independently of GIF conversion and mask availability.
         # A conversion failure must not freeze the rolling observation window.
         try:
-            write_hourly_statistics(args.meteor_dir, args.output_dir / "hourly_stats.json", datetime.now())
+            write_hourly_statistics(args.meteor_dir, args.output_dir / "hourly_stats.json", now, event_times)
         except (OSError, ValueError) as exc:
             print(f"[OBS meteor overlay] statistics update failed: {exc}", file=sys.stderr, flush=True)
         try:
@@ -406,9 +454,9 @@ def main() -> int:
         if not mask.revision:
             time.sleep(max(0.5, args.poll_seconds))
             continue
-        now = datetime.now()
-        count, window_start, window_end = night_count(args.meteor_dir, now)
-        source = newest_event_video(args.meteor_dir)
+        count, window_start, window_end = night_count(args.meteor_dir, now, event_times)
+        source = next((event.video for event in reversed(events)
+                       if event.detected <= now and event.video is not None), None)
         render_key = (source.name, mask.revision) if source is not None else None
         if source is not None and render_key != last_rendered:
             if stable_file(source, min(0.5, max(0.1, args.poll_seconds / 2))):
@@ -416,25 +464,33 @@ def main() -> int:
                 next_zoom = args.output_dir / ".next_zoom.gif"
                 try:
                     print(f"[OBS meteor overlay] updating: {source.name}", flush=True)
-                    full_raw = convert_raw_to_gif(source, args.meteor_dir, next_full, args.ffmpeg, mask)
-                    zoom_raw = convert_raw_zoom_to_gif(source, args.meteor_dir, next_zoom, args.ffmpeg, mask)
+                    event_dir = source.parent
+                    full_raw = convert_raw_to_gif(source, event_dir, next_full, args.ffmpeg, mask)
+                    zoom_raw = convert_raw_zoom_to_gif(source, event_dir, next_zoom, args.ffmpeg, mask)
+                    full_image_source = full_raw
+                    geometry_known = full_raw is not None and zoom_raw is not None
                     if full_raw is None or zoom_raw is None:
-                        full, zoom, zoom_mask = fallback_sources(source, args.meteor_dir, mask)
+                        full, zoom, zoom_mask = fallback_sources(source, event_dir, mask)
                         if not stable_file(full, 0.25) or not stable_file(zoom, 0.25):
                             raise OSError("流星映像を保存中です")
                         if full_raw is None:
                             convert_to_gif(full, next_full, args.ffmpeg, 320, 180, mask)
+                            full_image_source = full
                         if zoom_raw is None:
-                            if mask.mask is not None:
-                                convert_saved_zoom_to_gif(zoom, source, args.meteor_dir, next_zoom, args.ffmpeg, zoom_mask)
+                            if mask.mask is not None or "_full" in full.stem:
+                                convert_saved_zoom_to_gif(full, source, event_dir, next_zoom, args.ffmpeg, zoom_mask)
+                                zoom = full
+                                geometry_known = True
                             else:
                                 convert_to_gif(zoom, next_zoom, args.ffmpeg, 180, 180, zoom_mask)
                             zoom_raw = zoom
+                    region = replay_region(source, full_image_source, args.ffmpeg) if geometry_known else None
                     os.replace(next_full, gif_path)
                     os.replace(next_zoom, zoom_gif_path)
                     display_source, display_zoom = source, zoom_raw
                     display_mask_revision = mask.revision
                     display_mask_enabled = mask.mask is not None
+                    display_zoom_region = region
                     last_rendered = render_key
                 except (OSError, ValueError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
                     print(f"[OBS meteor overlay] update failed: {exc}", file=sys.stderr, flush=True)
@@ -454,6 +510,7 @@ def main() -> int:
                 ),
                 "tonight_count": count,
                 "mask_revision": display_mask_revision,
+                "zoom_region": display_zoom_region,
                 "tonight_window": f"{window_start.strftime('%m/%d %H:%M')}–{window_end.strftime('%m/%d %H:%M')}",
             },
             ensure_ascii=False,
@@ -469,6 +526,7 @@ def main() -> int:
                 window_end,
                 display_mask_revision,
                 display_mask_enabled,
+                display_zoom_region,
             )
             last_metadata = metadata_snapshot
         time.sleep(max(0.5, args.poll_seconds))

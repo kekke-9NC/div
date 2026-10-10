@@ -22,7 +22,7 @@ function updateClock() {
         byId('elapsed').textContent = seconds < 60 ? 'たった今' : seconds < 3600 ? `${Math.floor(seconds / 60)}分前` : seconds < 86400 ? `${Math.floor(seconds / 3600)}時間前` : `${Math.floor(seconds / 86400)}日前`;
     }
     if (statsUpdatedEpoch !== null) {
-        byId('stats-state').textContent = now.getTime() / 1000 - statsUpdatedEpoch > 90 ? '更新が遅れています' : '保存された検出を集計';
+        byId('stats-state').textContent = now.getTime() / 1000 - statsUpdatedEpoch > 90 ? '更新が遅れています' : '訂正反映・未確認は自動判定';
     }
 }
 
@@ -53,10 +53,21 @@ async function refreshMetadata() {
         const nightly = Number(data.tonight_count);
         if (data.tonight_count != null && Number.isFinite(nightly)) byId('count').textContent = nightly;
         byId('window').textContent = data.tonight_window || '18:00–翌06:00';
-        if (!data.event || data.detected_at_epoch == null) return;
+        if (!data.event || data.detected_at_epoch == null) {
+            clearTimeout(focusTimer);
+            replay.classList.remove('ready', 'focus', 'located');
+            byId('meteor').removeAttribute('src');
+            byId('zoom').removeAttribute('src');
+            byId('last-date').textContent = '--/--';
+            byId('last-clock').textContent = '--:--:--';
+            byId('elapsed').textContent = '--';
+            byId('replay-state').textContent = '自動リプレイ';
+            displayedEvent = displayedEpoch = imageKey = null;
+            return;
+        }
         const epoch = Number(data.detected_at_epoch);
         if (!Number.isFinite(epoch)) return;
-        const key = `${data.event}:${data.mask_revision || ''}`;
+        const key = `${data.event}:${data.mask_revision || ''}:${JSON.stringify(data.zoom_region || null)}`;
         // Reload only when the event or mask changes; polling must not restart GIFs.
         if (key === imageKey || key === pendingKey) return;
         pendingKey = key;
@@ -73,6 +84,7 @@ async function refreshMetadata() {
         byId('last-date').textContent = jstDate.format(new Date(epoch * 1000));
         byId('last-clock').textContent = jstClock.format(new Date(epoch * 1000));
         replay.classList.add('ready');
+        showZoomRegion(data.zoom_region);
         if (newDetection) {
             clearTimeout(focusTimer);
             replay.classList.add('focus');
@@ -89,6 +101,23 @@ async function refreshMetadata() {
         pendingKey = null;
         metadataBusy = false;
     }
+}
+
+function showZoomRegion(region) {
+    const values = region && [region.x, region.y, region.width, region.height];
+    const valid = values && values.every(Number.isFinite) && region.width > 0 && region.height > 0 && region.x >= 0 && region.y >= 0 && region.x + region.width <= 320.01 && region.y + region.height <= 180.01;
+    replay.classList.toggle('located', Boolean(valid));
+    byId('zoom-label').textContent = valid ? '水色の範囲 · 拡大' : '流星拡大';
+    if (!valid) return;
+    const {x, y, width: w, height: h} = region;
+    const arm = Math.min(9, w / 3, h / 3);
+    // Corners leave the meteor itself unobscured while marking the exact crop.
+    byId('zoom-brackets').setAttribute('d', [
+        `M${x},${y + arm} V${y} H${x + arm}`,
+        `M${x + w - arm},${y} H${x + w} V${y + arm}`,
+        `M${x + w},${y + h - arm} V${y + h} H${x + w - arm}`,
+        `M${x + arm},${y + h} H${x} V${y + h - arm}`,
+    ].join(' '));
 }
 
 function drawGraph(bins) {
