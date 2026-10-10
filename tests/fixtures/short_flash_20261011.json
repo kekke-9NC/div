@@ -1,0 +1,406 @@
+{
+  "recording_date": "20261011",
+  "hour": "02",
+  "minutes": [
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+    24,
+    25,
+    26,
+    27,
+    28,
+    29,
+    30,
+    31,
+    32,
+    33,
+    34,
+    35,
+    36,
+    37
+  ],
+  "fps": 25,
+  "events": [
+    {
+      "id": 1,
+      "minute": 19,
+      "first_frame": 268,
+      "last_frame": 275,
+      "roi": [
+        860,
+        274,
+        160,
+        160
+      ],
+      "was_missed": true
+    },
+    {
+      "id": 2,
+      "minute": 19,
+      "first_frame": 647,
+      "last_frame": 649,
+      "roi": [
+        771,
+        712,
+        160,
+        160
+      ],
+      "was_missed": true
+    },
+    {
+      "id": 3,
+      "minute": 19,
+      "first_frame": 1026,
+      "last_frame": 1037,
+      "roi": [
+        609,
+        424,
+        168,
+        168
+      ],
+      "was_missed": false
+    },
+    {
+      "id": 4,
+      "minute": 20,
+      "first_frame": 31,
+      "last_frame": 33,
+      "roi": [
+        458,
+        322,
+        160,
+        160
+      ],
+      "was_missed": false
+    },
+    {
+      "id": 5,
+      "minute": 20,
+      "first_frame": 774,
+      "last_frame": 783,
+      "roi": [
+        468,
+        59,
+        278,
+        278
+      ],
+      "was_missed": false
+    },
+    {
+      "id": 6,
+      "minute": 20,
+      "first_frame": 1056,
+      "last_frame": 1065,
+      "roi": [
+        416,
+        539,
+        160,
+        160
+      ],
+      "was_missed": true
+    },
+    {
+      "id": 7,
+      "minute": 20,
+      "first_frame": 1466,
+      "last_frame": 1475,
+      "roi": [
+        0,
+        534,
+        160,
+        160
+      ],
+      "was_missed": true
+    },
+    {
+      "id": 8,
+      "minute": 21,
+      "first_frame": 224,
+      "last_frame": 230,
+      "roi": [
+        581,
+        157,
+        172,
+        172
+      ],
+      "was_missed": true
+    },
+    {
+      "id": 9,
+      "minute": 21,
+      "first_frame": 959,
+      "last_frame": 970,
+      "roi": [
+        1554,
+        297,
+        160,
+        160
+      ],
+      "was_missed": false
+    },
+    {
+      "id": 10,
+      "minute": 22,
+      "first_frame": 335,
+      "last_frame": 339,
+      "roi": [
+        1418,
+        396,
+        160,
+        160
+      ],
+      "was_missed": false
+    },
+    {
+      "id": 11,
+      "minute": 22,
+      "first_frame": 861,
+      "last_frame": 864,
+      "roi": [
+        1177,
+        506,
+        160,
+        160
+      ],
+      "was_missed": true
+    },
+    {
+      "id": 12,
+      "minute": 22,
+      "first_frame": 1291,
+      "last_frame": 1294,
+      "roi": [
+        307,
+        867,
+        160,
+        160
+      ],
+      "was_missed": true
+    },
+    {
+      "id": 13,
+      "minute": 23,
+      "first_frame": 713,
+      "last_frame": 717,
+      "roi": [
+        586,
+        155,
+        160,
+        160
+      ],
+      "was_missed": true
+    },
+    {
+      "id": 14,
+      "minute": 24,
+      "first_frame": 418,
+      "last_frame": 422,
+      "roi": [
+        1248,
+        136,
+        160,
+        160
+      ],
+      "was_missed": false
+    },
+    {
+      "id": 15,
+      "minute": 25,
+      "first_frame": 627,
+      "last_frame": 655,
+      "roi": [
+        166,
+        403,
+        340,
+        340
+      ],
+      "was_missed": false
+    },
+    {
+      "id": 16,
+      "minute": 27,
+      "first_frame": 516,
+      "last_frame": 533,
+      "roi": [
+        256,
+        327,
+        160,
+        160
+      ],
+      "was_missed": true
+    },
+    {
+      "id": 17,
+      "minute": 28,
+      "first_frame": 943,
+      "last_frame": 959,
+      "roi": [
+        1171,
+        893,
+        160,
+        160
+      ],
+      "was_missed": true
+    },
+    {
+      "id": 18,
+      "minute": 29,
+      "first_frame": 480,
+      "last_frame": 482,
+      "roi": [
+        1267,
+        853,
+        160,
+        160
+      ],
+      "was_missed": true
+    },
+    {
+      "id": 19,
+      "minute": 30,
+      "first_frame": 708,
+      "last_frame": 714,
+      "roi": [
+        1402,
+        459,
+        160,
+        160
+      ],
+      "was_missed": true
+    },
+    {
+      "id": 20,
+      "minute": 30,
+      "first_frame": 846,
+      "last_frame": 848,
+      "roi": [
+        1028,
+        904,
+        160,
+        160
+      ],
+      "was_missed": true
+    },
+    {
+      "id": 21,
+      "minute": 31,
+      "first_frame": 267,
+      "last_frame": 277,
+      "roi": [
+        343,
+        17,
+        160,
+        160
+      ],
+      "was_missed": true
+    },
+    {
+      "id": 22,
+      "minute": 31,
+      "first_frame": 423,
+      "last_frame": 427,
+      "roi": [
+        1112,
+        30,
+        160,
+        160
+      ],
+      "was_missed": false
+    },
+    {
+      "id": 23,
+      "minute": 34,
+      "first_frame": 937,
+      "last_frame": 945,
+      "roi": [
+        588,
+        30,
+        160,
+        160
+      ],
+      "was_missed": false
+    },
+    {
+      "id": 24,
+      "minute": 34,
+      "first_frame": 1267,
+      "last_frame": 1281,
+      "roi": [
+        1349,
+        913,
+        160,
+        160
+      ],
+      "was_missed": false
+    },
+    {
+      "id": 25,
+      "minute": 34,
+      "first_frame": 1363,
+      "last_frame": 1367,
+      "roi": [
+        714,
+        741,
+        160,
+        160
+      ],
+      "was_missed": true
+    },
+    {
+      "id": 26,
+      "minute": 36,
+      "first_frame": 147,
+      "last_frame": 156,
+      "roi": [
+        533,
+        905,
+        160,
+        160
+      ],
+      "was_missed": false
+    },
+    {
+      "id": 27,
+      "minute": 36,
+      "first_frame": 148,
+      "last_frame": 180,
+      "roi": [
+        0,
+        4,
+        160,
+        160
+      ],
+      "was_missed": true
+    },
+    {
+      "id": 28,
+      "minute": 37,
+      "first_frame": 464,
+      "last_frame": 482,
+      "roi": [
+        395,
+        578,
+        160,
+        160
+      ],
+      "was_missed": false
+    },
+    {
+      "id": 29,
+      "minute": 37,
+      "first_frame": 1149,
+      "last_frame": 1152,
+      "roi": [
+        1058,
+        512,
+        160,
+        160
+      ],
+      "was_missed": true
+    }
+  ]
+}

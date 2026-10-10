@@ -68,6 +68,9 @@ MOVING_POINT_RESIDUAL_THRESHOLD = 12.0
 MOVING_POINT_MAX_GAP = 1
 MOVING_POINT_MAX_STEP = 14.0
 MOVING_POINT_MAX_CANDIDATES = 20
+# Preserve native pixels and two-frame motion evidence for brief RTSP flashes.
+# Existing Hough and moving-point proposals remain available alongside this.
+SHORT_FLASH_DETECT_ENABLED = True
 # 詳細検出で、粗検出した流星候補と同じ軌跡とみなす許容値。
 # 雲の縁など、カットアウト内の無関係な線でクリップ時間が延びるのを防ぐ。
 FINER_LINE_MATCH_DISTANCE = 70    # 粗検出線分からの最大距離 (px)

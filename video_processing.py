@@ -17,6 +17,7 @@ from multiprocessing import cpu_count
 import config
 import image_processing
 import moving_point_detector
+import short_flash_detector
 import model
 import astrometry
 import tracking
@@ -115,6 +116,38 @@ def _select_model_event_frames(
     if relative_start > relative_end:
         return frames
     return frames[relative_start : relative_end + 1]
+
+
+def _candidate_already_saved(line, bounds, saved, frame_rate, temporal=False):
+    """Suppress another view of an event, never all later events at a position."""
+    center = np.mean(line, axis=0)
+    for item in saved:
+        if temporal and item.get('label') != 'meteor':
+            # A previously rejected coarse crop must not block better evidence.
+            continue
+        first = item.get('detection_start_frame', item.get('start_frame', -1))
+        last = item.get('detection_end_frame', item.get('end_frame', -1))
+        margin = 0 if temporal else max(1, int(frame_rate * .25))
+        if bounds[0] > last + margin or bounds[1] < first - margin:
+            continue
+        previous_center = item.get('center')
+        if previous_center is None:
+            continue
+        if np.linalg.norm(center - previous_center) < config.DUPLICATE_DETECTION_THRESHOLD:
+            return True
+        previous_line = item.get('detection_line')
+        if previous_line is not None:
+            # A long meteor can cross two distant crops. Its later full track
+            # contains the earlier crop even when their centers are far apart.
+            angle1 = math.atan2(line[1][1] - line[0][1], line[1][0] - line[0][0])
+            angle2 = math.atan2(previous_line[1][1] - previous_line[0][1], previous_line[1][0] - previous_line[0][0])
+            difference = abs((angle1 - angle2 + math.pi / 2) % math.pi - math.pi / 2)
+            if difference < math.radians(25) and min(
+                _point_to_segment_distance(tuple(previous_center), line[0], line[1]),
+                _point_to_segment_distance(tuple(center), previous_line[0], previous_line[1]),
+            ) < 50:
+                return True
+    return False
 
 
 def _write_motion_info(
@@ -590,7 +623,8 @@ def _process_finer_detection_worker(
     composite_step: int,
     cut_size: int,
     border_margin: int,
-    finer_min_length: int
+    finer_min_length: int,
+    temporal_bounds: Optional[Tuple[int, int]] = None,
 ) -> Tuple[List[int], Tuple[int, int, int, int]]:
     """
     並列処理用の詳細検出ワーカー関数。
@@ -635,6 +669,12 @@ def _process_finer_detection_worker(
     y_start_cut = max(border_margin, y_end_cut - cut_size)
     
     cutout_rect = (x_start_cut, y_start_cut, x_end_cut, y_end_cut)
+
+    if temporal_bounds is not None:
+        # Motion was verified at native resolution in chronological frames.
+        # Requiring another long Hough line here discards precisely the brief
+        # flashes this independent proposal path is intended to recover.
+        return list(temporal_bounds), cutout_rect
     
     # 比較明合成フレーム作成（カットアウト領域のみ）
     composite_frames = []
@@ -892,6 +932,7 @@ def create_line_video_clips(
 
     processed_clips_info: List[Dict[str, Any]] = []
     detection_counter = 0
+    flash_detector = short_flash_detector.ShortFlashDetector(frame_rate, config.BORDER_SIZE)
 
     try:
         evidence_cap = _open_video_capture(evidence_path, decoder_threads) if evidence_path else None
@@ -993,7 +1034,14 @@ def create_line_video_clips(
                     # can make a real event look like a weak classifier input.
                     lines = [track.line for track in moving_tracks] + lines
 
-                lines = _deduplicate_candidate_lines(lines)
+                flash_candidates = []
+                if config.SHORT_FLASH_DETECT_ENABLED and use_rtsp_params and frame_window:
+                    flash_candidates = flash_detector.consume(
+                        frame_window, start_index_diff, mask=mask, roi=roi,
+                        final=not is_rtsp and current_frame_index == total_frames - 1,
+                    )
+                flash_by_line = {candidate.line: candidate for candidate in flash_candidates}
+                lines = _deduplicate_candidate_lines([c.line for c in flash_candidates] + lines)
 
                 if not lines:
                     continue
@@ -1007,14 +1055,11 @@ def create_line_video_clips(
                         (x1, y1), (x2, y2) = line
                         cx, cy = int((x1 + x2) / 2), int((y1 + y2) / 2)
 
-                        is_duplicate = False
-                        for existing_clip in processed_clips_info:
-                            ex_cx, ex_cy = existing_clip.get('center', (None, None))
-                            if ex_cx is not None:
-                                dist = np.sqrt((cx - ex_cx)**2 + (cy - ex_cy)**2)
-                                if dist < config.DUPLICATE_DETECTION_THRESHOLD:
-                                    is_duplicate = True
-                                    break
+                        flash = flash_by_line.get(line)
+                        bounds = (flash.start_frame, flash.end_frame) if flash else (start_index_diff, end_index_diff)
+                        is_duplicate = _candidate_already_saved(
+                            line, bounds, processed_clips_info, frame_rate, temporal=flash is not None,
+                        )
                         # 収集済み候補とも重複チェック
                         for vc in valid_candidates:
                             if np.sqrt((cx - vc['cx'])**2 + (cy - vc['cy'])**2) < config.DUPLICATE_DETECTION_THRESHOLD:
@@ -1025,7 +1070,8 @@ def create_line_video_clips(
                             valid_candidates.append({
                                 'line': line, 'cx': cx, 'cy': cy,
                                 'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2,
-                                'length': line_length
+                                'length': line_length,
+                                'flash': flash_by_line.get(line),
                             })
 
                     if valid_candidates:
@@ -1141,6 +1187,7 @@ def create_line_video_clips(
                                     try:
                                         result = _process_finer_detection_worker(
                                             cx=cand['cx'], cy=cand['cy'], candidate_line=cand['line'],
+                                            temporal_bounds=(cand['flash'].start_frame, cand['flash'].end_frame) if cand['flash'] else None,
                                             **worker_kwargs,
                                         )
                                         collect_finer_result(cand, *result)
@@ -1155,6 +1202,7 @@ def create_line_video_clips(
                                         executor.submit(
                                             _process_finer_detection_worker,
                                             cx=cand['cx'], cy=cand['cy'], candidate_line=cand['line'],
+                                            temporal_bounds=(cand['flash'].start_frame, cand['flash'].end_frame) if cand['flash'] else None,
                                             **worker_kwargs,
                                         ): cand
                                         for cand in valid_candidates
@@ -1183,6 +1231,11 @@ def create_line_video_clips(
                             
                                 detection_start_frame = min(line_detected_indices)
                                 detection_end_frame = max(line_detected_indices)
+                                if _candidate_already_saved(
+                                    cand['line'], (detection_start_frame, detection_end_frame),
+                                    processed_clips_info, frame_rate, temporal=cand['flash'] is not None,
+                                ):
+                                    continue
                                 print(f"詳細検出によるフレーム範囲: {detection_start_frame} - {detection_end_frame}")
                             
                                 padding_seconds = config.FINER_DETECT_PADDING_SECONDS
@@ -1310,6 +1363,11 @@ def create_line_video_clips(
                                 classification_diff_cutout = _extract_diff_cutout(
                                     classification_diff_img, cutout_rect, cut_size
                                 )
+                                inference_rect = (
+                                    cand['flash'].classifier_rect(img_w, img_h)
+                                    if cand['flash'] and model.get_active_model_info().get('architecture') in getattr(model, 'EVENT_ARCHITECTURES', (model.UNIVERSAL_ARCHITECTURE_NAME,))
+                                    else cutout_rect
+                                )
                             
                                 temp_dir = config.TEMP_CLIP_DIR
                                 os.makedirs(temp_dir, exist_ok=True)
@@ -1317,7 +1375,7 @@ def create_line_video_clips(
                                 cv2.imwrite(temp_diff_image_path, classification_diff_cutout)
                                 probability = model.predict_meteor_event(
                                     frames=ml_source_frames,
-                                    cutout_rect=cutout_rect,
+                                    cutout_rect=inference_rect,
                                     detected_line=((x1, y1), (x2, y2)),
                                     frame_rate=frame_rate,
                                     fallback_image_path=temp_diff_image_path,
@@ -1354,7 +1412,7 @@ def create_line_video_clips(
                                             detection_time=detection_datetime,
                                             frames=ml_source_frames,
                                             classification_diff=classification_diff_img,
-                                            cutout_rect=cutout_rect,
+                                            cutout_rect=inference_rect,
                                             cutout_size=cut_size,
                                             frame_rate=frame_rate,
                                             detected_line=((x1, y1), (x2, y2)),
@@ -1579,7 +1637,9 @@ def create_line_video_clips(
                                 processed_clips_info.append({
                                     'path': saved_paths.get('video'), 'center': (cx, cy), 'probability': probability,
                                     'label': detection_label, 'timestamp': detection_datetime,
-                                    'start_frame': adjusted_start_frame, 'end_frame': adjusted_end_frame, 'saved_paths': saved_paths
+                                    'start_frame': adjusted_start_frame, 'end_frame': adjusted_end_frame, 'saved_paths': saved_paths,
+                                    'detection_start_frame': detection_start_frame, 'detection_end_frame': detection_end_frame,
+                                    'detection_line': ((x1, y1), (x2, y2))
                                 })
                         
                             continue  # 並列処理による保存完了後は逐次ループをスキップ
@@ -1590,14 +1650,11 @@ def create_line_video_clips(
                     (x1, y1), (x2, y2) = line
                     cx, cy = int((x1 + x2) / 2), int((y1 + y2) / 2)
 
-                    is_duplicate = False
-                    for existing_clip in processed_clips_info:
-                        ex_cx, ex_cy = existing_clip.get('center', (None, None))
-                        if ex_cx is not None:
-                            dist = np.sqrt((cx - ex_cx)**2 + (cy - ex_cy)**2)
-                            if dist < config.DUPLICATE_DETECTION_THRESHOLD:
-                                is_duplicate = True
-                                break
+                    flash = flash_by_line.get(line)
+                    bounds = (flash.start_frame, flash.end_frame) if flash else (start_index_diff, end_index_diff)
+                    is_duplicate = _candidate_already_saved(
+                        line, bounds, processed_clips_info, frame_rate, temporal=flash is not None,
+                    )
                     if is_duplicate:
                         continue
 
@@ -1758,6 +1815,10 @@ def create_line_video_clips(
                                 line_detected_indices.append(composite_frame_indices[i])
                                 print(f"  -> finer差分 (フレーム {composite_frame_indices[i]} 付近) カットアウト領域で線検出")
 
+                    flash = flash_by_line.get(line)
+                    if flash is not None:
+                        line_detected_indices = [flash.start_frame, flash.end_frame]
+
                     if cancel_flag is not None and cancel_flag.is_set(): break
 
                     if not line_detected_indices:
@@ -1893,6 +1954,11 @@ def create_line_video_clips(
                     classification_diff_cutout = _extract_diff_cutout(
                         classification_diff_img, cutout_rect, cut_size
                     )
+                    inference_rect = (
+                        flash.classifier_rect(img_w, img_h)
+                        if flash and model.get_active_model_info().get('architecture') in getattr(model, 'EVENT_ARCHITECTURES', (model.UNIVERSAL_ARCHITECTURE_NAME,))
+                        else cutout_rect
+                    )
 
                     temp_dir = config.TEMP_CLIP_DIR
                     os.makedirs(temp_dir, exist_ok=True)
@@ -1900,7 +1966,7 @@ def create_line_video_clips(
                     cv2.imwrite(temp_diff_image_path, classification_diff_cutout)
                     probability = model.predict_meteor_event(
                         frames=ml_source_frames,
-                        cutout_rect=cutout_rect,
+                        cutout_rect=inference_rect,
                         detected_line=((x1, y1), (x2, y2)),
                         frame_rate=frame_rate,
                         fallback_image_path=temp_diff_image_path,
@@ -1937,7 +2003,7 @@ def create_line_video_clips(
                                 detection_time=detection_datetime,
                                 frames=ml_source_frames,
                                 classification_diff=classification_diff_img,
-                                cutout_rect=cutout_rect,
+                                cutout_rect=inference_rect,
                                 cutout_size=cut_size,
                                 frame_rate=frame_rate,
                                 detected_line=((x1, y1), (x2, y2)),
@@ -2164,7 +2230,9 @@ def create_line_video_clips(
                     processed_clips_info.append({
                         'path': saved_paths.get('video'), 'center': (cx, cy), 'probability': probability,
                         'label': detection_label, 'timestamp': detection_datetime,
-                        'start_frame': adjusted_start_frame, 'end_frame': adjusted_end_frame, 'saved_paths': saved_paths
+                        'start_frame': adjusted_start_frame, 'end_frame': adjusted_end_frame, 'saved_paths': saved_paths,
+                                    'detection_start_frame': detection_start_frame, 'detection_end_frame': detection_end_frame,
+                                    'detection_line': ((x1, y1), (x2, y2))
                     })
 
             except Exception as e_frame:
