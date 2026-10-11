@@ -37,7 +37,7 @@ CONCAT_GROUP_SIZE = 10
 DEFAULTS = dict(timelapse=False, blend_video=False, blend_image=False, concatenate=False,
                 duration=15.0, fps=60.0, constellations=True, timestamp=True,
                 timestamp_position="bottom_right", timestamp_size=3.5, mean_radius=0,
-                crop_margin=20, sky_config="", output_dir="")
+                crop_margin=10, ai_crop=False, sky_config="", output_dir="")
 
 
 def normalize_options(value):
@@ -235,6 +235,67 @@ def line_rect(line, size, margin):
             min(width, max(x1, x2) + margin + 1), min(height, max(y1, y2) + margin + 1)]
 
 
+def coordinate_rect(frames, line, margin, seed_rect=None):
+    """Follow temporal changes attached to the detected coordinates, without AI.
+
+    A short detection can describe only part of a moving meteor. Grow a local
+    search when its connected trail reaches an edge, then crop to the trail's
+    actual bounds plus margin. Never pad/resize to the classifier's 256 square.
+    """
+    height, width = frames[0].shape[:2]
+    seed = line_rect(line, (width, height), 0) if line is not None else seed_rect
+    if seed is None or seed[2] <= seed[0] or seed[3] <= seed[1]:
+        raise ValueError("流星の検出座標が不正です")
+    # A few search pixels remain necessary even when output margin is zero.
+    search_margin = max(10, margin)
+    bounds = [max(0, seed[0]-search_margin), max(0, seed[1]-search_margin),
+              min(width, seed[2]+search_margin), min(height, seed[3]+search_margin)]
+    while True:
+        x1, y1, x2, y2 = bounds
+        minimum = maximum = None
+        for frame in frames:
+            gray = cv2.cvtColor(frame[y1:y2, x1:x2], cv2.COLOR_BGR2GRAY)
+            if minimum is None:
+                minimum, maximum = gray.copy(), gray.copy()
+            else:
+                np.minimum(minimum, gray, out=minimum)
+                np.maximum(maximum, gray, out=maximum)
+        residual = cv2.subtract(maximum, minimum)
+        anchor = np.zeros(residual.shape, np.uint8)
+        if line is None:
+            a, b, c, d = seed
+            anchor[b-y1:d-y1, a-x1:c-x1] = 255
+        else:
+            points = [tuple(int(v-origin) for v, origin in zip(point, (x1, y1))) for point in line]
+            cv2.line(anchor, points[0], points[1], 255, 5)
+        peak = int(residual[anchor != 0].max(initial=0))
+        median = float(np.median(residual))
+        noise = float(np.median(np.abs(residual.astype(np.float32)-median)))
+        threshold = max(8, peak*.15, median+6*noise)
+        signal = (residual >= threshold).astype(np.uint8)
+        # Join small gaps between consecutive observed meteor positions.
+        joined = cv2.dilate(signal, np.ones((7, 7), np.uint8))
+        _count, labels = cv2.connectedComponents(joined, connectivity=8)
+        identities = np.unique(labels[(anchor != 0) & (joined != 0)])
+        selected = (signal != 0) & np.isin(labels, identities[identities != 0])
+        yy, xx = np.nonzero(selected)
+        if not len(xx):
+            return [max(0, seed[0]-margin), max(0, seed[1]-margin),
+                    min(width, seed[2]+margin), min(height, seed[3]+margin)]
+        left, top, right, bottom = int(xx.min()), int(yy.min()), int(xx.max()), int(yy.max())
+        grow_x, grow_y = max(10, (x2-x1)//2), max(10, (y2-y1)//2)
+        enlarged = [max(0, x1-grow_x) if left < search_margin else x1,
+                    max(0, y1-grow_y) if top < search_margin else y1,
+                    min(width, x2+grow_x) if right >= x2-x1-search_margin else x2,
+                    min(height, y2+grow_y) if bottom >= y2-y1-search_margin else y2]
+        if enlarged == bounds:
+            return [max(0, min(seed[0], x1+left)-margin),
+                    max(0, min(seed[1], y1+top)-margin),
+                    min(width, max(seed[2], x1+right+1)+margin),
+                    min(height, max(seed[3], y1+bottom+1)+margin)]
+        bounds = enlarged
+
+
 def local_boxes(image, log):
     import bright_area_detector as detector
     return detector.detect_meteor_boxes_local(image, log)
@@ -367,7 +428,7 @@ class ScheduleProducts:
             if not (job["options"]["blend_image"] or job["options"]["blend_video"]):
                 return
             size = [frames[0].shape[1], frames[0].shape[0]]
-            rect = line_rect(line, size, job["options"]["crop_margin"])
+            rect = coordinate_rect(frames, line, job["options"]["crop_margin"])
             if rect[2] <= rect[0] or rect[3] <= rect[1]:
                 raise ValueError("流星の検出座標が不正です")
             identity = hashlib.sha256((started_at.isoformat() + repr(line)).encode()).hexdigest()[:24]
@@ -382,6 +443,8 @@ class ScheduleProducts:
             key = job["id"] + "_event_" + identity
             event = dict(id=identity, key=key, start=(started_at + timedelta(seconds=indices[0]/frame_rate)).isoformat(),
                          count=len(indices), fps=frame_rate, size=size, rect=rect, ai_done=False,
+                         detected_line=[[float(x), float(y)] for x, y in line],
+                         coordinate_rect_ready=True,
                          capture_pending=True)
             if previous is None:
                 job["events"].append(event)
@@ -541,8 +604,62 @@ class ScheduleProducts:
         x1, y1, x2, y2 = event["rect"]
         return frame[y1:y2, x1:x2]
 
+    @staticmethod
+    def _crop_method(job):
+        return "ai" if job["options"].get("ai_crop", False) else "coordinates"
+
+    def _cutout_key(self, job, event):
+        method = self._crop_method(job)
+        suffix = method
+        if method == "ai":
+            suffix += "_" + hashlib.sha256(json.dumps(event.get("boxes", [])).encode()).hexdigest()[:12]
+        return event["key"] + "_cutouts_" + suffix
+
     def _prepare_event(self, job, event):
-        if not event["ai_done"]:
+        method = self._crop_method(job)
+        if method == "coordinates":
+            if not event.get("coordinate_rect_ready"):
+                # Old caches may already truncate a short detection's trail.
+                # Rebuild once from retained archives, not from that crop.
+                started = datetime.fromisoformat(event["start"])
+                frames = []
+                for index in range(event["count"]):
+                    if self.cancel.is_set():
+                        raise InterruptedError("座標範囲の復旧を中断しました")
+                    frame = self._source_frame(job, started+timedelta(seconds=index/event["fps"]))
+                    if frame is None:
+                        raise IOError("流星の座標範囲を補完する録画がまだありません")
+                    frames.append(frame)
+                margin = job["options"]["crop_margin"]
+                a, b, c, d = event["rect"]
+                width, height = event["size"]
+                seed = [min(a+margin, c-1) if a > 0 else 0,
+                        min(b+margin, d-1) if b > 0 else 0,
+                        max(a+1, c-margin) if c < width else width,
+                        max(b+1, d-margin) if d < height else height]
+                event["rect"] = coordinate_rect(frames, event.get("detected_line"), margin, seed)
+                event["coordinate_rect_ready"] = True
+                event["key"] += "_coordinates_v1"
+                self._save(job)
+                mask = self._mask(job)
+                a, b, c, d = event["rect"]
+                if mask is not None:
+                    mask = cv2.resize(mask, (frames[0].shape[1], frames[0].shape[0]), interpolation=cv2.INTER_NEAREST)[b:d, a:c]
+                files = {}
+                for index, frame in enumerate(frames):
+                    crop = frame[b:d, a:c]
+                    if mask is not None:
+                        crop = cv2.bitwise_and(crop, crop, mask=mask)
+                    files[f"{index:06d}.png"] = png_bytes(crop)
+                self.cache.put(event["key"], files)
+            # Coordinates seed the local temporal trail search; retain the
+            # complete native-sized region, including its requested margin.
+            width = event["rect"][2]-event["rect"][0]
+            height = event["rect"][3]-event["rect"][1]
+            event["boxes"] = [[0, 0, width, height]]
+            event["box_source"] = "detected_line"
+            event["ai_done"] = False
+        elif not event.get("ai_done") or event.get("crop_method") not in (None, "ai"):
             composite = None
             for index in range(event["count"]):
                 frame = self._event_frame(job, event, index)
@@ -566,8 +683,12 @@ class ScheduleProducts:
             event["boxes"] = valid or [[0, 0, width, height]]
             event["box_source"] = "local_ai" if valid else "detected_line"
             event["ai_done"] = True
-            self._save(job)
-        key = event["key"] + "_cutouts"
+        event["crop_method"] = method
+        event["cutouts_prepared"] = False
+        self._save(job)
+        # Distinct keys prevent previously cached AI crops from silently
+        # surviving a migration to the default coordinate method.
+        key = self._cutout_key(job, event)
         if self._cutouts_valid(event, key):
             event["cutout_key"] = key
             event["cutouts_prepared"] = True
@@ -607,7 +728,7 @@ class ScheduleProducts:
         return cv2.bitwise_and(crop, crop, mask=keep)
 
     def _cutout_frame(self, job, event, index):
-        key = event.get("cutout_key", event["key"] + "_cutouts")
+        key = self._cutout_key(job, event)
         try:
             frame = decode_png(self.cache.read(key, f"{index:06d}.png"))
             if frame is not None and frame.shape[1::-1] == (
@@ -753,7 +874,7 @@ class ScheduleProducts:
             for event in events:
                 if event["size"] != size:
                     raise IOError("流星クリップの解像度が途中で変わっています")
-                if not event.get("cutouts_prepared"):
+                if not event.get("cutouts_prepared") or event.get("crop_method") != self._crop_method(job):
                     self._prepare_event(job, event)
                 x, y, _, _ = event["rect"]
                 frame_count = max(1, round(event["count"]*fps/event["fps"]))
@@ -926,8 +1047,10 @@ class ScheduleProducts:
                 self.cache.clear([key])
                 missing_samples += 1
         for event in list(job["events"]):
-            key = event.get("cutout_key", event["key"] + "_cutouts")
-            if not event.get("ai_done") or not self._cutouts_valid(event, key):
+            key = self._cutout_key(job, event)
+            if event.get("crop_method") != self._crop_method(job):
+                job["blends_done"] = False
+            if event.get("crop_method") != self._crop_method(job) or not self._cutouts_valid(event, key):
                 event["cutouts_prepared"] = False
                 missing_cuts += 1
         for part in job.get("concat_parts", []):
@@ -1061,7 +1184,8 @@ class ScheduleProducts:
                 self.checked_jobs.add(job["id"])
             self._recover_captures(job)
             # Do not wait for detection to end before preparing shared crops.
-            pending = [event for event in list(job["events"]) if not event.get("cutouts_prepared")]
+            pending = [event for event in list(job["events"]) if not event.get("cutouts_prepared") or
+                       event.get("crop_method") != self._crop_method(job)]
             for event in pending[:2]:
                 self._prepare_event(job, event)
             self._prepare_samples(job)

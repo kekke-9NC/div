@@ -50,6 +50,8 @@ class ScheduleProductTests(unittest.TestCase):
         values = products.normalize_options(None)
         self.assertEqual((values["duration"], values["fps"]), (15, 60))
         self.assertTrue(values["constellations"])
+        self.assertFalse(values["ai_crop"])
+        self.assertEqual(values["crop_margin"], 10)
         self.assertFalse(products.enabled(values))
         for values in ({"duration": float("nan")}, {"fps": 0}, {"crop_margin": -1}, {"duration": 300, "fps": 120}):
             with self.assertRaises(ValueError):
@@ -272,7 +274,7 @@ class ScheduleProductTests(unittest.TestCase):
     def test_cutouts_are_prepared_before_end_and_shared_without_masking_again(self):
         with tempfile.TemporaryDirectory() as root:
             start = datetime(2026, 10, 12, 20)
-            service = self.service(root, blend_image=True, blend_video=True)
+            service = self.service(root, blend_image=True, blend_video=True, ai_crop=True)
             self.archive(root, start)
             frames = [np.full((64, 96, 3), 200, np.uint8) for _ in range(3)]
             service.capture_event(frames, 10, start, ((25, 20), (35, 30)))
@@ -456,7 +458,7 @@ class ScheduleProductTests(unittest.TestCase):
 
     def test_shared_crops_one_ai_call_for_image_and_video(self):
         with tempfile.TemporaryDirectory() as root:
-            service = self.service(root, blend_image=True, blend_video=True)
+            service = self.service(root, blend_image=True, blend_video=True, ai_crop=True)
             frames = [np.zeros((64, 96, 3), np.uint8) for _ in range(3)]
             frames[1][20:25, 30:35] = 255
             service.capture_event(frames, 10, datetime(2026, 10, 12, 20),
@@ -478,18 +480,130 @@ class ScheduleProductTests(unittest.TestCase):
 
     def test_ai_failure_uses_detection_rect_and_survives_restart(self):
         with tempfile.TemporaryDirectory() as root:
-            service = self.service(root, blend_image=True)
+            service = self.service(root, blend_image=True, ai_crop=True)
             service.box_detector = mock.Mock(side_effect=RuntimeError("offline"))
             service.capture_event([np.ones((64, 96, 3), np.uint8)*50], 10,
                 datetime(2026, 10, 12, 20), ((30, 20), (35, 25)))
             job = next(iter(service.jobs.values()))
             service._prepare_event(job, job["events"][0])
-            restarted = self.service(root, blend_image=True)
+            restarted = self.service(root, blend_image=True, ai_crop=True)
             recovered = next(iter(restarted.jobs.values()))
             event = recovered["events"][0]
             self.assertEqual(event["box_source"], "detected_line")
             self.assertTrue(event["ai_done"])
             self.assertTrue((restarted.cache.root/event["key"]).exists())
+
+    def test_default_micro_meteor_uses_native_coordinate_crop_without_ai(self):
+        with tempfile.TemporaryDirectory() as root:
+            service = self.service(root, blend_image=True, blend_video=True, crop_margin=4)
+            start = datetime(2026, 10, 12, 20)
+            frames = [np.zeros((64, 96, 3), np.uint8) for _ in range(3)]
+            frames[1][20:24, 30:33] = 255
+            service.box_detector = mock.Mock(side_effect=AssertionError("default invoked AI"))
+            service.capture_event(frames, 10, start, ((30, 20), (32, 23)))
+            job = next(iter(service.jobs.values()))
+            event = job["events"][0]
+            service._prepare_event(job, event)
+            self.assertEqual(event["detected_line"], [[30, 20], [32, 23]])
+            crop = service._cutout_frame(job, event, 1)
+            self.assertEqual(crop.shape, (12, 11, 3))
+            self.assertEqual(int(crop[4:8, 4:7].min()), 255)
+            self.assertEqual(event["crop_method"], "coordinates")
+            self.assertFalse(event["ai_done"])
+            output = Path(root)/"products"
+            output.mkdir()
+            results = service._blends(job, output)
+            image = cv2.imread(results["blend_image"])
+            self.assertEqual(int(image[20:24, 30:33].min()), 255)
+            service.box_detector.assert_not_called()
+
+    def test_coordinate_crop_clips_margin_to_each_image_edge(self):
+        with tempfile.TemporaryDirectory() as root:
+            service = self.service(root, blend_image=True, crop_margin=4)
+            start = datetime(2026, 10, 12, 20)
+            cases = [(((0, 0), (2, 3)), (8, 7)), (((93, 60), (95, 63)), (8, 7)),
+                     (((95, 0), (93, 3)), (8, 7)), (((2, 60), (0, 63)), (8, 7))]
+            for index, (line, shape) in enumerate(cases):
+                frame = np.zeros((64, 96, 3), np.uint8)
+                cv2.line(frame, line[0], line[1], (255, 255, 255), 1)
+                service.capture_event([frame], 10, start+timedelta(seconds=index), line)
+                job = next(iter(service.jobs.values()))
+                event = job["events"][-1]
+                service._prepare_event(job, event)
+                crop = service._cutout_frame(job, event, 0)
+                self.assertEqual(crop.shape[:2], shape)
+                self.assertEqual(np.count_nonzero(crop), np.count_nonzero(frame))
+
+    def test_restart_migrates_old_ai_cache_to_coordinates_using_saved_rect(self):
+        with tempfile.TemporaryDirectory() as root:
+            start = datetime(2026, 10, 12, 20)
+            old = self.service(root, blend_image=True, ai_crop=True)
+            frames = [np.ones((64, 96, 3), np.uint8)*200]
+            old.capture_event(frames, 10, start, ((25, 20), (35, 30)))
+            job = next(iter(old.jobs.values()))
+            old.box_detector = lambda _image, _log: [(400, 400, 600, 600)]
+            event = job["events"][0]
+            old._prepare_event(job, event)
+            ai_key = event["cutout_key"]
+            self.assertEqual(int(old._cutout_frame(job, event, 0)[0, 0].max()), 0)
+            # Original releases lacked a method choice and explicit endpoints.
+            job["options"].pop("ai_crop")
+            event.pop("detected_line")
+            event.pop("crop_method")
+            event.pop("coordinate_rect_ready")
+            job["blends_done"] = True
+            old._save(job)
+            resumed = self.service(root, blend_image=True)
+            restored = next(iter(resumed.jobs.values()))
+            resumed.box_detector = mock.Mock(side_effect=AssertionError("AI invoked"))
+            resumed._source_frame = mock.Mock(return_value=frames[0])
+            resumed.tick(start+timedelta(seconds=10))
+            recovered = restored["events"][0]
+            self.assertNotEqual(recovered["cutout_key"], ai_key)
+            self.assertEqual(recovered["crop_method"], "coordinates")
+            self.assertFalse(restored["blends_done"])
+            self.assertEqual(int(resumed._cutout_frame(restored, recovered, 0)[0, 0].max()), 200)
+            resumed.box_detector.assert_not_called()
+
+    def test_short_seed_follows_whole_temporal_trail_and_ignores_static_stars(self):
+        frames = [np.zeros((96, 120, 3), np.uint8) for _ in range(5)]
+        for frame in frames:
+            frame[25, 40] = 255  # Static star beyond the actual meteor.
+        cv2.line(frames[1], (46, 40), (52, 46), (220, 220, 220), 2)
+        cv2.line(frames[2], (52, 46), (60, 54), (220, 220, 220), 2)
+        cv2.line(frames[3], (60, 54), (67, 61), (220, 220, 220), 2)
+        line = ((52, 46), (54, 48))
+        a, b, c, d = products.coordinate_rect(frames, line, 4)
+        self.assertLessEqual(a, 45-4)
+        self.assertLessEqual(b, 39-4)
+        self.assertGreaterEqual(c, 69+4)
+        self.assertGreaterEqual(d, 63+4)
+        self.assertGreater(b, 25)
+        self.assertLess(c-a, 60)
+        self.assertLess(d-b, 60)
+
+    def test_legacy_short_crop_recovers_whole_trail_from_original_frames(self):
+        with tempfile.TemporaryDirectory() as root:
+            service = self.service(root, blend_image=True, crop_margin=4)
+            start = datetime(2026, 10, 12, 20)
+            frames = [np.zeros((64, 96, 3), np.uint8) for _ in range(3)]
+            cv2.line(frames[1], (20, 20), (50, 40), (255, 255, 255), 2)
+            service.capture_event(frames, 10, start, ((30, 27), (32, 28)))
+            job = next(iter(service.jobs.values()))
+            event = job["events"][0]
+            # Recreate the crop/metadata saved by an older release.
+            event["rect"] = products.line_rect(((30, 27), (32, 28)), (96, 64), 4)
+            event.pop("coordinate_rect_ready")
+            event.pop("detected_line")
+            service._source_frame = mock.Mock(side_effect=frames)
+            service._prepare_event(job, event)
+            a, b, c, d = event["rect"]
+            self.assertLessEqual(a, 19-4)
+            self.assertGreaterEqual(c, 52+4)
+            self.assertGreaterEqual(d, 42+4)
+            self.assertTrue(event["coordinate_rect_ready"])
+            recovered = service._cutout_frame(job, event, 1)
+            self.assertEqual(np.count_nonzero(recovered), np.count_nonzero(frames[1]))
 
     def test_deleted_event_cache_reconstructs_from_archive(self):
         with tempfile.TemporaryDirectory() as root:
@@ -675,7 +789,7 @@ class ScheduleProductTests(unittest.TestCase):
 
     def test_slow_ai_does_not_hold_detector_delivery_lock(self):
         with tempfile.TemporaryDirectory() as root:
-            service = self.service(root, blend_image=True)
+            service = self.service(root, blend_image=True, ai_crop=True)
             start = datetime(2026, 10, 12, 20)
             frames = [np.zeros((64, 96, 3), np.uint8)]
             service.capture_event(frames, 10, start, ((30, 20), (35, 25)))

@@ -1313,6 +1313,9 @@ atomcam2で利用する場合は、GitHubで公開されている
         row = len(fields)
         ttk.Checkbutton(frame, text="配信と同じ星座を重ねる", variable=values["constellations"]).grid(row=row, column=0, columnspan=2, sticky=tk.W)
         row += 1
+        ttk.Checkbutton(frame, text="切り抜きに内蔵AIを使用（初期値OFF：検出座標を使用）",
+                        variable=values["ai_crop"]).grid(row=row, column=0, columnspan=3, sticky=tk.W)
+        row += 1
         ttk.Checkbutton(frame, text="撮影時刻を表示する", variable=values["timestamp"]).grid(row=row, column=0, sticky=tk.W)
         ttk.Combobox(frame, textvariable=values["timestamp_position"], state="readonly",
                      values=("bottom_right", "bottom_left", "top_right", "top_left"), width=15).grid(row=row, column=1)
@@ -1328,7 +1331,7 @@ atomcam2で利用する場合は、GitHubで公開されている
                     variable.set(path)
             ttk.Button(frame, text="参照", command=browse).grid(row=row, column=2, padx=6)
         row += 1
-        ttk.Label(frame, text="RTSPのマスクを自動で適用します。時間は録画スケジュール全体です。\nAIで枠が得られない流星には線検出の座標を使い、画像と動画で素材を共有します。", style="Hint.TLabel").grid(row=row, column=0, columnspan=3, sticky=tk.W, pady=10)
+        ttk.Label(frame, text="RTSPのマスクを自動で適用します。時間は録画スケジュール全体です。\n切り抜きは情報ファイルと同じ流星の検出座標＋余白を使用し、画像と動画で共有します。\n内蔵AIは選択時のみ使用し、枠が得られない場合は検出座標を使います。", style="Hint.TLabel").grid(row=row, column=0, columnspan=3, sticky=tk.W, pady=10)
         def close():
             import rtsp_schedule_products
             try:
