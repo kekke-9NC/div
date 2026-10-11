@@ -829,6 +829,18 @@ def _process_finer_detection_worker(
     return line_detected_indices, cutout_rect
 
 
+def _cache_scheduled_event(save_options, frames, fps, started_at, line, is_meteor):
+    callback = save_options.get("_schedule_event_callback")
+    if callback is not None and is_meteor:
+        try:
+            callback(frames, fps, started_at, line)
+        except Exception as exc:
+            failure_callback = save_options.get("_schedule_event_error_callback")
+            if failure_callback is not None:
+                failure_callback(frames, fps, started_at, line, exc)
+            print(f"[自動作成] 流星素材の準備に失敗: {exc}")
+
+
 def create_line_video_clips(
     source: str,
     is_rtsp: bool = False,
@@ -1570,6 +1582,11 @@ def create_line_video_clips(
                                 )
                                 saved_paths = {}
                                 denoise_metrics: Optional[Dict[str, float]] = None
+                                _cache_scheduled_event(
+                                    save_options, final_frames_for_clip, frame_rate,
+                                    base_datetime + timedelta(seconds=(actual_start_final if is_rtsp else adjusted_start_frame)/frame_rate),
+                                    ((x1, y1), (x2, y2)), is_meteor,
+                                )
 
                                 if save_options.get('ml_training_export_enabled', False):
                                     try:
@@ -2165,6 +2182,11 @@ def create_line_video_clips(
                     )
                     saved_paths = {}
                     denoise_metrics: Optional[Dict[str, float]] = None
+                    _cache_scheduled_event(
+                        save_options, final_frames_for_clip, frame_rate,
+                        base_datetime + timedelta(seconds=(actual_start_final if is_rtsp else adjusted_start_frame)/frame_rate),
+                        ((x1, y1), (x2, y2)), is_meteor,
+                    )
 
                     if save_options.get('ml_training_export_enabled', False):
                         try:

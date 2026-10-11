@@ -399,6 +399,7 @@ class RealtimeRunner:
         self.evidence = evidence
         self.mean_frames = mean_frames
         self.correction = correction
+        self.flush_requested = threading.Event()
         self.queue = queue.Queue()
         self.seen = set()
         self.seen_lock = threading.Lock()
@@ -447,7 +448,9 @@ class RealtimeRunner:
     def _archive(self):
         while not self.cancel.is_set():
             try:
-                self.archiver.compact()
+                flush = self.flush_requested.is_set()
+                self.flush_requested.clear()
+                self.archiver.compact(flush=flush)
             except Exception as exc:
                 self.status(f"[RTSP保存] 連結再試行予定（元動画は保持）: {exc}")
             self.cancel.wait(1)

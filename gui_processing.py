@@ -228,6 +228,18 @@ class ProcessingMixin:
             )
             self.append_log(f"固定パターン補正 {correction_state} ({mode})")
             
+            try:
+                import rtsp_schedule_products
+                product_options = rtsp_schedule_products.processing_options(self._schedule_product_values())
+                if rtsp_schedule_products.enabled(product_options):
+                    if not rtsp_time_limit:
+                        raise ValueError("自動作成には「時間帯を指定して録画する」をONにしてください。")
+                    if (rtsp_sh, rtsp_sm) == (rtsp_eh, rtsp_em):
+                        raise ValueError("録画スケジュールの開始・終了時刻を異なる時刻にしてください。")
+            except ValueError as exc:
+                messagebox.showerror("自動作成の設定", str(exc))
+                self.cancel_processing(restore_button_state=True)
+                return
             rtsp_args = (
                 url, config.RTSP_SAVE_ROOT, config.RTSP_SEGMENT_DURATION, config.RTSP_SCAN_INTERVAL, self.progress_queue.put,
                 params['mask'], params['global_wcs_info'], params['plate_solve_mask'],
@@ -239,7 +251,8 @@ class ProcessingMixin:
                 params['rtsp_notification_sound'],
                 params['noise_twin_options'],
             )
-            self.rtsp_thread = threading.Thread(target=file_utils.rtsp_save_and_process_thread_target, args=rtsp_args, daemon=True)
+            self.rtsp_thread = threading.Thread(target=file_utils.rtsp_save_and_process_thread_target, args=rtsp_args,
+                kwargs={"schedule_product_options": product_options}, daemon=True)
             self.rtsp_thread.start()
             self._update_live_preview_button_state()
 

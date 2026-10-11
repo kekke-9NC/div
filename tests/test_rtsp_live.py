@@ -109,6 +109,44 @@ class RtspLiveTests(unittest.TestCase):
             self.assertGreater(rtsp_segments._properties(saved)[1], 40)
             self.assertEqual(event["timestamp"].date(), datetime(2026, 10, 12).date())
 
+    def test_schedule_crops_receive_meteor_with_individual_outputs_off(self):
+        import rtsp_schedule_products
+        with tempfile.TemporaryDirectory() as root:
+            paths = self.chunks(root)
+            cap, _ = self.capture(paths)
+            service = rtsp_schedule_products.ScheduleProducts(root,
+                {"blend_image": True, "constellations": False}, (20, 0, 20, 1),
+                threading.Event(), status=lambda _message: None,
+                box_detector=lambda _image, _log: [])
+            with (
+                mock.patch.object(video_processing.model, "predict_noise_gate", return_value=None),
+                mock.patch.object(video_processing.model, "predict_meteor_event", return_value=.99),
+                mock.patch.object(video_processing.model, "get_meteor_decision_threshold", return_value=.5),
+                mock.patch.object(video_processing.image_processing, "detect_lines", return_value=[]),
+                mock.patch.object(config, "CUTOUT_SIZE", 64),
+                mock.patch.object(config, "FINER_CUTOUT_SIZE", 100),
+            ):
+                video_processing.create_line_video_clips(
+                    source=str(paths[0]), is_rtsp=True, interval=.25, duration=1,
+                    buffer_duration=4, meteor_save_path=root, not_meteor_save_path=root,
+                    save_options={"video": False, "cutout": False, "full": False,
+                        "composite": False, "info": False, "summary": False,
+                        "full_video": False, "ml_training_export_enabled": False,
+                        "_rtsp_live_capture": cap, "_schedule_event_callback": service.capture_event,
+                        "rtsp_analysis_context": {"base_datetime": cap.started_at}},
+                )
+            job = next(iter(service.jobs.values()))
+            self.assertEqual(len(job["events"]), 1)
+            event = job["events"][0]
+            self.assertGreater(event["count"], 40)
+            frames = [service._event_frame(job, event, i) for i in range(event["count"])]
+            self.assertGreater(max(int(frame.max()) for frame in frames), 150)
+            output = Path(root)/"products"
+            output.mkdir()
+            result = service._blends(job, output)
+            self.assertTrue(Path(result["blend_image"]).exists())
+            self.assertEqual(event["box_source"], "detected_line")
+
     def test_session_or_clock_gap_resets_the_stream(self):
         with tempfile.TemporaryDirectory() as root:
             first = self.chunks(root, count=1)

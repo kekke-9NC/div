@@ -18,7 +18,10 @@ import numpy as np
 from PIL import Image
 from camera_plate_model import FixedCameraPlateModel
 from local_wideangle_astrometry import _draw_constellation_lines, SIDEREAL_DAY_SECONDS
-from legacy_detection_mask import LegacyDetectionMask, default_settings_path
+try:
+    from .legacy_detection_mask import LegacyDetectionMask, default_settings_path
+except ImportError:
+    from obs_meteor_overlay.legacy_detection_mask import LegacyDetectionMask, default_settings_path
 
 STOP = False
 
