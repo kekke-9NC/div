@@ -2,6 +2,7 @@ import os
 import time
 import threading
 from typing import Set, Optional, Callable, Dict, Any, Tuple, List
+from pathlib import Path
 import cv2
 import numpy as np
 from datetime import datetime, timedelta, time as dt_time
@@ -14,6 +15,7 @@ import noise_twin
 import noise_twin_pipeline
 import temporal_mean
 import rtsp_segments
+import rtsp_live
 import media_time
 
 rtsp_processed_files: Set[str] = set()
@@ -245,7 +247,7 @@ def monitor_directory(
 
 def _rtsp_ffmpeg_segment_output_options(
     segment_pattern: str,
-    duration_secs: int,
+    duration_secs: float,
     requested_fps: Optional[float] = None,
 ) -> List[str]:
     """Build FFmpeg segment-muxer output options with the output path last."""
@@ -253,6 +255,7 @@ def _rtsp_ffmpeg_segment_output_options(
         '-map', '0:v:0',
         '-c:v', 'libx264',
         '-preset', 'ultrafast',
+        '-tune', 'zerolatency', '-bf', '0', '-threads', '2',
         '-force_key_frames', f'expr:gte(t,n_forced*{duration_secs})',
         '-an',
         '-f', 'segment',
@@ -260,7 +263,7 @@ def _rtsp_ffmpeg_segment_output_options(
         '-segment_time_delta', str(0.5 / (requested_fps or config.RTSP_FPS)),
         '-segment_format', 'mp4',
         '-reset_timestamps', '1',
-        '-strftime', '1',
+        '-strftime', '0' if 'chunk_%' in segment_pattern else '1',
     ]
     if requested_fps is not None:
         options.extend(['-r', str(requested_fps)])
@@ -270,7 +273,7 @@ def _rtsp_ffmpeg_segment_output_options(
 
 def save_rtsp_video_segments_ffmpeg(
     rtsp_url: str, save_root: str = config.RTSP_SAVE_ROOT,
-    segment_duration: int = config.RTSP_SEGMENT_DURATION, cancel_flag: Optional[threading.Event] = None,
+    segment_duration: float = config.RTSP_SEGMENT_DURATION, cancel_flag: Optional[threading.Event] = None,
     time_limit_enabled: bool = False, start_hour: int = 17, start_minute: int = 0,
     end_hour: int = 7, end_minute: int = 0,
     preview_callback: Optional[Callable[[np.ndarray], None]] = None,
@@ -338,7 +341,7 @@ def save_rtsp_video_segments_ffmpeg(
     else:
         print("[RTSP保存] ソフトウェアデコードを使用 - 連続録画モード")
     
-    duration_secs = int(segment_duration)
+    duration_secs = max(0.1, float(segment_duration))
     
     # 時間外の場合に表示するログを抑制するためのフラグ
     was_outside_time_range = True
@@ -375,6 +378,10 @@ def save_rtsp_video_segments_ffmpeg(
             # strftimeを使って時刻ベースのファイル名を生成
             session_id = rtsp_segments.new_session_id()
             segment_pattern = os.path.join(save_root, "%Y%m%d", "%H", f"%M_%S_{session_id}.mp4")
+            capture_dir = None
+            if duration_secs < 1:
+                capture_dir = rtsp_live.capture_directory(save_root, now)
+                segment_pattern = str(capture_dir / "chunk_%09d.mp4")
             # FFmpeg segment does not support strftime_mkdir on all builds.
             # Pre-create the next hour as well so rollover never reconnects.
             next_hour = now + timedelta(hours=1)
@@ -391,6 +398,9 @@ def save_rtsp_video_segments_ffmpeg(
             
             # 入力と出力設定（segment muxer）
             ffmpeg_cmd.extend(['-i', rtsp_url])
+
+            if capture_dir is not None:
+                ffmpeg_cmd.extend(rtsp_live.capture_options(capture_dir))
 
             ffmpeg_cmd.extend(
                 _rtsp_ffmpeg_segment_output_options(
@@ -545,6 +555,8 @@ def save_rtsp_video_segments_ffmpeg(
                 current_date = current_now.strftime("%Y%m%d")
                 
                 current_hour_dir = os.path.join(save_root, current_date, current_now.strftime("%H"))
+                if capture_dir is not None:
+                    current_hour_dir = str(capture_dir)
                 os.makedirs(current_hour_dir, exist_ok=True)  # 時間が変わっても対応
                 next_hour = current_now + timedelta(hours=1)
                 os.makedirs(os.path.join(save_root, next_hour.strftime("%Y%m%d"), next_hour.strftime("%H")), exist_ok=True)
@@ -660,7 +672,7 @@ def save_rtsp_video_segments_ffmpeg(
 
 def save_rtsp_video_segments(
     rtsp_url: str, save_root: str = config.RTSP_SAVE_ROOT,
-    segment_duration: int = config.RTSP_SEGMENT_DURATION, cancel_flag: Optional[threading.Event] = None,
+    segment_duration: float = config.RTSP_SEGMENT_DURATION, cancel_flag: Optional[threading.Event] = None,
     time_limit_enabled: bool = False, start_hour: int = 17, start_minute: int = 0,
     end_hour: int = 7, end_minute: int = 0,
     preview_callback: Optional[Callable[[np.ndarray], None]] = None,
@@ -702,6 +714,10 @@ def save_rtsp_video_segments(
     twin_processor = None
     pending_twin_results = []
     session_id = rtsp_segments.new_session_id()
+    capture_dir = None
+    segment_sequence = 0
+    capture_started_at = None
+    total_captured_frames = 0
 
     def apply_dark_frame(frame: np.ndarray) -> np.ndarray:
         nonlocal dark_frame_cache, dark_frame_cache_shape
@@ -718,11 +734,16 @@ def save_rtsp_video_segments(
     def connect_rtsp():
         """RTSPストリームに接続。成功するまで無限リトライ"""
         nonlocal cap, width, height, fps, twin_processor, session_id
+        nonlocal capture_dir, segment_sequence, capture_started_at, total_captured_frames
         while cancel_flag is None or not cancel_flag.is_set():
             print(f"[RTSP保存] ストリームに接続中: {rtsp_url}")
             cap = utils.create_rtsp_capture(rtsp_url)
             if cap.isOpened():
                 session_id = rtsp_segments.new_session_id()
+                capture_dir = None
+                segment_sequence = 0
+                capture_started_at = None
+                total_captured_frames = 0
                 width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
                 height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
                 detected_fps = float(cap.get(cv2.CAP_PROP_FPS) or 0)
@@ -788,6 +809,9 @@ def save_rtsp_video_segments(
                 if not connect_rtsp():
                     break
             segment_frames = max(1, int(round(fps * segment_duration)))
+            if segment_duration < 1:
+                segment_frames = max(1, int((segment_sequence + 1) * fps * segment_duration + 1e-9)
+                                     - total_captured_frames)
 
             now = datetime.now()
             dir_path = os.path.join(save_root, now.strftime("%Y%m%d"), now.strftime("%H"))
@@ -796,6 +820,14 @@ def save_rtsp_video_segments(
             minute_str = now.strftime("%M_%S") + "_" + session_id
             base_file_path = os.path.join(dir_path, f"{minute_str}.mp4")
             temp_file_path = os.path.join(dir_path, f"{minute_str}_temp_{time.time_ns()}.mp4")
+            if segment_duration < 1:
+                if capture_dir is None:
+                    capture_dir = rtsp_live.capture_directory(save_root, now)
+                    capture_started_at = now
+                now = capture_started_at + timedelta(seconds=total_captured_frames / fps)
+                base_file_path = str(capture_dir / f"chunk_{segment_sequence:09d}.mp4")
+                temp_file_path = str(capture_dir / f"chunk_{segment_sequence:09d}_temp_{time.time_ns()}.mp4")
+                segment_sequence += 1
             temp_evidence_path = os.path.splitext(temp_file_path)[0] + "_innovation.mp4"
 
             out = cv2.VideoWriter(temp_file_path, fourcc, fps, (width, height))
@@ -810,7 +842,8 @@ def save_rtsp_video_segments(
                 continue
             pair_writer = noise_twin.AsyncVideoPairWriter(out, evidence_out)
 
-            print(f"[RTSP保存] セグメント開始 (一時ファイル): {os.path.basename(temp_file_path)}")
+            if segment_duration >= 1:
+                print(f"[RTSP保存] セグメント開始 (一時ファイル): {os.path.basename(temp_file_path)}")
             frames_written = 0
             stream_error = False
             paused_for_time_limit = False
@@ -867,6 +900,7 @@ def save_rtsp_video_segments(
                     frames_written += 1
 
             pair_writer.close()
+            total_captured_frames += frames_written
             pair_writer = None
             out = None
             evidence_out = None
@@ -885,7 +919,7 @@ def save_rtsp_video_segments(
                 if os.path.exists(temp_file_path):
                     try:
                         file_size = os.path.getsize(temp_file_path)
-                        if file_size > 10000 and frames_written > 10:
+                        if (segment_duration < 1 and frames_written > 0) or (file_size > 10000 and frames_written > 10):
                             final_file_path = get_unique_file_path(base_file_path)
                             finalize_segment(final_file_path)
                             print(f"[RTSP保存] 時間制限による部分セグメント保存: {final_file_path} ({frames_written} フレーム)")
@@ -907,7 +941,7 @@ def save_rtsp_video_segments(
                 if os.path.exists(temp_file_path):
                     try:
                         file_size = os.path.getsize(temp_file_path)
-                        if file_size > 10000 and frames_written > 10:  # 10KB以上かつ10フレーム以上
+                        if (segment_duration < 1 and frames_written > 0) or (file_size > 10000 and frames_written > 10):
                             final_file_path = get_unique_file_path(base_file_path)
                             finalize_segment(final_file_path)
                             print(f"[RTSP保存] 部分セグメント保存: {final_file_path} ({frames_written} フレーム)")
@@ -936,7 +970,8 @@ def save_rtsp_video_segments(
                 # 正常完了
                 final_file_path = get_unique_file_path(base_file_path)
                 finalize_segment(final_file_path)
-                print(f"[RTSP保存] セグメント保存完了: {final_file_path} ({frames_written} フレーム)")
+                if segment_duration >= 1:
+                    print(f"[RTSP保存] セグメント保存完了: {final_file_path} ({frames_written} フレーム)")
             else:
                 if os.path.exists(temp_file_path):
                     os.remove(temp_file_path)
@@ -1100,9 +1135,91 @@ def process_new_rtsp_files(
                 processed_files_set.add(file_path)
 
 
+def _run_realtime_rtsp(
+    rtsp_url, save_root, segment_duration, progress_callback, mask, global_wcs_info,
+    plate_solve_mask, meteor_save_path, not_meteor_save_path, cancel_flag,
+    save_options, duration, min_length, summary_video_config, time_limit_enabled,
+    start_hour, start_minute, end_hour, end_minute, preview_callback, dark_frame,
+    notify_on_detection, noise_twin_options, rtsp_fps,
+):
+    effective_cancel = cancel_flag or threading.Event()
+    options = dict(noise_twin_options or {})
+    twin = noise_twin.NoiseTwinOptions.from_value(options)
+    mean = temporal_mean.normalize_window(options.get("temporal_mean_frames", 0))
+    save_mean = bool(options.get("save_temporal_mean_video", True))
+    if twin.enabled and mean:
+        raise ValueError("NoiseTwinと3/5フレーム平均は同時に使用できません。")
+
+    def status(message):
+        print(message)
+        if progress_callback:
+            progress_callback((message, None))
+
+    def ready(path):
+        if twin.enabled:
+            return (Path(str(path) + ".preprocessed.json").exists()
+                    and path.with_name(path.stem + "_innovation.mp4").exists())
+        if mean:
+            suffix = ".preprocessed.json" if save_mean else ".analysis_pending.json"
+            return Path(str(path) + suffix).exists()
+        return True
+
+    def analyze(capture, evidence):
+        detector_options = dict(save_options or {})
+        detector_options.update(
+            _rtsp_live_capture=capture, _rtsp_live_evidence_capture=evidence,
+            rtsp_analysis_context={"base_datetime": capture.started_at},
+        )
+        processed_options = dict(options, already_processed=True)
+        return video_processing.create_line_video_clips(
+            source=str(capture.first_path), is_rtsp=True,
+            interval=config.RTSP_LIVE_DETECT_INTERVAL,
+            duration=max(1.0, duration), min_length=min_length,
+            mask=mask, global_wcs_info=global_wcs_info,
+            use_plate_solve=global_wcs_info is not None,
+            plate_solve_mask=plate_solve_mask, progress_callback=progress_callback,
+            meteor_save_path=meteor_save_path, not_meteor_save_path=not_meteor_save_path,
+            cancel_flag=effective_cancel, save_options=detector_options,
+            notify_on_detection=notify_on_detection, summary_video_config=summary_video_config,
+            fixed_pattern_correction=None if twin.enabled or mean else dark_frame,
+            noise_twin_options=processed_options,
+        )
+
+    runner = rtsp_live.RealtimeRunner(
+        save_root, analyze, effective_cancel, status, ready,
+        evidence=twin.enabled, mean_frames=mean if mean and not save_mean else 0,
+        correction=dark_frame,
+    )
+    runner.start()
+    status(f"[RTSP解析] {segment_duration}秒受け渡し・連続検出、保存は1分単位へ連結")
+    try:
+        if twin.enabled or mean:
+            pipeline = noise_twin_pipeline.RtspNoiseTwinPipeline(
+                rtsp_url=rtsp_url, save_root=save_root, model_path=twin.model_path,
+                analyze_callback=lambda _path, _evidence: True,
+                cancel_event=effective_cancel, correction=dark_frame,
+                segment_seconds=segment_duration, require_validated=twin.require_validated,
+                status_callback=status,
+                recording_allowed=lambda: is_within_time_range(
+                    datetime.now(), time_limit_enabled, start_hour, start_minute, end_hour, end_minute),
+                preview_callback=preview_callback, temporal_mean_frames=mean,
+                save_temporal_mean_video=save_mean, encoding_options=options.get("encoding"),
+                continuous_analysis=True,
+            )
+            pipeline.run()
+        else:
+            save_rtsp_video_segments(
+                rtsp_url, save_root, segment_duration, effective_cancel,
+                time_limit_enabled, start_hour, start_minute, end_hour, end_minute,
+                preview_callback, requested_fps=rtsp_fps,
+            )
+    finally:
+        runner.stop()
+
+
 def rtsp_save_and_process_thread_target(
     rtsp_url: str, save_root: str = config.RTSP_SAVE_ROOT,
-    segment_duration: int = config.RTSP_SEGMENT_DURATION, scan_interval: int = config.RTSP_SCAN_INTERVAL,
+    segment_duration: float = config.RTSP_SEGMENT_DURATION, scan_interval: float = config.RTSP_SCAN_INTERVAL,
     progress_callback: Optional[Callable[[Tuple[str, Optional[float]]], None]] = None,
     mask: Optional[np.ndarray] = None, global_wcs_info: Optional[Dict] = None,
     plate_solve_mask: Optional[np.ndarray] = None, meteor_save_path: str = config.DEFAULT_METEOR_SAVE_PATH,
@@ -1121,6 +1238,15 @@ def rtsp_save_and_process_thread_target(
 ):
     global rtsp_processed_files
     video_extensions = config.PERIODIC_VIDEO_EXTENSIONS
+
+    if segment_duration < 1:
+        return _run_realtime_rtsp(
+            rtsp_url, save_root, segment_duration, progress_callback, mask, global_wcs_info,
+            plate_solve_mask, meteor_save_path, not_meteor_save_path, cancel_flag,
+            save_options, duration, min_length, summary_video_config, time_limit_enabled,
+            start_hour, start_minute, end_hour, end_minute, preview_callback, dark_frame,
+            notify_on_detection, noise_twin_options, rtsp_fps,
+        )
 
     twin_options = noise_twin.NoiseTwinOptions.from_value(noise_twin_options)
     mean_window = temporal_mean.normalize_window(
@@ -1277,9 +1403,10 @@ def rtsp_save_and_process_thread_target(
         )
         wait_message = f"[RTSP統合] 解析スキャン完了。次のスキャンまで {scan_interval} 秒待機。"
         print(wait_message)
-        for _ in range(scan_interval):
-            if cancel_flag is not None and cancel_flag.is_set(): break
-            time.sleep(1)
+        if cancel_flag is not None:
+            cancel_flag.wait(scan_interval)
+        else:
+            time.sleep(scan_interval)
 
     print("[RTSP統合] 統合処理スレッドを終了します。")
     if cancel_flag is not None and save_thread.is_alive():

@@ -67,6 +67,7 @@ class RtspFixedPatternModeTests(unittest.TestCase):
         ):
             file_utils.rtsp_save_and_process_thread_target(
                 "rtsp://camera/stream",
+                segment_duration=5,
                 cancel_flag=threading.Event(),
                 dark_frame=correction,
                 noise_twin_options=options,
@@ -129,7 +130,7 @@ class RtspFixedPatternModeTests(unittest.TestCase):
                     noise_twin_options={},
                 )
 
-        self.assertEqual(captured["args"][-1], 30)
+        self.assertEqual(captured["kwargs"]["requested_fps"], 30)
 
 
 if __name__ == "__main__":

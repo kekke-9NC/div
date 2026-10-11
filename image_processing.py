@@ -118,6 +118,62 @@ def detect_lines(
 detect_lines_with_endpoints = detect_lines
 
 
+def _continuous_rtsp_differences(cap, interval, duration, buffer_duration,
+                                 cancel_flag, evidence_cap, include_frame_window):
+    """Keep one detector clock and a bounded future tail across spool files."""
+    if cancel_flag is None:
+        cancel_flag = cap.cancel
+    fps = cap.get(cv2.CAP_PROP_FPS) or config.DEFAULT_FPS
+    required = max(2, int(round(fps * duration)))
+    step = max(1, int(round(fps * interval)))
+    future = max(0, int(round(fps * config.RTSP_LIVE_LOOKAHEAD_SECONDS)))
+    capacity = max(required + future + 1, int(round(fps * buffer_duration)))
+    frames = deque(maxlen=capacity)
+    evidence = deque(maxlen=capacity) if evidence_cap is not None else None
+    frame_index = -1
+    next_end = required - 1
+    last_end = -1
+
+    def emit(end, final=False):
+        cap.analysis_final_frame = final
+        first = frame_index - len(frames) + 1
+        start = max(first, 0, end - required + 1)
+        window = list(frames)[start - first:end - first + 1]
+        maximum, minimum = _temporal_min_max(window)
+        if evidence is not None:
+            diff, _ = _temporal_min_max(list(evidence)[start - first:end - first + 1])
+        else:
+            diff = cv2.absdiff(maximum, minimum)
+        result = (diff, (start, end), maximum, minimum, frames.copy(), frame_index)
+        return result + (window,) if include_frame_window else result
+
+    while cancel_flag is None or not cancel_flag.is_set():
+        ok, frame = cap.read()
+        if not ok:
+            break
+        frame_index += 1
+        frames.append(frame)
+        if evidence is not None:
+            ok_evidence, evidence_frame = evidence_cap.read()
+            evidence.append(evidence_frame if ok_evidence else frame)
+        if frame_index >= next_end + future:
+            yield emit(next_end)
+            cap.acknowledge(next_end)
+            last_end = next_end
+            next_end += step
+    if frames and (cancel_flag is None or not cancel_flag.is_set()):
+        # A pause/disconnection still emits every unread tail window. Only the
+        # very last one flushes the short-flash detector's active tracks.
+        while next_end < frame_index:
+            yield emit(next_end)
+            cap.acknowledge(next_end)
+            last_end = next_end
+            next_end += step
+        if last_end != frame_index:
+            yield emit(frame_index, final=True)
+            cap.acknowledge(frame_index, final=True)
+
+
 def create_diff_images(
     cap: cv2.VideoCapture,
     interval: float = 1.0,
@@ -154,6 +210,13 @@ def create_diff_images(
     """
     if not cap.isOpened():
         print("VideoCaptureオブジェクトが開かれていません。")
+        return
+
+    if is_rtsp and getattr(cap, "continuous_rtsp", False):
+        yield from _continuous_rtsp_differences(
+            cap, interval, duration, buffer_duration, cancel_flag,
+            evidence_cap, include_frame_window,
+        )
         return
 
     fps = cap.get(cv2.CAP_PROP_FPS)

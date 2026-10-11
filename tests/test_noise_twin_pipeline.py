@@ -18,6 +18,7 @@ class NoiseTwinPipelineTests(unittest.TestCase):
             "analyze_callback": lambda _video, _evidence: True,
             "cancel_event": threading.Event(),
             "require_validated": False,
+            "segment_seconds": 5,
         }
         options.update(overrides)
         return noise_twin_pipeline.RtspNoiseTwinPipeline(

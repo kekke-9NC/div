@@ -128,9 +128,12 @@ PERIODIC_VIDEO_EXTENSIONS = ('.mp4', '.avi', '.mov')
 DEFAULT_SCAN_INTERVAL = 60 # 定期スキャンのデフォルト間隔（秒）
 RTSP_SAVE_ROOT = os.path.join(EXE_DIR, "rtsp")
 RTSP_FPS = 25 # RTSPストリームの前提FPS
-RTSP_SEGMENT_DURATION = 5 # RTSP動画の1セグメントあたりの秒数
+RTSP_SEGMENT_DURATION = 0.5 # 検出に渡す一時録画の秒数（保存用は1分へ連結）
 RTSP_SEGMENT_FRAMES = RTSP_FPS * RTSP_SEGMENT_DURATION # 旧OpenCV保存用の互換値
-RTSP_SCAN_INTERVAL = 1 # 完成したセグメントの解析待ちを短縮する
+RTSP_SCAN_INTERVAL = 0.1 # 完成したセグメントの受け渡し間隔
+RTSP_LIVE_DETECT_INTERVAL = 0.25 # 連続フレーム列の検出間隔
+RTSP_LIVE_LOOKAHEAD_SECONDS = 1.0 # 終了した流星の後ろの映像を確保する
+RTSP_ARCHIVE_DURATION = 60 # 再エンコードせず保存用動画へまとめる秒数
 RTSP_BUFFER_DURATION = 10 # RTSP処理時にメモリ上に保持するバッファの秒数 (float)
 
 # --- RTSP用Astrometry設定 (視野角) ---

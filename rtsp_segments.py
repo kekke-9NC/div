@@ -191,4 +191,5 @@ def analysis_window(path, ready_paths=None, evidence_path="", context_seconds=5.
 
 def owns_event(options, start_frame):
     context = options.get("rtsp_analysis_context", {})
-    return (not context or context["core_start_frame"] <= start_frame < context["core_end_frame"])
+    return ("core_start_frame" not in context
+            or context["core_start_frame"] <= start_frame < context["core_end_frame"])

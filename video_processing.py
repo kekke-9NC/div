@@ -1012,7 +1012,7 @@ def create_line_video_clips(
         if progress_callback:
             progress_callback((message, None))
 
-    cap = _open_video_capture(analysis_source, decoder_threads)
+    cap = save_options.get("_rtsp_live_capture") or _open_video_capture(analysis_source, decoder_threads)
     if not cap.isOpened():
         message = f"動画/ストリームを開けませんでした: {source}"
         print(f"エラー: {message}")
@@ -1070,7 +1070,9 @@ def create_line_video_clips(
     summary_writer = _SummaryVideoWriter(progress_callback)
 
     try:
-        evidence_cap = _open_video_capture(evidence_path, decoder_threads) if evidence_path else None
+        evidence_cap = save_options.get("_rtsp_live_evidence_capture")
+        if evidence_cap is None and evidence_path:
+            evidence_cap = _open_video_capture(evidence_path, decoder_threads)
         diff_generator = image_processing.create_diff_images(
             cap, interval, duration, 1.0, buffer_duration, is_rtsp, cancel_flag,
             evidence_cap=evidence_cap,
@@ -1108,6 +1110,12 @@ def create_line_video_clips(
                     last_read_frame_index_by_diff = max(last_read_frame_index_by_diff, current_frame_index)
 
                 start_index_diff, end_index_diff = frame_idx_tuple
+                if getattr(cap, "continuous_rtsp", False):
+                    # Duplicate checks need only recent tracks, not an entire
+                    # night's events retained in memory.
+                    cutoff = current_frame_index - int(frame_rate * 30)
+                    processed_clips_info[:] = [item for item in processed_clips_info
+                        if item.get("end_frame", current_frame_index) >= cutoff]
 
                 # RTSP時、またはRTSP録画ファイル時は専用パラメータを使用（ノイズ対策）
                 # RTSP録画ファイルのパスにRTSP_SAVE_ROOTが含まれているかチェック
@@ -1173,7 +1181,8 @@ def create_line_video_clips(
                 if config.SHORT_FLASH_DETECT_ENABLED and use_rtsp_params and frame_window:
                     flash_candidates = flash_detector.consume(
                         frame_window, start_index_diff, mask=mask, roi=roi,
-                        final=not is_rtsp and current_frame_index == total_frames - 1,
+                        final=(not is_rtsp and current_frame_index == total_frames - 1)
+                        or getattr(cap, "analysis_final_frame", False),
                     )
                 flash_by_line = {candidate.line: candidate for candidate in flash_candidates}
                 lines = _deduplicate_candidate_lines([c.line for c in flash_candidates] + lines)

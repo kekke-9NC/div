@@ -197,7 +197,7 @@ class RtspSegmentTests(unittest.TestCase):
             with (mock.patch.object(config, "RTSP_USE_NVIDIA_HWACCEL", False),
                   mock.patch.object(file_utils.utils, "create_rtsp_capture", return_value=Camera())):
                 file_utils.save_rtsp_video_segments("rtsp://synthetic", directory,
-                                                   cancel_flag=cancel, requested_fps=25)
+                                                   segment_duration=5, cancel_flag=cancel, requested_fps=25)
             saved = list(Path(directory).rglob("*.mp4"))
             self.assertEqual(len(saved), 1)
             fps, count, _ = rtsp_segments._properties(saved[0])

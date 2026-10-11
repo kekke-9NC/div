@@ -1,6 +1,6 @@
 """Disk-backed three-stage RTSP pipeline for NoiseTwin.
 
-Capture never waits for MPS or meteor analysis. Completed five-second source
+Capture never waits for MPS or meteor analysis. Completed source
 segments are queued on disk, transformed by exactly one NoiseTwin worker, and
 then handed to a separate analysis worker.
 """
@@ -29,6 +29,8 @@ import video_encoding
 import config
 import media_time
 import rtsp_segments
+import rtsp_live
+from fixed_pattern import apply_fixed_pattern_correction
 
 
 StatusCallback = Optional[Callable[[str], None]]
@@ -62,7 +64,7 @@ class RtspNoiseTwinPipeline:
         analyze_callback: AnalyzeCallback,
         cancel_event: threading.Event,
         correction=None,
-        segment_seconds: int = config.RTSP_SEGMENT_DURATION,
+        segment_seconds: float = config.RTSP_SEGMENT_DURATION,
         require_validated: bool = True,
         status_callback: StatusCallback = None,
         recording_allowed: Optional[Callable[[], bool]] = None,
@@ -71,6 +73,7 @@ class RtspNoiseTwinPipeline:
         temporal_mean_frames: int = 0,
         save_temporal_mean_video: bool = True,
         encoding_options: Optional[dict] = None,
+        continuous_analysis: bool = False,
     ):
         self.rtsp_url = rtsp_url
         self.save_root = Path(save_root)
@@ -80,7 +83,9 @@ class RtspNoiseTwinPipeline:
         self.analyze_callback = analyze_callback
         self.cancel_event = cancel_event
         self.correction = correction
-        self.segment_seconds = max(1, int(segment_seconds))
+        self.segment_seconds = max(0.1, float(segment_seconds))
+        self.continuous_analysis = continuous_analysis
+        self.raw_catalog = rtsp_live.ChunkCatalog(self.spool_root)
         self.require_validated = require_validated
         self.status_callback = status_callback
         self.recording_allowed = recording_allowed or (lambda: True)
@@ -124,16 +129,22 @@ class RtspNoiseTwinPipeline:
         directory.mkdir(parents=True, exist_ok=True)
         self._capture_directory(datetime.now() + timedelta(hours=1))
         pattern = str(self.spool_root / "%Y%m%d" / "%H" / f"%M_%S_{rtsp_segments.new_session_id()}.mp4")
+        if self.segment_seconds < 1:
+            directory = rtsp_live.capture_directory(self.spool_root)
+            pattern = str(directory / "chunk_%09d.mp4")
         command = [ffmpeg, "-y", "-loglevel", "warning"]
         command.extend(("-rtsp_transport", "tcp", "-i", self.rtsp_url))
+        if self.segment_seconds < 1:
+            command.extend(rtsp_live.capture_options(directory))
         command.extend(
             (
                 "-map", "0:v:0", "-an", "-c:v", "libx264",
                 "-preset", "ultrafast", "-crf", "18",
-                "-force_key_frames", f"expr:gte(t,n_forced*{self.segment_seconds})",
-                "-f", "segment", "-segment_time", str(self.segment_seconds),
+                "-tune", "zerolatency", "-bf", "0", "-threads", "2",
+                "-force_key_frames", f"expr:gte(t,n_forced*{self.segment_seconds:g})",
+                "-f", "segment", "-segment_time", f"{self.segment_seconds:g}",
                 "-reset_timestamps", "1",
-                "-segment_format", "mp4", "-strftime", "1",
+                "-segment_format", "mp4", "-strftime", "0" if self.segment_seconds < 1 else "1",
                 pattern,
             )
         )
@@ -220,6 +231,8 @@ class RtspNoiseTwinPipeline:
                     self.capture_process = None
 
     def _completed_raw_segments(self) -> list[Path]:
+        if self.segment_seconds < 1:
+            return [path for path in self.raw_catalog.paths() if str(path) not in self.enqueued]
         candidates: list[tuple[Path, os.stat_result]] = []
         for path in self.spool_root.rglob("*.mp4"):
             key = str(path)
@@ -251,18 +264,19 @@ class RtspNoiseTwinPipeline:
         return completed
 
     def _spool_loop(self) -> None:
+        last_status = 0.0
         while not self.cancel_event.is_set():
             try:
                 for path in self._completed_raw_segments():
                     key = str(path)
                     self.enqueued.add(key)
                     self.raw_queue.put(key)
-                    self._status(
-                        f"受信完了: {path.name} / NoiseTwin待ち={self.raw_queue.qsize()}"
-                    )
+                    if self.segment_seconds >= 1 or time.monotonic() - last_status >= 5:
+                        self._status(f"受信完了: {path.name} / 前処理待ち={self.raw_queue.qsize()}")
+                        last_status = time.monotonic()
             except OSError as exc:
                 self._status(f"スプール監視の一時エラー: {exc}。1秒後に再試行します。")
-            self.cancel_event.wait(1)
+            self.cancel_event.wait(config.RTSP_SCAN_INTERVAL)
 
     def _final_paths(self, raw_path: Path) -> tuple[Path, Path]:
         relative = raw_path.relative_to(self.spool_root)
@@ -290,6 +304,8 @@ class RtspNoiseTwinPipeline:
             cv2.setNumThreads(self.resource_plan.noise_twin_cpu_threads)
         except Exception:
             pass
+        if self.continuous_analysis and not (self.temporal_mean_frames and not self.save_temporal_mean_video):
+            return self._continuous_transform_loop()
         while not self.cancel_event.is_set():
             try:
                 raw_value = self.raw_queue.get(timeout=0.5)
@@ -306,10 +322,11 @@ class RtspNoiseTwinPipeline:
                     if self.temporal_mean_frames
                     else "NoiseTwin"
                 )
-                self._status(
-                    f"{transform_label}開始: {raw_path.name} / "
-                    f"分析待ち={self.analysis_queue.qsize()}"
-                )
+                if not self.continuous_analysis:
+                    self._status(
+                        f"{transform_label}開始: {raw_path.name} / "
+                        f"分析待ち={self.analysis_queue.qsize()}"
+                    )
                 self.work_root.mkdir(parents=True, exist_ok=True)
                 final_video, final_evidence = self._final_paths(raw_path)
                 final_video.parent.mkdir(parents=True, exist_ok=True)
@@ -380,16 +397,20 @@ class RtspNoiseTwinPipeline:
                     raw_path.unlink()
                 except OSError:
                     pass
+                Path(str(raw_path) + ".capture.json").unlink(missing_ok=True)
+                self.enqueued.discard(str(raw_path))
                 error_marker = raw_path.with_suffix(raw_path.suffix + ".error.json")
                 try:
                     error_marker.unlink()
                 except OSError:
                     pass
-                self.analysis_queue.put((str(final_video), final_evidence_value))
-                self._status(
-                    f"{transform_label}完了: {final_video.name} / "
-                    f"分析待ち={self.analysis_queue.qsize()}"
-                )
+                if not self.continuous_analysis:
+                    self.analysis_queue.put((str(final_video), final_evidence_value))
+                if not self.continuous_analysis:
+                    self._status(
+                        f"{transform_label}完了: {final_video.name} / "
+                        f"分析待ち={self.analysis_queue.qsize()}"
+                    )
             except Exception as exc:
                 key = str(raw_path)
                 attempts = self.retry_counts.get(key, 0) + 1
@@ -401,6 +422,114 @@ class RtspNoiseTwinPipeline:
                     self.raw_queue.put(key)
             finally:
                 self.raw_queue.task_done()
+
+    def _continuous_transform_loop(self) -> None:
+        """Keep the model and its temporal state across subsecond files."""
+        engine = None
+        pending = None
+        while not self.cancel_event.is_set():
+            if pending is None:
+                try:
+                    pending = Path(self.raw_queue.get(timeout=.5))
+                except queue.Empty:
+                    continue
+            capture = rtsp_live.SegmentCapture(
+                pending, self.raw_queue, self.cancel_event, lambda _path: None, track_chunks=True)
+            writer = None
+            raw_path = None
+            temporary_video = temporary_evidence = None
+            try:
+                if self.temporal_mean_frames:
+                    processor = temporal_mean.TemporalMeanStream(self.temporal_mean_frames)
+                else:
+                    if self.require_validated:
+                        noise_twin.validate_model_for_video(
+                            self.model_path, *capture.size, capture.fps)
+                    if engine is None:
+                        engine = noise_twin.NoiseTwinEngine(
+                            self.model_path, self.correction, self.require_validated)
+                    processor = noise_twin.NoiseTwinStreamProcessor(engine)
+                encoding = video_encoding.resolve_for_source(
+                    dict(vars(self.encoding_settings)), str(pending))
+                self.work_root.mkdir(parents=True, exist_ok=True)
+                written = 0
+                output_data = None
+                next_preview = 0.0
+
+                def write_result(result):
+                    nonlocal writer, raw_path, temporary_video, temporary_evidence
+                    nonlocal written, output_data
+                    nonlocal next_preview
+                    if writer is None:
+                        raw_path, output_data = capture.new_chunks.popleft()
+                        token = f"{raw_path.stem}_{time.time_ns()}"
+                        temporary_video = self.work_root / f"{token}.mp4"
+                        temporary_evidence = self.work_root / f"{token}_innovation.mp4"
+                        main = video_encoding.FFmpegFrameWriter(
+                            str(temporary_video), capture.fps, capture.size, encoding)
+                        evidence = None if self.temporal_mean_frames else cv2.VideoWriter(
+                            str(temporary_evidence), cv2.VideoWriter_fourcc(*"mp4v"),
+                            capture.fps, capture.size)
+                        writer = noise_twin.AsyncVideoPairWriter(main, evidence)
+                        written = 0
+                    if self.temporal_mean_frames:
+                        result = noise_twin.NoiseTwinResult(result, result, 0, 0, 0, 1)
+                    if self.preview_callback is not None and time.monotonic() >= next_preview:
+                        try:
+                            self.preview_callback(result.frame)
+                        except Exception:
+                            pass
+                        next_preview = time.monotonic() + 1 / 3
+                    writer.submit(result)
+                    written += 1
+                    if written == output_data["frame_count"]:
+                        writer.close()
+                        writer = None
+                        video, evidence = self._final_paths(raw_path)
+                        video.parent.mkdir(parents=True, exist_ok=True)
+                        if rtsp_segments._properties(temporary_video)[1] != written:
+                            raise IOError("Transformed chunk frame count changed")
+                        rtsp_live.write_json(str(video) + ".capture.json", output_data)
+                        if self.temporal_mean_frames:
+                            temporal_mean.write_processing_marker(
+                                str(video), self.temporal_mean_frames, analyzed=False)
+                        else:
+                            os.replace(temporary_evidence, evidence)
+                            noise_twin.write_processing_marker(video, engine.metadata)
+                        os.replace(temporary_video, video)
+                        raw_path.unlink()
+                        Path(str(raw_path) + ".capture.json").unlink(missing_ok=True)
+                        self.enqueued.discard(str(raw_path))
+                        self.raw_queue.task_done()
+                        if capture.decoded and capture.decoded[0][0] == raw_path:
+                            capture.decoded.popleft()
+                        raw_path = None
+
+                while not self.cancel_event.is_set():
+                    ok, frame = capture.read()
+                    if not ok:
+                        for result in processor.flush():
+                            write_result(result)
+                        break
+                    if self.temporal_mean_frames:
+                        frame = apply_fixed_pattern_correction(frame, self.correction)
+                    for result in processor.push(frame):
+                        write_result(result)
+                if not self.cancel_event.is_set() and writer is not None:
+                    raise IOError("Incomplete transformed session tail")
+            except Exception as exc:
+                self._status(f"連続前処理エラー（未処理原画は保持）: {exc}")
+            finally:
+                if writer is not None:
+                    try:
+                        writer.close()
+                    except Exception:
+                        pass
+                for path in (temporary_video, temporary_evidence):
+                    if path is not None:
+                        path.unlink(missing_ok=True)
+                capture.release()
+            pending = capture.pending
 
     def _analysis_loop(self) -> None:
         while not self.cancel_event.is_set():
@@ -476,7 +605,9 @@ class RtspNoiseTwinPipeline:
             finally:
                 self.analysis_queue.task_done()
 
-    def start(self) -> None:
+    def _restore_analysis(self) -> None:
+        if self.continuous_analysis:
+            return
         self.spool_root.mkdir(parents=True, exist_ok=True)
         # Resume analysis after an app restart when denoising had completed but
         # the transient innovation sidecar had not yet been consumed.
@@ -515,6 +646,10 @@ class RtspNoiseTwinPipeline:
             video = Path(str(marker)[: -len(".analysis_pending.json")])
             if video.exists():
                 self.analysis_queue.put((str(video), ""))
+
+    def start(self) -> None:
+        self.spool_root.mkdir(parents=True, exist_ok=True)
+        self._restore_analysis()
         plan = self.resource_plan
         if self.temporal_mean_frames and not self.save_temporal_mean_video:
             method = f"原画保存・分析時のみ時間平均{self.temporal_mean_frames}フレーム"
@@ -523,7 +658,7 @@ class RtspNoiseTwinPipeline:
         else:
             method = "NoiseTwin MPS"
         self._status(
-            f"リソース配分: 受信=FFmpeg 5秒分割 1、変換={method} 1 + "
+            f"リソース配分: 受信=FFmpeg {self.segment_seconds:g}秒分割 1、変換={method} 1 + "
             f"CPU {plan.noise_twin_cpu_threads}、分析={plan.analysis_workers}、"
             f"UI予約={plan.ui_reserved_cores}コア"
         )
@@ -548,6 +683,8 @@ class RtspNoiseTwinPipeline:
             ("NoiseTwinTransform", self._denoise_loop),
             ("NoiseTwinAnalysis", self._analysis_loop),
         )
+        if self.continuous_analysis:
+            targets = targets[:-1]
         self.threads = [
             threading.Thread(target=target, name=name, daemon=True)
             for name, target in targets
