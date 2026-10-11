@@ -80,6 +80,27 @@ def schedule_window(when, start_hour, start_minute, end_hour, end_minute):
     return (start, end) if start <= when < end else None
 
 
+def overlapping_schedule_windows(started_at, ended_at, clock):
+    """Return scheduled windows that overlap the half-open interval [start, end)."""
+    start_hour, start_minute, end_hour, end_minute = clock
+    if ended_at <= started_at or (start_hour, start_minute) == (end_hour, end_minute):
+        return []
+    windows = []
+    day = (started_at - timedelta(days=1)).date()
+    last_day = ended_at.date()
+    while day <= last_day:
+        start = started_at.replace(year=day.year, month=day.month, day=day.day,
+                                   hour=start_hour, minute=start_minute, second=0, microsecond=0)
+        end = started_at.replace(year=day.year, month=day.month, day=day.day,
+                                 hour=end_hour, minute=end_minute, second=0, microsecond=0)
+        if end < start:
+            end += timedelta(days=1)
+        if start < ended_at and end > started_at:
+            windows.append((start, end))
+        day += timedelta(days=1)
+    return windows
+
+
 class ProductCache:
     """Atomic cache entries with oldest-created-first eviction and shared locking."""
     def __init__(self, root, limit=CACHE_LIMIT):
@@ -405,13 +426,27 @@ class ScheduleProducts:
                 guard.write_bytes(b" " * 64)
         return self.jobs[key]
 
-    def _event_job(self, when):
+    def _overlapping_job(self, started_at, ended_at):
+        overlapping = []
+        for job in self.jobs.values():
+            if job["state"] == "complete":
+                continue
+            start, end = datetime.fromisoformat(job["start"]), datetime.fromisoformat(job["end"])
+            if start < ended_at and end > started_at:
+                overlapping.append((min(ended_at, end)-max(started_at, start), job))
+        return max(overlapping, key=lambda item: item[0])[1] if overlapping else None
+
+    def _event_job(self, started_at, ended_at):
         # A resumed window keeps its saved settings even if the UI has changed
         # (or was closed before saving its checkboxes).
-        for job in self.jobs.values():
-            if job["state"] != "complete" and datetime.fromisoformat(job["start"]) <= when < datetime.fromisoformat(job["end"]):
+        job = self._overlapping_job(started_at, ended_at)
+        if job is not None or self.existing_only:
+            return job
+        for start, end in overlapping_schedule_windows(started_at, ended_at, self.clock):
+            job = self._job(max(started_at, start))
+            if job is not None and job["state"] != "complete":
                 return job
-        return None if self.existing_only else self._job(when)
+        return None
 
     def capture_event(self, frames, frame_rate, started_at, line):
         """Persist a small lossless line crop before detector buffers are reused.
@@ -422,7 +457,8 @@ class ScheduleProducts:
         if not frames:
             return
         with self.lock:
-            job = self._event_job(started_at + timedelta(seconds=(len(frames)-1)/frame_rate/2))
+            ended_at = started_at + timedelta(seconds=len(frames)/frame_rate)
+            job = self._event_job(started_at, ended_at)
             if job is None or job["state"] == "complete":
                 return
             if not (job["options"]["blend_image"] or job["options"]["blend_video"]):
@@ -470,12 +506,11 @@ class ScheduleProducts:
     def capture_event_failed(self, frames, frame_rate, started_at, line, error):
         """Latch capture failure even when the manifest cannot currently write."""
         with self.lock:
-            when = started_at + timedelta(seconds=(len(frames)-1)/frame_rate/2)
-            job = next((job for job in self.jobs.values() if job["state"] != "complete" and
-                datetime.fromisoformat(job["start"]) <= when < datetime.fromisoformat(job["end"])), None)
+            ended_at = started_at + timedelta(seconds=len(frames)/frame_rate)
+            job = self._overlapping_job(started_at, ended_at)
             if job is None:
-                window = schedule_window(when, *self.clock)
-                if window is None or self.existing_only:
+                windows = overlapping_schedule_windows(started_at, ended_at, self.clock)
+                if not windows or self.existing_only:
                     return
             if job is None:
                 # Job setup failed: the worker must fail closed instead of
@@ -705,9 +740,10 @@ class ScheduleProducts:
         self._save(job)
 
     def _cutouts_valid(self, event, key):
-        with _CACHE_LOCK:
-            directory = self.cache.root / key
-            if not directory.is_dir():
+        # Pin the directory against eviction while reading, but release the
+        # shared cache lock between files and before decoding each PNG.
+        with self.cache.pin([key]) as available:
+            if key not in available:
                 return False
             # Decode to detect a damaged/incomplete cache after interruption.
             for index in range(event["count"]):
