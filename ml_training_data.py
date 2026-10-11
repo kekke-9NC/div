@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import shutil
 import threading
@@ -115,8 +116,23 @@ def export_training_event(
     detected_line: Sequence[Sequence[int]],
     frame_range: Sequence[int],
     media_directories: Optional[Dict[str, str]] = None,
+    minimum_probability: float = 0.15,
 ) -> Optional[str]:
     """Atomically export one pending event and return its directory."""
+    if isinstance(minimum_probability, bool):
+        raise ValueError("minimum_probability must be between 0 and 1")
+    try:
+        minimum_probability = float(minimum_probability)
+        probability = float(probability)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("probability and minimum_probability must be numeric") from exc
+    if not math.isfinite(minimum_probability) or not 0.0 <= minimum_probability <= 1.0:
+        raise ValueError("minimum_probability must be between 0 and 1")
+    if not math.isfinite(probability) or not 0.0 <= probability <= 1.0:
+        raise ValueError("probability must be between 0 and 1")
+    if probability < minimum_probability:
+        return None
+
     label = "meteor" if predicted_label == "meteor" else "not_meteor"
     root = Path(root_dir).expanduser().resolve()
     pending = root / "pending" / label
@@ -146,7 +162,8 @@ def export_training_event(
             "event_id": final_dir.name,
             "review_status": "pending",
             "predicted_label": label,
-            "meteor_probability": float(probability),
+            "meteor_probability": probability,
+            "minimum_save_probability": minimum_probability,
             "source": str(source),
             "detection_time": detection_time.isoformat(),
             "created_at": _utc_now(),

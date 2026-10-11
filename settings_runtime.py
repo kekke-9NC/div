@@ -160,6 +160,17 @@ def from_legacy_settings(raw: Any, root: Path) -> RuntimeSettings:
     )
     if ml_enabled and not ml_root:
         raise ValueError("機械学習向けデータの保存先が空です")
+    ml_min_probability = (
+        _number(
+            settings.get(
+                "ml_training_min_probability",
+                getattr(config, "DEFAULT_ML_TRAINING_MIN_PROBABILITY", 0.15),
+            ),
+            "ml_training_min_probability", 0.0, 1.0,
+        )
+        if ml_enabled
+        else getattr(config, "DEFAULT_ML_TRAINING_MIN_PROBABILITY", 0.15)
+    )
     auto_mask = _boolean(
         settings.get("auto_video_mask_enabled", getattr(config, "DEFAULT_AUTO_VIDEO_MASK_ENABLED", True)),
         "auto_video_mask_enabled",
@@ -170,6 +181,7 @@ def from_legacy_settings(raw: Any, root: Path) -> RuntimeSettings:
         "full_video_timestamp_size_percent": timestamp_size,
         "ml_training_export_enabled": ml_enabled,
         "ml_training_data_root": str(Path(ml_root).expanduser().resolve()) if ml_root else "",
+        "ml_training_min_probability": ml_min_probability,
         "auto_video_mask_enabled": auto_mask,
         "auto_video_mask_cache_dir": str(root / "auto_video_masks"),
     }

@@ -95,6 +95,13 @@ class ProcessingMixin:
                 'auto_video_mask_cache_dir': config.AUTO_VIDEO_MASK_CACHE_DIR,
             })
             if params['save_options']['ml_training_export_enabled']:
+                try:
+                    ml_min_probability = float(self.ml_training_min_probability_var.get())
+                except (TypeError, ValueError) as exc:
+                    raise ValueError("学習データの流星確率下限は0〜1の数値で指定してください。") from exc
+                if not 0.0 <= ml_min_probability <= 1.0:
+                    raise ValueError("学習データの流星確率下限は0〜1の範囲で指定してください。")
+                params['save_options']['ml_training_min_probability'] = ml_min_probability
                 if not params['save_options']['ml_training_data_root']:
                     raise ValueError("機械学習向けデータの保存先が空です。")
                 os.makedirs(params['save_options']['ml_training_data_root'], exist_ok=True)

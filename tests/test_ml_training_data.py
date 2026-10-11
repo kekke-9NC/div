@@ -34,7 +34,31 @@ class TrainingDataTests(unittest.TestCase):
             cutout_rect=(0, 0, 24, 24), cutout_size=24, frame_rate=15.0,
             detected_line=((4, 11), (15, 11)), frame_range=(1, 3),
             media_directories=media_directories,
+            minimum_probability=0.0,
         ))
+
+    def test_export_skips_probabilities_below_configured_floor(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            kwargs = {
+                "root_dir": str(root), "predicted_label": "not_meteor",
+                "probability": 0.149, "event_id": "below_floor", "source": "source.mp4",
+                "detection_time": datetime(2026, 1, 2, 3, 4, 5),
+                "frames": [np.zeros((24, 24, 3), dtype=np.uint8)],
+                "classification_diff": np.zeros((24, 24), dtype=np.uint8),
+                "cutout_rect": (0, 0, 24, 24), "cutout_size": 24,
+                "frame_rate": 15.0, "detected_line": ((4, 11), (15, 11)),
+                "frame_range": (1, 1),
+            }
+            self.assertIsNone(ml_training_data.export_training_event(**kwargs))
+            self.assertFalse((root / "pending").exists())
+
+            kwargs["probability"] = 0.15
+            exported = ml_training_data.export_training_event(**kwargs)
+            self.assertEqual(exported, str(root / "pending" / "not_meteor" / "below_floor"))
+            with (Path(exported) / "metadata.json").open(encoding="utf-8") as handle:
+                metadata = json.load(handle)
+            self.assertEqual(metadata["minimum_save_probability"], 0.15)
 
     def test_export_review_and_persistent_undo(self):
         with tempfile.TemporaryDirectory() as directory:

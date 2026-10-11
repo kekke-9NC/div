@@ -293,9 +293,22 @@ class SettingsMixin:
         ).pack(anchor=tk.W, padx=4, pady=(3, 1))
         ttk.Label(
             ml_frame,
-            text="通常差分・モノクロ動画・時間画像・時刻マップを、予測クラス別の未確認フォルダへ保存します。",
+            text="通常差分・モノクロ動画・時間画像・時刻マップを、予測クラス別の未確認フォルダへ保存します。設定した流星確率未満のイベントは保存しません。",
             style="Hint.TLabel",
         ).pack(anchor=tk.W, padx=24, pady=(0, 4))
+        ml_threshold_frame = ttk.Frame(ml_frame)
+        ml_threshold_frame.pack(fill=tk.X, padx=4, pady=2)
+        ttk.Label(ml_threshold_frame, text="流星確率の保存下限:").pack(side=tk.LEFT)
+        ttk.Entry(
+            ml_threshold_frame,
+            textvariable=self.ml_training_min_probability_var,
+            width=8,
+        ).pack(side=tk.LEFT, padx=(5, 4))
+        ttk.Label(
+            ml_threshold_frame,
+            text="（0〜1。これ未満は保存しません）",
+            style="Hint.TLabel",
+        ).pack(side=tk.LEFT)
         ml_path_frame = ttk.Frame(ml_frame)
         ml_path_frame.pack(fill=tk.X, padx=4, pady=2)
         ttk.Label(ml_path_frame, text="保存先:", width=10).pack(side=tk.LEFT)
@@ -1626,6 +1639,7 @@ class SettingsMixin:
             'meteor_save_path': self.meteor_save_path_var.get(), 'not_meteor_save_path': self.not_meteor_save_path_var.get(),
             'ml_training_export_enabled': self.ml_training_export_enabled_var.get(),
             'ml_training_data_root': self.ml_training_data_root_var.get(),
+            'ml_training_min_probability': self.ml_training_min_probability_var.get(),
             'auto_video_mask_enabled': self.auto_video_mask_enabled_var.get(),
             'date_folder_twilight_filter_enabled': self.date_folder_twilight_filter_enabled_var.get(),
             'observation_latitude': self.observation_latitude_var.get(),
@@ -1873,6 +1887,12 @@ class SettingsMixin:
             self.ml_training_data_root_var.set(
                 settings.get('ml_training_data_root', config.DEFAULT_ML_TRAINING_DATA_ROOT)
             )
+            self.ml_training_min_probability_var.set(str(
+                settings.get(
+                    'ml_training_min_probability',
+                    config.DEFAULT_ML_TRAINING_MIN_PROBABILITY,
+                )
+            ))
             self.auto_video_mask_enabled_var.set(
                 settings.get('auto_video_mask_enabled', config.DEFAULT_AUTO_VIDEO_MASK_ENABLED)
             )
