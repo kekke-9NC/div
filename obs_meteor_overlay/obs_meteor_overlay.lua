@@ -6,10 +6,20 @@ local overlay_pid_file = base_dir .. "overlay.pid"
 local overlay_log_file = base_dir .. "overlay.log"
 local mask_file = base_dir .. "detection_mask.png"
 local mask_state_file = base_dir .. "mask_state.json"
+local camera_source_file = base_dir .. "camera_source.txt"
 local filter_name = "旧UIの検出マスク（自動同期）"
 local camera_source = "メディア"
 local last_mask_revision = nil
 local exiting = false
+
+local function save_camera_source()
+    local temporary = camera_source_file .. ".tmp"
+    local handle = io.open(temporary, "w")
+    if handle == nil then return end
+    handle:write(camera_source)
+    handle:close()
+    os.rename(temporary, camera_source_file)
+end
 
 local function shell_quote(value)
     return "'" .. string.gsub(value, "'", "'\\''") .. "'"
@@ -122,6 +132,7 @@ function script_update(settings)
         camera_source = selected
         last_mask_revision = nil
     end
+    save_camera_source()
 end
 
 function script_load(settings)

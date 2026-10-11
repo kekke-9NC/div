@@ -240,6 +240,23 @@ def _read_video_frame_range(
     return frames
 
 
+def _iter_with_final_marker(items):
+    """Yield each item with a flag identifying the last one."""
+    iterator = iter(items)
+    try:
+        current = next(iterator)
+    except StopIteration:
+        return
+    while True:
+        try:
+            following = next(iterator)
+        except StopIteration:
+            yield current, True
+            return
+        yield current, False
+        current = following
+
+
 class _VideoFrameRangeCache:
     """Reuse one decoded evidence window within a single file operation.
 
@@ -1044,7 +1061,12 @@ def create_line_video_clips(
 
         last_read_frame_index_by_diff = -1
 
-        for diff_data in diff_generator:
+        if is_rtsp:
+            diff_items = ((item, False) for item in diff_generator)
+        else:
+            diff_items = _iter_with_final_marker(diff_generator)
+
+        for diff_data, is_final_diff in diff_items:
             try:
                 if cancel_flag is not None and cancel_flag.is_set():
                     print("差分画像ループ中にキャンセルされました。")
@@ -1138,7 +1160,7 @@ def create_line_video_clips(
                 if config.SHORT_FLASH_DETECT_ENABLED and use_rtsp_params and frame_window:
                     flash_candidates = flash_detector.consume(
                         frame_window, start_index_diff, mask=mask, roi=roi,
-                        final=not is_rtsp and current_frame_index == total_frames - 1,
+                        final=not is_rtsp and is_final_diff,
                     )
                 flash_by_line = {candidate.line: candidate for candidate in flash_candidates}
                 lines = _deduplicate_candidate_lines([c.line for c in flash_candidates] + lines)

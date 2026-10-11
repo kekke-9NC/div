@@ -5,6 +5,7 @@ __pycache__/
 *.log
 *.pid
 *.tmp
+camera_source.txt
 calibration/
 validation/
 recent_cache/

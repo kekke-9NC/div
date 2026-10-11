@@ -9,6 +9,7 @@ import hashlib
 import json
 from pathlib import Path
 import signal
+import sys
 import time
 import uuid
 import cv2
@@ -16,6 +17,14 @@ import numpy as np
 import websocket
 
 STOP = False
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+try:
+    import config as app_config
+except ImportError:
+    app_config = None
 
 
 def atomic_json(path, payload):
@@ -99,6 +108,14 @@ def match_frame(image, wall_epoch, source):
         cap.release()
 
 
+def camera_source_name(output_dir):
+    try:
+        configured = (output_dir / 'camera_source.txt').read_text(encoding='utf-8').strip()
+    except OSError:
+        configured = ''
+    return configured or 'メディア'
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--output-dir', type=Path, required=True)
@@ -112,7 +129,7 @@ def main():
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     output = args.output_dir / 'broadcast_timing.json'
-    root = Path.home() / 'Library/Application Support/MeteorDetector/rtsp'
+    root = Path(app_config.RTSP_SAVE_ROOT) if app_config is not None else PROJECT_ROOT / 'rtsp'
     pending, anchors, session_start = [], [], None
     try:
         previous = json.loads(output.read_text())
@@ -129,7 +146,8 @@ def main():
             if now - last_capture >= 20:
                 obs = OBS()
                 try:
-                    status = obs.request('GetMediaInputStatus', {'inputName': 'メディア'})
+                    source_name = camera_source_name(args.output_dir)
+                    status = obs.request('GetMediaInputStatus', {'inputName': source_name})
                     if status['mediaState'] != 'OBS_MEDIA_STATE_PLAYING':
                         raise ValueError('Camera is not playing')
                     connection_start = time.time() - status['mediaCursor'] / 1000
@@ -137,7 +155,7 @@ def main():
                         pending, anchors, session_start = [], [], connection_start
                         atomic_json(output, {'calibrated': False, 'updated_at_epoch': now})
                     before = time.time()
-                    screenshot = obs.request('GetSourceScreenshot', {'sourceName': 'メディア', 'imageFormat': 'png'})
+                    screenshot = obs.request('GetSourceScreenshot', {'sourceName': source_name, 'imageFormat': 'png'})
                     after = time.time()
                     if after - before < .5:
                         image = cv2.imdecode(np.frombuffer(base64.b64decode(screenshot['imageData'].split(',', 1)[1]), dtype=np.uint8), cv2.IMREAD_GRAYSCALE)

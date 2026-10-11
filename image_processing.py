@@ -177,6 +177,8 @@ def create_diff_images(
         total_frames = float('inf')
 
     interval_frames = max(1, int(fps * interval))
+    last_yielded_frame_index = -1
+    reached_eof = False
 
     while frame_index < total_frames:
         if cancel_flag is not None and cancel_flag.is_set():
@@ -186,6 +188,7 @@ def create_diff_images(
         ret, frame = cap.read()
         if not ret:
             print(f"フレーム {frame_index} の読み込みに失敗、またはストリームが終了しました。")
+            reached_eof = True
             break
 
         if evidence_cap is not None and evidence_for_diff is not None:
@@ -218,6 +221,7 @@ def create_diff_images(
             end_idx = frame_index
             start_idx = max(0, end_idx - len(frames_for_diff) + 1)
             frame_indices = (start_idx, end_idx)
+            last_yielded_frame_index = end_idx
 
             frame_window = list(frames_for_diff) if include_frame_window else None
             if is_rtsp and buffer_frames is not None:
@@ -239,6 +243,30 @@ def create_diff_images(
                 yield diff_image, frame_indices, brightness_composite_image, min_val_image
 
         frame_index += 1
+
+    # Frame counts are often unavailable for damaged or variable-frame-rate
+    # files. Emit the final partial window at EOF so consumers can process
+    # events that occur after the last regular interval.
+    final_frame_index = frame_index - 1
+    if (
+        reached_eof
+        and not is_rtsp
+        and frames_for_diff
+        and final_frame_index > last_yielded_frame_index
+    ):
+        brightness_composite_image, min_val_image = _temporal_min_max(frames_for_diff)
+        if evidence_for_diff is not None and len(evidence_for_diff) == len(frames_for_diff):
+            diff_image, _unused_minimum = _temporal_min_max(evidence_for_diff)
+        else:
+            diff_image = cv2.absdiff(brightness_composite_image, min_val_image)
+
+        start_idx = max(0, final_frame_index - len(frames_for_diff) + 1)
+        frame_indices = (start_idx, final_frame_index)
+        frame_window = list(frames_for_diff) if include_frame_window else None
+        if frame_window is not None:
+            yield diff_image, frame_indices, brightness_composite_image, min_val_image, frame_window
+        else:
+            yield diff_image, frame_indices, brightness_composite_image, min_val_image
 
     print("差分画像生成ジェネレータを終了します。")
 
