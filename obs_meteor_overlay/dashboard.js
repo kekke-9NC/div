@@ -7,13 +7,11 @@ const jstMinute = new Intl.DateTimeFormat('ja-JP', {timeZone: 'Asia/Tokyo', hour
 let displayedEvent = null;
 let displayedEpoch = null;
 let displayedReplayEpoch = null;
-let replayModeLabel = '自動リプレイ';
 let imageKey = null;
 let pendingKey = null;
 let focusTimer = null;
 let metadataBusy = false;
 let statisticsBusy = false;
-let statsUpdatedEpoch = null;
 let skyBusy = false;
 let skyGeneration = null;
 let skyUpdatedEpoch = null;
@@ -36,9 +34,6 @@ function updateClock() {
     if (displayedReplayEpoch !== null) {
         const seconds = Math.max(0, now.getTime() / 1000 - displayedReplayEpoch);
         byId('elapsed').textContent = seconds < 60 ? 'たった今' : seconds < 3600 ? `${Math.floor(seconds / 60)}分前` : seconds < 86400 ? `${Math.floor(seconds / 3600)}時間前` : `${Math.floor(seconds / 86400)}日前`;
-    }
-    if (statsUpdatedEpoch !== null) {
-        byId('stats-state').textContent = now.getTime() / 1000 - statsUpdatedEpoch > 90 ? '更新が遅れています' : '訂正反映・未確認は自動判定';
     }
 }
 
@@ -103,16 +98,12 @@ async function refreshMetadata() {
             byId('last-date').textContent = '--/--';
             byId('last-clock').textContent = '--:--:--';
             byId('elapsed').textContent = '--';
-            byId('replay-state').textContent = '自動リプレイ';
-            replayModeLabel = '自動リプレイ';
             displayedEvent = displayedEpoch = displayedReplayEpoch = imageKey = null;
             byId('visible-window').textContent = '';
             return;
         }
         const epoch = Number(data.detected_at_epoch);
         if (!Number.isFinite(epoch)) return;
-        replayModeLabel = data.composite_available ? '比較明合成 → 動画' : '自動リプレイ';
-        if (!replay.classList.contains('focus')) byId('replay-state').textContent = replayModeLabel;
         const key = `${data.replay_version || 'legacy'}:${data.event}:${data.mask_revision || ''}:${JSON.stringify(data.zoom_region || null)}`;
         // Reload only when the event or mask changes; polling must not restart GIFs.
         if (key === imageKey) {
@@ -137,10 +128,8 @@ async function refreshMetadata() {
         if (newDetection) {
             clearTimeout(focusTimer);
             replay.classList.add('focus');
-            byId('replay-state').textContent = data.composite_available ? '新しい検出 · 比較明 → 動画' : '新しい検出 · リプレイ';
             focusTimer = setTimeout(() => {
                 replay.classList.remove('focus');
-                byId('replay-state').textContent = replayModeLabel;
             }, 12000);
         }
         updateClock();
@@ -158,8 +147,6 @@ function showReplayTime(data) {
     displayedReplayEpoch = epoch;
     byId('last-date').textContent = jstDate.format(new Date(epoch * 1000));
     byId('last-clock').textContent = jstClock.format(new Date(epoch * 1000));
-    const aligned = data.timestamp_basis === 'obs_frame_match';
-    byId('time-basis').textContent = aligned ? '配信映像の時刻 · JST' : data.timestamp_basis === 'recording_frame' ? '録画時刻 · 配信照合待ち' : '検出記録の時刻';
     const validRange = Number.isFinite(data.visible_start_epoch) && Number.isFinite(data.visible_end_epoch);
     byId('visible-window').textContent = validRange ? `流星 ${jstClock.format(new Date(data.visible_start_epoch * 1000))}–${jstClock.format(new Date(data.visible_end_epoch * 1000))}` : '';
 }
@@ -182,9 +169,12 @@ function renderHistory(data) {
         clock.textContent = Number.isFinite(epoch) ? jstClock.format(new Date(epoch * 1000)) : '--:--:--';
         const date = document.createElement('span');
         date.textContent = Number.isFinite(epoch) ? jstDate.format(new Date(epoch * 1000)).slice(5) : '';
-        const basis = document.createElement('span');
-        basis.textContent = !event.image ? '映像準備中' : event.timestamp_basis === 'obs_frame_match' ? '配信時刻' : '録画時刻';
-        info.append(rank, clock, date, basis);
+        info.append(rank, clock, date);
+        if (!event.image) {
+            const state = document.createElement('span');
+            state.textContent = '映像準備中';
+            info.append(state);
+        }
         card.append(image, info);
         return card;
     });
@@ -196,7 +186,6 @@ function renderHistory(data) {
     }
     track.replaceChildren(...cards);
     byId('history-title').textContent = `直近${data.events.length || 10}件の流星`;
-    byId('history-state').textContent = '新しい順 · 比較明合成 → 動画リプレイ · 訂正反映';
 }
 
 function availableBoardPages() {
@@ -207,21 +196,6 @@ function availableBoardPages() {
     }
     if (historyData && historyData.events.length) pages.push('history-page');
     return pages;
-}
-
-function updateBoardNextHint() {
-    const pages = availableBoardPages();
-    if (!pages.includes(activeBoardPage)) return;
-    const nextPage = pages[(pages.indexOf(activeBoardPage) + 1) % pages.length];
-    const labels = {
-        'graph-page': '直近1時間の推移',
-        'night-graph-page': '今夜の時間別検出',
-        'conditions-page': '今夜の観測条件',
-        'history-page': `直近${historyData && historyData.events.length || 10}件の流星`,
-    };
-    byId('board-next').textContent = nextPage === activeBoardPage
-        ? '時間別情報を更新中'
-        : `次：${labels[nextPage]}`;
 }
 
 function showBoardPage(page) {
@@ -237,7 +211,6 @@ function showBoardPage(page) {
         historyAnimation.cancel();
         historyAnimation = null;
     }
-    updateBoardNextHint();
     if (historyActive) {
         renderHistory(historyData);
         const distance = Math.max(0, byId('history-track').scrollWidth - byId('history-viewport').clientWidth);
@@ -262,12 +235,8 @@ function switchBoard() {
 
 function clearNightDashboard() {
     nightDashboardData = null;
-    byId('observation-status').textContent = '情報更新待ち';
-    byId('observation-status').classList.remove('active');
     if (activeBoardPage === 'night-graph-page' || activeBoardPage === 'conditions-page') {
         showBoardPage('graph-page');
-    } else {
-        updateBoardNextHint();
     }
 }
 
@@ -280,11 +249,8 @@ async function refreshHistory() {
         if (!Number.isFinite(data.updated_at_epoch) || Date.now() / 1000 - data.updated_at_epoch > 90) {
             historyData = null;
             if (historyActive) switchBoard();
-            else updateBoardNextHint();
-            byId('history-state').textContent = '一覧の更新待ち';
             return;
         }
-        byId('history-state').textContent = data.events.length ? '新しい順 · 比較明合成 → 動画リプレイ · 訂正反映' : '流星の検出を待っています';
         const key = JSON.stringify([data.mask_revision, data.events.map(event => [event.event, event.image]), data.excluded_events]);
         if (key !== historyKey) {
             // Newly detected items join on the next cycle, without interrupting
@@ -296,15 +262,7 @@ async function refreshHistory() {
         } else {
             historyData = data;
         }
-        updateBoardNextHint();
-        if (!historyActive) {
-            const hint = activeBoardPage === 'conditions-page' && data.events.length
-                ? `次：直近${data.events.length}件の流星`
-                : null;
-            if (hint) byId('board-next').textContent = hint;
-        }
     } catch (_) {
-        byId('history-state').textContent = '一覧を準備しています';
         if (historyData && Date.now() / 1000 - historyData.updated_at_epoch > 90 && historyActive) switchBoard();
     } finally {
         historyBusy = false;
@@ -385,7 +343,29 @@ function drawNightGraph(data) {
     const startDate = new Date(start * 1000);
     const endDate = new Date(end * 1000);
     byId('night-window').textContent = `${jstDate.format(startDate).slice(5)} ${jstMinute.format(startDate)} – ${jstDate.format(endDate).slice(5)} ${jstMinute.format(endDate)}`;
-    byId('observation-night').textContent = `${data.night_label} · JST`;
+    byId('observation-night').textContent = data.night_label || '--夜';
+}
+
+function drawMoon(phaseDegrees, illuminationPercent) {
+    const path = byId('moon-lit');
+    const disk = byId('moon-disc');
+    if (!Number.isFinite(phaseDegrees) || !Number.isFinite(illuminationPercent)) {
+        path.setAttribute('d', '');
+        disk.setAttribute('aria-label', '月の照明率を計算中');
+        return;
+    }
+    const angle = ((phaseDegrees % 360) + 360) % 360;
+    const cosine = Math.cos(angle * Math.PI / 180);
+    const radius = 43.5;
+    // The bright limb is conventionally shown on the right while waxing and
+    // on the left while waning. The ellipse width follows phase, not percent.
+    const waxing = angle < 180;
+    const limbSweep = waxing ? 1 : 0;
+    const terminatorSide = cosine * (waxing ? 1 : -1);
+    const terminatorSweep = terminatorSide >= 0 ? 0 : 1;
+    const terminatorRadius = Math.max(0.05, radius * Math.abs(cosine));
+    path.setAttribute('d', `M 50 6.5 A ${radius} ${radius} 0 0 ${limbSweep} 50 93.5 A ${terminatorRadius} ${radius} 0 0 ${terminatorSweep} 50 6.5 Z`);
+    disk.setAttribute('aria-label', `月の照明率 ${illuminationPercent}%`);
 }
 
 async function refreshNightDashboard() {
@@ -406,49 +386,28 @@ async function refreshNightDashboard() {
             return;
         }
         nightDashboardData = data;
-        updateBoardNextHint();
         drawNightGraph(data);
 
         if (data.observation_schedule_enabled && Number.isFinite(data.observation_start_epoch) && Number.isFinite(data.observation_end_epoch)) {
             const start = Number(data.observation_start_epoch);
             const end = Number(data.observation_end_epoch);
-            byId('observation-schedule').textContent = `${jstMinute.format(new Date(start * 1000))} → ${jstMinute.format(new Date(end * 1000))}`;
-            byId('observation-date').textContent = `${jstDate.format(new Date(start * 1000)).slice(5)} → ${jstDate.format(new Date(end * 1000)).slice(5)} · 旧UI設定 · JST`;
-            const now = Date.now() / 1000;
-            const status = byId('observation-status');
-            if (now >= start && now < end) {
-                status.textContent = '予定時間内';
-                status.classList.add('active');
-            } else if (now < start) {
-                const remaining = Math.max(0, Math.floor(start - now));
-                const hours = Math.floor(remaining / 3600);
-                const minutes = Math.floor((remaining % 3600) / 60);
-                status.textContent = `開始まで ${hours}時間${String(minutes).padStart(2, '0')}分`;
-                status.classList.remove('active');
-            } else {
-                status.textContent = '次回予定';
-                status.classList.remove('active');
-            }
+            byId('observation-schedule').textContent = `${jstMinute.format(new Date(start * 1000))} – ${jstMinute.format(new Date(end * 1000))}`;
+            byId('observation-date').textContent = `${jstDate.format(new Date(start * 1000)).slice(5)} → ${jstDate.format(new Date(end * 1000)).slice(5)}`;
         } else {
-            byId('observation-schedule').textContent = '時間指定なし';
-            byId('observation-date').textContent = '旧UIの時間設定 · JST';
-            byId('observation-status').textContent = '旧UI設定';
-            byId('observation-status').classList.remove('active');
+            byId('observation-schedule').textContent = '予定なし';
+            byId('observation-date').textContent = '';
         }
 
         if (Number.isFinite(data.sunset_epoch)) {
             const sunset = new Date(Number(data.sunset_epoch) * 1000);
             byId('sunset-time').textContent = jstMinute.format(sunset);
-            byId('sunset-date').textContent = `${jstDate.format(sunset).slice(5)} · JST`;
         } else {
             byId('sunset-time').textContent = '--:--';
-            byId('sunset-date').textContent = '地点情報なし';
         }
         byId('moon-phase').textContent = data.moon_phase_name || '--';
-        byId('moon-age').textContent = Number.isFinite(data.moon_age_days) ? data.moon_age_days.toFixed(1) : '--.-';
         const illumination = Number.isFinite(data.moon_illumination_percent) ? Math.min(100, Math.max(0, data.moon_illumination_percent)) : null;
         byId('moon-illumination').textContent = illumination === null ? '--%' : `${illumination}%`;
-        byId('moon-fill').style.width = illumination === null ? '0%' : `${illumination}%`;
+        drawMoon(Number(data.moon_phase_angle_deg), illumination);
     } catch (_) {
         const updated = Number(nightDashboardData && nightDashboardData.updated_at_epoch);
         if (!Number.isFinite(updated) || Math.abs(Date.now() / 1000 - updated) > 60) clearNightDashboard();
@@ -468,7 +427,6 @@ async function refreshStatistics() {
         if (!Number.isFinite(start) || !Number.isFinite(end)) return;
         byId('hour-count').textContent = data.bins.reduce((sum, n) => sum + n, 0);
         byId('hour-window').textContent = `${jstMinute.format(new Date(start * 1000))} – ${jstMinute.format(new Date(end * 1000))}`;
-        statsUpdatedEpoch = Number(data.updated_at_epoch);
         drawGraph(data.bins);
         updateClock();
     } catch (_) {

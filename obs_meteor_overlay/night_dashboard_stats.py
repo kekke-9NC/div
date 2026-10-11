@@ -89,16 +89,16 @@ def _moon_details(now_local: datetime):
         illumination = (1.0 - math.cos(math.radians(elongation))) / 2.0
         phase_index = int(((elongation + 22.5) % 360.0) // 45.0)
         phase_names = (
-            "新月", "満ちていく月", "上弦", "十三夜ごろ",
-            "満月", "欠けていく月", "下弦", "有明月",
+            "新月", "三日月", "上弦の月", "満ちていく月",
+            "満月", "欠けていく月", "下弦の月", "有明月",
         )
         details = {
             "phase_name": phase_names[phase_index],
-            "age_days": round(elongation / 360.0 * 29.530588853, 1),
+            "phase_angle_deg": round(elongation, 3),
             "illumination_percent": int(round(illumination * 100)),
         }
     except Exception as exc:
-        details = {"phase_name": "計算待ち", "age_days": None,
+        details = {"phase_name": "計算待ち", "phase_angle_deg": None,
                    "illumination_percent": None, "error": str(exc)}
     _MOON_CACHE = (bucket, details)
     return details
@@ -144,7 +144,6 @@ def dashboard_payload(now_local: datetime, events, settings: dict):
     sunset_day = active_night_start.date()
     return {
         "updated_at_epoch": now_local.timestamp(),
-        "classification_basis": "dataset_review_then_prediction",
         "night_window_start_epoch": window_start.timestamp(),
         "night_window_end_epoch": window_end.timestamp(),
         "night_hour_labels": [f"{hour:02d}" for hour in (*range(18, 24), *range(0, 6))],
@@ -156,7 +155,7 @@ def dashboard_payload(now_local: datetime, events, settings: dict):
         "observation_end_epoch": end_epoch,
         "sunset_epoch": sunset_epoch,
         "moon_phase_name": moon["phase_name"],
-        "moon_age_days": moon["age_days"],
+        "moon_phase_angle_deg": moon["phase_angle_deg"],
         "moon_illumination_percent": moon["illumination_percent"],
     }
 
