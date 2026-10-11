@@ -518,6 +518,7 @@ class AnalysisMixin:
             if os.path.isdir(p):
                 # フォルダの場合は中の動画ファイルを追加
                 for root, dirs, files in os.walk(p):
+                    dirs[:] = sorted(name for name in dirs if not name.startswith("."))
                     for f in sorted(files):
                         filepath = os.path.join(root, f)
                         if video_processor.is_video_file(filepath):

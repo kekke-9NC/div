@@ -229,7 +229,7 @@ class ProcessingMixin:
             self.append_log(f"固定パターン補正 {correction_state} ({mode})")
             
             rtsp_args = (
-                url, config.RTSP_SAVE_ROOT, config.RTSP_SEGMENT_DURATION, 60, self.progress_queue.put,
+                url, config.RTSP_SAVE_ROOT, config.RTSP_SEGMENT_DURATION, config.RTSP_SCAN_INTERVAL, self.progress_queue.put,
                 params['mask'], params['global_wcs_info'], params['plate_solve_mask'],
                 params['meteor_save_path'], params['not_meteor_save_path'], self.cancel_flag,
                 params['save_options'], params['interval_sec'], params['duration_sec'],

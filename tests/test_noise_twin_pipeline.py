@@ -32,20 +32,20 @@ class NoiseTwinPipelineTests(unittest.TestCase):
         self.assertEqual(plan.analysis_workers, 1)
         self.assertEqual(plan.ui_reserved_cores, 2)
 
-    def test_capture_uses_stream_copy_and_minute_segments(self):
+    def test_capture_forces_keyframes_for_five_second_segments(self):
         with tempfile.TemporaryDirectory() as directory:
             pipeline = self.make_pipeline(directory)
             with mock.patch("noise_twin_pipeline.shutil.which", return_value="/usr/bin/ffmpeg"):
                 command = pipeline._ffmpeg_command()
                 output_pattern = Path(command[-1])
-                output_parent_exists = output_pattern.parent.is_dir()
-        self.assertIn("copy", command)
-        self.assertNotIn("libx264", command)
-        self.assertEqual(command[command.index("-segment_time") + 1], "60")
-        self.assertIn("-segment_atclocktime", command)
+                output_parent_exists = pipeline._capture_directory().is_dir()
+        self.assertIn("libx264", command)
+        self.assertIn("expr:gte(t,n_forced*5)", command)
+        self.assertEqual(command[command.index("-segment_time") + 1], "5")
+        self.assertNotIn("-segment_atclocktime", command)
         self.assertNotIn("-strftime_mkdir", command)
         self.assertTrue(output_parent_exists)
-        self.assertEqual(output_pattern.name, "%M_%S.mp4")
+        self.assertRegex(output_pattern.name, r"^%M_%S_[0-9a-f]{12}\.mp4$")
 
     def test_spool_only_releases_completed_segment(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -172,6 +172,42 @@ class NoiseTwinPipelineTests(unittest.TestCase):
                 pipeline.analysis_queue.get_nowait(),
                 (str(video), ""),
             )
+
+    def test_evidence_is_retained_until_successor_finishes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pipeline = self.make_pipeline(directory)
+            hour = Path(directory) / "20261011" / "20"
+            hour.mkdir(parents=True)
+            videos = [hour / f"00_{second:02d}_aabbccddeeff.mp4" for second in (0, 5)]
+            evidence = [video.with_name(video.stem + "_innovation.mp4") for video in videos]
+            for video, sidecar in zip(videos, evidence):
+                video.touch()
+                sidecar.touch()
+                noise_twin_pipeline.noise_twin.processing_marker_path(video).write_text(
+                    '{"processed": true}', encoding="utf-8")
+            observed = []
+            def analyze(video, _evidence):
+                observed.append(evidence[0].exists())
+                return True
+            pipeline.analyze_callback = analyze
+            worker = threading.Thread(target=pipeline._analysis_loop)
+            worker.start()
+            pipeline.analysis_queue.put((str(videos[0]), str(evidence[0])))
+            pipeline.analysis_queue.join()
+            self.assertTrue(evidence[0].exists())
+            pipeline.analysis_queue.put((str(videos[1]), str(evidence[1])))
+            pipeline.analysis_queue.join()
+            pipeline.cancel_event.set()
+            worker.join(timeout=2)
+            self.assertEqual(observed, [True, True])
+            self.assertFalse(evidence[0].exists())
+            self.assertTrue(evidence[1].exists())
+            marker = noise_twin_pipeline.noise_twin.load_processing_marker(str(videos[1]))
+            self.assertTrue(marker["analyzed"])
+            with mock.patch.object(threading.Thread, "start"):
+                restarted = self.make_pipeline(directory)
+                restarted.start()
+            self.assertTrue(restarted.analysis_queue.empty())
 
 
 if __name__ == "__main__":

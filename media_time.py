@@ -95,6 +95,14 @@ def _path_time(path: str) -> Optional[datetime]:
 
 def get_media_start_time(path: str) -> Tuple[Optional[datetime], str]:
     """Return media start time and the source used to determine it."""
+    # Transformed RTSP segments are created later than the captured frames.
+    # Preserve the original timing even after copying an archive elsewhere.
+    try:
+        with open(str(path) + ".capture.json", encoding="utf-8") as handle:
+            captured = datetime.fromisoformat(json.load(handle)["start_time"])
+        return captured, "RTSP録画開始時刻"
+    except (OSError, ValueError, TypeError, KeyError):
+        pass
     created = _filesystem_creation_time(path)
     if created is not None:
         return created, "ファイル作成時刻"

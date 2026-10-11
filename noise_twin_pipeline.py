@@ -1,6 +1,6 @@
 """Disk-backed three-stage RTSP pipeline for NoiseTwin.
 
-Capture never waits for MPS or meteor analysis. Completed one-minute source
+Capture never waits for MPS or meteor analysis. Completed five-second source
 segments are queued on disk, transformed by exactly one NoiseTwin worker, and
 then handed to a separate analysis worker.
 """
@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 import os
 from pathlib import Path
@@ -26,6 +26,9 @@ import cv2
 import noise_twin
 import temporal_mean
 import video_encoding
+import config
+import media_time
+import rtsp_segments
 
 
 StatusCallback = Optional[Callable[[str], None]]
@@ -59,7 +62,7 @@ class RtspNoiseTwinPipeline:
         analyze_callback: AnalyzeCallback,
         cancel_event: threading.Event,
         correction=None,
-        segment_seconds: int = 60,
+        segment_seconds: int = config.RTSP_SEGMENT_DURATION,
         require_validated: bool = True,
         status_callback: StatusCallback = None,
         recording_allowed: Optional[Callable[[], bool]] = None,
@@ -77,7 +80,7 @@ class RtspNoiseTwinPipeline:
         self.analyze_callback = analyze_callback
         self.cancel_event = cancel_event
         self.correction = correction
-        self.segment_seconds = max(10, int(segment_seconds))
+        self.segment_seconds = max(1, int(segment_seconds))
         self.require_validated = require_validated
         self.status_callback = status_callback
         self.recording_allowed = recording_allowed or (lambda: True)
@@ -119,14 +122,17 @@ class RtspNoiseTwinPipeline:
         # and only let FFmpeg expand the filename within that directory.
         directory = capture_directory or self._capture_directory()
         directory.mkdir(parents=True, exist_ok=True)
-        pattern = str(directory / "%M_%S.mp4")
+        self._capture_directory(datetime.now() + timedelta(hours=1))
+        pattern = str(self.spool_root / "%Y%m%d" / "%H" / f"%M_%S_{rtsp_segments.new_session_id()}.mp4")
         command = [ffmpeg, "-y", "-loglevel", "warning"]
         command.extend(("-rtsp_transport", "tcp", "-i", self.rtsp_url))
         command.extend(
             (
-                "-map", "0:v:0", "-an", "-c:v", "copy",
+                "-map", "0:v:0", "-an", "-c:v", "libx264",
+                "-preset", "ultrafast", "-crf", "18",
+                "-force_key_frames", f"expr:gte(t,n_forced*{self.segment_seconds})",
                 "-f", "segment", "-segment_time", str(self.segment_seconds),
-                "-segment_atclocktime", "1", "-reset_timestamps", "1",
+                "-reset_timestamps", "1",
                 "-segment_format", "mp4", "-strftime", "1",
                 pattern,
             )
@@ -164,10 +170,9 @@ class RtspNoiseTwinPipeline:
             try:
                 started_at = datetime.now()
                 capture_directory = self._capture_directory(started_at)
-                capture_hour = started_at.strftime("%Y%m%d%H")
                 command = self._ffmpeg_command(capture_directory)
                 self._status(
-                    f"RTSP stream-copy受信を開始しました（{self.segment_seconds}秒セグメント）。"
+                    f"RTSP連続受信を開始しました（{self.segment_seconds}秒セグメント）。"
                 )
                 stderr_tail: deque[str] = deque(maxlen=20)
                 process = subprocess.Popen(
@@ -187,15 +192,11 @@ class RtspNoiseTwinPipeline:
                 with self._process_lock:
                     self.capture_process = process
                 self.capture_running.set()
-                hour_rollover = False
                 while process.poll() is None and not self.cancel_event.is_set():
                     if not self.recording_allowed():
                         process.terminate()
                         break
-                    if datetime.now().strftime("%Y%m%d%H") != capture_hour:
-                        hour_rollover = True
-                        process.terminate()
-                        break
+                    self._capture_directory(datetime.now() + timedelta(hours=1))
                     time.sleep(0.5)
                 if process.poll() is None:
                     process.terminate()
@@ -206,13 +207,10 @@ class RtspNoiseTwinPipeline:
                     process.wait()
                 stderr_thread.join(timeout=1)
                 if not self.cancel_event.is_set() and self.recording_allowed():
-                    if hour_rollover:
-                        self._status("保存先の時刻が切り替わったため受信を継続します。")
-                    else:
-                        detail = " / ".join(list(stderr_tail)[-3:])
-                        suffix = f" FFmpeg: {detail}" if detail else ""
-                        self._status(f"受信が終了したため2秒後に再接続します。{suffix}")
-                        time.sleep(2)
+                    detail = " / ".join(list(stderr_tail)[-3:])
+                    suffix = f" FFmpeg: {detail}" if detail else ""
+                    self._status(f"受信が終了したため2秒後に再接続します。{suffix}")
+                    self.cancel_event.wait(2)
             except Exception as exc:
                 self._status(f"受信エラー: {exc}。2秒後に再接続します。")
                 time.sleep(2)
@@ -315,6 +313,9 @@ class RtspNoiseTwinPipeline:
                 self.work_root.mkdir(parents=True, exist_ok=True)
                 final_video, final_evidence = self._final_paths(raw_path)
                 final_video.parent.mkdir(parents=True, exist_ok=True)
+                captured_at, _ = media_time.get_media_start_time(str(raw_path))
+                if captured_at is not None:
+                    rtsp_segments.write_capture_time(final_video, captured_at)
                 if self.temporal_mean_frames:
                     final_evidence_value = ""
                     if self.save_temporal_mean_video:
@@ -409,14 +410,33 @@ class RtspNoiseTwinPipeline:
                 continue
             try:
                 self._status(f"流星分析開始: {Path(video_path).name}")
-                success = bool(self.analyze_callback(video_path, evidence_path))
+                while not self.cancel_event.is_set():
+                    try:
+                        success = bool(self.analyze_callback(video_path, evidence_path))
+                        break
+                    except rtsp_segments.SegmentNotReady:
+                        # Keep chronological ownership and predecessor evidence.
+                        self.cancel_event.wait(1)
+                else:
+                    continue
                 if success:
                     self.analysis_retry_counts.pop(video_path, None)
+                    # Retain one analysed predecessor for the next window.
+                    # Analyzed markers prevent it from being replayed on restart.
+                    marker_path = noise_twin.processing_marker_path(video_path)
+                    if evidence_path and marker_path.exists():
+                        marker_data = json.loads(marker_path.read_text(encoding="utf-8"))
+                        marker_data["analyzed"] = True
+                        marker_path.write_text(json.dumps(marker_data), encoding="utf-8")
                     if evidence_path:
-                        try:
-                            os.remove(evidence_path)
-                        except OSError:
-                            pass
+                        previous, _ = rtsp_segments._neighbours(video_path)
+                        if previous is not None:
+                            previous_marker = noise_twin.load_processing_marker(str(previous)) or {}
+                            if previous_marker.get("analyzed", False):
+                                try:
+                                    previous.with_name(previous.stem + "_innovation.mp4").unlink()
+                                except OSError:
+                                    pass
                     mean_marker = Path(video_path).with_suffix(
                         Path(video_path).suffix + ".preprocessed.json"
                     )
@@ -465,7 +485,9 @@ class RtspNoiseTwinPipeline:
                 continue
             video = evidence.with_name(evidence.name.replace("_innovation.mp4", ".mp4"))
             if video.exists():
-                self.analysis_queue.put((str(video), str(evidence)))
+                marker = noise_twin.load_processing_marker(str(video)) or {}
+                if not marker.get("analyzed", False):
+                    self.analysis_queue.put((str(video), str(evidence)))
         for marker in self.save_root.rglob("*.mp4.preprocessed.json"):
             if self.spool_root in marker.parents:
                 continue
@@ -501,12 +523,12 @@ class RtspNoiseTwinPipeline:
         else:
             method = "NoiseTwin MPS"
         self._status(
-            f"リソース配分: 受信=FFmpeg copy 1、変換={method} 1 + "
+            f"リソース配分: 受信=FFmpeg 5秒分割 1、変換={method} 1 + "
             f"CPU {plan.noise_twin_cpu_threads}、分析={plan.analysis_workers}、"
             f"UI予約={plan.ui_reserved_cores}コア"
         )
         if self.temporal_mean_frames and not self.save_temporal_mean_video:
-            self._status("RTSP動画の保存: 原画（stream copy）")
+            self._status("RTSP動画の保存: 受信映像（時間平均なし）")
         else:
             estimated = video_encoding.estimated_megabytes_per_minute(self.encoding_settings)
             if self.encoding_settings.quality == "source":

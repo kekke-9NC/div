@@ -449,6 +449,10 @@ def _source_created_datetime(path: str) -> datetime:
     preserving the existing media-time fallback for ordinary videos.
     """
     source_path = Path(path)
+    if Path(str(path) + ".capture.json").is_file():
+        timestamp, _source = media_time.get_media_start_time(path)
+        if timestamp is not None:
+            return timestamp
     if any(parent.name.lower() == "rtsp" for parent in source_path.parents):
         path_timestamp = getattr(media_time, "_path_time", lambda _path: None)(path)
         if path_timestamp is not None:
@@ -612,7 +616,7 @@ def _open_video_capture(path: str, decoder_threads: int = 2) -> cv2.VideoCapture
 def _is_unfinished_video(path: str) -> bool:
     """Return whether a path follows the recorder's in-progress naming scheme."""
     name = os.path.basename(path).lower()
-    return name.startswith(".") or "_temp_" in name
+    return name.startswith(".") or "_temp_" in name or "_innovation" in name
 
 # NVENC利用可能フラグ（キャッシュ）
 _nvenc_available: Optional[bool] = None
@@ -705,7 +709,8 @@ def get_files_from_path(path: str) -> Tuple[List[str], List[str]]:
         elif ext in VIDEO_EXTENSIONS and not _is_unfinished_video(path):
             videos.append(path)
     elif os.path.isdir(path):
-        for root, _directories, filenames in os.walk(path):
+        for root, directories, filenames in os.walk(path):
+            directories[:] = [name for name in directories if not name.startswith(".")]
             for filename in filenames:
                 item = os.path.join(root, filename)
                 ext = Path(filename).suffix.lower()
@@ -1150,6 +1155,12 @@ class FrameLoader:
             with self._lock:
                 cap = self._video_caps.get(path)
                 if cap is None or not cap.isOpened():
+                    # A night of five-second recordings contains thousands of
+                    # files. Bound decoder/file handles even on the Python path.
+                    if len(self._video_caps) >= 8:
+                        oldest = next(iter(self._video_caps))
+                        self._video_caps.pop(oldest).release()
+                        self._video_positions.pop(oldest, None)
                     cap = _open_video_capture(path)
                     self._video_caps[path] = cap
                     self._video_positions[path] = -1
@@ -2065,6 +2076,9 @@ def _create_video_timelapse_fast(
         return None
 
     concat_compatible = _videos_are_concat_compatible(video_paths, target_size)
+    if not concat_compatible and len(video_paths) > 32:
+        # Use the bounded sequential reader for long mixed-codec archives.
+        return None
     encoder_name, encoder_args, encoder_label = _select_h264_encoder()
     input_mode = "concat demuxer" if concat_compatible else "異形式マルチ入力"
     _report_progress(

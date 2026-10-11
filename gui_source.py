@@ -348,6 +348,7 @@ class SourceMixin:
         
         # 録画時間外でも解析は継続する旨の説明
         ttk.Label(self.rtsp_time_limit_detail_frame, text="録画時間外でも、すでに保存済みの動画の解析は継続します。", style="Hint.TLabel").pack(anchor=tk.W, pady=(4,0))
+        ttk.Label(lf_rtsp, text="5秒ごとに保存・解析します。境界の流星は前後の動画を含めて解析するため、反映まで約10秒＋解析時間かかります。", style="Hint.TLabel", wraplength=650).pack(anchor=tk.W, pady=(6, 0))
         
         self.toggle_rtsp_time_limit_frame()
         

@@ -31,6 +31,8 @@ import automatic_video_mask
 import noise_twin
 import temporal_mean
 import meteor_direction
+import rtsp_segments
+import media_time
 
 
 def _pixel_to_world_for_annotation(path: str, x: float, y: float):
@@ -632,6 +634,8 @@ def get_rtsp_recording_start_datetime(
     作成日時（birth time）が最も直接的な開始時刻になる。ファイルをコピーした場合や
     作成日時を提供しないファイルシステムでは、更新日時から動画長を引く。
     """
+    if os.path.exists(source + ".capture.json"):
+        return media_time.get_media_start_time(source)
     try:
         stat_result = os.stat(source)
         birth_time = getattr(stat_result, "st_birthtime", None)
@@ -881,7 +885,8 @@ def create_line_video_clips(
     )
     if twin_options.enabled and mean_window:
         raise ValueError("NoiseTwinと3/5フレーム平均は同時に使用できません。")
-    analysis_source = source
+    rtsp_context = save_options.get("rtsp_analysis_context", {})
+    analysis_source = rtsp_context.get("analysis_source", source)
     evidence_path = ""
     active_fixed_pattern_correction = fixed_pattern_correction
     if twin_options.enabled:
@@ -917,7 +922,7 @@ def create_line_video_clips(
                     progress_callback((f"NoiseTwin前処理 {done}/{max(total, 0)}", None))
 
             prepared_video = noise_twin.prepare_video(
-                source,
+                analysis_source,
                 twin_options.model_path,
                 correction=fixed_pattern_correction,
                 temp_dir=config.TEMP_CLIP_DIR,
@@ -969,7 +974,7 @@ def create_line_video_clips(
                     )
 
             prepared_mean = temporal_mean.prepare_video(
-                source,
+                analysis_source,
                 mean_window,
                 correction=fixed_pattern_correction,
                 temp_dir=config.TEMP_CLIP_DIR,
@@ -1026,7 +1031,10 @@ def create_line_video_clips(
         if total_frames <= 0:
             print(f"警告: 総フレーム数が取得できませんでした ({source})。")
 
-    if is_rtsp:
+    if rtsp_context:
+        base_datetime = rtsp_context["base_datetime"]
+        video_path_for_naming = source
+    elif is_rtsp:
         base_datetime = datetime.now()
         video_path_for_naming = "rtsp_stream"
     else:
@@ -1103,7 +1111,7 @@ def create_line_video_clips(
 
                 # RTSP時、またはRTSP録画ファイル時は専用パラメータを使用（ノイズ対策）
                 # RTSP録画ファイルのパスにRTSP_SAVE_ROOTが含まれているかチェック
-                is_rtsp_recorded_file = not is_rtsp and config.RTSP_SAVE_ROOT in source
+                is_rtsp_recorded_file = not is_rtsp and (config.RTSP_SAVE_ROOT in source or bool(rtsp_context))
                 use_rtsp_params = is_rtsp or is_rtsp_recorded_file
             
                 if use_rtsp_params:
@@ -1367,6 +1375,8 @@ def create_line_video_clips(
                             
                                 detection_start_frame = min(line_detected_indices)
                                 detection_end_frame = max(line_detected_indices)
+                                if not rtsp_segments.owns_event(save_options, detection_start_frame):
+                                    continue
                                 if _candidate_already_saved(
                                     cand['line'], (detection_start_frame, detection_end_frame),
                                     processed_clips_info, frame_rate, temporal=cand['flash'] is not None,
@@ -1967,6 +1977,8 @@ def create_line_video_clips(
 
                     detection_start_frame = min(line_detected_indices)
                     detection_end_frame = max(line_detected_indices)
+                    if not rtsp_segments.owns_event(save_options, detection_start_frame):
+                        continue
                     print(f"詳細検出によるフレーム範囲: {detection_start_frame} - {detection_end_frame}")
 
                     padding_seconds = config.FINER_DETECT_PADDING_SECONDS

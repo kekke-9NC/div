@@ -45,18 +45,15 @@ astrometry_session: Optional[str] = None
 last_upload_time: Optional[float] = None
 
 def extract_datetime_from_video_path(video_path: str) -> Optional[datetime]:
-    path_obj = Path(video_path); parts = path_obj.parts
-    try:
-        if len(parts) >= 4:
-            date_part, hour_part, minute_part_base = parts[-3], parts[-2], path_obj.stem
-            if '_' in minute_part_base and minute_part_base.split('_')[-1].isdigit(): minute_part = minute_part_base.split('_')[-1][:2]
-            elif minute_part_base.isdigit(): minute_part = minute_part_base[:2]
-            else: raise ValueError(f"分解析不可: {path_obj.name}")
-            return datetime.strptime(f"{date_part}_{hour_part}_{minute_part}", "%Y%m%d_%H_%M")
-        else: print(f"パス階層不足: {video_path}"); return None
-    except (IndexError, ValueError, TypeError) as e: print(f"動画日時解析失敗 ({video_path}): {e}"); return None
+    from media_time import _path_time
+    return _path_time(video_path)
+
 
 def extract_datetime_from_file_path(file_path: str) -> Optional[datetime]:
+    from media_time import _path_time
+    timestamp = _path_time(file_path)
+    if timestamp is not None:
+        return timestamp
     path = Path(file_path)
     try:
         if len(path.parts) >= 4 and path.parent.parent.name.isdigit() and path.parent.name.isdigit():

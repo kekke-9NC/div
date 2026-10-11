@@ -408,6 +408,62 @@ def _build_independent_concat_filter(
     return ";".join(chains), output_label
 
 
+def _normalize_concat_batches(files, directory, fps=None, progress_callback=None,
+                              cancel_check=None, process_callback=None, batch_size=16):
+    """Bound simultaneous decoders for thousands of short RTSP recordings.
+
+    Decode each original independently in small batches. The resulting H.264
+    streams share one size/FPS and can safely use the sequential concat demuxer.
+    """
+    target_fps = fps or get_video_fps(files[0]) or 25.0
+    stream = next((item for item in (get_video_info(files[0]) or {}).get("streams", [])
+                   if item.get("codec_type") == "video"), {})
+    width, height = int(stream.get("width", 1920)), int(stream.get("height", 1080))
+    outputs = []
+    for start in range(0, len(files), batch_size):
+        if cancel_check and cancel_check():
+            raise RuntimeError("処理がキャンセルされました")
+        batch = files[start:start + batch_size]
+        output = os.path.join(directory, f"batch_{start:06d}.mp4")
+        command = [get_ffmpeg_path(), "-y", "-loglevel", "error", "-filter_complex_threads", "2"]
+        for path in batch:
+            command.extend(["-threads", "2", "-i", path])
+        chains = [f"[{index}:v]scale={width}:{height},setsar=1,settb=AVTB,setpts=PTS-STARTPTS[s{index}]"
+                  for index in range(len(batch))]
+        inputs = "".join(f"[s{index}]" for index in range(len(batch)))
+        chains.append(f"{inputs}concat=n={len(batch)}:v=1:a=0,fps={target_fps},format=yuv420p[out]")
+        command.extend(["-filter_complex", ";".join(chains), "-map", "[out]", "-an",
+                        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "16",
+                        "-threads", "4", "-video_track_timescale", "90000", output])
+        if progress_callback:
+            progress_callback(0.0, f"短区間動画の連結準備: {start + 1}～{start + len(batch)}/{len(files)}")
+        with tempfile.TemporaryFile() as errors:
+            process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=errors)
+            try:
+                if process_callback:
+                    process_callback(process)
+                while process.poll() is None:
+                    if cancel_check and cancel_check():
+                        raise RuntimeError("処理がキャンセルされました")
+                    time.sleep(0.1)
+                if process.returncode:
+                    errors.seek(0, os.SEEK_END)
+                    errors.seek(max(0, errors.tell() - 2000))
+                    raise RuntimeError(errors.read().decode("utf-8", errors="replace"))
+            finally:
+                if process.poll() is None:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait()
+                if process_callback:
+                    process_callback(None)
+        outputs.append(output)
+    return outputs
+
+
 def parse_ffmpeg_progress(line: str, total_duration: float) -> Optional[float]:
     """
     FFmpegの出力から進捗率を解析する
@@ -780,6 +836,21 @@ def concatenate_videos(
     files_to_concat = base_files # デフォルトは元ファイルまたは補正済み一時ファイル
     concat_source_files = list(valid_files)
 
+    concat_batch_dir = None
+    if safe_mode and len(files_to_concat) > 16:
+        concat_batch_dir = tempfile.mkdtemp(prefix="meteor_concat_batches_")
+        try:
+            files_to_concat = _normalize_concat_batches(
+                files_to_concat, concat_batch_dir, fps, progress_callback,
+                cancel_check, process_callback,
+            )
+            safe_mode = False
+        except Exception as exc:
+            shutil.rmtree(concat_batch_dir, ignore_errors=True)
+            if enhancement_temp_dir:
+                shutil.rmtree(enhancement_temp_dir, ignore_errors=True)
+            return False, f"短区間動画の連結準備に失敗しました: {exc}"
+
     if safe_mode and progress_callback:
         progress_callback(
             0.0,
@@ -809,7 +880,6 @@ def concatenate_videos(
         try:
             output_dir = os.path.dirname(output_path)
             debug_concat_list_path = os.path.join(output_dir, "debug_concat_list.txt")
-            import shutil
             shutil.copy(concat_list_path, debug_concat_list_path)
             if progress_callback:
                 progress_callback(0.0, f"[DEBUG] concat listを保存: {debug_concat_list_path}")
@@ -818,6 +888,10 @@ def concatenate_videos(
                 progress_callback(0.0, f"[DEBUG] concat list保存に失敗: {e}")
                 
     except Exception as e:
+        if concat_batch_dir:
+            shutil.rmtree(concat_batch_dir, ignore_errors=True)
+        if enhancement_temp_dir:
+            shutil.rmtree(enhancement_temp_dir, ignore_errors=True)
         return False, f"一時ファイルの作成に失敗しました: {e}"
     
     # エラーログを収集する変数
@@ -861,6 +935,8 @@ def concatenate_videos(
                 pass
             if enhancement_temp_dir:
                 shutil.rmtree(enhancement_temp_dir, ignore_errors=True)
+            if concat_batch_dir:
+                shutil.rmtree(concat_batch_dir, ignore_errors=True)
             return False, f"実時刻タイムスタンプの作成に失敗しました: {exc}"
     
     try:
@@ -1141,6 +1217,8 @@ def concatenate_videos(
                 pass
         if timestamp_temp_dir:
             shutil.rmtree(timestamp_temp_dir, ignore_errors=True)
+        if concat_batch_dir:
+            shutil.rmtree(concat_batch_dir, ignore_errors=True)
 
 
 def get_supported_video_extensions() -> List[str]:
@@ -1163,6 +1241,9 @@ def is_video_file(filepath: str) -> bool:
     Returns:
         動画ファイルの場合True
     """
+    name = os.path.basename(filepath).lower()
+    if name.startswith(".") or "_temp_" in name or "_innovation" in name:
+        return False
     ext = os.path.splitext(filepath)[1].lower()
     return ext in get_supported_video_extensions()
 
