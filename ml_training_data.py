@@ -114,6 +114,7 @@ def export_training_event(
     frame_rate: float,
     detected_line: Sequence[Sequence[int]],
     frame_range: Sequence[int],
+    media_directories: Optional[Dict[str, str]] = None,
 ) -> Optional[str]:
     """Atomically export one pending event and return its directory."""
     label = "meteor" if predicted_label == "meteor" else "not_meteor"
@@ -155,6 +156,14 @@ def export_training_event(
             "cutout_rect": [int(v) for v in cutout_rect],
             "cutout_size": int(cutout_size),
             "detected_line": [[int(v) for v in point] for point in detected_line],
+            "detected_media": {
+                "directories": {
+                    label_name: str(Path(directory).expanduser().resolve())
+                    for label_name, directory in (media_directories or {}).items()
+                    if label_name in ("meteor", "not_meteor") and str(directory).strip()
+                },
+                "filename_prefix": safe_event_id,
+            } if media_directories else None,
             "artifacts": {
                 "diff": "diff.png",
                 "temporal_rgb": "temporal_rgb.png",
@@ -190,34 +199,225 @@ def load_metadata(event_dir: Path) -> Dict[str, Any]:
         return json.load(handle)
 
 
-def review_event(event_dir: Path, root_dir: str, reviewed_label: str) -> Dict[str, Any]:
+def _detected_media_metadata(
+    media_directories: Dict[str, str], filename_prefix: str
+) -> Dict[str, Any]:
+    return {
+        "directories": {
+            label_name: str(Path(directory).expanduser().resolve())
+            for label_name, directory in media_directories.items()
+            if label_name in ("meteor", "not_meteor") and str(directory).strip()
+        },
+        "filename_prefix": filename_prefix,
+    }
+
+
+def _event_media_prefix(event_id: str) -> str:
+    parts = str(event_id).rsplit("_", 1)
+    if len(parts) == 2 and len(parts[1]) == 8 and all(
+        character in "0123456789abcdefABCDEF" for character in parts[1]
+    ):
+        return parts[0]
+    return str(event_id)
+
+
+def _has_detected_media_metadata(value: object) -> bool:
+    if not isinstance(value, dict):
+        return False
+    directories = value.get("directories")
+    if not isinstance(directories, dict) or not str(value.get("filename_prefix", "")).strip():
+        return False
+    return all(str(directories.get(label, "")).strip() for label in ("meteor", "not_meteor"))
+
+
+def _available_media_destination(path: Path) -> Path:
+    if not path.exists():
+        return path
+    candidate = path.with_name(f"{path.stem}_{uuid.uuid4().hex[:8]}{path.suffix}")
+    while candidate.exists():
+        candidate = path.with_name(f"{path.stem}_{uuid.uuid4().hex[:8]}{path.suffix}")
+    return candidate
+
+
+def _apply_media_moves(
+    moves: Iterable[Tuple[Path, Path]], *, rename_conflicts: bool
+) -> List[Dict[str, str]]:
+    """Move files as a group and roll back completed moves if one fails."""
+    completed: List[Dict[str, str]] = []
+    try:
+        for source, destination in moves:
+            if not source.is_file() or source.resolve() == destination.resolve():
+                continue
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if destination.exists():
+                if not rename_conflicts:
+                    raise FileExistsError(str(destination))
+                destination = _available_media_destination(destination)
+            shutil.move(str(source), str(destination))
+            completed.append({"from": str(source), "to": str(destination)})
+    except Exception:
+        rollback_errors = []
+        for item in reversed(completed):
+            moved = Path(item["to"])
+            original = Path(item["from"])
+            try:
+                if moved.exists() and not original.exists():
+                    original.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(moved), str(original))
+            except Exception as exc:
+                rollback_errors.append(str(exc))
+        if rollback_errors:
+            raise RuntimeError(
+                f"メディア移動に失敗し、ロールバックにも失敗しました: {'; '.join(rollback_errors)}"
+            )
+        raise
+    return completed
+
+
+def _move_detected_media(
+    metadata: Dict[str, Any], source_label: str, destination_label: str
+) -> List[Dict[str, str]]:
+    detected_media = metadata.get("detected_media")
+    if not isinstance(detected_media, dict):
+        return []
+    directories = detected_media.get("directories")
+    prefix = str(detected_media.get("filename_prefix", "")).strip()
+    if not isinstance(directories, dict) or not prefix:
+        return []
+    source_dir = Path(str(directories.get(source_label, ""))).expanduser()
+    destination_dir = Path(str(directories.get(destination_label, ""))).expanduser()
+    if not str(directories.get(source_label, "")).strip() or not str(
+        directories.get(destination_label, "")
+    ).strip():
+        return []
+    if source_dir.resolve() == destination_dir.resolve() or not source_dir.is_dir():
+        return []
+
+    matching_files = []
+    for path in source_dir.iterdir():
+        if not path.is_file():
+            continue
+        if path.name == prefix or path.stem == prefix or path.name.startswith(f"{prefix}_"):
+            matching_files.append(path)
+    return _apply_media_moves(
+        ((path, destination_dir / path.name) for path in sorted(matching_files)),
+        rename_conflicts=True,
+    )
+
+
+def review_event(
+    event_dir: Path,
+    root_dir: str,
+    reviewed_label: str,
+    media_directories: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
     label = "meteor" if reviewed_label == "meteor" else "not_meteor"
     root = Path(root_dir).expanduser().resolve()
     metadata = load_metadata(event_dir)
     predicted = metadata.get("predicted_label", event_dir.parent.name)
+    predicted = "meteor" if predicted == "meteor" else "not_meteor"
+    if media_directories and not _has_detected_media_metadata(metadata.get("detected_media")):
+        metadata["detected_media"] = _detected_media_metadata(
+            media_directories,
+            _event_media_prefix(str(metadata.get("event_id") or event_dir.name)),
+        )
     destination_parent = root / "reviewed" / label
     destination_parent.mkdir(parents=True, exist_ok=True)
     destination = destination_parent / event_dir.name
     if destination.exists():
         destination = destination_parent / f"{event_dir.name}_{uuid.uuid4().hex[:8]}"
 
+    media_moves = _move_detected_media(metadata, predicted, label) if label != predicted else []
+    original_metadata = dict(metadata)
     metadata.update({
         "review_status": "reviewed",
         "reviewed_label": label,
         "was_misclassified": label != predicted,
         "reviewed_at": _utc_now(),
+        "detected_media_moves": media_moves,
     })
-    with (event_dir / "metadata.json").open("w", encoding="utf-8") as handle:
-        json.dump(metadata, handle, ensure_ascii=False, indent=2)
-    shutil.move(str(event_dir), str(destination))
     record = {
         "action": "review", "timestamp": _utc_now(), "event_id": destination.name,
         "predicted_label": predicted, "reviewed_label": label,
         "was_misclassified": label != predicted,
         "from": str(event_dir), "to": str(destination),
+        "media_moves": media_moves,
     }
-    _append_jsonl(root / "review_log.jsonl", record)
+    try:
+        with (event_dir / "metadata.json").open("w", encoding="utf-8") as handle:
+            json.dump(metadata, handle, ensure_ascii=False, indent=2)
+        shutil.move(str(event_dir), str(destination))
+        _append_jsonl(root / "review_log.jsonl", record)
+    except Exception:
+        if destination.exists() and not event_dir.exists():
+            shutil.move(str(destination), str(event_dir))
+        if event_dir.exists():
+            with (event_dir / "metadata.json").open("w", encoding="utf-8") as handle:
+                json.dump(original_metadata, handle, ensure_ascii=False, indent=2)
+        _apply_media_moves(
+            ((Path(item["to"]), Path(item["from"])) for item in reversed(media_moves)),
+            rename_conflicts=False,
+        )
+        raise
     return record
+
+
+def sync_reviewed_media(root_dir: str, media_directories: Dict[str, str]) -> int:
+    """Move saved detection files for already-reviewed misclassifications."""
+    root = Path(root_dir).expanduser().resolve()
+    moved_count = 0
+    for reviewed_folder_label in ("meteor", "not_meteor"):
+        reviewed_dir = root / "reviewed" / reviewed_folder_label
+        if not reviewed_dir.is_dir():
+            continue
+        for event_dir in sorted(reviewed_dir.iterdir()):
+            if not event_dir.is_dir() or event_dir.name.startswith("."):
+                continue
+            metadata = load_metadata(event_dir)
+            if metadata.get("review_status") != "reviewed":
+                continue
+            predicted_raw = metadata.get("predicted_label")
+            reviewed_raw = metadata.get("reviewed_label", reviewed_folder_label)
+            if predicted_raw not in ("meteor", "not_meteor") or reviewed_raw not in (
+                "meteor", "not_meteor"
+            ):
+                continue
+            if predicted_raw == reviewed_raw or "detected_media_moves" in metadata:
+                continue
+
+            detected_media = metadata.get("detected_media")
+            if not _has_detected_media_metadata(detected_media):
+                detected_media = _detected_media_metadata(
+                    media_directories,
+                    _event_media_prefix(str(metadata.get("event_id") or event_dir.name)),
+                )
+
+            original_metadata = dict(metadata)
+            metadata["detected_media"] = detected_media
+            media_moves = _move_detected_media(metadata, predicted_raw, reviewed_raw)
+            if not media_moves:
+                continue
+            metadata["detected_media_moves"] = media_moves
+            try:
+                with (event_dir / "metadata.json").open("w", encoding="utf-8") as handle:
+                    json.dump(metadata, handle, ensure_ascii=False, indent=2)
+                _append_jsonl(root / "review_log.jsonl", {
+                    "action": "sync_reviewed_media",
+                    "timestamp": _utc_now(),
+                    "event_id": event_dir.name,
+                    "review_timestamp": metadata.get("reviewed_at"),
+                    "media_moves": media_moves,
+                })
+            except Exception:
+                with (event_dir / "metadata.json").open("w", encoding="utf-8") as handle:
+                    json.dump(original_metadata, handle, ensure_ascii=False, indent=2)
+                _apply_media_moves(
+                    ((Path(item["to"]), Path(item["from"])) for item in reversed(media_moves)),
+                    rename_conflicts=False,
+                )
+                raise
+            moved_count += len(media_moves)
+    return moved_count
 
 
 def detection_date(event_dir: Path) -> Optional[str]:
@@ -307,18 +507,39 @@ def undo_review(record: Dict[str, Any], root_dir: str) -> Optional[Path]:
     if not source.exists() or destination.exists():
         return None
     metadata = load_metadata(source)
+    reviewed_metadata = dict(metadata)
+    media_moves = metadata.get("detected_media_moves", record.get("media_moves", []))
+    if not isinstance(media_moves, list):
+        media_moves = []
+    restored_media_moves = _apply_media_moves(
+        ((Path(item["to"]), Path(item["from"])) for item in reversed(media_moves)),
+        rename_conflicts=False,
+    )
     metadata["review_status"] = "pending"
     for key in ("reviewed_label", "was_misclassified", "reviewed_at"):
         metadata.pop(key, None)
-    with (source / "metadata.json").open("w", encoding="utf-8") as handle:
-        json.dump(metadata, handle, ensure_ascii=False, indent=2)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    shutil.move(str(source), str(destination))
-    _append_jsonl(Path(root_dir).expanduser() / "review_log.jsonl", {
-        "action": "undo", "timestamp": _utc_now(), "event_id": destination.name,
-        "reverts_review_timestamp": record.get("timestamp"), "from": str(source),
-        "to": str(destination),
-    })
+    metadata.pop("detected_media_moves", None)
+    try:
+        with (source / "metadata.json").open("w", encoding="utf-8") as handle:
+            json.dump(metadata, handle, ensure_ascii=False, indent=2)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(source), str(destination))
+        _append_jsonl(Path(root_dir).expanduser() / "review_log.jsonl", {
+            "action": "undo", "timestamp": _utc_now(), "event_id": destination.name,
+            "reverts_review_timestamp": record.get("timestamp"), "from": str(source),
+            "to": str(destination),
+        })
+    except Exception:
+        if destination.exists() and not source.exists():
+            shutil.move(str(destination), str(source))
+        if source.exists():
+            with (source / "metadata.json").open("w", encoding="utf-8") as handle:
+                json.dump(reviewed_metadata, handle, ensure_ascii=False, indent=2)
+        _apply_media_moves(
+            ((Path(item["to"]), Path(item["from"])) for item in reversed(restored_media_moves)),
+            rename_conflicts=False,
+        )
+        raise
     return destination
 
 

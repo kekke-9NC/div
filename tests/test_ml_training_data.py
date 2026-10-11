@@ -1,4 +1,5 @@
 import json
+import shutil
 import tempfile
 import unittest
 from datetime import datetime
@@ -11,19 +12,28 @@ import ml_training_data
 
 
 class TrainingDataTests(unittest.TestCase):
-    def _export_sample(self, root: Path, event_id: str, when: datetime):
+    def _export_sample(
+        self,
+        root: Path,
+        event_id: str,
+        when: datetime,
+        predicted_label: str = "not_meteor",
+        media_directories=None,
+    ):
         frames = []
         for index in range(3):
             frame = np.zeros((24, 24, 3), dtype=np.uint8)
             frame[10:13, 4 + index * 4:7 + index * 4] = 200
             frames.append(frame)
         return Path(ml_training_data.export_training_event(
-            root_dir=str(root), predicted_label="not_meteor", probability=0.08,
+            root_dir=str(root), predicted_label=predicted_label,
+            probability=0.95 if predicted_label == "meteor" else 0.08,
             event_id=event_id, source=f"/{when:%Y%m%d}/22/57.mp4",
             detection_time=when, frames=frames,
             classification_diff=np.max(np.stack(frames), axis=0),
             cutout_rect=(0, 0, 24, 24), cutout_size=24, frame_rate=15.0,
             detected_line=((4, 11), (15, 11)), frame_range=(1, 3),
+            media_directories=media_directories,
         ))
 
     def test_export_review_and_persistent_undo(self):
@@ -123,6 +133,126 @@ class TrainingDataTests(unittest.TestCase):
             ]
             self.assertEqual(grouped, [first, second])
             self.assertNotIn(third, grouped)
+
+    def test_review_moves_detected_media_and_undo_restores_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            meteor_dir = root / "detected_meteor"
+            not_meteor_dir = root / "detected_not_meteor"
+            media_directories = {
+                "meteor": str(meteor_dir),
+                "not_meteor": str(not_meteor_dir),
+            }
+            event = self._export_sample(
+                root, "false_positive", datetime(2026, 10, 1, 22, 57),
+                predicted_label="meteor", media_directories=media_directories,
+            )
+            meteor_dir.mkdir()
+            related_files = [
+                meteor_dir / f"{event.name}.mp4",
+                meteor_dir / f"{event.name}_composite.jpg",
+                meteor_dir / f"{event.name}_info.txt",
+            ]
+            for path in related_files:
+                path.write_text("sample", encoding="utf-8")
+            unrelated = meteor_dir / "another_event.mp4"
+            unrelated.write_text("keep", encoding="utf-8")
+
+            record = ml_training_data.review_event(event, str(root), "not_meteor")
+            reviewed = root / "reviewed" / "not_meteor" / event.name
+            self.assertTrue(reviewed.is_dir())
+            self.assertEqual(len(record["media_moves"]), len(related_files))
+            for path in related_files:
+                self.assertFalse(path.exists())
+                self.assertTrue(not_meteor_dir.joinpath(path.name).is_file())
+            self.assertTrue(unrelated.is_file())
+
+            restored = ml_training_data.undo_review(record, str(root))
+            self.assertEqual(restored, event)
+            for path in related_files:
+                self.assertTrue(path.is_file())
+                self.assertFalse(not_meteor_dir.joinpath(path.name).exists())
+
+    def test_skip_does_not_move_detected_media(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            meteor_dir = root / "detected_meteor"
+            not_meteor_dir = root / "detected_not_meteor"
+            media_directories = {
+                "meteor": str(meteor_dir),
+                "not_meteor": str(not_meteor_dir),
+            }
+            event = self._export_sample(
+                root, "skipped_event", datetime(2026, 10, 2, 22, 57),
+                predicted_label="meteor", media_directories=media_directories,
+            )
+            meteor_dir.mkdir()
+            detected_clip = meteor_dir / f"{event.name}.mp4"
+            detected_clip.write_text("keep in predicted folder", encoding="utf-8")
+
+            record = ml_training_data.skip_event(event, str(root))
+
+            self.assertTrue(Path(record["to"]).is_dir())
+            self.assertTrue(detected_clip.is_file())
+            self.assertFalse(not_meteor_dir.exists())
+
+    def test_sync_moves_media_for_legacy_reviewed_events(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            meteor_dir = root / "detected_meteor"
+            not_meteor_dir = root / "detected_not_meteor"
+            media_directories = {
+                "meteor": str(meteor_dir),
+                "not_meteor": str(not_meteor_dir),
+            }
+            event = self._export_sample(
+                root, "legacy_false_positive", datetime(2026, 10, 3, 22, 57),
+                predicted_label="meteor",
+            )
+            meteor_dir.mkdir()
+            detected_files = [
+                meteor_dir / f"{event.name}.mp4",
+                meteor_dir / f"{event.name}_cutout_diff.jpg",
+            ]
+            for path in detected_files:
+                path.write_text("legacy output", encoding="utf-8")
+
+            metadata = ml_training_data.load_metadata(event)
+            metadata.update({
+                "review_status": "reviewed",
+                "reviewed_label": "not_meteor",
+                "was_misclassified": True,
+                "reviewed_at": "2026-10-04T00:00:00+00:00",
+            })
+            (event / "metadata.json").write_text(
+                json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            reviewed = root / "reviewed" / "not_meteor" / event.name
+            reviewed.parent.mkdir(parents=True)
+            shutil.move(str(event), str(reviewed))
+            record = {
+                "action": "review",
+                "timestamp": "legacy-review",
+                "from": str(event),
+                "to": str(reviewed),
+            }
+
+            moved_count = ml_training_data.sync_reviewed_media(
+                str(root), media_directories
+            )
+
+            self.assertEqual(moved_count, len(detected_files))
+            for path in detected_files:
+                self.assertFalse(path.exists())
+                self.assertTrue(not_meteor_dir.joinpath(path.name).is_file())
+            self.assertEqual(
+                ml_training_data.sync_reviewed_media(str(root), media_directories), 0
+            )
+
+            restored = ml_training_data.undo_review(record, str(root))
+            self.assertEqual(restored, event)
+            for path in detected_files:
+                self.assertTrue(path.is_file())
 
 
 if __name__ == "__main__":

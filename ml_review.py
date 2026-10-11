@@ -28,9 +28,15 @@ def confirmation_button_styles(predicted_label: object) -> tuple[str, str]:
 
 
 class TrainingDataReviewWindow(tk.Toplevel):
-    def __init__(self, parent: tk.Misc, root_dir: str):
+    def __init__(
+        self,
+        parent: tk.Misc,
+        root_dir: str,
+        media_directories: Optional[Dict[str, str]] = None,
+    ):
         super().__init__(parent)
         self.root_dir = str(Path(root_dir).expanduser())
+        self.media_directories = dict(media_directories or {})
         self.title("機械学習データ目視レビュー")
         self.geometry("1320x760")
         self.minsize(1000, 650)
@@ -266,7 +272,9 @@ class TrainingDataReviewWindow(tk.Toplevel):
             return
         self._stop_video()
         try:
-            record = ml_training_data.review_event(event, self.root_dir, label)
+            record = ml_training_data.review_event(
+                event, self.root_dir, label, self.media_directories
+            )
             self.undo_stack.append(record)
             self.events.pop(self.index)
             self.index = min(self.index, max(0, len(self.events) - 1))
@@ -371,5 +379,9 @@ class TrainingDataReviewWindow(tk.Toplevel):
         self.destroy()
 
 
-def open_review_window(parent: tk.Misc, root_dir: str) -> TrainingDataReviewWindow:
-    return TrainingDataReviewWindow(parent, root_dir)
+def open_review_window(
+    parent: tk.Misc,
+    root_dir: str,
+    media_directories: Optional[Dict[str, str]] = None,
+) -> TrainingDataReviewWindow:
+    return TrainingDataReviewWindow(parent, root_dir, media_directories)
