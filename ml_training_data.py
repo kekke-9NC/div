@@ -310,6 +310,7 @@ def review_event(
     root_dir: str,
     reviewed_label: str,
     media_directories: Optional[Dict[str, str]] = None,
+    *, batch_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     label = "meteor" if reviewed_label == "meteor" else "not_meteor"
     root = Path(root_dir).expanduser().resolve()
@@ -343,6 +344,9 @@ def review_event(
         "from": str(event_dir), "to": str(destination),
         "media_moves": media_moves,
     }
+    if batch_id:
+        metadata["review_batch_id"] = batch_id
+        record["batch_id"] = batch_id
     try:
         with (event_dir / "metadata.json").open("w", encoding="utf-8") as handle:
             json.dump(metadata, handle, ensure_ascii=False, indent=2)
@@ -437,7 +441,8 @@ def detection_date(event_dir: Path) -> Optional[str]:
         return compact if len(compact) == 10 else None
 
 
-def skip_event(event_dir: Path, root_dir: str, reason: str = "single") -> Dict[str, Any]:
+def skip_event(event_dir: Path, root_dir: str, reason: str = "single", *,
+               batch_id: Optional[str] = None) -> Dict[str, Any]:
     """Hide a pending event persistently without assigning a training label.
 
     Skipped samples are moved out of ``pending`` so reopening the reviewer does
@@ -447,6 +452,7 @@ def skip_event(event_dir: Path, root_dir: str, reason: str = "single") -> Dict[s
     event_dir = Path(event_dir).expanduser().resolve()
     root = Path(root_dir).expanduser().resolve()
     metadata = load_metadata(event_dir)
+    original_metadata = dict(metadata)
     predicted = str(metadata.get("predicted_label", event_dir.parent.name))
     predicted = "meteor" if predicted == "meteor" else "not_meteor"
     destination_parent = root / "skipped" / predicted
@@ -461,9 +467,6 @@ def skip_event(event_dir: Path, root_dir: str, reason: str = "single") -> Dict[s
         "skipped_at": timestamp,
         "skip_reason": str(reason or "single"),
     })
-    with (event_dir / "metadata.json").open("w", encoding="utf-8") as handle:
-        json.dump(metadata, handle, ensure_ascii=False, indent=2)
-    shutil.move(str(event_dir), str(destination))
     record = {
         "action": "skip",
         "timestamp": timestamp,
@@ -474,7 +477,21 @@ def skip_event(event_dir: Path, root_dir: str, reason: str = "single") -> Dict[s
         "from": str(event_dir),
         "to": str(destination),
     }
-    _append_jsonl(root / "review_log.jsonl", record)
+    if batch_id:
+        metadata["skip_batch_id"] = batch_id
+        record["batch_id"] = batch_id
+    try:
+        with (event_dir / "metadata.json").open("w", encoding="utf-8") as handle:
+            json.dump(metadata, handle, ensure_ascii=False, indent=2)
+        shutil.move(str(event_dir), str(destination))
+        _append_jsonl(root / "review_log.jsonl", record)
+    except Exception:
+        if destination.exists() and not event_dir.exists():
+            shutil.move(str(destination), str(event_dir))
+        if event_dir.exists():
+            with (event_dir / "metadata.json").open("w", encoding="utf-8") as handle:
+                json.dump(original_metadata, handle, ensure_ascii=False, indent=2)
+        raise
     return record
 
 
@@ -485,19 +502,28 @@ def undo_skip(record: Dict[str, Any], root_dir: str) -> Optional[Path]:
     if not source.exists() or destination.exists():
         return None
     metadata = load_metadata(source)
+    original_metadata = dict(metadata)
     metadata["review_status"] = "pending"
-    for key in ("skipped_at", "skip_reason"):
+    for key in ("skipped_at", "skip_reason", "skip_batch_id"):
         metadata.pop(key, None)
-    with (source / "metadata.json").open("w", encoding="utf-8") as handle:
-        json.dump(metadata, handle, ensure_ascii=False, indent=2)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    shutil.move(str(source), str(destination))
-    _append_jsonl(Path(root_dir).expanduser() / "review_log.jsonl", {
-        "action": "undo_skip", "timestamp": _utc_now(),
-        "event_id": destination.name,
-        "reverts_skip_timestamp": record.get("timestamp"),
-        "from": str(source), "to": str(destination),
-    })
+    try:
+        with (source / "metadata.json").open("w", encoding="utf-8") as handle:
+            json.dump(metadata, handle, ensure_ascii=False, indent=2)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(source), str(destination))
+        _append_jsonl(Path(root_dir).expanduser() / "review_log.jsonl", {
+            "action": "undo_skip", "timestamp": _utc_now(),
+            "event_id": destination.name,
+            "reverts_skip_timestamp": record.get("timestamp"),
+            "from": str(source), "to": str(destination),
+        })
+    except Exception:
+        if destination.exists() and not source.exists():
+            shutil.move(str(destination), str(source))
+        if source.exists():
+            with (source / "metadata.json").open("w", encoding="utf-8") as handle:
+                json.dump(original_metadata, handle, ensure_ascii=False, indent=2)
+        raise
     return destination
 
 
@@ -516,7 +542,7 @@ def undo_review(record: Dict[str, Any], root_dir: str) -> Optional[Path]:
         rename_conflicts=False,
     )
     metadata["review_status"] = "pending"
-    for key in ("reviewed_label", "was_misclassified", "reviewed_at"):
+    for key in ("reviewed_label", "was_misclassified", "reviewed_at", "review_batch_id"):
         metadata.pop(key, None)
     metadata.pop("detected_media_moves", None)
     try:

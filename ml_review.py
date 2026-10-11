@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -54,6 +55,7 @@ class TrainingDataReviewWindow(tk.Toplevel):
         self.skip_count_var = tk.IntVar(value=10)
         self.undo_skip_count_var = tk.IntVar(value=1)
         self.skip_status_var = tk.StringVar()
+        self.bulk_dialog = None
         self._build_ui()
         self.protocol("WM_DELETE_WINDOW", self._close)
         self.bind("<Left>", lambda _e: self._previous())
@@ -84,6 +86,7 @@ class TrainingDataReviewWindow(tk.Toplevel):
         toolbar.pack(fill=tk.X)
         ttk.Label(toolbar, textvariable=self.status_var).pack(side=tk.LEFT)
         ttk.Label(toolbar, textvariable=self.skip_status_var).pack(side=tk.LEFT, padx=(18, 0))
+        ttk.Button(toolbar, text="流星確率で一括選別", command=self._open_bulk_review).pack(side=tk.RIGHT, padx=8)
         ttk.Button(toolbar, text="再読み込み", command=self.refresh).pack(side=tk.RIGHT)
 
         ttk.Label(
@@ -159,8 +162,17 @@ class TrainingDataReviewWindow(tk.Toplevel):
         else:
             self.index = min(self.index, max(0, len(self.events) - 1))
         self.skip_stack = ml_training_data.undoable_skips(self.root_dir)
+        self.undo_stack = ml_training_data.undoable_reviews(self.root_dir)
         self.skip_status_var.set(f"スキップ中: {len(self.skip_stack)}件")
         self._show_current()
+
+    def _open_bulk_review(self) -> None:
+        if self.bulk_dialog is not None and self.bulk_dialog.winfo_exists():
+            self.bulk_dialog.lift()
+            return
+        from ml_bulk_review_ui import BulkReviewDialog
+        self.bulk_dialog = BulkReviewDialog(self)
+        self.bulk_dialog.grab_set()
 
     @property
     def current_event(self) -> Optional[Path]:
@@ -190,6 +202,8 @@ class TrainingDataReviewWindow(tk.Toplevel):
 
         try:
             meta = ml_training_data.load_metadata(event)
+            if not isinstance(meta, dict):
+                raise ValueError("メタデータの形式が不正です。")
         except Exception as exc:
             self._highlight_predicted_confirmation(None)
             self.detail_var.set(f"メタデータを読み込めません: {exc}")
@@ -197,8 +211,16 @@ class TrainingDataReviewWindow(tk.Toplevel):
         predicted_label = meta.get("predicted_label")
         self._highlight_predicted_confirmation(predicted_label)
         self.status_var.set(f"未確認 {self.index + 1} / {len(self.events)}")
+        try:
+            raw_probability = meta["meteor_probability"]
+            if isinstance(raw_probability, bool):
+                raise ValueError("Invalid probability")
+            probability = float(raw_probability)
+            probability_text = f"{probability:.3f}" if math.isfinite(probability) and 0 <= probability <= 1 else "不明"
+        except (KeyError, TypeError, ValueError):
+            probability_text = "不明"
         self.detail_var.set(
-            f"予測: {predicted_label}　流星確率: {meta.get('meteor_probability', 0):.3f}\n"
+            f"予測: {predicted_label}　流星確率: {probability_text}\n"
             f"日時: {meta.get('detection_time', '')}　元動画: {meta.get('source', '')}"
         )
 
@@ -375,6 +397,12 @@ class TrainingDataReviewWindow(tk.Toplevel):
         self.refresh()
 
     def _close(self) -> None:
+        if self.bulk_dialog is not None and self.bulk_dialog.winfo_exists():
+            if self.bulk_dialog.busy:
+                self.bulk_dialog._close()
+                self.after(100, self._close)
+                return
+            self.bulk_dialog.destroy()
         self._stop_video()
         self.destroy()
 
