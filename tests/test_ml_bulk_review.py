@@ -39,6 +39,17 @@ def test_invalid_probabilities_are_excluded(tmp_path, probability):
     assert result.unreadable == 1
 
 
+@pytest.mark.parametrize("sign", [1, -1])
+def test_overflowing_json_probability_does_not_stop_selection(tmp_path, sign):
+    event(tmp_path, "a_overflow", sign * 10**400)
+    valid = event(tmp_path, "z_valid", 0.05)
+    result = select(tmp_path)
+    assert [candidate.path for candidate in result.candidates] == [valid]
+    assert result.scanned == 2
+    assert result.unreadable == 1
+    assert not result.cancelled
+
+
 def test_missing_or_broken_metadata_and_nonpending_are_excluded(tmp_path):
     a = event(tmp_path, "missing")
     (a / "metadata.json").write_text('{"review_status":"pending"}')
@@ -62,7 +73,9 @@ def test_day_and_prediction_filters(tmp_path):
 
 
 @pytest.mark.parametrize("filters", [{"threshold": "nan"}, {"threshold": 1.1}, {"threshold": -1},
-                                     {"comparison": "less"}, {"detection_date": "2026-99-99"}, {"predicted_label": "bad"}])
+                                     {"comparison": "less"}, {"detection_date": "2026-99-99"}, {"predicted_label": "bad"},
+                                     pytest.param({"threshold": 10**400}, id="positive-overflow"),
+                                     pytest.param({"threshold": -(10**400)}, id="negative-overflow")])
 def test_invalid_filters_fail_before_selection(filters):
     with pytest.raises(ValueError):
         bulk.ReviewFilter(**filters)

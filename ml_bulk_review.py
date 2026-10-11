@@ -23,7 +23,7 @@ class ReviewFilter:
     def __post_init__(self):
         try:
             value = float(self.threshold)
-        except (TypeError, ValueError) as exc:
+        except (TypeError, ValueError, OverflowError) as exc:
             raise ValueError("流星確率の閾値は0〜1で指定してください。") from exc
         if not math.isfinite(value) or not 0 <= value <= 1:
             raise ValueError("流星確率の閾値は0〜1で指定してください。")
@@ -100,7 +100,7 @@ def select_events(root_dir: str, criteria: ReviewFilter, cancel: threading.Event
                 matches &= day == criteria.detection_date
             if matches:
                 result.candidates.append(Candidate(path, digest))
-        except (OSError, ValueError, TypeError, KeyError):
+        except (OSError, ValueError, TypeError, KeyError, OverflowError):
             result.unreadable += 1
         result.scanned += 1
         if index % 100 == 0 or index + 1 == len(events):

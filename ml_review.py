@@ -217,7 +217,7 @@ class TrainingDataReviewWindow(tk.Toplevel):
                 raise ValueError("Invalid probability")
             probability = float(raw_probability)
             probability_text = f"{probability:.3f}" if math.isfinite(probability) and 0 <= probability <= 1 else "不明"
-        except (KeyError, TypeError, ValueError):
+        except (KeyError, TypeError, ValueError, OverflowError):
             probability_text = "不明"
         self.detail_var.set(
             f"予測: {predicted_label}　流星確率: {probability_text}\n"
