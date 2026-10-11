@@ -23,6 +23,8 @@ from event_timing import EventTiming
 
 
 STOP = False
+COMPOSITE_HOLD_SECONDS = 1.5
+REPLAY_STYLE_VERSION = "composite-first-native-fps-v1"
 EVENT_STAMP_RE = re.compile(r"^(\d{8}_\d{9})_(?:not_)?meteor_")
 
 
@@ -167,7 +169,7 @@ def render_gif(source, output, ffmpeg, video_filter, mask=None, input_options=()
                         "[video][mask]blend=all_mode=multiply:repeatlast=1," + video_filter]
         else:
             command += ["-vf", video_filter]
-        command += [*output_options, "-an", "-threads", "1", "-loop", "0", str(temporary)]
+        command += [*output_options, "-an", "-threads", "1", "-fps_mode", "passthrough", "-loop", "0", str(temporary)]
         subprocess.run(command, check=True, timeout=90)
         os.replace(temporary, output)
     finally:
@@ -175,7 +177,71 @@ def render_gif(source, output, ffmpeg, video_filter, mask=None, input_options=()
         mask_png.unlink(missing_ok=True)
 
 
-def convert_raw_to_gif(event_source, meteor_dir, output, ffmpeg, mask=None, zoom=False):
+def render_composite_first_gif(
+    source,
+    composite,
+    output,
+    ffmpeg,
+    still_filter,
+    video_filter,
+    mask=None,
+    input_options=(),
+):
+    """Hold the event's brighten-composite, then play every source frame."""
+    if composite is None or not composite.is_file():
+        return False
+    output.parent.mkdir(parents=True, exist_ok=True)
+    fps = probe_video_geometry(ffmpeg, source)[2]
+    with tempfile.NamedTemporaryFile(prefix="latest_meteor_", suffix=".gif", dir=output.parent, delete=False) as handle:
+        temporary = Path(handle.name)
+    mask_png = temporary.with_suffix(".png")
+    try:
+        command = [
+            ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+            "-threads", "1", "-filter_threads", "1", "-filter_complex_threads", "1",
+            "-loop", "1", "-framerate", f"{fps:g}", "-t", f"{COMPOSITE_HOLD_SECONDS:.3f}",
+            "-i", str(composite), *input_options, "-i", str(source),
+        ]
+        if mask is not None and mask.mask is not None:
+            width, height, _ = probe_video_geometry(ffmpeg, source)
+            mask.write_png(mask_png, width, height)
+            command += ["-i", str(mask_png)]
+            graph = (
+                "[0:v]format=gbrp[still-source];[1:v]format=gbrp[video-source];"
+                "[2:v]format=gbrp,split[still-mask][video-mask];"
+                "[still-source][still-mask]blend=all_mode=multiply:repeatlast=1[still-masked];"
+                "[video-source][video-mask]blend=all_mode=multiply:repeatlast=1[video-masked];"
+                f"[still-masked]{still_filter},setpts=PTS-STARTPTS,setsar=1[still];"
+                f"[video-masked]{video_filter},setpts=PTS-STARTPTS,setsar=1[video];"
+            )
+        else:
+            graph = (
+                f"[0:v]format=gbrp,{still_filter},setpts=PTS-STARTPTS,setsar=1[still];"
+                f"[1:v]format=gbrp,{video_filter},setpts=PTS-STARTPTS,setsar=1[video];"
+            )
+        graph += (
+            "[still][video]concat=n=2:v=1:a=0[sequence];"
+            "[sequence]split[s0][s1];[s0]palettegen=max_colors=192[p];"
+            "[s1][p]paletteuse=dither=sierra2_4a[out]"
+        )
+        command += [
+            "-filter_complex", graph, "-map", "[out]", "-an", "-threads", "1",
+            "-fps_mode", "passthrough", "-loop", "0", str(temporary),
+        ]
+        subprocess.run(command, check=True, timeout=90)
+        os.replace(temporary, output)
+        return True
+    finally:
+        temporary.unlink(missing_ok=True)
+        mask_png.unlink(missing_ok=True)
+
+
+def composite_path_for(source, meteor_dir):
+    path = saved_media_path(meteor_dir, source, "_composite.jpg")
+    return path if path.is_file() else None
+
+
+def convert_raw_to_gif(event_source, meteor_dir, output, ffmpeg, mask=None, zoom=False, composite_first=False):
     request = raw_zoom_request(event_source, meteor_dir)
     if request is None:
         return None
@@ -188,22 +254,36 @@ def convert_raw_to_gif(event_source, meteor_dir, output, ffmpeg, mask=None, zoom
     duration_seconds = max(0.25, (clip_end + padding_frames - start_frame + 1) / fps)
     if zoom:
         x, y, crop_size = zoom_crop(source_width, source_height, center_x, center_y)
-        video_filter = (f"crop={crop_size}:{crop_size}:{x}:{y},"
-                        "tpad=start_mode=clone:start_duration=0.25:stop_mode=clone:stop_duration=0.5,"
-                        "fps=12,scale=180:180:flags=lanczos,")
+        still_filter = f"crop={crop_size}:{crop_size}:{x}:{y},scale=180:180:flags=lanczos"
+        video_filter = (
+            f"crop={crop_size}:{crop_size}:{x}:{y},"
+            "tpad=start_mode=clone:start_duration=0.25:stop_mode=clone:stop_duration=0.5,"
+            + ("" if composite_first else "fps=12,")
+            + "scale=180:180:flags=lanczos"
+        )
     else:
+        scale_pad = ("scale=320:180:force_original_aspect_ratio=decrease:flags=lanczos,"
+                     "pad=320:180:(ow-iw)/2:(oh-ih)/2:color=black")
+        still_filter = scale_pad
         video_filter = ("tpad=start_mode=clone:start_duration=0.5:stop_mode=clone:stop_duration=1.0,"
-                        "fps=12,scale=320:180:force_original_aspect_ratio=decrease:flags=lanczos,"
-                        "pad=320:180:(ow-iw)/2:(oh-ih)/2:color=black,")
-    video_filter += "split[s0][s1];[s0]palettegen=max_colors=192[p];[s1][p]paletteuse=dither=sierra2_4a"
-    render_gif(raw_source, output, ffmpeg, video_filter, mask,
-               input_options=("-ss", f"{start_frame / fps:.3f}"),
-               output_options=("-t", f"{duration_seconds:.3f}"))
+                        + ("" if composite_first else "fps=12,")
+                        + scale_pad)
+    seek_and_duration = ("-ss", f"{start_frame / fps:.3f}", "-t", f"{duration_seconds:.3f}")
+    composite = composite_path_for(event_source, meteor_dir)
+    rendered = composite_first and render_composite_first_gif(
+        raw_source, composite, output, ffmpeg, still_filter, video_filter, mask,
+        input_options=seek_and_duration,
+    )
+    if not rendered:
+        render_gif(raw_source, output, ffmpeg, video_filter, mask,
+                   input_options=("-ss", f"{start_frame / fps:.3f}"),
+                   output_options=("-t", f"{duration_seconds:.3f}"))
     return raw_source
 
 
-def convert_raw_zoom_to_gif(event_source, meteor_dir, output, ffmpeg, mask=None):
-    return convert_raw_to_gif(event_source, meteor_dir, output, ffmpeg, mask, zoom=True)
+def convert_raw_zoom_to_gif(event_source, meteor_dir, output, ffmpeg, mask=None, composite_first=False):
+    return convert_raw_to_gif(event_source, meteor_dir, output, ffmpeg, mask, zoom=True,
+                              composite_first=composite_first)
 
 
 def fallback_sources(source, meteor_dir, mask):
@@ -218,21 +298,30 @@ def fallback_sources(source, meteor_dir, mask):
     return full, full, mask
 
 
-def convert_saved_zoom_to_gif(full, event_source, meteor_dir, output, ffmpeg, mask):
+def convert_saved_zoom_to_gif(full, event_source, meteor_dir, output, ffmpeg, mask, composite_first=False):
     request = raw_zoom_request(event_source, meteor_dir, require_video=False)
     if request is None:
-        convert_to_gif(full, output, ffmpeg, 180, 180, mask)
+        convert_to_gif(
+            full, output, ffmpeg, 180, 180, mask,
+            composite_first=composite_first,
+        )
         return
     _, _, _, center_x, center_y = request
     width, height, _ = probe_video_geometry(ffmpeg, full)
     x, y, size = zoom_crop(width, height, center_x, center_y)
+    crop_scale = f"crop={size}:{size}:{x}:{y},scale=180:180:flags=lanczos"
     video_filter = (
         f"crop={size}:{size}:{x}:{y},"
         "tpad=start_mode=clone:start_duration=0.25:stop_mode=clone:stop_duration=0.5,"
-        "fps=12,scale=180:180:flags=lanczos,split[s0][s1];"
-        "[s0]palettegen=max_colors=192[p];[s1][p]paletteuse=dither=sierra2_4a"
+        + ("" if composite_first else "fps=12,")
+        + "scale=180:180:flags=lanczos"
     )
-    render_gif(full, output, ffmpeg, video_filter, mask)
+    rendered = composite_first and render_composite_first_gif(
+        full, composite_path_for(event_source, meteor_dir), output, ffmpeg,
+        crop_scale, video_filter, mask,
+    )
+    if not rendered:
+        render_gif(full, output, ffmpeg, video_filter, mask)
 
 
 def zoom_crop(width, height, center_x, center_y):
@@ -337,13 +426,16 @@ def stable_file(path: Path, wait_seconds: float) -> bool:
     return first.st_size == second.st_size and first.st_mtime_ns == second.st_mtime_ns
 
 
-def convert_to_gif(source, output, ffmpeg, width, height, mask=None):
-    video_filter = (
-        "tpad=start_mode=clone:start_duration=0.5:stop_mode=clone:stop_duration=1.0,"
-        f"fps=12,scale={width}:{height}:force_original_aspect_ratio=decrease:flags=lanczos,"
-        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,"
-        "split[s0][s1];[s0]palettegen=max_colors=192[p];[s1][p]paletteuse=dither=sierra2_4a"
-    )
+def convert_to_gif(source, output, ffmpeg, width, height, mask=None, composite_path=None, composite_first=False):
+    scale_pad = (f"scale={width}:{height}:force_original_aspect_ratio=decrease:flags=lanczos,"
+                 f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black")
+    still_filter = scale_pad
+    video_filter = ("tpad=start_mode=clone:start_duration=0.5:stop_mode=clone:stop_duration=1.0,"
+                    + ("" if composite_first else "fps=12,") + scale_pad)
+    if composite_first and composite_path is not None and render_composite_first_gif(
+        source, composite_path, output, ffmpeg, still_filter, video_filter, mask,
+    ):
+        return
     render_gif(source, output, ffmpeg, video_filter, mask)
 
 
@@ -375,7 +467,8 @@ def write_metadata(
         "mask_enabled": mask_enabled,
         "zoom_region": zoom_region,
         "classification_basis": "dataset_review_then_prediction",
-        "replay_version": 2,
+        "replay_version": REPLAY_STYLE_VERSION,
+        "composite_available": bool(source is not None and composite_path_for(source, source.parent)),
         **(timing or {}),
     }
     temporary = metadata_path.with_suffix(metadata_path.suffix + ".tmp")
@@ -449,7 +542,7 @@ def main() -> int:
     atexit.register(stop_workers)
 
     while not STOP:
-        for script in ('broadcast_timing', 'recent_meteors'):
+        for script in ('broadcast_timing', 'recent_meteors', 'night_dashboard_stats'):
             worker = workers.get(script)
             if worker is None or worker[0].poll() is not None:
                 if worker:
@@ -458,7 +551,17 @@ def main() -> int:
                 command = [sys.executable, str(Path(__file__).with_name(f'{script}.py')),
                            '--output-dir', str(args.output_dir), '--parent-pid', str(os.getpid())]
                 if script == 'recent_meteors':
-                    command += ['--meteor-dir', str(args.meteor_dir), '--legacy-settings', str(args.legacy_settings), '--ffmpeg', args.ffmpeg]
+                    command += [
+                        '--meteor-dir', str(args.meteor_dir),
+                        '--legacy-settings', str(args.legacy_settings),
+                        '--ffmpeg', args.ffmpeg,
+                        '--composite-first',
+                    ]
+                elif script == 'night_dashboard_stats':
+                    command += [
+                        '--meteor-dir', str(args.meteor_dir),
+                        '--legacy-settings', str(args.legacy_settings),
+                    ]
                 workers[script] = (subprocess.Popen(command, stdout=log, stderr=log), log)
         # Render astronomy separately so it cannot delay replay/statistics.
         if (args.output_dir / 'sky_config.json').exists() and (sky_process is None or sky_process.poll() is not None):
@@ -508,7 +611,9 @@ def main() -> int:
         count, window_start, window_end = night_count(args.meteor_dir, now, event_times)
         source = next((event.video for event in reversed(events)
                        if event.detected <= now and event.video is not None), None)
-        render_key = (source.name, mask.revision) if source is not None else None
+        composite = composite_path_for(source, source.parent) if source is not None else None
+        composite_mtime = composite.stat().st_mtime_ns if composite is not None else None
+        render_key = (REPLAY_STYLE_VERSION, source.name, mask.revision, composite_mtime) if source is not None else None
         if source is not None and render_key != last_rendered:
             if stable_file(source, min(0.5, max(0.1, args.poll_seconds / 2))):
                 next_full = args.output_dir / ".next_full.gif"
@@ -516,8 +621,14 @@ def main() -> int:
                 try:
                     print(f"[OBS meteor overlay] updating: {source.name}", flush=True)
                     event_dir = source.parent
-                    full_raw = convert_raw_to_gif(source, event_dir, next_full, args.ffmpeg, mask)
-                    zoom_raw = convert_raw_zoom_to_gif(source, event_dir, next_zoom, args.ffmpeg, mask)
+                    full_raw = convert_raw_to_gif(
+                        source, event_dir, next_full, args.ffmpeg, mask,
+                        composite_first=True,
+                    )
+                    zoom_raw = convert_raw_zoom_to_gif(
+                        source, event_dir, next_zoom, args.ffmpeg, mask,
+                        composite_first=True,
+                    )
                     full_image_source = full_raw
                     geometry_known = full_raw is not None and zoom_raw is not None
                     if full_raw is None or zoom_raw is None:
@@ -525,15 +636,25 @@ def main() -> int:
                         if not stable_file(full, 0.25) or not stable_file(zoom, 0.25):
                             raise OSError("流星映像を保存中です")
                         if full_raw is None:
-                            convert_to_gif(full, next_full, args.ffmpeg, 320, 180, mask)
+                            convert_to_gif(
+                                full, next_full, args.ffmpeg, 320, 180, mask,
+                                composite_path=composite,
+                                composite_first=True,
+                            )
                             full_image_source = full
                         if zoom_raw is None:
                             if mask.mask is not None or "_full" in full.stem:
-                                convert_saved_zoom_to_gif(full, source, event_dir, next_zoom, args.ffmpeg, zoom_mask)
+                                convert_saved_zoom_to_gif(
+                                    full, source, event_dir, next_zoom, args.ffmpeg, zoom_mask,
+                                    composite_first=True,
+                                )
                                 zoom = full
                                 geometry_known = True
                             else:
-                                convert_to_gif(zoom, next_zoom, args.ffmpeg, 180, 180, zoom_mask)
+                                convert_to_gif(
+                                    zoom, next_zoom, args.ffmpeg, 180, 180, zoom_mask,
+                                    composite_first=True,
+                                )
                             zoom_raw = zoom
                     region = replay_region(source, full_image_source, args.ffmpeg) if geometry_known else None
                     os.replace(next_full, gif_path)
@@ -555,6 +676,8 @@ def main() -> int:
                 "source": str(source) if source is not None else None,
                 "event": event_id(source) if source is not None else None,
                 "zoom_source": str(current_zoom_source) if current_zoom_source is not None else None,
+                "replay_version": REPLAY_STYLE_VERSION,
+                "composite_available": bool(source is not None and composite is not None),
                 "detected_at": (
                     event_datetime(source).strftime("%Y/%m/%d %H:%M:%S")
                     if source is not None and event_datetime(source) is not None

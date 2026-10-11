@@ -7,6 +7,7 @@ const jstMinute = new Intl.DateTimeFormat('ja-JP', {timeZone: 'Asia/Tokyo', hour
 let displayedEvent = null;
 let displayedEpoch = null;
 let displayedReplayEpoch = null;
+let replayModeLabel = '自動リプレイ';
 let imageKey = null;
 let pendingKey = null;
 let focusTimer = null;
@@ -23,6 +24,9 @@ let historyAnimation = null;
 let boardTimer = null;
 let historyActive = false;
 let renderedHistoryEvents = [];
+let activeBoardPage = 'graph-page';
+let nightDashboardBusy = false;
+let nightDashboardData = null;
 
 function updateClock() {
     const now = new Date();
@@ -100,13 +104,16 @@ async function refreshMetadata() {
             byId('last-clock').textContent = '--:--:--';
             byId('elapsed').textContent = '--';
             byId('replay-state').textContent = '自動リプレイ';
+            replayModeLabel = '自動リプレイ';
             displayedEvent = displayedEpoch = displayedReplayEpoch = imageKey = null;
             byId('visible-window').textContent = '';
             return;
         }
         const epoch = Number(data.detected_at_epoch);
         if (!Number.isFinite(epoch)) return;
-        const key = `${data.event}:${data.mask_revision || ''}:${JSON.stringify(data.zoom_region || null)}`;
+        replayModeLabel = data.composite_available ? '比較明合成 → 動画' : '自動リプレイ';
+        if (!replay.classList.contains('focus')) byId('replay-state').textContent = replayModeLabel;
+        const key = `${data.replay_version || 'legacy'}:${data.event}:${data.mask_revision || ''}:${JSON.stringify(data.zoom_region || null)}`;
         // Reload only when the event or mask changes; polling must not restart GIFs.
         if (key === imageKey) {
             showReplayTime(data);
@@ -130,10 +137,10 @@ async function refreshMetadata() {
         if (newDetection) {
             clearTimeout(focusTimer);
             replay.classList.add('focus');
-            byId('replay-state').textContent = '新しい検出 · リプレイ';
+            byId('replay-state').textContent = data.composite_available ? '新しい検出 · 比較明 → 動画' : '新しい検出 · リプレイ';
             focusTimer = setTimeout(() => {
                 replay.classList.remove('focus');
-                byId('replay-state').textContent = '自動リプレイ';
+                byId('replay-state').textContent = replayModeLabel;
             }, 12000);
         }
         updateClock();
@@ -189,17 +196,48 @@ function renderHistory(data) {
     }
     track.replaceChildren(...cards);
     byId('history-title').textContent = `直近${data.events.length || 10}件の流星`;
-    byId('history-state').textContent = '新しい順 · 拡大リプレイ · 訂正反映';
+    byId('history-state').textContent = '新しい順 · 比較明合成 → 動画リプレイ · 訂正反映';
 }
 
-function switchBoard() {
+function availableBoardPages() {
+    const pages = ['graph-page'];
+    const updated = Number(nightDashboardData && nightDashboardData.updated_at_epoch);
+    if (Number.isFinite(updated) && Math.abs(Date.now() / 1000 - updated) <= 60) {
+        pages.push('night-graph-page', 'conditions-page');
+    }
+    if (historyData && historyData.events.length) pages.push('history-page');
+    return pages;
+}
+
+function updateBoardNextHint() {
+    const pages = availableBoardPages();
+    if (!pages.includes(activeBoardPage)) return;
+    const nextPage = pages[(pages.indexOf(activeBoardPage) + 1) % pages.length];
+    const labels = {
+        'graph-page': '直近1時間の推移',
+        'night-graph-page': '今夜の時間別検出',
+        'conditions-page': '今夜の観測条件',
+        'history-page': `直近${historyData && historyData.events.length || 10}件の流星`,
+    };
+    byId('board-next').textContent = nextPage === activeBoardPage
+        ? '時間別情報を更新中'
+        : `次：${labels[nextPage]}`;
+}
+
+function showBoardPage(page) {
     clearTimeout(boardTimer);
-    historyActive = !historyActive && Boolean(historyData && historyData.events.length);
-    byId('graph-page').classList.toggle('active', !historyActive);
-    byId('history-page').classList.toggle('active', historyActive);
-    byId('graph-page').setAttribute('aria-hidden', String(historyActive));
-    byId('history-page').setAttribute('aria-hidden', String(!historyActive));
-    if (historyAnimation) historyAnimation.cancel();
+    if (!availableBoardPages().includes(page)) page = 'graph-page';
+    activeBoardPage = page;
+    historyActive = page === 'history-page';
+    for (const id of ['graph-page', 'night-graph-page', 'conditions-page', 'history-page']) {
+        byId(id).classList.toggle('active', id === page);
+        byId(id).setAttribute('aria-hidden', String(id !== page));
+    }
+    if (historyAnimation && !historyActive) {
+        historyAnimation.cancel();
+        historyAnimation = null;
+    }
+    updateBoardNextHint();
     if (historyActive) {
         renderHistory(historyData);
         const distance = Math.max(0, byId('history-track').scrollWidth - byId('history-viewport').clientWidth);
@@ -212,7 +250,24 @@ function switchBoard() {
         ], {duration, easing: 'linear', fill: 'forwards'});
         boardTimer = setTimeout(switchBoard, duration);
     } else {
-        boardTimer = setTimeout(switchBoard, 24000);
+        boardTimer = setTimeout(switchBoard, 22000);
+    }
+}
+
+function switchBoard() {
+    const pages = availableBoardPages();
+    const index = pages.indexOf(activeBoardPage);
+    showBoardPage(pages[(index + 1) % pages.length]);
+}
+
+function clearNightDashboard() {
+    nightDashboardData = null;
+    byId('observation-status').textContent = '情報更新待ち';
+    byId('observation-status').classList.remove('active');
+    if (activeBoardPage === 'night-graph-page' || activeBoardPage === 'conditions-page') {
+        showBoardPage('graph-page');
+    } else {
+        updateBoardNextHint();
     }
 }
 
@@ -225,10 +280,11 @@ async function refreshHistory() {
         if (!Number.isFinite(data.updated_at_epoch) || Date.now() / 1000 - data.updated_at_epoch > 90) {
             historyData = null;
             if (historyActive) switchBoard();
-            byId('board-next').textContent = '流星一覧の更新待ち';
+            else updateBoardNextHint();
+            byId('history-state').textContent = '一覧の更新待ち';
             return;
         }
-        byId('board-next').textContent = data.events.length ? `次：直近${data.events.length}件の流星` : '流星の検出を待っています';
+        byId('history-state').textContent = data.events.length ? '新しい順 · 比較明合成 → 動画リプレイ · 訂正反映' : '流星の検出を待っています';
         const key = JSON.stringify([data.mask_revision, data.events.map(event => [event.event, event.image]), data.excluded_events]);
         if (key !== historyKey) {
             // Newly detected items join on the next cycle, without interrupting
@@ -240,8 +296,15 @@ async function refreshHistory() {
         } else {
             historyData = data;
         }
+        updateBoardNextHint();
+        if (!historyActive) {
+            const hint = activeBoardPage === 'conditions-page' && data.events.length
+                ? `次：直近${data.events.length}件の流星`
+                : null;
+            if (hint) byId('board-next').textContent = hint;
+        }
     } catch (_) {
-        byId('board-next').textContent = '流星一覧を準備しています';
+        byId('history-state').textContent = '一覧を準備しています';
         if (historyData && Date.now() / 1000 - historyData.updated_at_epoch > 90 && historyActive) switchBoard();
     } finally {
         historyBusy = false;
@@ -289,6 +352,111 @@ function drawGraph(bins) {
     svg.setAttribute('aria-label', `直近1時間、古い順に10分ごとの検出数：${bins.join('、')}件`);
 }
 
+function drawNightGraph(data) {
+    const svg = byId('night-graph');
+    const ns = 'http://www.w3.org/2000/svg';
+    const elements = [];
+    const add = (tag, attrs, text) => {
+        const el = document.createElementNS(ns, tag);
+        for (const [key, value] of Object.entries(attrs)) el.setAttribute(key, value);
+        if (text !== undefined) el.textContent = text;
+        elements.push(el);
+    };
+    const bins = data.night_bins;
+    const hours = data.night_hour_labels;
+    const max = Math.max(1, ...bins);
+    const start = Number(data.night_window_start_epoch);
+    const end = Number(data.night_window_end_epoch);
+    const now = Date.now() / 1000;
+    const currentIndex = now >= start && now < end ? Math.floor((now - start) / 3600) : -1;
+    const baseY = 98;
+    add('line', {x1: 8, x2: 1232, y1: baseY, y2: baseY, stroke: '#425169'});
+    bins.forEach((value, index) => {
+        const x = 14 + index * 102;
+        const height = value / max * 55;
+        const future = start + (index + 1) * 3600 > now && index !== currentIndex;
+        const className = index === currentIndex ? 'bar current' : future ? 'bar future' : 'bar';
+        add('rect', {x, y: baseY - height, width: 62, height, rx: 3, class: className});
+        add('text', {x: x + 31, y: Math.max(13, baseY - height - 6), 'text-anchor': 'middle', class: 'bar-value'}, value);
+        add('text', {x: x + 31, y: 119, 'text-anchor': 'middle'}, `${hours[index]}時`);
+    });
+    svg.replaceChildren(...elements);
+    svg.setAttribute('aria-label', `今夜18時から翌6時まで、1時間ごとの検出数：${bins.join('、')}件`);
+    const startDate = new Date(start * 1000);
+    const endDate = new Date(end * 1000);
+    byId('night-window').textContent = `${jstDate.format(startDate).slice(5)} ${jstMinute.format(startDate)} – ${jstDate.format(endDate).slice(5)} ${jstMinute.format(endDate)}`;
+    byId('observation-night').textContent = `${data.night_label} · JST`;
+}
+
+async function refreshNightDashboard() {
+    if (nightDashboardBusy) return;
+    nightDashboardBusy = true;
+    try {
+        const data = await localJSON('night_dashboard.json');
+        if (!Array.isArray(data.night_bins) || data.night_bins.length !== 12 ||
+            !data.night_bins.every(n => Number.isInteger(n) && n >= 0) ||
+            !Array.isArray(data.night_hour_labels) || data.night_hour_labels.length !== 12 ||
+            !Number.isFinite(data.night_window_start_epoch) || !Number.isFinite(data.night_window_end_epoch)) {
+            clearNightDashboard();
+            return;
+        }
+        const updated = Number(data.updated_at_epoch);
+        if (!Number.isFinite(updated) || Math.abs(Date.now() / 1000 - updated) > 60) {
+            clearNightDashboard();
+            return;
+        }
+        nightDashboardData = data;
+        updateBoardNextHint();
+        drawNightGraph(data);
+
+        if (data.observation_schedule_enabled && Number.isFinite(data.observation_start_epoch) && Number.isFinite(data.observation_end_epoch)) {
+            const start = Number(data.observation_start_epoch);
+            const end = Number(data.observation_end_epoch);
+            byId('observation-schedule').textContent = `${jstMinute.format(new Date(start * 1000))} → ${jstMinute.format(new Date(end * 1000))}`;
+            byId('observation-date').textContent = `${jstDate.format(new Date(start * 1000)).slice(5)} → ${jstDate.format(new Date(end * 1000)).slice(5)} · 旧UI設定 · JST`;
+            const now = Date.now() / 1000;
+            const status = byId('observation-status');
+            if (now >= start && now < end) {
+                status.textContent = '予定時間内';
+                status.classList.add('active');
+            } else if (now < start) {
+                const remaining = Math.max(0, Math.floor(start - now));
+                const hours = Math.floor(remaining / 3600);
+                const minutes = Math.floor((remaining % 3600) / 60);
+                status.textContent = `開始まで ${hours}時間${String(minutes).padStart(2, '0')}分`;
+                status.classList.remove('active');
+            } else {
+                status.textContent = '次回予定';
+                status.classList.remove('active');
+            }
+        } else {
+            byId('observation-schedule').textContent = '時間指定なし';
+            byId('observation-date').textContent = '旧UIの時間設定 · JST';
+            byId('observation-status').textContent = '旧UI設定';
+            byId('observation-status').classList.remove('active');
+        }
+
+        if (Number.isFinite(data.sunset_epoch)) {
+            const sunset = new Date(Number(data.sunset_epoch) * 1000);
+            byId('sunset-time').textContent = jstMinute.format(sunset);
+            byId('sunset-date').textContent = `${jstDate.format(sunset).slice(5)} · JST`;
+        } else {
+            byId('sunset-time').textContent = '--:--';
+            byId('sunset-date').textContent = '地点情報なし';
+        }
+        byId('moon-phase').textContent = data.moon_phase_name || '--';
+        byId('moon-age').textContent = Number.isFinite(data.moon_age_days) ? data.moon_age_days.toFixed(1) : '--.-';
+        const illumination = Number.isFinite(data.moon_illumination_percent) ? Math.min(100, Math.max(0, data.moon_illumination_percent)) : null;
+        byId('moon-illumination').textContent = illumination === null ? '--%' : `${illumination}%`;
+        byId('moon-fill').style.width = illumination === null ? '0%' : `${illumination}%`;
+    } catch (_) {
+        const updated = Number(nightDashboardData && nightDashboardData.updated_at_epoch);
+        if (!Number.isFinite(updated) || Math.abs(Date.now() / 1000 - updated) > 60) clearNightDashboard();
+    } finally {
+        nightDashboardBusy = false;
+    }
+}
+
 async function refreshStatistics() {
     if (statisticsBusy) return;
     statisticsBusy = true;
@@ -313,11 +481,13 @@ async function refreshStatistics() {
 updateClock();
 refreshMetadata();
 refreshStatistics();
+refreshNightDashboard();
 refreshSky();
 refreshHistory();
 boardTimer = setTimeout(switchBoard, 24000);
 setInterval(updateClock, 1000);
 setInterval(refreshMetadata, 2500);
 setInterval(refreshStatistics, 2500);
+setInterval(refreshNightDashboard, 10000);
 setInterval(refreshSky, 2500);
 setInterval(refreshHistory, 5000);

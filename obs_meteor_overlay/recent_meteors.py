@@ -12,7 +12,14 @@ import signal
 import time
 from broadcast_timing import atomic_json
 from event_timing import EventTiming
-from latest_meteor_gif import convert_raw_zoom_to_gif, convert_saved_zoom_to_gif, convert_to_gif, fallback_sources
+from latest_meteor_gif import (
+    REPLAY_STYLE_VERSION,
+    composite_path_for,
+    convert_raw_zoom_to_gif,
+    convert_saved_zoom_to_gif,
+    convert_to_gif,
+    fallback_sources,
+)
 from legacy_detection_mask import LegacyDetectionMask, default_settings_path
 from reviewed_events import ReviewedMeteorCatalog
 
@@ -26,6 +33,7 @@ def main():
     parser.add_argument('--legacy-settings', type=Path, default=default_settings_path())
     parser.add_argument('--ffmpeg', required=True)
     parser.add_argument('--parent-pid', type=int)
+    parser.add_argument('--composite-first', action='store_true')
     args = parser.parse_args()
     os.nice(10)
     def stop(*_):
@@ -56,7 +64,15 @@ def main():
                 raise ValueError('Mask unavailable')
             entries, missing, keep = [], [], set()
             for event in events:
-                revision = hashlib.sha256(f'{event.key}:{mask.revision}:{event.video.stat().st_mtime_ns}'.encode()).hexdigest()[:20]
+                composite = composite_path_for(event.video, event.video.parent)
+                composite_mtime = composite.stat().st_mtime_ns if composite is not None else None
+                revision_input = (
+                    f'{REPLAY_STYLE_VERSION}:{event.key}:{mask.revision}:'
+                    f'{event.video.stat().st_mtime_ns}:{composite_mtime}'
+                    if args.composite_first else
+                    f'{event.key}:{mask.revision}:{event.video.stat().st_mtime_ns}'
+                )
+                revision = hashlib.sha256(revision_input.encode()).hexdigest()[:20]
                 gif = cache / f'{revision}.gif'
                 keep.add(gif.name)
                 entry = {'event': event.key, 'detected_at_epoch': event.detected.timestamp(), **timing.resolve(event.video)}
@@ -70,13 +86,22 @@ def main():
                         'classification_basis': 'dataset_review_then_prediction'})
             if missing:
                 source, output = missing[0]
-                raw = convert_raw_zoom_to_gif(source, source.parent, output, args.ffmpeg, mask)
+                raw = convert_raw_zoom_to_gif(
+                    source, source.parent, output, args.ffmpeg, mask,
+                    composite_first=args.composite_first,
+                )
                 if raw is None:
                     full, zoom, zoom_mask = fallback_sources(source, source.parent, mask)
                     if mask.mask is not None or '_full' in full.stem:
-                        convert_saved_zoom_to_gif(full, source, source.parent, output, args.ffmpeg, zoom_mask)
+                        convert_saved_zoom_to_gif(
+                            full, source, source.parent, output, args.ffmpeg, zoom_mask,
+                            composite_first=args.composite_first,
+                        )
                     else:
-                        convert_to_gif(zoom, output, args.ffmpeg, 180, 180, zoom_mask)
+                        convert_to_gif(
+                            zoom, output, args.ffmpeg, 180, 180, zoom_mask,
+                            composite_first=args.composite_first,
+                        )
             # Keep two generations briefly while browsers finish a page transition.
             for path in cache.glob('*.gif'):
                 if path.name not in keep and time.time() - path.stat().st_mtime > 180:

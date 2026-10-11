@@ -50,7 +50,27 @@ body { color: var(--ink); font-family: -apple-system, BlinkMacSystemFont, 'Hirag
 .board-page { position: absolute; inset: 0; padding: 14px 18px; opacity: 0; transform: translateY(22px); transition: opacity 650ms ease, transform 650ms ease; pointer-events: none; }
 .board-page.active { opacity: 1; transform: translateY(0); }
 #graph-page { display: grid; grid-template-columns: 190px 1fr; gap: 16px; }
+#night-graph-page, #conditions-page { display: flex; flex-direction: column; gap: 7px; }
 #history-page { display: flex; flex-direction: column; gap: 10px; }
+.night-heading { height: 26px; display: flex; align-items: center; justify-content: space-between; color: var(--muted); font-size: 15px; }
+.night-heading strong { color: var(--cyan); font-size: 19px; }
+#night-window { font-size: 14px; }
+#night-graph { width: 100%; flex: 1; min-height: 0; }
+#night-graph text { font-family: inherit; font-size: 13px; fill: var(--muted); }
+#night-graph .bar-value { fill: var(--ink); font-size: 15px; }
+#night-graph .bar { fill: #55b9d5; }
+#night-graph .bar.current { fill: #a2eaff; }
+#night-graph .bar.future { fill: #355b70; }
+.night-conditions { display: grid; grid-template-columns: 1.2fr .8fr 1.2fr; gap: 12px; flex: 1; min-height: 0; }
+.condition-card { min-width: 0; display: flex; flex-direction: column; justify-content: center; gap: 5px; padding: 8px 14px; background: #141f30; border: 1px solid #364355; border-radius: 8px; }
+.condition-label { color: var(--muted); font-size: 14px; font-weight: 600; }
+.condition-value { color: var(--ink); font-size: 25px; line-height: 1.1; font-weight: 750; white-space: nowrap; }
+.condition-detail { color: var(--muted); font-size: 13px; white-space: nowrap; }
+.condition-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+#observation-status { color: var(--muted); font-size: 12px; }
+#observation-status.active { color: var(--cyan); }
+.moon-meter { height: 5px; overflow: hidden; background: #28364a; border-radius: 99px; }
+.moon-meter span { display: block; width: 0; height: 100%; background: linear-gradient(90deg, #66cde8, #ffe18b); border-radius: inherit; transition: width 500ms ease; }
 .history-heading { display: flex; align-items: center; justify-content: space-between; height: 26px; color: var(--muted); font-size: 16px; }
 .history-heading strong { color: var(--cyan); font-size: 20px; }
 #history-viewport { flex: 1; min-height: 0; overflow: hidden; position: relative; mask-image: linear-gradient(to right, transparent, black 12px, black calc(100% - 12px), transparent); }
@@ -85,12 +105,37 @@ body { color: var(--ink); font-family: -apple-system, BlinkMacSystemFont, 'Hirag
 </section>
 <div id="bottom">
  <section class="panel summary" aria-label="現在時刻"><span class="caption">現在時刻 · JST</span><span id="current-clock">--:--:--</span><span id="current-date">----/--/--</span></section>
- <section id="statistics" class="panel" aria-label="直近1時間の検出数と推移">
+ <section id="statistics" class="panel" aria-label="検出推移と今夜の観測条件">
   <div id="graph-page" class="board-page active">
-  <div class="hour-count"><span class="caption">直近1時間</span><div><span id="hour-count">--</span><span class="unit">件</span></div><span id="stats-state">集計を読み込み中</span><span id="board-next">次：流星一覧</span></div>
+  <div class="hour-count"><span class="caption">直近1時間</span><div><span id="hour-count">--</span><span class="unit">件</span></div><span id="stats-state">集計を読み込み中</span><span id="board-next">次：今夜の時間別検出</span></div>
   <div class="trend"><div class="trend-heading"><span>検出数の推移 <span style="font-size:14px">/ 10分ごと</span></span><span id="hour-window">--:-- – --:--</span></div><svg id="graph" viewBox="0 0 1000 130" role="img" aria-label="直近1時間の検出推移"></svg></div>
   </div>
-  <div id="history-page" class="board-page" aria-label="直近10件の流星">
+  <div id="night-graph-page" class="board-page" aria-label="今夜の1時間ごとの検出数" aria-hidden="true">
+   <div class="night-heading"><strong>今夜の検出数 <span style="font-size:14px;font-weight:500">/ 1時間ごと</span></strong><span id="night-window">--</span></div>
+   <svg id="night-graph" viewBox="0 0 1240 128" role="img" aria-label="今夜の1時間ごとの検出数"></svg>
+  </div>
+  <div id="conditions-page" class="board-page" aria-label="今夜の観測条件" aria-hidden="true">
+   <div class="night-heading"><strong>今夜の観測条件</strong><span id="observation-night">--夜 · JST</span></div>
+   <div class="night-conditions">
+    <div class="condition-card">
+     <div class="condition-head"><span class="condition-label">観測予定</span><span id="observation-status">設定を読み込み中</span></div>
+     <strong id="observation-schedule" class="condition-value">--:-- → --:--</strong>
+     <span id="observation-date" class="condition-detail">旧UIの時間設定 · JST</span>
+    </div>
+    <div class="condition-card">
+     <span class="condition-label">日の入り</span>
+     <strong id="sunset-time" class="condition-value">--:--</strong>
+     <span id="sunset-date" class="condition-detail">観測夜 · JST</span>
+    </div>
+    <div class="condition-card">
+     <div class="condition-head"><span class="condition-label">月の満ち欠け</span><strong id="moon-phase" class="condition-detail">--</strong></div>
+     <strong class="condition-value"><span id="moon-age">--.-</span><span style="font-size:15px;font-weight:550">日齢（目安）</span></strong>
+     <div class="moon-meter" aria-hidden="true"><span id="moon-fill"></span></div>
+     <span class="condition-detail">照らされている割合 <span id="moon-illumination">--%</span></span>
+    </div>
+   </div>
+  </div>
+  <div id="history-page" class="board-page" aria-label="直近10件の流星" aria-hidden="true">
    <div class="history-heading"><strong id="history-title">直近10件の流星</strong><span id="history-state">新しい順 · 拡大リプレイ</span></div>
    <div id="history-viewport"><div id="history-track"><span class="history-empty">リプレイを準備しています</span></div></div>
   </div>
