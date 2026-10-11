@@ -1657,6 +1657,7 @@ class SettingsMixin:
             'camera_control_base_url': self.camera_control_base_url_var.get(),
             'camera_control_ev_target': self.camera_control_ev_target_var.get(),
             # RTSP time limit settings
+            'rtsp_schedule_products': self._schedule_product_values(),
             'rtsp_time_limit_enabled': self.rtsp_time_limit_var.get(),
             'rtsp_start_hour': self.rtsp_start_hour_var.get(), 'rtsp_start_minute': self.rtsp_start_min_var.get(),
             'apply_rtsp_dark': self.apply_rtsp_dark_var.get(),
@@ -1737,6 +1738,7 @@ class SettingsMixin:
             self.toggle_time_limit_frame()
             
             # RTSP time limit settings
+            self._restore_schedule_product_values(settings.get('rtsp_schedule_products', {}))
             self.rtsp_time_limit_var.set(settings.get('rtsp_time_limit_enabled', False))
             self.rtsp_start_hour_var.set(settings.get('rtsp_start_hour', '17')); self.rtsp_start_min_var.set(settings.get('rtsp_start_minute', '00'))
             self.rtsp_end_hour_var.set(settings.get('rtsp_end_hour', '07')); self.rtsp_end_min_var.set(settings.get('rtsp_end_minute', '00'))

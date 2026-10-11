@@ -539,6 +539,7 @@ class App(
         self.rtsp_fps_var = tk.StringVar(value=str(config.RTSP_FPS))
         self.rtsp_notification_sound_var = tk.BooleanVar(value=True)
         # RTSP time limit for recording (similar to periodic scan)
+        self._init_schedule_product_vars()
         self.rtsp_time_limit_var = tk.BooleanVar(value=False)
         self.rtsp_start_hour_var = tk.StringVar(value="17")
         self.rtsp_start_min_var = tk.StringVar(value="00")

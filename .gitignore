@@ -90,3 +90,8 @@ tests/test_sun_times.py
 
 README.md
 .conda/
+
+# Disposable scheduled RTSP product cache and recovery manifests
+.schedule_cache/
+.schedule_jobs/
+schedule_products/
