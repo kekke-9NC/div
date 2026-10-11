@@ -52,6 +52,145 @@ class ScheduleProductTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 products.normalize_options(values)
 
+    def test_disabled_outputs_ignore_invalid_optional_settings(self):
+        values = {"duration": "invalid", "fps": float("nan"), "crop_margin": -1,
+                  "timestamp_position": "invalid"}
+        with mock.patch.object(products, "normalize_options", side_effect=AssertionError("validated disabled output")):
+            self.assertEqual(products.processing_options(values), products.DEFAULTS)
+        with self.assertRaises(ValueError):
+            products.processing_options(dict(values, timelapse=True))
+
+    def test_rtsp_entry_point_bypasses_disabled_product_validation(self):
+        import file_utils
+        with mock.patch.object(file_utils, "_rtsp_save_and_process_thread_target", autospec=True,
+                               return_value="ordinary_rtsp") as recorder, \
+             mock.patch.object(products, "normalize_options", side_effect=AssertionError("validated")):
+            result = file_utils.rtsp_save_and_process_thread_target("rtsp://camera", time_limit_enabled=True,
+                schedule_product_options={"duration": "bad", "fps": 0})
+        self.assertEqual(result, "ordinary_rtsp")
+        recorder.assert_called_once_with("rtsp://camera", time_limit_enabled=True)
+
+    def failed_capture(self, service, start):
+        import video_processing
+        frames = [np.zeros((64, 96, 3), np.uint8) for _ in range(3)]
+        video_processing._cache_scheduled_event({
+            "_schedule_event_callback": service.capture_event,
+            "_schedule_event_error_callback": service.capture_event_failed},
+            frames, 10, start, ((25, 20), (35, 30)), True)
+
+    def test_cache_write_failure_blocks_completion_and_deletion_until_recovery(self):
+        with tempfile.TemporaryDirectory() as root:
+            service = self.service(root, blend_image=True, concatenate=True)
+            start = datetime(2026, 10, 12, 20)
+            with mock.patch.object(service.cache, "put", side_effect=OSError("disk full")):
+                self.failed_capture(service, start)
+            job = next(iter(service.jobs.values()))
+            self.assertTrue(job["events"][0]["capture_pending"])
+            with self.assertRaises(IOError):
+                service.tick(start+timedelta(minutes=1))
+            with self.assertRaises(IOError):
+                service._finish(job)
+            with self.assertRaises(IOError):
+                service._concatenate(job, Path(root)/"recording.mp4")
+            self.assertNotEqual(job["state"], "complete")
+            # Original archives become available after the failed cache write.
+            source = self.archive(root, start)
+            service.tick(start+timedelta(minutes=1))
+            self.assertFalse(job["events"][0]["capture_pending"])
+            self.assertEqual(job["state"], "complete")
+            self.assertTrue(Path(job["outputs"]["blend_image"]).exists())
+            self.assertFalse(source.exists(), "replacement did not resume after recovery")
+
+    def test_manifest_failure_retries_metadata_and_preserves_original(self):
+        with tempfile.TemporaryDirectory() as root:
+            service = self.service(root, blend_image=True, concatenate=True)
+            start = datetime(2026, 10, 12, 20)
+            job = service._job(start)
+            source = self.archive(root, start)
+            with mock.patch.object(service, "_save", side_effect=OSError("manifest write failed")):
+                self.failed_capture(service, start)
+                with self.assertRaises(IOError):
+                    service._finish(job)
+            self.assertTrue(source.exists())
+            self.assertTrue(job["events"][0]["capture_pending"])
+            self.assertTrue(service._capture_guard(job))
+            service.tick(start+timedelta(minutes=1))
+            self.assertEqual(job["state"], "complete")
+            self.assertEqual(len(job["events"]), 1)
+            self.assertTrue(Path(job["outputs"]["blend_image"]).exists())
+            self.assertFalse(source.exists())
+
+    def test_restart_with_unregistered_capture_blocks_empty_blend_success(self):
+        with tempfile.TemporaryDirectory() as root:
+            service = self.service(root, blend_image=True, concatenate=True)
+            start = datetime(2026, 10, 12, 20)
+            service._job(start)
+            source = self.archive(root, start)
+            with mock.patch.object(service, "_save", side_effect=OSError("manifest write failed")):
+                self.failed_capture(service, start)
+            restarted = self.service(root, blend_image=True, concatenate=True)
+            job = next(iter(restarted.jobs.values()))
+            self.assertEqual(job["events"], [], "simulated disk manifest unexpectedly contained the event")
+            self.assertTrue(job["capture_unknown"])
+            with self.assertRaises(IOError):
+                restarted.tick(start+timedelta(minutes=1))
+            self.assertNotEqual(job["state"], "complete")
+            self.assertTrue(source.exists())
+            self.assertFalse(job.get("blends_done", False))
+
+    def test_restart_recovers_registered_capture_after_cache_failure(self):
+        with tempfile.TemporaryDirectory() as root:
+            service = self.service(root, blend_image=True, concatenate=True)
+            start = datetime(2026, 10, 12, 20)
+            source = self.archive(root, start)
+            with mock.patch.object(service.cache, "put", side_effect=OSError("cache write failed")):
+                self.failed_capture(service, start)
+            restarted = self.service(root, blend_image=True, concatenate=True)
+            job = next(iter(restarted.jobs.values()))
+            self.assertTrue(job["events"][0]["capture_pending"])
+            restarted.tick(start+timedelta(minutes=1))
+            self.assertEqual(job["state"], "complete")
+            image = cv2.imread(job["outputs"]["blend_image"])
+            self.assertGreater(int(image[25, 30].max()), 150)
+            self.assertFalse(source.exists())
+
+    def test_cache_quota_refusal_is_recovered_from_original(self):
+        with tempfile.TemporaryDirectory() as root:
+            service = self.service(root, blend_image=True, concatenate=True)
+            start = datetime(2026, 10, 12, 20)
+            with mock.patch.object(service.cache, "put", return_value=False):
+                self.failed_capture(service, start)
+            job = next(iter(service.jobs.values()))
+            self.assertTrue(job["events"][0]["capture_pending"])
+            with self.assertRaises(IOError):
+                service._finish(job)
+            source = self.archive(root, start)
+            service.tick(start+timedelta(minutes=1))
+            self.assertEqual(job["state"], "complete")
+            self.assertFalse(source.exists())
+
+    def test_recovery_manifest_failure_keeps_capture_pending(self):
+        with tempfile.TemporaryDirectory() as root:
+            service = self.service(root, blend_image=True, concatenate=True)
+            start = datetime(2026, 10, 12, 20)
+            source = self.archive(root, start)
+            with mock.patch.object(service.cache, "put", side_effect=OSError("cache write failed")):
+                self.failed_capture(service, start)
+            job = next(iter(service.jobs.values()))
+            service._archives(job)
+            save = service._save
+            def fail_recovery_commit(current):
+                if current["events"] and not current["events"][0]["capture_pending"]:
+                    raise OSError("recovery commit failed")
+                save(current)
+            with mock.patch.object(service, "_save", side_effect=fail_recovery_commit):
+                with self.assertRaises(OSError):
+                    service._recover_captures(job)
+            self.assertTrue(job["events"][0]["capture_pending"])
+            with self.assertRaises(IOError):
+                service._finish(job)
+            self.assertTrue(source.exists())
+
     def test_quota_evicts_oldest_and_manual_selective_clear(self):
         with tempfile.TemporaryDirectory() as root:
             cache = products.ProductCache(root, 9)

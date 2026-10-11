@@ -1226,7 +1226,7 @@ def rtsp_save_and_process_thread_target(*args, schedule_product_options=None, **
     bound = inspect.signature(_rtsp_save_and_process_thread_target).bind(*args, **kwargs)
     bound.apply_defaults()
     values = bound.arguments
-    options = rtsp_schedule_products.normalize_options(schedule_product_options)
+    options = rtsp_schedule_products.processing_options(schedule_product_options)
     if not values["time_limit_enabled"] or not rtsp_schedule_products.enabled(options):
         return _rtsp_save_and_process_thread_target(*args, **kwargs)
     cancel = values["cancel_flag"] or threading.Event()
@@ -1237,7 +1237,8 @@ def rtsp_save_and_process_thread_target(*args, schedule_product_options=None, **
         (values["start_hour"], values["start_minute"], values["end_hour"], values["end_minute"]),
         cancel, status, values["mask"])
     values["save_options"] = dict(values["save_options"] or {},
-        _schedule_event_callback=products.capture_event, _schedule_products=products)
+        _schedule_event_callback=products.capture_event,
+        _schedule_event_error_callback=products.capture_event_failed, _schedule_products=products)
     products.start()
     try:
         return _rtsp_save_and_process_thread_target(**values)

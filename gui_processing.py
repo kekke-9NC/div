@@ -230,7 +230,7 @@ class ProcessingMixin:
             
             try:
                 import rtsp_schedule_products
-                product_options = rtsp_schedule_products.normalize_options(self._schedule_product_values())
+                product_options = rtsp_schedule_products.processing_options(self._schedule_product_values())
                 if rtsp_schedule_products.enabled(product_options):
                     if not rtsp_time_limit:
                         raise ValueError("自動作成には「時間帯を指定して録画する」をONにしてください。")

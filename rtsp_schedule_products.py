@@ -55,6 +55,11 @@ def enabled(options):
     return any(options.get(name) for name in ("timelapse", "blend_video", "blend_image", "concatenate"))
 
 
+def processing_options(value):
+    """Disabled outputs must not make ordinary RTSP depend on optional fields."""
+    return normalize_options(value) if enabled(value or {}) else dict(DEFAULTS)
+
+
 def schedule_window(when, start_hour, start_minute, end_hour, end_minute):
     """Return the daily window containing when, including a midnight crossing."""
     start = when.replace(hour=start_hour, minute=start_minute, second=0, microsecond=0)
@@ -181,14 +186,47 @@ class ScheduleProducts:
         self.overlay_module = None
         self.source_data = {}
         self.ai_unavailable = None
+        setup_error = self.job_root / "capture_setup.failed"
+        self.capture_setup_error = setup_error.read_text(encoding="utf-8") if setup_error.exists() else None
+        if any(not (guard.parent / "job.json").exists() for guard in self.job_root.glob("*/capture.guard")):
+            self.capture_setup_error = "流星素材のジョブ登録が中断されています"
         for path in self.job_root.glob("*/job.json"):
             job = json.loads(path.read_text(encoding="utf-8"))
             if job["state"] != "complete":
                 self.jobs[job["id"]] = job
+                pending = self._capture_guard(job)
+                if pending:
+                    event = next((event for event in job["events"] if event["id"] == pending), None)
+                    if event is not None:
+                        event["capture_pending"] = True
+                    else:
+                        job["capture_unknown"] = pending
 
     def _save(self, job):
         with self.lock:
             rtsp_live.write_json(self.job_root / job["id"] / "job.json", job)
+
+    def _capture_guard(self, job):
+        path = self.job_root / job["id"] / "capture.guard"
+        return path.read_text(encoding="ascii").strip() if path.exists() else ""
+
+    def _set_capture_guard(self, job, identity):
+        # Reserve the small guard when creating the job. Updating it in place
+        # does not need a second file allocation when the disk fills up. A torn
+        # or interrupted write leaves a nonempty guard and fails closed.
+        path = self.job_root / job["id"] / "capture.guard"
+        with path.open("r+b") as handle:
+            handle.write(identity.encode("ascii").ljust(64, b" "))
+            handle.flush()
+            os.fsync(handle.fileno())
+
+    def _assert_capture_ready(self, job):
+        with self.lock:
+            if self.capture_setup_error or job.get("capture_unknown") or any(
+                    event.get("capture_pending") for event in job["events"]):
+                raise IOError("流星素材の保存・登録を復旧するまで、生成完了と元録画の削除を保留します")
+            if self._capture_guard(job):
+                raise IOError("流星素材の登録が未完了です。元録画を保持します")
 
     def _job(self, when):
         with self.lock:
@@ -209,11 +247,20 @@ class ScheduleProducts:
             else:
                 job = dict(id=key, start=start.isoformat(), end=end.isoformat(),
                            options=self.options, state="recording", archives=[], events=[], samples={}, outputs={})
+                guard = directory / "capture.guard"
+                with guard.open("wb") as handle:
+                    handle.write(b" " * 64)
+                    handle.flush()
+                    os.fsync(handle.fileno())
                 if self.mask is not None:
                     np.save(directory / "mask.npy", self.mask)
                     job["mask_path"] = str(directory / "mask.npy")
                 self._save(job)
             self.jobs[key] = job
+            # Compatibility with jobs created before the capture guard existed.
+            guard = directory / "capture.guard"
+            if not guard.exists():
+                guard.write_bytes(b" " * 64)
         return self.jobs[key]
 
     def capture_event(self, frames, frame_rate, started_at, line):
@@ -233,21 +280,99 @@ class ScheduleProducts:
             if rect[2] <= rect[0] or rect[3] <= rect[1]:
                 raise ValueError("流星の検出座標が不正です")
             identity = hashlib.sha256((started_at.isoformat() + repr(line)).encode()).hexdigest()[:24]
-            if any(event["id"] == identity for event in job["events"]):
+            previous = next((event for event in job["events"] if event["id"] == identity), None)
+            if previous is not None and not previous.get("capture_pending"):
                 return
             # Exclude padding outside the schedule itself.
             start, end = datetime.fromisoformat(job["start"]), datetime.fromisoformat(job["end"])
             indices = [i for i in range(len(frames)) if start <= started_at + timedelta(seconds=i/frame_rate) < end]
             if not indices:
                 return
+            key = job["id"] + "_event_" + identity
+            event = dict(id=identity, key=key, start=(started_at + timedelta(seconds=indices[0]/frame_rate)).isoformat(),
+                         count=len(indices), fps=frame_rate, size=size, rect=rect, ai_done=False,
+                         capture_pending=True)
+            if previous is None:
+                job["events"].append(event)
+            else:
+                event = previous
+            # Publish recovery coordinates before any image encoding/cache I/O.
+            # Even if the manifest write fails, the preallocated guard records
+            # that this event must be recovered before deleting source footage.
+            self._set_capture_guard(job, identity)
+            self._save(job)
             x1, y1, x2, y2 = rect
             files = {f"{j:06d}.png": png_bytes(frames[i][y1:y2, x1:x2]) for j, i in enumerate(indices)}
-            key = job["id"] + "_event_" + identity
-            self.cache.put(key, files)
-            event = dict(id=identity, key=key, start=(started_at + timedelta(seconds=indices[0]/frame_rate)).isoformat(),
-                         count=len(indices), fps=frame_rate, size=size, rect=rect, ai_done=False)
-            job["events"].append(event)
-            self._save(job)
+            if not self.cache.put(key, files):
+                raise IOError("流星素材がキャッシュ上限を超えました。元録画からの復旧を待ちます")
+            event["capture_pending"] = False
+            try:
+                self._save(job)
+                self._set_capture_guard(job, "")
+            except Exception:
+                event["capture_pending"] = True
+                raise
+
+    def capture_event_failed(self, frames, frame_rate, started_at, line, error):
+        """Latch capture failure even when the manifest cannot currently write."""
+        with self.lock:
+            window = schedule_window(started_at + timedelta(seconds=(len(frames)-1)/frame_rate/2), *self.clock)
+            if window is None:
+                return
+            start, end = window
+            key = start.strftime("%Y%m%dT%H%M") + "_" + end.strftime("%Y%m%dT%H%M")
+            job = self.jobs.get(key)
+            if job is None:
+                # Job setup failed: the worker must fail closed instead of
+                # treating an empty event list as a successful observation.
+                self.capture_setup_error = str(error)
+                try:
+                    (self.job_root / "capture_setup.failed").write_text(str(error), encoding="utf-8")
+                except OSError:
+                    pass
+                return
+            identity = hashlib.sha256((started_at.isoformat() + repr(line)).encode()).hexdigest()[:24]
+            event = next((event for event in job["events"] if event["id"] == identity), None)
+            if event is not None:
+                event["capture_pending"] = True
+                event["capture_error"] = str(error)
+            else:
+                job["capture_unknown"] = identity
+            try:
+                self._set_capture_guard(job, identity)
+                self._save(job)
+            except Exception:
+                # Keep the in-memory latch; the worker retries persistence.
+                pass
+
+    def _recover_captures(self, job):
+        with self.lock:
+            if job.get("capture_unknown"):
+                self._save(job)
+                self._assert_capture_ready(job)
+            pending = [event for event in job["events"] if event.get("capture_pending")]
+        for event in pending:
+            with self.lock:
+                # Save recovery metadata again before clearing any failure.
+                self._save(job)
+            for index in range(event["count"]):
+                self._event_frame(job, event, index)
+            self._prepare_event(job, event)
+            with self.lock:
+                event["capture_pending"] = False
+                event.pop("capture_error", None)
+                # A recovered event invalidates any previously rendered blend.
+                job["blends_done"] = False
+                try:
+                    self._save(job)
+                except Exception:
+                    event["capture_pending"] = True
+                    raise
+        with self.lock:
+            if self.capture_setup_error or job.get("capture_unknown") or any(event.get("capture_pending") for event in job["events"]):
+                self._assert_capture_ready(job)
+            self._set_capture_guard(job, "")
+            self._assert_capture_ready(job)
 
     def _mask(self, job):
         path = job.get("mask_path")
@@ -536,6 +661,7 @@ class ScheduleProducts:
         changed codecs use a frame-accurate encode; out-of-window originals are
         retained, since they contain footage outside this replacement scope.
         """
+        self._assert_capture_ready(job)
         paths = list(job["archives"])
         if not paths:
             raise IOError("連結する録画がありません")
@@ -601,6 +727,7 @@ class ScheduleProducts:
                     fps=expected["fps"], frame_count=expected["count"], size=expected["size"], sources=paths))
                 os.replace(joined, output)
         self._validate_concat(output, expected)
+        self._assert_capture_ready(job)
         job["outputs"]["concatenate"] = str(output)
         job["state"] = "replacing"
         self._save(job)
@@ -625,6 +752,7 @@ class ScheduleProducts:
             cap.release()
 
     def _finish(self, job):
+        self._assert_capture_ready(job)
         output = self._output_root(job)
         if job["state"] == "replacing":
             self._concatenate(job, Path(job["outputs"]["concatenate"]))
@@ -647,12 +775,15 @@ class ScheduleProducts:
                 self._save(job)
             if job["options"]["concatenate"]:
                 self._concatenate(job, output / "recording.mp4")
+        self._assert_capture_ready(job)
         job["state"] = "complete"
         self._save(job)
         self.status(f"[自動作成] スケジュール終了後の作成完了: {output}")
 
     def tick(self, now=None):
         now = now or datetime.now()
+        if self.capture_setup_error:
+            raise IOError(f"流星素材のジョブ登録を復旧するまで元録画を保持します: {self.capture_setup_error}")
         if schedule_window(now, *self.clock):
             self._job(now)
         for job in list(self.jobs.values()):
@@ -662,6 +793,7 @@ class ScheduleProducts:
                 self._finish(job)
                 continue
             self._archives(job)
+            self._recover_captures(job)
             # Do not wait for detection to end before preparing shared crops.
             for event in list(job["events"]):
                 if not event["ai_done"]:
@@ -674,6 +806,7 @@ class ScheduleProducts:
                 self._archives(job)
                 self._prepare_samples(job)
                 if not job["archives"]:
+                    self._assert_capture_ready(job)
                     job["state"] = "complete"
                     self._save(job)
                     self.status("[自動作成] スケジュール内の録画がありません")

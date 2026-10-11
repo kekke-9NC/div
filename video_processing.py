@@ -835,6 +835,9 @@ def _cache_scheduled_event(save_options, frames, fps, started_at, line, is_meteo
         try:
             callback(frames, fps, started_at, line)
         except Exception as exc:
+            failure_callback = save_options.get("_schedule_event_error_callback")
+            if failure_callback is not None:
+                failure_callback(frames, fps, started_at, line, exc)
             print(f"[自動作成] 流星素材の準備に失敗: {exc}")
 
 
