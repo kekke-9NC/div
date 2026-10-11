@@ -155,7 +155,14 @@ class PreviewMixin:
         for pattern in patterns:
             m = re.search(pattern, message, flags=re.IGNORECASE)
             if m:
-                return m.group(1).strip().strip('"').strip("'")
+                summary_ref = m.group(1).strip().strip('"').strip("'")
+                # Only meteor summaries are interactive in the event log.
+                # Negative detections may still have summary artifacts from an
+                # older run or an alternate save configuration, but should not
+                # appear as blue preview links.
+                if re.search(r"(?:^|[/\\_])not_meteor(?:$|[/\\_.-])", summary_ref, re.IGNORECASE):
+                    return None
+                return summary_ref
         return None
 
     def _resolve_summary_video_path(self, summary_ref: str) -> Optional[str]:

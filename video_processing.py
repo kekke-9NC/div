@@ -711,17 +711,9 @@ def _has_matching_finer_line(
     )
 
 
-def _keep_full_event_media(probability, is_meteor):
-    """Keep every meteor export; compact only explicitly configured negatives."""
-    if is_meteor:
-        return True
-    try:
-        floor = float(model.get_active_model_info().get('non_meteor_full_media_probability_min', 0.))
-        if not np.isfinite(floor) or not 0. <= floor <= model.get_meteor_decision_threshold():
-            return True
-        return not (0. <= probability < floor)
-    except (TypeError, ValueError):
-        return True
+def _keep_full_event_media(is_meteor):
+    """Save regular event media only for events classified as meteors."""
+    return bool(is_meteor)
 
 
 def _resident_frame_slice(frames, first, start, end):
@@ -1543,7 +1535,7 @@ def create_line_video_clips(
                                 print(f"流星確率: {probability:.4f}")
                             
                                 is_meteor = probability >= model.get_meteor_decision_threshold()
-                                keep_full_media = _keep_full_event_media(probability, is_meteor)
+                                keep_full_media = _keep_full_event_media(is_meteor)
                                 save_dir = meteor_save_path if is_meteor else not_meteor_save_path
                                 detection_label = "meteor" if is_meteor else "not_meteor"
                                 os.makedirs(save_dir, exist_ok=True)
@@ -1582,7 +1574,7 @@ def create_line_video_clips(
                                     except Exception as e_ml:
                                         print(f"機械学習向けイベントの保存に失敗: {e_ml}")
                             
-                                if save_options.get('video', False):
+                                if save_options.get('video', False) and keep_full_media:
                                     output_clip_path = os.path.join(save_dir, f"{base_filename}.mp4")
                                     fourcc = cv2.VideoWriter_fourcc(*config.VIDEO_FOURCC)
                                     out_clip = cv2.VideoWriter(output_clip_path, fourcc, frame_rate, (cut_size, cut_size))
@@ -1618,6 +1610,7 @@ def create_line_video_clips(
                                 if (
                                     active_fixed_pattern_correction is None
                                     and save_options.get('denoised_full_video', False)
+                                    and keep_full_media
                                     and final_frames_for_clip
                                 ):
                                     denoised_full_video_path = os.path.join(save_dir, f"{base_filename}_full_denoised.mp4")
@@ -1645,7 +1638,7 @@ def create_line_video_clips(
                                     else:
                                         print(f"エラー: ノイズ低減動画の書き込みに失敗 ({denoised_full_video_path})")
                             
-                                if save_options.get('cutout', False):
+                                if save_options.get('cutout', False) and keep_full_media:
                                     cutout_diff_path = os.path.join(save_dir, f"{base_filename}_cutout_diff.jpg")
                                     if cv2.imwrite(cutout_diff_path, diff_cutout):
                                         saved_paths['cutout'] = cutout_diff_path
@@ -1653,7 +1646,7 @@ def create_line_video_clips(
                                     else:
                                         print(f"エラー: 切り出し差分画像の保存に失敗 ({cutout_diff_path})")
                             
-                                if save_options.get('full', False):
+                                if save_options.get('full', False) and keep_full_media:
                                     full_diff_path = os.path.join(save_dir, f"{base_filename}_full_diff.jpg")
                                     if cv2.imwrite(full_diff_path, saved_diff_img):
                                         saved_paths['full'] = full_diff_path
@@ -1661,7 +1654,7 @@ def create_line_video_clips(
                                     else:
                                         print(f"エラー: 全体差分画像の保存に失敗 ({full_diff_path})")
                             
-                                if save_options.get('composite', False) and final_frames_for_clip:
+                                if save_options.get('composite', False) and keep_full_media and final_frames_for_clip:
                                     try:
                                         composite_image = _max_composite_cutout(
                                             final_frames_for_clip,
@@ -1687,7 +1680,7 @@ def create_line_video_clips(
                                     except Exception as e_comp:
                                         print(f"比較明合成または注釈処理中にエラー: {e_comp}")
                             
-                                if save_options.get('info', False):
+                                if save_options.get('info', False) and keep_full_media:
                                     info_path = os.path.join(save_dir, f"{base_filename}_info.txt")
                                     try:
                                         ra_start_str, dec_start_str, ra_end_str, dec_end_str = "N/A", "N/A", "N/A", "N/A"
@@ -2135,7 +2128,7 @@ def create_line_video_clips(
                     print(f"流星確率: {probability:.4f}")
 
                     is_meteor = probability >= model.get_meteor_decision_threshold()
-                    keep_full_media = _keep_full_event_media(probability, is_meteor)
+                    keep_full_media = _keep_full_event_media(is_meteor)
                     save_dir = meteor_save_path if is_meteor else not_meteor_save_path
                     detection_label = "meteor" if is_meteor else "not_meteor"
                     os.makedirs(save_dir, exist_ok=True)
@@ -2174,7 +2167,7 @@ def create_line_video_clips(
                         except Exception as e_ml:
                             print(f"機械学習向けイベントの保存に失敗: {e_ml}")
 
-                    if save_options.get('video', False):
+                    if save_options.get('video', False) and keep_full_media:
                         output_clip_path = os.path.join(save_dir, f"{base_filename}.mp4")
                         fourcc = cv2.VideoWriter_fourcc(*config.VIDEO_FOURCC)
                         out_clip = cv2.VideoWriter(output_clip_path, fourcc, frame_rate, (cut_size, cut_size))
@@ -2210,6 +2203,7 @@ def create_line_video_clips(
                     if (
                         active_fixed_pattern_correction is None
                         and save_options.get('denoised_full_video', False)
+                        and keep_full_media
                         and final_frames_for_clip
                     ):
                         denoised_full_video_path = os.path.join(save_dir, f"{base_filename}_full_denoised.mp4")
@@ -2237,7 +2231,7 @@ def create_line_video_clips(
                         else:
                             print(f"エラー: ノイズ低減動画の書き込みに失敗 ({denoised_full_video_path})")
 
-                    if save_options.get('cutout', False):
+                    if save_options.get('cutout', False) and keep_full_media:
                         cutout_diff_path = os.path.join(save_dir, f"{base_filename}_cutout_diff.jpg")
                         if cv2.imwrite(cutout_diff_path, diff_cutout):
                             saved_paths['cutout'] = cutout_diff_path
@@ -2245,7 +2239,7 @@ def create_line_video_clips(
                         else:
                             print(f"エラー: 切り出し差分画像の保存に失敗 ({cutout_diff_path})")
 
-                    if save_options.get('full', False):
+                    if save_options.get('full', False) and keep_full_media:
                         full_diff_path = os.path.join(save_dir, f"{base_filename}_full_diff.jpg")
                         if cv2.imwrite(full_diff_path, saved_diff_img):
                             saved_paths['full'] = full_diff_path
@@ -2253,7 +2247,7 @@ def create_line_video_clips(
                         else:
                             print(f"エラー: 全体差分画像の保存に失敗 ({full_diff_path})")
 
-                    if save_options.get('composite', False) and final_frames_for_clip:
+                    if save_options.get('composite', False) and keep_full_media and final_frames_for_clip:
                         try:
                             composite_image = _max_composite_cutout(
                                 final_frames_for_clip,
@@ -2279,7 +2273,7 @@ def create_line_video_clips(
                         except Exception as e_comp:
                              print(f"比較明合成または注釈処理中にエラー: {e_comp}")
 
-                    if save_options.get('info', False):
+                    if save_options.get('info', False) and keep_full_media:
                         info_path = os.path.join(save_dir, f"{base_filename}_info.txt")
                         try:
                             ra_start_str, dec_start_str, ra_end_str, dec_end_str = "N/A", "N/A", "N/A", "N/A"
