@@ -6,6 +6,8 @@ archives remain outside it so eviction or a manual clear can be recovered.
 from __future__ import annotations
 
 from bisect import bisect_right
+from collections import Counter
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 import hashlib
 import json
@@ -28,6 +30,10 @@ from video_io import open_video_capture
 
 CACHE_LIMIT = 150_000_000_000
 _CACHE_LOCK = threading.RLock()
+_CACHE_BUILDS = {}
+_CACHE_PINS = Counter()
+_CACHE_CLEAR_PENDING = set()
+CONCAT_GROUP_SIZE = 10
 DEFAULTS = dict(timelapse=False, blend_video=False, blend_image=False, concatenate=False,
                 duration=15.0, fps=60.0, constellations=True, timestamp=True,
                 timestamp_position="bottom_right", timestamp_size=3.5, mean_radius=0,
@@ -77,13 +83,13 @@ def schedule_window(when, start_hour, start_minute, end_hour, end_minute):
 class ProductCache:
     """Atomic cache entries with oldest-created-first eviction and shared locking."""
     def __init__(self, root, limit=CACHE_LIMIT):
-        self.root = Path(root)
+        self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.limit = min(CACHE_LIMIT, max(0, int(limit)))
         with _CACHE_LOCK:
             # A crashed writer can leave an unpublished entry. It is disposable.
             for temporary in self.root.glob(".entry_*"):
-                if temporary.is_dir():
+                if temporary.is_dir() and temporary not in _CACHE_BUILDS:
                     shutil.rmtree(temporary)
             self._trim(0)
 
@@ -97,12 +103,19 @@ class ProductCache:
 
     def _trim(self, incoming):
         used = self.size()
+        for temporary, (reserved, target) in _CACHE_BUILDS.items():
+            if target.parent == self.root:
+                written = sum(p.stat().st_size for p in temporary.rglob("*") if p.is_file())
+                used += max(0, reserved-written)
         for entry in self.entries():
             if used + incoming <= self.limit:
                 break
+            if _CACHE_PINS[entry]:
+                continue
             size = sum(p.stat().st_size for p in entry.rglob("*") if p.is_file())
             shutil.rmtree(entry)
             used -= size
+        return used + incoming <= self.limit
 
     def put(self, key, files):
         """Files are already encoded bytes; no transient on-disk quota overshoot."""
@@ -113,7 +126,8 @@ class ProductCache:
             target = self.root / key
             if target.exists():
                 return True
-            self._trim(size)
+            if not self._trim(size):
+                return False
             temporary = Path(tempfile.mkdtemp(prefix=".entry_", dir=self.root))
             try:
                 for name, data in files.items():
@@ -123,6 +137,60 @@ class ProductCache:
                 if temporary.exists():
                     shutil.rmtree(temporary)
             return True
+
+    def build(self, key, reserve, writer):
+        """Reserve capacity and stream a video into an atomic disposable entry.
+
+        Heavy I/O runs without the cache lock so meteor delivery stays live.
+        Reservations include unpublished files and prevent concurrent writers
+        from taking each other's capacity. The writer must respect its bound.
+        """
+        with _CACHE_LOCK:
+            target = self.root / key
+            if target.exists():
+                return True
+            if reserve > self.limit or not self._trim(reserve):
+                return False
+            temporary = Path(tempfile.mkdtemp(prefix=".entry_", dir=self.root))
+            _CACHE_BUILDS[temporary] = (reserve, target)
+        try:
+            writer(temporary)
+            written = sum(p.stat().st_size for p in temporary.rglob("*") if p.is_file())
+            if written > reserve:
+                raise IOError("連結キャッシュが予約容量を超えました。元録画は保持します")
+            with _CACHE_LOCK:
+                if target in _CACHE_CLEAR_PENDING:
+                    _CACHE_CLEAR_PENDING.discard(target)
+                    return False
+                if not target.exists():
+                    temporary.rename(target)
+                return True
+        finally:
+            with _CACHE_LOCK:
+                _CACHE_BUILDS.pop(temporary, None)
+                _CACHE_CLEAR_PENDING.discard(target)
+                if temporary.exists():
+                    shutil.rmtree(temporary)
+
+    @contextmanager
+    def pin(self, keys):
+        """Keep input videos readable during eviction or a manual cache clear."""
+        with _CACHE_LOCK:
+            available = {key: self.root/key for key in keys if (self.root/key).is_dir()}
+            for path in available.values():
+                _CACHE_PINS[path] += 1
+        try:
+            yield available
+        finally:
+            with _CACHE_LOCK:
+                for path in available.values():
+                    _CACHE_PINS[path] -= 1
+                    if not _CACHE_PINS[path]:
+                        del _CACHE_PINS[path]
+                        if path in _CACHE_CLEAR_PENDING:
+                            _CACHE_CLEAR_PENDING.discard(path)
+                            if path.exists():
+                                shutil.rmtree(path)
 
     def read(self, key, name):
         with _CACHE_LOCK:
@@ -134,7 +202,13 @@ class ProductCache:
             allowed = set(keys) if keys is not None else None
             for entry in self.entries():
                 if allowed is None or entry.name in allowed:
-                    shutil.rmtree(entry)
+                    if _CACHE_PINS[entry]:
+                        _CACHE_CLEAR_PENDING.add(entry)
+                    else:
+                        shutil.rmtree(entry)
+            for _temporary, (_reserved, target) in _CACHE_BUILDS.items():
+                if target.parent == self.root and (allowed is None or target.name in allowed):
+                    _CACHE_CLEAR_PENDING.add(target)
 
 
 def png_bytes(frame):
@@ -186,6 +260,10 @@ class ScheduleProducts:
         self.overlay_module = None
         self.source_data = {}
         self.ai_unavailable = None
+        self.stream_signatures = {}
+        self.source_properties = {}
+        self.checked_jobs = set()
+        self.existing_only = False
         setup_error = self.job_root / "capture_setup.failed"
         self.capture_setup_error = setup_error.read_text(encoding="utf-8") if setup_error.exists() else None
         if any(not (guard.parent / "job.json").exists() for guard in self.job_root.glob("*/capture.guard")):
@@ -194,6 +272,9 @@ class ScheduleProducts:
             job = json.loads(path.read_text(encoding="utf-8"))
             if job["state"] != "complete":
                 self.jobs[job["id"]] = job
+                guard = path.parent / "capture.guard"
+                if not guard.exists():
+                    guard.write_bytes(b" " * 64)
                 pending = self._capture_guard(job)
                 if pending:
                     event = next((event for event in job["events"] if event["id"] == pending), None)
@@ -263,20 +344,30 @@ class ScheduleProducts:
                 guard.write_bytes(b" " * 64)
         return self.jobs[key]
 
+    def _event_job(self, when):
+        # A resumed window keeps its saved settings even if the UI has changed
+        # (or was closed before saving its checkboxes).
+        for job in self.jobs.values():
+            if job["state"] != "complete" and datetime.fromisoformat(job["start"]) <= when < datetime.fromisoformat(job["end"]):
+                return job
+        return None if self.existing_only else self._job(when)
+
     def capture_event(self, frames, frame_rate, started_at, line):
         """Persist a small lossless line crop before detector buffers are reused.
 
         VLM inference and all rendering run on the product worker. A cache miss
         can reconstruct these frames from original archives using this clock.
         """
-        if not (self.options["blend_image"] or self.options["blend_video"]) or not frames:
+        if not frames:
             return
         with self.lock:
-            job = self._job(started_at + timedelta(seconds=(len(frames)-1)/frame_rate/2))
+            job = self._event_job(started_at + timedelta(seconds=(len(frames)-1)/frame_rate/2))
             if job is None or job["state"] == "complete":
                 return
+            if not (job["options"]["blend_image"] or job["options"]["blend_video"]):
+                return
             size = [frames[0].shape[1], frames[0].shape[0]]
-            rect = line_rect(line, size, self.options["crop_margin"])
+            rect = line_rect(line, size, job["options"]["crop_margin"])
             if rect[2] <= rect[0] or rect[3] <= rect[1]:
                 raise ValueError("流星の検出座標が不正です")
             identity = hashlib.sha256((started_at.isoformat() + repr(line)).encode()).hexdigest()[:24]
@@ -316,12 +407,13 @@ class ScheduleProducts:
     def capture_event_failed(self, frames, frame_rate, started_at, line, error):
         """Latch capture failure even when the manifest cannot currently write."""
         with self.lock:
-            window = schedule_window(started_at + timedelta(seconds=(len(frames)-1)/frame_rate/2), *self.clock)
-            if window is None:
-                return
-            start, end = window
-            key = start.strftime("%Y%m%dT%H%M") + "_" + end.strftime("%Y%m%dT%H%M")
-            job = self.jobs.get(key)
+            when = started_at + timedelta(seconds=(len(frames)-1)/frame_rate/2)
+            job = next((job for job in self.jobs.values() if job["state"] != "complete" and
+                datetime.fromisoformat(job["start"]) <= when < datetime.fromisoformat(job["end"])), None)
+            if job is None:
+                window = schedule_window(when, *self.clock)
+                if window is None or self.existing_only:
+                    return
             if job is None:
                 # Job setup failed: the worker must fail closed instead of
                 # treating an empty event list as a successful observation.
@@ -432,8 +524,12 @@ class ScheduleProducts:
             cap.release()
 
     def _event_frame(self, job, event, index):
-        frame = decode_png(self.cache.read(event["key"], f"{index:06d}.png"))
-        if frame is not None:
+        try:
+            frame = decode_png(self.cache.read(event["key"], f"{index:06d}.png"))
+        except IOError:
+            frame = None
+        if frame is not None and frame.shape[1::-1] == (
+                event["rect"][2]-event["rect"][0], event["rect"][3]-event["rect"][1]):
             return frame
         when = datetime.fromisoformat(event["start"]) + timedelta(seconds=index/event["fps"])
         frame = self._source_frame(job, when)
@@ -446,32 +542,80 @@ class ScheduleProducts:
         return frame[y1:y2, x1:x2]
 
     def _prepare_event(self, job, event):
-        if event["ai_done"]:
+        if not event["ai_done"]:
+            composite = None
+            for index in range(event["count"]):
+                frame = self._event_frame(job, event, index)
+                composite = frame if composite is None else np.maximum(composite, frame)
+            height, width = composite.shape[:2]
+            boxes = []
+            try:
+                if self.ai_unavailable is None:
+                    boxes = self.box_detector(composite, self.status)
+            except Exception as exc:
+                self.ai_unavailable = str(exc)
+                self.status(f"[自動作成] 内蔵AIの枠取得に失敗。線検出の枠を使用: {exc}")
+            valid = []
+            for box in boxes:
+                if len(box) != 4 or not all(math.isfinite(v) and 0 <= v <= 1000 for v in box):
+                    continue
+                x1, y1, x2, y2 = box
+                if x2 > x1 and y2 > y1:
+                    valid.append([max(0, int(x1*width/1000)-3), max(0, int(y1*height/1000)-3),
+                                  min(width, math.ceil(x2*width/1000)+3), min(height, math.ceil(y2*height/1000)+3)])
+            event["boxes"] = valid or [[0, 0, width, height]]
+            event["box_source"] = "local_ai" if valid else "detected_line"
+            event["ai_done"] = True
+            self._save(job)
+        key = event["key"] + "_cutouts"
+        if self._cutouts_valid(event, key):
+            event["cutout_key"] = key
+            event["cutouts_prepared"] = True
+            self._save(job)
             return
-        composite = None
+        files = {}
         for index in range(event["count"]):
-            frame = self._event_frame(job, event, index)
-            composite = frame if composite is None else np.maximum(composite, frame)
-        height, width = composite.shape[:2]
-        boxes = []
-        try:
-            if self.ai_unavailable is None:
-                boxes = self.box_detector(composite, self.status)
-        except Exception as exc:
-            self.ai_unavailable = str(exc)
-            self.status(f"[自動作成] 内蔵AIの枠取得に失敗。線検出の枠を使用: {exc}")
-        valid = []
-        for box in boxes:
-            if len(box) != 4 or not all(math.isfinite(v) and 0 <= v <= 1000 for v in box):
-                continue
-            x1, y1, x2, y2 = box
-            if x2 > x1 and y2 > y1:
-                valid.append([max(0, int(x1*width/1000)-3), max(0, int(y1*height/1000)-3),
-                              min(width, math.ceil(x2*width/1000)+3), min(height, math.ceil(y2*height/1000)+3)])
-        event["boxes"] = valid or [[0, 0, width, height]]
-        event["box_source"] = "local_ai" if valid else "detected_line"
-        event["ai_done"] = True
+            if self.cancel.is_set():
+                raise InterruptedError("切り抜きキャッシュを中断しました。元録画は保持します")
+            files[f"{index:06d}.png"] = png_bytes(self._masked_crop(job, event, index))
+        self.cache.clear([key])
+        event["cutouts_prepared"] = self.cache.put(key, files)
+        event["cutout_key"] = key
         self._save(job)
+
+    def _cutouts_valid(self, event, key):
+        with _CACHE_LOCK:
+            directory = self.cache.root / key
+            if not directory.is_dir():
+                return False
+            # Decode to detect a damaged/incomplete cache after interruption.
+            for index in range(event["count"]):
+                try:
+                    frame = decode_png(self.cache.read(key, f"{index:06d}.png"))
+                except IOError:
+                    return False
+                if frame is None or frame.shape[1::-1] != (
+                        event["rect"][2]-event["rect"][0], event["rect"][3]-event["rect"][1]):
+                    return False
+            return True
+
+    def _masked_crop(self, job, event, index):
+        crop = self._event_frame(job, event, index)
+        keep = np.zeros(crop.shape[:2], np.uint8)
+        for a, b, c, d in event["boxes"]:
+            keep[b:d, a:c] = 255
+        return cv2.bitwise_and(crop, crop, mask=keep)
+
+    def _cutout_frame(self, job, event, index):
+        key = event.get("cutout_key", event["key"] + "_cutouts")
+        try:
+            frame = decode_png(self.cache.read(key, f"{index:06d}.png"))
+            if frame is not None and frame.shape[1::-1] == (
+                    event["rect"][2]-event["rect"][0], event["rect"][3]-event["rect"][1]):
+                return frame
+        except IOError:
+            pass
+        return self._masked_crop(job, event, index)
 
     def _annotate(self, job, frame, when):
         options = job["options"]
@@ -609,18 +753,15 @@ class ScheduleProducts:
             for event in events:
                 if event["size"] != size:
                     raise IOError("流星クリップの解像度が途中で変わっています")
-                self._prepare_event(job, event)
+                if not event.get("cutouts_prepared"):
+                    self._prepare_event(job, event)
                 x, y, _, _ = event["rect"]
                 frame_count = max(1, round(event["count"]*fps/event["fps"]))
                 count = max(count, frame_count)
                 for index in range(frame_count):
                     if self.cancel.is_set():
                         raise InterruptedError("比較明合成を中断しました")
-                    crop = self._event_frame(job, event, min(event["count"]-1, int(index*event["fps"]/fps)))
-                    keep = np.zeros(crop.shape[:2], np.uint8)
-                    for a, b, c, d in event["boxes"]:
-                        keep[b:d, a:c] = 255
-                    crop = cv2.bitwise_and(crop, crop, mask=keep)
+                    crop = self._cutout_frame(job, event, min(event["count"]-1, int(index*event["fps"]/fps)))
                     height, width = crop.shape[:2]
                     region = image[y:y+height, x:x+width]
                     np.maximum(region, crop, out=region)
@@ -654,78 +795,200 @@ class ScheduleProducts:
             return None
         return json.loads(result.stdout).get("streams", [None])[0]
 
-    def _concatenate(self, job, output):
-        """Publish and journal a validated result before deleting any input.
+    def _concat_plan(self, job, paths):
+        start, end = datetime.fromisoformat(job["start"]), datetime.fromisoformat(job["end"])
+        data = []
+        for path in paths:
+            stat = Path(path).stat()
+            key = (str(path), stat.st_size, stat.st_mtime_ns)
+            if key not in self.source_properties:
+                self.source_properties[key] = rtsp_segments._properties(path)
+            rate, count, dimensions = self.source_properties[key]
+            # Recovery metadata supplies the clock, never the deletion bounds.
+            data.append(dict(self._timing(path), fps=rate, frame_count=count, size=list(dimensions)))
+        fps, size = data[0]["fps"], data[0]["size"]
+        if any(abs(item["fps"]-fps) > .05 or item["size"] != size for item in data):
+            raise IOError("録画のFPSまたは解像度が途中で変わっています。元動画を保持します")
+        ranges, deletable = [], []
+        for path, item in zip(paths, data):
+            when = datetime.fromisoformat(item["start_time"])
+            first = max(0, math.ceil((start-when).total_seconds()*fps-1e-6))
+            last = min(item["frame_count"], math.ceil((end-when).total_seconds()*fps-1e-6))
+            ranges.append([first, last])
+            if first == 0 and last == item["frame_count"]:
+                deletable.append(path)
+        return dict(fps=fps, count=sum(last-first for first, last in ranges),
+                    size=size, ranges=ranges, deletable=deletable)
 
-        Whole compatible archives use stream copy. Rare boundary overruns or
-        changed codecs use a frame-accurate encode; out-of-window originals are
-        retained, since they contain footage outside this replacement scope.
-        """
+    def _signature(self, path):
+        stat = Path(path).stat()
+        key = (str(path), stat.st_size, stat.st_mtime_ns)
+        if key not in self.stream_signatures:
+            self.stream_signatures[key] = self._stream_signature(path)
+        return self.stream_signatures[key]
+
+    def _run_concat_copy(self, paths, output):
+        # Poll a real process so closing the app cannot orphan a video writer.
+        with tempfile.TemporaryDirectory(prefix=".concat_list_", dir=output.parent) as temporary:
+            listing = Path(temporary)/"inputs.txt"
+            listing.write_text("".join("file '" + str(Path(path).resolve()).replace("'", "'\\''") + "'\n" for path in paths), encoding="utf-8")
+            with tempfile.TemporaryFile() as errors:
+                process = subprocess.Popen([shutil.which("ffmpeg") or "ffmpeg", "-nostdin", "-v", "error", "-y",
+                    "-f", "concat", "-safe", "0", "-i", str(listing), "-map", "0:v:0", "-an", "-c", "copy",
+                    "-movflags", "+faststart", str(output)], stdout=subprocess.DEVNULL, stderr=errors)
+                try:
+                    while process.poll() is None:
+                        if self.cancel.wait(.1):
+                            raise InterruptedError("連結を中断しました。元録画は保持します")
+                    return process.returncode == 0
+                finally:
+                    if process.poll() is None:
+                        process.terminate()
+                        try:
+                            process.wait(timeout=3)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                            process.wait()
+
+    def _render_concat(self, paths, expected, output):
+        signatures = [self._signature(path) for path in paths]
+        whole = all(first == 0 and last == rtsp_segments._properties(path)[1]
+                    for path, (first, last) in zip(paths, expected["ranges"]))
+        compatible = whole and signatures and signatures[0] is not None and all(
+            item == signatures[0] for item in signatures)
+        if compatible and self._run_concat_copy(paths, output):
+            try:
+                self._validate_concat(output, expected)
+                return
+            except IOError:
+                pass
+        def frames():
+            for path, (first, last) in zip(paths, expected["ranges"]):
+                cap = open_video_capture(path)
+                try:
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, first)
+                    for _ in range(first, last):
+                        ok, frame = cap.read()
+                        if not ok:
+                            raise IOError(f"連結元の動画を読めません: {path}")
+                        yield frame
+                finally:
+                    cap.release()
+        self._write_video(output, frames(), expected["fps"])
+        self._validate_concat(output, expected)
+
+    def _prepare_concatenation(self, job, max_builds=1):
+        if not job["options"]["concatenate"]:
+            return
+        old = {item["key"]: item for item in job.get("concat_parts", [])}
+        parts = []
+        builds = 0
+        for offset in range(0, len(job["archives"]), CONCAT_GROUP_SIZE):
+            paths = job["archives"][offset:offset+CONCAT_GROUP_SIZE]
+            expected = self._concat_plan(job, paths)
+            sources = [(path, Path(path).stat().st_size, Path(path).stat().st_mtime_ns) for path in paths]
+            identity = hashlib.sha256(json.dumps([sources, expected], sort_keys=True).encode()).hexdigest()[:24]
+            key = job["id"] + "_concat_" + identity
+            part = dict(key=key, sources=paths, expected=expected)
+            previous = old.get(key)
+            if previous:
+                part.update(previous)
+            parts.append(part)
+            if part.get("prepared") or part.get("unavailable") or builds >= max_builds:
+                continue
+            if self.cancel.is_set():
+                raise InterruptedError("連結キャッシュを中断しました。元録画は保持します")
+            duration = expected["count"]/expected["fps"]
+            # Stream copy stays below input bytes + container overhead. Frame
+            # encoding uses 40 Mbps, maxrate 48 Mbps; reserve a generous bound.
+            reserve = max(sum(size for _path, size, _mtime in sources), math.ceil(duration*8_000_000)) + 8_000_000
+            def writer(directory):
+                self._render_concat(paths, expected, directory/"recording.mp4")
+            prepared = self.cache.build(key, reserve, writer)
+            part["prepared"] = prepared
+            part["unavailable"] = not prepared
+            builds += 1
+        with self.lock:
+            job["concat_parts"] = parts
+            self._save(job)
+        current_keys = {part["key"] for part in parts}
+        self.cache.clear([key for key in old if key not in current_keys])
+
+    def _check_existing_cache(self, job):
+        missing_cuts = missing_parts = missing_samples = 0
+        for index in job.get("samples", {}):
+            key = job["id"] + f"_sample_{int(index):06d}"
+            try:
+                frame = decode_png(self.cache.read(key, "frame.png"))
+                if frame is None:
+                    raise IOError("Missing sample")
+            except IOError:
+                self.cache.clear([key])
+                missing_samples += 1
+        for event in list(job["events"]):
+            key = event.get("cutout_key", event["key"] + "_cutouts")
+            if not event.get("ai_done") or not self._cutouts_valid(event, key):
+                event["cutouts_prepared"] = False
+                missing_cuts += 1
+        for part in job.get("concat_parts", []):
+            with self.cache.pin([part["key"]]) as available:
+                directory = available.get(part["key"])
+                try:
+                    if directory is None:
+                        raise IOError("Missing concat cache")
+                    self._validate_concat(directory/"recording.mp4", part["expected"])
+                except (IOError, OSError, cv2.error):
+                    part["prepared"] = False
+                    part.pop("unavailable", None)
+                    self.cache.clear([part["key"]])
+                    missing_parts += 1
+        self._save(job)
+        self.status(f"[自動作成] 起動時のキャッシュ確認: タイムラプス {missing_samples}枚・切り抜き {missing_cuts}件・連結 {missing_parts}区間を補完")
+
+    def _concatenate(self, job, output):
+        """Reuse prepared parts; publish/validate before deleting any input."""
         self._assert_capture_ready(job)
         paths = list(job["archives"])
         if not paths:
             raise IOError("連結する録画がありません")
         expected = job.get("concat_expected")
         if expected is None:
-            start, end = datetime.fromisoformat(job["start"]), datetime.fromisoformat(job["end"])
-            properties = [rtsp_segments._properties(path) for path in paths]
-            fps, _, size = properties[0]
-            if any(abs(rate-fps) > .05 or dimensions != size for rate, _, dimensions in properties):
-                raise IOError("録画のFPSまたは解像度が途中で変わっています。元動画を保持します")
-            ranges, deletable = [], []
-            for path, (rate, count, _) in zip(paths, properties):
-                when = datetime.fromisoformat(self._timing(path)["start_time"])
-                first = max(0, math.ceil((start-when).total_seconds()*rate-1e-6))
-                last = min(count, math.ceil((end-when).total_seconds()*rate-1e-6))
-                ranges.append([first, last])
-                if first == 0 and last == count:
-                    deletable.append(path)
-            expected = dict(fps=fps, count=sum(last-first for first, last in ranges),
-                            size=list(size), ranges=ranges, deletable=deletable)
+            expected = self._concat_plan(job, paths)
             job["concat_expected"] = expected
             self._save(job)
         if not output.exists():
-            with tempfile.TemporaryDirectory(prefix=".concat_", dir=output.parent) as temporary:
-                listing = Path(temporary) / "inputs.txt"
-                listing.write_text("".join("file '" + str(Path(path).resolve()).replace("'", "'\\''") + "'\n" for path in paths), encoding="utf-8")
-                joined = Path(temporary) / "joined.mp4"
-                full_archives = len(expected["deletable"]) == len(paths)
-                copied = False
-                signatures = [self._stream_signature(path) for path in paths] if full_archives else []
-                compatible = signatures and signatures[0] is not None and all(signature == signatures[0] for signature in signatures)
-                if full_archives and compatible:
-                    result = subprocess.run([shutil.which("ffmpeg") or "ffmpeg", "-nostdin", "-v", "error", "-y",
-                        "-f", "concat", "-safe", "0", "-i", str(listing), "-map", "0:v:0", "-an", "-c", "copy",
-                        "-movflags", "+faststart", str(joined)], capture_output=True, text=True)
-                    if not result.returncode:
+            with self.cache.pin([part["key"] for part in job.get("concat_parts", [])]) as available:
+                inputs, ranges = [], []
+                covered = []
+                for part in job.get("concat_parts", []):
+                    directory = available.get(part["key"])
+                    valid = False
+                    if directory is not None:
                         try:
-                            self._validate_concat(joined, expected)
-                            copied = True
-                        except IOError:
+                            self._validate_concat(directory/"recording.mp4", part["expected"])
+                            valid = True
+                        except (IOError, OSError, cv2.error):
                             pass
-                if not copied:
-                    self.status("[自動作成] スケジュールの境界をフレーム単位で整えて連結します")
-                    def frames():
-                        for path, (first, last) in zip(paths, expected["ranges"]):
-                            cap = open_video_capture(path)
-                            try:
-                                cap.set(cv2.CAP_PROP_POS_FRAMES, first)
-                                for _ in range(first, last):
-                                    ok, frame = cap.read()
-                                    if not ok:
-                                        raise IOError(f"連結元の動画を読めません: {path}")
-                                    yield frame
-                            finally:
-                                cap.release()
-                    self._write_video(joined, frames(), expected["fps"])
-                    self._validate_concat(joined, expected)
-                if self.cancel.is_set():
-                    raise InterruptedError("連結を中断しました。元録画は保持します")
-                captured_at = datetime.fromisoformat(self._timing(paths[0])["start_time"]) + timedelta(
-                    seconds=expected["ranges"][0][0]/expected["fps"])
-                rtsp_live.write_json(str(output)+".capture.json", dict(start_time=captured_at.isoformat(),
-                    fps=expected["fps"], frame_count=expected["count"], size=expected["size"], sources=paths))
-                os.replace(joined, output)
+                    if valid:
+                        inputs.append(str(directory/"recording.mp4"))
+                        ranges.append([0, part["expected"]["count"]])
+                    else:
+                        inputs.extend(part["sources"])
+                        ranges.extend(part["expected"]["ranges"])
+                    covered.extend(part["sources"])
+                if covered != paths:
+                    inputs, ranges = paths, expected["ranges"]
+                render_plan = dict(expected, ranges=ranges)
+                with tempfile.TemporaryDirectory(prefix=".concat_", dir=output.parent) as temporary:
+                    joined = Path(temporary)/"joined.mp4"
+                    self._render_concat(inputs, render_plan, joined)
+                    if self.cancel.is_set():
+                        raise InterruptedError("連結を中断しました。元録画は保持します")
+                    captured_at = datetime.fromisoformat(self._timing(paths[0])["start_time"]) + timedelta(
+                        seconds=expected["ranges"][0][0]/expected["fps"])
+                    rtsp_live.write_json(str(output)+".capture.json", dict(start_time=captured_at.isoformat(),
+                        fps=expected["fps"], frame_count=expected["count"], size=expected["size"], sources=paths))
+                    os.replace(joined, output)
         self._validate_concat(output, expected)
         self._assert_capture_ready(job)
         job["outputs"]["concatenate"] = str(output)
@@ -784,7 +1047,7 @@ class ScheduleProducts:
         now = now or datetime.now()
         if self.capture_setup_error:
             raise IOError(f"流星素材のジョブ登録を復旧するまで元録画を保持します: {self.capture_setup_error}")
-        if schedule_window(now, *self.clock):
+        if not self.existing_only and schedule_window(now, *self.clock):
             self._job(now)
         for job in list(self.jobs.values()):
             if job["state"] == "complete":
@@ -793,12 +1056,16 @@ class ScheduleProducts:
                 self._finish(job)
                 continue
             self._archives(job)
+            if job["id"] not in self.checked_jobs:
+                self._check_existing_cache(job)
+                self.checked_jobs.add(job["id"])
             self._recover_captures(job)
             # Do not wait for detection to end before preparing shared crops.
-            for event in list(job["events"]):
-                if not event["ai_done"]:
-                    self._prepare_event(job, event)
+            pending = [event for event in list(job["events"]) if not event.get("cutouts_prepared")]
+            for event in pending[:2]:
+                self._prepare_event(job, event)
             self._prepare_samples(job)
+            self._prepare_concatenation(job)
             if now >= datetime.fromisoformat(job["end"]):
                 self.flush_archives()
                 if not self._drained(job):
@@ -811,11 +1078,14 @@ class ScheduleProducts:
                     self._save(job)
                     self.status("[自動作成] スケジュール内の録画がありません")
                     continue
+                self._prepare_concatenation(job, max_builds=len(job["archives"])+1)
                 job["state"] = "rendering"
                 self._save(job)
                 self._finish(job)
 
     def start(self):
+        if self.thread and self.thread.is_alive():
+            return
         def run():
             while not self.cancel.is_set():
                 try:
@@ -827,5 +1097,78 @@ class ScheduleProducts:
         self.thread.start()
 
     def stop(self):
+        self.cancel.set()
         if self.thread:
             self.thread.join(timeout=5)
+
+
+_SERVICE_LOCK = threading.RLock()
+_SERVICES = {}
+
+
+def pending_recording_products(root, status):
+    """Keep detecting for saved windows when unsaved UI switches reset to OFF."""
+    with _SERVICE_LOCK:
+        service = _SERVICES.get(str(Path(root).resolve()))
+        if service is not None:
+            with service.lock:
+                service.existing_only = True
+                if any(job["state"] != "complete" for job in service.jobs.values()):
+                    service.status = status
+                    return service
+    return None
+
+
+def recording_products(root, options, clock, status, mask=None):
+    """Attach recording to the startup worker rather than launching a duplicate."""
+    key = str(Path(root).resolve())
+    with _SERVICE_LOCK:
+        service = _SERVICES.get(key)
+        if service is None:
+            service = ScheduleProducts(root, options, clock, threading.Event(), status, mask)
+            _SERVICES[key] = service
+        with service.lock:
+            service.options = normalize_options(options)
+            service.clock = clock
+            service.status = status
+            service.mask = None if mask is None else mask.copy()
+            service.existing_only = False
+        service.start()
+        return service
+
+
+def resume_pending_products(root, status=print):
+    """On app launch, verify/rebuild unfinished jobs using their saved settings."""
+    key = str(Path(root).resolve())
+    with _SERVICE_LOCK:
+        if key in _SERVICES:
+            return _SERVICES[key]
+        pending = []
+        for marker in (Path(root)/".schedule_jobs").glob("*/job.json"):
+            try:
+                job = json.loads(marker.read_text(encoding="utf-8"))
+                if job["state"] != "complete":
+                    pending.append(job)
+            except (OSError, ValueError, KeyError) as exc:
+                status(f"[自動作成] 復旧情報を読み取れません。元録画は保持: {exc}")
+                return None
+        if not pending:
+            return None
+        first = pending[0]
+        start, end = datetime.fromisoformat(first["start"]), datetime.fromisoformat(first["end"])
+        service = ScheduleProducts(root, first["options"],
+            (start.hour, start.minute, end.hour, end.minute), threading.Event(), status)
+        service.existing_only = True
+        _SERVICES[key] = service
+        service.start()
+        return service
+
+
+def stop_background_products():
+    with _SERVICE_LOCK:
+        services = list(_SERVICES.values())
+        _SERVICES.clear()
+    for service in services:
+        service.cancel.set()
+    for service in services:
+        service.stop()

@@ -1227,24 +1227,26 @@ def rtsp_save_and_process_thread_target(*args, schedule_product_options=None, **
     bound.apply_defaults()
     values = bound.arguments
     options = rtsp_schedule_products.processing_options(schedule_product_options)
-    if not values["time_limit_enabled"] or not rtsp_schedule_products.enabled(options):
-        return _rtsp_save_and_process_thread_target(*args, **kwargs)
-    cancel = values["cancel_flag"] or threading.Event()
-    values["cancel_flag"] = cancel
     callback = values["progress_callback"]
     status = lambda message: callback((message, None)) if callback else print(message)
-    products = rtsp_schedule_products.ScheduleProducts(values["save_root"], options,
-        (values["start_hour"], values["start_minute"], values["end_hour"], values["end_minute"]),
-        cancel, status, values["mask"])
+    if values["time_limit_enabled"] and rtsp_schedule_products.enabled(options):
+        products = rtsp_schedule_products.recording_products(values["save_root"], options,
+            (values["start_hour"], values["start_minute"], values["end_hour"], values["end_minute"]),
+            status, values["mask"])
+    else:
+        products = rtsp_schedule_products.pending_recording_products(values["save_root"], status)
+        if products is None:
+            return _rtsp_save_and_process_thread_target(*args, **kwargs)
     values["save_options"] = dict(values["save_options"] or {},
         _schedule_event_callback=products.capture_event,
         _schedule_event_error_callback=products.capture_event_failed, _schedule_products=products)
-    products.start()
     try:
         return _rtsp_save_and_process_thread_target(**values)
     finally:
-        cancel.set()
-        products.stop()
+        # Continue preparing saved jobs; recording creates future windows only
+        # while it is actually attached to this worker.
+        with products.lock:
+            products.existing_only = True
 
 
 def _rtsp_save_and_process_thread_target(

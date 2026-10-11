@@ -15,6 +15,9 @@ import rtsp_segments
 
 
 class ScheduleProductTests(unittest.TestCase):
+    def tearDown(self):
+        products.stop_background_products()
+
     def service(self, root, **options):
         return products.ScheduleProducts(root, dict(constellations=False, timestamp=False,
             duration=1, fps=6, **options), (20, 0, 20, 1), threading.Event(),
@@ -215,6 +218,242 @@ class ScheduleProductTests(unittest.TestCase):
             self.assertTrue(cache.put("new", {"a": b"1234"}))
             self.assertLessEqual(cache.size(), 9)
 
+    def test_video_build_reservation_does_not_block_delivery_or_get_removed(self):
+        with tempfile.TemporaryDirectory() as root:
+            cache = products.ProductCache(root, 20)
+            entered, release = threading.Event(), threading.Event()
+            def writer(directory):
+                (directory/"recording.mp4").write_bytes(b"1234")
+                entered.set()
+                self.assertTrue(release.wait(3))
+                self.assertTrue(directory.exists())
+            result = []
+            worker = threading.Thread(target=lambda: result.append(cache.build("video", 16, writer)))
+            worker.start()
+            try:
+                self.assertTrue(entered.wait(1))
+                # Opening cache management must not delete a running writer.
+                manager = products.ProductCache(root, 20)
+                self.assertTrue(manager.put("event", {"frame.png": b"abcd"}))
+                self.assertFalse(manager.put("full", {"frame.png": b"x"*5}))
+            finally:
+                release.set()
+                worker.join(4)
+            self.assertEqual(result, [True])
+            self.assertEqual(cache.read("video", "recording.mp4"), b"1234")
+
+    def test_manual_clear_defers_active_inputs_and_discards_active_build(self):
+        with tempfile.TemporaryDirectory() as root:
+            cache = products.ProductCache(root, 10)
+            cache.put("input", {"recording.mp4": b"12345678"})
+            with cache.pin(["input"]) as available:
+                cache.clear()
+                self.assertTrue(available["input"].is_dir())
+                self.assertFalse(cache.put("other", {"frame.png": b"123"}))
+            self.assertEqual(cache.size(), 0)
+            def writer(directory):
+                (directory/"recording.mp4").write_bytes(b"1234")
+                cache.clear()
+            self.assertFalse(cache.build("video", 8, writer))
+            self.assertEqual(cache.size(), 0)
+            self.assertFalse(list(Path(root).glob(".entry_*")))
+
+    def test_failed_video_cache_build_is_not_published(self):
+        with tempfile.TemporaryDirectory() as root:
+            cache = products.ProductCache(root, 20)
+            def writer(directory):
+                (directory/"recording.mp4").write_bytes(b"incomplete")
+                raise InterruptedError("app closed")
+            with self.assertRaises(InterruptedError):
+                cache.build("video", 20, writer)
+            self.assertEqual(cache.size(), 0)
+            self.assertIsNone(cache.read("video", "recording.mp4"))
+
+    def test_cutouts_are_prepared_before_end_and_shared_without_masking_again(self):
+        with tempfile.TemporaryDirectory() as root:
+            start = datetime(2026, 10, 12, 20)
+            service = self.service(root, blend_image=True, blend_video=True)
+            self.archive(root, start)
+            frames = [np.full((64, 96, 3), 200, np.uint8) for _ in range(3)]
+            service.capture_event(frames, 10, start, ((25, 20), (35, 30)))
+            service.box_detector = mock.Mock(return_value=[(400, 400, 600, 600)])
+            service.tick(start+timedelta(seconds=10))
+            job = next(iter(service.jobs.values()))
+            event = job["events"][0]
+            self.assertEqual(job["state"], "recording")
+            self.assertTrue(event["cutouts_prepared"])
+            cached = products.decode_png(service.cache.read(event["cutout_key"], "000000.png"))
+            self.assertEqual(int(cached[0, 0].max()), 0)
+            self.assertEqual(int(cached[cached.shape[0]//2, cached.shape[1]//2].max()), 200)
+            with mock.patch.object(service, "_masked_crop", side_effect=AssertionError("cut twice")):
+                output = Path(root)/"products"
+                output.mkdir()
+                results = service._blends(job, output)
+            self.assertEqual(set(results), {"blend_image", "blend_video"})
+            service.box_detector.assert_called_once()
+
+    def test_restart_rebuilds_missing_and_corrupt_caches_without_repeating_ai(self):
+        with tempfile.TemporaryDirectory() as root:
+            start = datetime(2026, 10, 12, 20)
+            service = self.service(root, timelapse=True, blend_image=True, concatenate=True)
+            source = self.archive(root, start, 600)
+            service.capture_event([np.ones((64, 96, 3), np.uint8)*200]*3, 10,
+                start, ((25, 20), (35, 30)))
+            service.tick(start+timedelta(seconds=30))
+            job = next(iter(service.jobs.values()))
+            event = job["events"][0]
+            sample_key = job["id"]+"_sample_000000"
+            cutout_key = event["cutout_key"]
+            concat_key = job["concat_parts"][0]["key"]
+            service.cache.clear([sample_key, cutout_key])
+            (service.cache.root/concat_key/"recording.mp4").write_bytes(b"interrupted")
+            restarted = self.service(root, timelapse=True, blend_image=True, concatenate=True)
+            restarted.existing_only = True
+            restarted.box_detector = mock.Mock(side_effect=AssertionError("AI repeated"))
+            restarted.tick(start+timedelta(seconds=40))
+            recovered = next(iter(restarted.jobs.values()))
+            self.assertEqual(recovered["state"], "recording")
+            self.assertIsNotNone(restarted.cache.read(sample_key, "frame.png"))
+            self.assertTrue(restarted._cutouts_valid(event, cutout_key))
+            restarted._validate_concat(restarted.cache.root/concat_key/"recording.mp4",
+                recovered["concat_parts"][0]["expected"])
+            restarted.box_detector.assert_not_called()
+            self.assertTrue(source.exists())
+            persisted = json.loads((restarted.job_root/job["id"]/"job.json").read_text())
+            self.assertTrue(persisted["events"][0]["cutouts_prepared"])
+            self.assertTrue(persisted["concat_parts"][0]["prepared"])
+
+    def test_cached_concat_groups_are_reused_at_end_and_keep_originals_until_then(self):
+        with tempfile.TemporaryDirectory() as root:
+            service = self.service(root, concatenate=True)
+            start = datetime(2026, 10, 12, 20)
+            sources = [self.archive(root, start+timedelta(seconds=i*3),
+                name=f"00_{i*3:02d}_aabbccddeeff_minute_{i:09d}.mp4") for i in range(11)]
+            service.tick(start+timedelta(seconds=35))
+            service.tick(start+timedelta(seconds=40))
+            job = next(iter(service.jobs.values()))
+            self.assertEqual([len(part["sources"]) for part in job["concat_parts"]], [10, 1])
+            self.assertTrue(all(part["prepared"] for part in job["concat_parts"]))
+            self.assertTrue(all(path.exists() for path in sources))
+            with mock.patch.object(service, "_render_concat", wraps=service._render_concat) as render:
+                service.tick(start+timedelta(minutes=1))
+            self.assertEqual(render.call_count, 1)
+            self.assertTrue(all(Path(path).is_relative_to(service.cache.root)
+                for path in render.call_args.args[0]))
+            self.assertEqual(job["state"], "complete")
+            self.assertEqual(rtsp_segments._properties(job["outputs"]["concatenate"])[1], 330)
+            self.assertFalse(any(path.exists() for path in sources))
+
+    def test_restart_worker_starts_without_rtsp_and_recording_reuses_it(self):
+        with tempfile.TemporaryDirectory() as root:
+            start = datetime(2026, 10, 12, 20)
+            saved = self.service(root, concatenate=True)
+            saved._job(start)
+            with mock.patch.object(products.ScheduleProducts, "start") as launch:
+                resumed = products.resume_pending_products(root, lambda _message: None)
+                self.assertTrue(resumed.existing_only)
+                self.assertEqual(len(resumed.jobs), 1)
+                self.assertIs(products.resume_pending_products(root), resumed)
+                recorded = products.recording_products(root, saved.options, saved.clock, lambda _message: None)
+                self.assertIs(recorded, resumed)
+                self.assertFalse(recorded.existing_only)
+                # Registry reuse plus the start method's live-thread guard.
+                self.assertEqual(launch.call_count, 2)
+            products.stop_background_products()
+            self.assertTrue(resumed.cancel.is_set())
+
+    def test_rtsp_stop_leaves_background_cache_worker_running(self):
+        import file_utils
+        with tempfile.TemporaryDirectory() as root:
+            recorder_cancel = threading.Event()
+            with mock.patch.object(products.ScheduleProducts, "start"), \
+                 mock.patch.object(file_utils, "_rtsp_save_and_process_thread_target", autospec=True,
+                    return_value="stopped") as record:
+                result = file_utils.rtsp_save_and_process_thread_target("rtsp://camera", save_root=root,
+                    time_limit_enabled=True, cancel_flag=recorder_cancel,
+                    schedule_product_options={"concatenate": True})
+            service = record.call_args.kwargs["save_options"]["_schedule_products"]
+            self.assertEqual(result, "stopped")
+            recorder_cancel.set()
+            self.assertFalse(service.cancel.is_set())
+            products.stop_background_products()
+            self.assertTrue(service.cancel.is_set())
+
+    def test_existing_cache_restart_reuses_frames_and_launches_only_one_thread(self):
+        with tempfile.TemporaryDirectory() as root:
+            start = datetime(2026, 10, 12, 20)
+            saved = self.service(root, timelapse=True, blend_image=True, concatenate=True)
+            self.archive(root, start, 600)
+            saved.capture_event([np.ones((64, 96, 3), np.uint8)*200]*3, 10,
+                start, ((25, 20), (35, 30)))
+            saved.tick(start+timedelta(seconds=30))
+            entered, release = threading.Event(), threading.Event()
+            original_tick = products.ScheduleProducts.tick
+            def frozen_tick(service):
+                # Call the original below to avoid recursing through the patch.
+                with mock.patch.object(service, "_source_frame", side_effect=AssertionError("decoded again")), \
+                     mock.patch.object(service, "_masked_crop", side_effect=AssertionError("cut again")), \
+                     mock.patch.object(service, "_render_concat", side_effect=AssertionError("joined again")):
+                    original_tick(service, start+timedelta(seconds=40))
+                entered.set()
+                release.wait(3)
+            try:
+                with mock.patch.object(products.ScheduleProducts, "tick", frozen_tick):
+                    resumed = products.resume_pending_products(root, lambda _message: None)
+                    self.assertTrue(entered.wait(2), "startup cache check failed")
+                    first_thread = resumed.thread
+                    recorded = products.recording_products(root, saved.options, saved.clock, lambda _message: None)
+                    self.assertIs(recorded.thread, first_thread)
+                    self.assertTrue(first_thread.is_alive())
+            finally:
+                release.set()
+                products.stop_background_products()
+
+    def test_startup_finishes_an_ended_job_without_starting_a_new_schedule(self):
+        with tempfile.TemporaryDirectory() as root:
+            start = datetime(2026, 10, 11, 20)
+            saved = self.service(root, concatenate=True)
+            source = self.archive(root, start)
+            job = saved._job(start)
+            # Older manifests did not contain a capture guard.
+            (saved.job_root/job["id"]/"capture.guard").unlink()
+            with mock.patch.object(products.ScheduleProducts, "start"):
+                resumed = products.resume_pending_products(root, lambda _message: None)
+            resumed.tick(start+timedelta(days=1, seconds=20))
+            self.assertEqual(len(resumed.jobs), 1)
+            self.assertEqual(resumed.jobs[job["id"]]["state"], "complete")
+            self.assertFalse(source.exists())
+
+    def test_resumed_job_keeps_capturing_if_unsaved_ui_options_reset(self):
+        import file_utils
+        with tempfile.TemporaryDirectory() as root:
+            start = datetime(2026, 10, 12, 20)
+            saved = self.service(root, blend_image=True)
+            saved._job(start)
+            with mock.patch.object(products.ScheduleProducts, "start"):
+                resumed = products.resume_pending_products(root, lambda _message: None)
+            with mock.patch.object(file_utils, "_rtsp_save_and_process_thread_target", autospec=True) as record:
+                file_utils.rtsp_save_and_process_thread_target("rtsp://camera", save_root=root,
+                    time_limit_enabled=False, schedule_product_options={"duration": "invalid"})
+            callback = record.call_args.kwargs["save_options"]["_schedule_event_callback"]
+            callback([np.zeros((64, 96, 3), np.uint8)], 10, start, ((25, 20), (35, 30)))
+            self.assertEqual(len(resumed.jobs[saved._job(start)["id"]]["events"]), 1)
+            self.assertTrue(resumed.existing_only)
+            callback([np.zeros((64, 96, 3), np.uint8)], 10, start+timedelta(days=1), ((25, 20), (35, 30)))
+            self.assertEqual(len(resumed.jobs), 1, "disabled outputs created a new job")
+
+    def test_cancelled_ffmpeg_concat_is_reaped(self):
+        with tempfile.TemporaryDirectory() as root:
+            service = self.service(root, concatenate=True)
+            process = mock.Mock()
+            process.poll.return_value = None
+            service.cancel.set()
+            with mock.patch.object(products.subprocess, "Popen", return_value=process):
+                with self.assertRaises(InterruptedError):
+                    service._run_concat_copy([Path(root)/"input.mp4"], Path(root)/"output.mp4")
+            process.terminate.assert_called_once()
+            process.wait.assert_called_once_with(timeout=3)
+
     def test_shared_crops_one_ai_call_for_image_and_video(self):
         with tempfile.TemporaryDirectory() as root:
             service = self.service(root, blend_image=True, blend_video=True)
@@ -324,6 +563,19 @@ class ScheduleProductTests(unittest.TestCase):
             self.assertTrue(source.exists())
             self.assertTrue(Path(str(source)+".capture.json").exists())
             self.assertNotEqual(job["state"], "replacing")
+
+    def test_concat_uses_actual_recording_length_instead_of_stale_metadata(self):
+        with tempfile.TemporaryDirectory() as root:
+            service = self.service(root, concatenate=True)
+            start = datetime(2026, 10, 12, 20)
+            source = self.archive(root, start)
+            marker = Path(str(source)+".capture.json")
+            metadata = json.loads(marker.read_text())
+            metadata["frame_count"] = 10
+            rtsp_live.write_json(marker, metadata)
+            job = service._job(start)
+            service.tick(start+timedelta(minutes=1))
+            self.assertEqual(rtsp_segments._properties(job["outputs"]["concatenate"])[1], 30)
 
     def test_boundary_is_frame_accurate_and_keeps_outside_footage(self):
         with tempfile.TemporaryDirectory() as root:

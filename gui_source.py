@@ -1289,7 +1289,7 @@ atomcam2で利用する場合は、GitHubで公開されている
                             ("blend_image", "比較明合成画像（流星の切り抜き）"),
                             ("concatenate", "等倍速で連結し、検証後に元の録画を削除して置き換える")):
             ttk.Checkbutton(frame, text=label, variable=self.schedule_product_vars[name]).pack(anchor=tk.W)
-        ttk.Label(frame, text="録画時間帯の指定が必要です。録画中から素材を準備します。", style="Hint.TLabel").pack(anchor=tk.W, pady=4)
+        ttk.Label(frame, text="録画中から連結・切り抜きを準備します。再起動時に不足キャッシュを補完します。", style="Hint.TLabel").pack(anchor=tk.W, pady=4)
         row = ttk.Frame(frame)
         row.pack(fill=tk.X)
         ttk.Button(row, text="タイムラプス・切り抜きの詳細設定", command=self._schedule_product_details).pack(side=tk.LEFT)
@@ -1351,7 +1351,7 @@ atomcam2で利用する場合は、GitHubで公開されている
         ttk.Label(frame, textvariable=summary).pack(anchor=tk.W)
         ttk.Label(frame, text="上限150GB。古い素材から自動削除します。削除した素材は元録画から再作成します。", wraplength=600).pack(anchor=tk.W, pady=6)
         tree = ttk.Treeview(frame, columns=("size",), show="tree headings", selectmode="extended", height=12)
-        tree.heading("#0", text="素材（スケジュール / sample=タイムラプス / event=流星）")
+        tree.heading("#0", text="素材（sample=タイムラプス / cutouts=切り抜き / concat=連結）")
         tree.heading("size", text="容量MB")
         tree.column("#0", width=510)
         tree.column("size", width=90)
