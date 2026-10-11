@@ -494,6 +494,9 @@ class App(
         self.ml_training_data_root_var = tk.StringVar(
             value=config.DEFAULT_ML_TRAINING_DATA_ROOT
         )
+        self.ml_training_min_probability_var = tk.StringVar(
+            value=str(config.DEFAULT_ML_TRAINING_MIN_PROBABILITY)
+        )
         self.auto_video_mask_enabled_var = tk.BooleanVar(
             value=config.DEFAULT_AUTO_VIDEO_MASK_ENABLED
         )
