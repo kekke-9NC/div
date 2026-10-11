@@ -65,6 +65,48 @@ def candidate_from_points(points, frame_rate=25.0):
                           tuple(fitted[1]), peak, r2)
 
 
+def _component_detections(residual, labels, stats, centers):
+    """Exact component scoring with stable signal ranking and bounded Python work."""
+    count = len(stats)
+    detections = []
+    # Keep label order (including stable signal-score ties). Only
+    # components passing the existing size tests need a Python loop.
+    eligible = np.flatnonzero(
+        (stats[1:, cv2.CC_STAT_AREA] >= 3)
+        & (stats[1:, cv2.CC_STAT_AREA] <= 1000)
+        & (stats[1:, cv2.CC_STAT_WIDTH] <= 350)
+        & (stats[1:, cv2.CC_STAT_HEIGHT] <= 350)
+    ) + 1
+    if len(eligible) > 400:
+        # Aggregate exact integer sums in one image pass. The old loop
+        # visited thousands of cloud/noise components only to discard
+        # all but 400. Weighted bincount is exact for these uint8 sums.
+        keep = np.zeros(count, dtype=bool)
+        keep[eligible] = True
+        pixels = keep[labels.ravel()]
+        flat_labels = labels.ravel()[pixels]
+        flat_values = residual.ravel()[pixels]
+        scores = np.bincount(flat_labels, weights=flat_values, minlength=count)
+        has_peak = np.bincount(flat_labels[flat_values >= 5], minlength=count) > 0
+        eligible = eligible[(scores[eligible] >= 20) & has_peak[eligible]]
+        eligible = eligible[np.argsort(-scores[eligible], kind='stable')[:400]]
+        for k in eligible:
+            x, y, w, h, area = map(int, stats[k])
+            values = residual[y:y+h, x:x+w][labels[y:y+h, x:x+w] == k]
+            detections.append([*centers[k], int(scores[k]), w, h, int(values.max())])
+    else:
+        for k in eligible:
+            x, y, w, h, area = map(int, stats[k])
+            values = residual[y:y+h, x:x+w][labels[y:y+h, x:x+w] == k]
+            peak, score = int(values.max()), int(values.sum())
+            if peak >= 5 and score >= 20:
+                detections.append([*centers[k], score, w, h, peak])
+        detections.sort(key=lambda d: d[2], reverse=True)
+    # Bound work in clouds; rank by signal, never by screen position.
+    detections = detections[:400]
+    return detections
+
+
 class ShortFlashDetector:
     def __init__(self, frame_rate=25.0, border=30):
         self.frame_rate = max(1., float(frame_rate))
@@ -126,24 +168,7 @@ class ShortFlashDetector:
                     permitted_shape = gray.shape
                 binary &= permitted
             count, labels, stats, centers = cv2.connectedComponentsWithStats(binary, 8)
-            detections = []
-            # Keep label order (including stable signal-score ties). Only
-            # components passing the existing size tests need a Python loop.
-            eligible = np.flatnonzero(
-                (stats[1:, cv2.CC_STAT_AREA] >= 3)
-                & (stats[1:, cv2.CC_STAT_AREA] <= 1000)
-                & (stats[1:, cv2.CC_STAT_WIDTH] <= 350)
-                & (stats[1:, cv2.CC_STAT_HEIGHT] <= 350)
-            ) + 1
-            for k in eligible:
-                x, y, w, h, area = map(int, stats[k])
-                values = residual[y:y+h, x:x+w][labels[y:y+h, x:x+w] == k]
-                peak, score = int(values.max()), int(values.sum())
-                if peak >= 5 and score >= 20:
-                    detections.append([*centers[k], score, w, h, peak])
-            # Bound work in clouds; rank by signal, never by screen position.
-            detections.sort(key=lambda d: d[2], reverse=True)
-            detections = detections[:400]
+            detections = _component_detections(residual, labels, stats, centers)
             if detections:
                 tree = cKDTree(np.asarray(detections)[:, :2])
                 choices = []

@@ -33,10 +33,16 @@ data_files += include([
     "*.npy",
     "assets/**/*.json",
     "THIRD_PARTY_NOTICES.md",
+    "assets/licenses/**/*",
 ])
 # Models
 data_files += include([
+    "models/*.pth",
+    "models/*.pth.meta.json",
+    "models/auxiliary/*.pth",
+    "models/auxiliary/*.pth.meta.json",
     "model_latest_1.pth",
+    "model_epoch_47.pth",
     "model_epoch_46.pth",
     "model_ep47_vacc91.60.pth",
     "model_ep48_vacc97.46.pth",
@@ -58,6 +64,9 @@ a = Analysis(
     datas=data_files,
     hiddenimports=[
         'tkinterdnd2', 'PIL', 'cv2', 'numpy', 'astropy', 'torch', 'torchvision',
+        'event_boost_model', 'event_transformer', 'event_noise_gate',
+        'transformers.models.dinov2.modeling_dinov2',
+        'transformers.models.dinov2.configuration_dinov2',
         'status_panel', 'ui_state', 'network_copy', 'download_pipeline', 'meteor_sky_viewer',
         'coordinate_manager', 'config', 'file_utils', 'video_processing', 'astrometry',
         'image_processing', 'model', 'utils', 'location_utils', 'sun_times', 'auto_time_updater',

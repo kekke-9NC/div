@@ -104,7 +104,7 @@ def _select_model_event_frames(
     """Keep the classifier focused on the detected luminous activity."""
     if not frames:
         return frames
-    if model.get_active_model_info().get("architecture") != model.UNIVERSAL_ARCHITECTURE_NAME:
+    if model.get_active_model_info().get("architecture") not in model.EVENT_ARCHITECTURES:
         return frames
     padding = max(0, int(round(config.MODEL_EVENT_PADDING_SECONDS * frame_rate)))
     start = max(clip_start_frame, detection_start_frame - padding)
@@ -258,39 +258,40 @@ class _VideoFrameRangeCache:
         self.resized_masks = {}
 
     def read(self, source, start_frame, end_frame, decoder_threads=2):
-        start = max(0, int(start_frame))
-        end = max(start - 1, int(end_frame))
+        start, end = max(0, int(start_frame)), int(end_frame)
         if end < start:
             return []
+        frames, first = None, start
         if self.key is not None:
-            cached_source, cached_threads, first, last = self.key
-            if (source == cached_source and decoder_threads == cached_threads
-                    and first <= start and end <= last):
-                return self.frames[start - first:end - first + 1]
-            if (source == cached_source and decoder_threads == cached_threads
-                    and first <= start <= last and end > last):
-                tail = _read_video_frame_range(source, last + 1, end, decoder_threads)
-                if len(tail) == end - last:
-                    frames = self.frames[start - first:] + tail
-                else:
-                    # A failed tail read must behave exactly like a fresh seek.
-                    frames = _read_video_frame_range(source, start, end, decoder_threads)
-            else:
-                frames = _read_video_frame_range(source, start, end, decoder_threads)
-        else:
+            cached_source, cached_threads, cached_first, last = self.key
+            if source == cached_source and decoder_threads == cached_threads:
+                if cached_first <= start and end <= last:
+                    return list(self.frames[start-cached_first:end-cached_first+1])
+                if start <= last+1 and end >= cached_first-1:
+                    head = _read_video_frame_range(source, start, cached_first-1, decoder_threads) if start < cached_first else []
+                    tail = _read_video_frame_range(source, last+1, end, decoder_threads) if end > last else []
+                    if len(head) == max(0, cached_first-start) and len(tail) == max(0, end-last):
+                        first = min(start, cached_first)
+                        frames = head + self.frames + tail
+        if frames is None:
             frames = _read_video_frame_range(source, start, end, decoder_threads)
-        if len(frames) == end - start + 1:
-            # Drop the previous window before retaining another full-HD range.
-            self.key = None
-            self.frames = []
-            if sum(frame.nbytes for frame in frames) <= self.max_bytes // 2:
-                self.key = (source, decoder_threads, start, end)
-                self.frames = frames
+            first = start
+        result = list(frames[start-first:end-first+1])
+        if len(result) == end-start+1:
+            self.key, self.frames = None, []
+            if frames:
+                capacity = max(0, (self.max_bytes//2)//frames[0].nbytes)
+                if len(result) <= capacity:
+                    # Preserve the surrounding resident window rather than
+                    # evicting it for each differently padded flash crop.
+                    keep_first = min(start-first, max(0, len(frames)-capacity))
+                    retained_frames = frames[keep_first:keep_first+capacity]
+                    self.frames = retained_frames
+                    absolute_first = first+keep_first
+                    self.key = (source, decoder_threads, absolute_first, absolute_first+len(retained_frames)-1)
             retained = {id(frame) for frame in self.frames}
-            self.masked = {key: value for key, value in self.masked.items() if key in retained}
-        # Enhancement may replace entries in the caller's list. Keep the
-        # retained raw list private even when this request filled the cache.
-        return list(frames)
+            self.masked = {key:value for key,value in self.masked.items() if key in retained}
+        return result
 
     def mask_frames(self, frames, mask):
         """Apply the same resized uint8 mask once per retained raw frame."""
@@ -708,6 +709,40 @@ def _has_matching_finer_line(
         _finer_line_matches_candidate(line, candidate_line, cutout_rect)
         for line in lines
     )
+
+
+def _keep_full_event_media(probability, is_meteor):
+    """Keep every meteor export; compact only explicitly configured negatives."""
+    if is_meteor:
+        return True
+    try:
+        floor = float(model.get_active_model_info().get('non_meteor_full_media_probability_min', 0.))
+        if not np.isfinite(floor) or not 0. <= floor <= model.get_meteor_decision_threshold():
+            return True
+        return not (0. <= probability < floor)
+    except (TypeError, ValueError):
+        return True
+
+
+def _resident_frame_slice(frames, first, start, end):
+    """Reuse decoded, already masked frames only for a complete exact range."""
+    if first <= start <= end < first + len(frames):
+        return list(frames[start-first:end-first+1])
+    return None
+
+
+def _noise_gate_cutout_rect(cx, cy, width, height):
+    size, border = config.CUTOUT_SIZE, config.BORDER_SIZE
+    half = size // 2
+    x2, y2 = min(width - border, cx + half), min(height - border, cy + half)
+    x1, y1 = max(border, cx - half), max(border, cy - half)
+    if x2 - x1 < size:
+        x1 = max(border, x1 - (size - (x2-x1)) // 2)
+        x2 = min(width-border, x1+size)
+    if y2 - y1 < size:
+        y1 = max(border, y1 - (size - (y2-y1)) // 2)
+        y2 = min(height-border, y1+size)
+    return max(border,x2-size), max(border,y2-size), x2, y2
 
 
 def _process_finer_detection_worker(
@@ -1252,13 +1287,14 @@ def create_line_video_clips(
                             # 並列処理で確認された候補を収集
                             confirmed_candidates_parallel = []
                         
-                            def collect_finer_result(cand, line_detected_indices, cutout_rect_finer):
+                            def collect_finer_result(cand, line_detected_indices, cutout_rect_finer, gate_result=None):
                                 if line_detected_indices:
                                     print(f"\n--- 詳細検出確認 中心: ({cand['cx']}, {cand['cy']}) ---")
                                     confirmed_candidates_parallel.append({
                                         'cand': cand,
                                         'line_detected_indices': line_detected_indices,
                                         'cutout_rect_finer': cutout_rect_finer,
+                                        'gate_result': gate_result,
                                     })
                                 else:
                                     print(f"候補 ({cand['cx']}, {cand['cy']}): 詳細検出では流星は見つかりませんでした。")
@@ -1273,16 +1309,34 @@ def create_line_video_clips(
                                 'border_margin': config.BORDER_SIZE,
                                 'finer_min_length': config.FINER_DETECT_MIN_LENGTH,
                             }
+                            def refine_and_gate(cand):
+                                indices, rect = _process_finer_detection_worker(
+                                    cx=cand['cx'], cy=cand['cy'], candidate_line=cand['line'],
+                                    temporal_bounds=(cand['flash'].start_frame, cand['flash'].end_frame) if cand['flash'] else None,
+                                    **worker_kwargs,
+                                )
+                                gate = None
+                                if indices and not is_rtsp:
+                                    low, high = min(indices), max(indices)
+                                    pad = int(config.FINER_DETECT_PADDING_SECONDS * frame_rate)
+                                    clip_low, clip_high = max(0, low-pad), high+pad
+                                    if total_frames > 0:
+                                        clip_high = min(total_frames-1, clip_high)
+                                        clip_low = max(0, clip_high-((high-low)+2*pad)+1)
+                                    model_pad = max(0, int(round(config.MODEL_EVENT_PADDING_SECONDS * frame_rate)))
+                                    core_low, core_high = max(clip_low, low-model_pad), min(clip_high, high+model_pad)
+                                    core = _resident_frame_slice(frames_for_finer_detect, actual_start_finer, core_low, core_high)
+                                    if core is not None and model.get_active_model_info().get('architecture') in model.EVENT_ARCHITECTURES:
+                                        inference_rect = cand['flash'].classifier_rect(img_w, img_h) if cand['flash'] else _noise_gate_cutout_rect(cand['cx'], cand['cy'], img_w, img_h)
+                                        gate = model.predict_noise_gate(core, inference_rect, frame_rate)
+                                return indices, rect, gate
+
                             if num_workers == 1:
                                 for cand in valid_candidates:
                                     if cancel_flag is not None and cancel_flag.is_set():
                                         break
                                     try:
-                                        result = _process_finer_detection_worker(
-                                            cx=cand['cx'], cy=cand['cy'], candidate_line=cand['line'],
-                                            temporal_bounds=(cand['flash'].start_frame, cand['flash'].end_frame) if cand['flash'] else None,
-                                            **worker_kwargs,
-                                        )
+                                        result = refine_and_gate(cand)
                                         collect_finer_result(cand, *result)
                                     except Exception as e:
                                         print(f"詳細処理中にエラー ({cand['cx']}, {cand['cy']}): {e}")
@@ -1293,10 +1347,7 @@ def create_line_video_clips(
                                 ) as executor:
                                     futures = {
                                         executor.submit(
-                                            _process_finer_detection_worker,
-                                            cx=cand['cx'], cy=cand['cy'], candidate_line=cand['line'],
-                                            temporal_bounds=(cand['flash'].start_frame, cand['flash'].end_frame) if cand['flash'] else None,
-                                            **worker_kwargs,
+                                            refine_and_gate, cand,
                                         ): cand
                                         for cand in valid_candidates
                                     }
@@ -1359,18 +1410,22 @@ def create_line_video_clips(
                                     print(f"RTSPバッファから最終クリップフレームを取得: {actual_start_final} - {actual_end_final}, {len(final_frames_for_clip)} フレーム")
                                 else:
                                     print(f"動画ファイルから最終クリップフレームを取得: {adjusted_start_frame} - {adjusted_end_frame}")
-                                    final_frames_for_clip = frame_range_cache.read(
-                                        analysis_source,
-                                        adjusted_start_frame,
-                                        adjusted_end_frame,
-                                        decoder_threads,
+                                    final_frames_for_clip = _resident_frame_slice(
+                                        frames_for_finer_detect, actual_start_finer,
+                                        adjusted_start_frame, adjusted_end_frame,
                                     )
+                                    final_frames_already_masked = final_frames_for_clip is not None
+                                    if final_frames_for_clip is None:
+                                        final_frames_for_clip = frame_range_cache.read(
+                                            analysis_source, adjusted_start_frame,
+                                            adjusted_end_frame, decoder_threads,
+                                        )
                             
                                 if not final_frames_for_clip:
                                     print("警告: 最終クリップ用のフレームを取得できませんでした。スキップします。")
                                     continue
                             
-                                if mask is not None:
+                                if mask is not None and (is_rtsp or not final_frames_already_masked):
                                     final_frames_for_clip = frame_range_cache.mask_frames(final_frames_for_clip, mask)
 
                                 # Keep the detector's original one-second difference image for
@@ -1385,6 +1440,24 @@ def create_line_video_clips(
                                     detection_end_frame,
                                     frame_rate,
                                 )
+                                inference_rect_for_gate = cand['flash'].classifier_rect(img_w, img_h) if cand['flash'] else _noise_gate_cutout_rect(cx, cy, img_w, img_h)
+                                gate_result = confirmed['gate_result']
+                                if gate_result is None:
+                                    gate_result = model.predict_noise_gate(ml_source_frames, inference_rect_for_gate, frame_rate)
+                                if gate_result is not None and gate_result[0] < gate_result[1]:
+                                    detection_counter += 1
+                                    when = base_datetime + timedelta(seconds=((adjusted_start_frame + adjusted_end_frame) // 2) / frame_rate)
+                                    processed_clips_info.append({
+                                        'path': None, 'center': (cx, cy), 'probability': gate_result[0],
+                                        'label': 'not_meteor', 'timestamp': when,
+                                        'start_frame': adjusted_start_frame, 'end_frame': adjusted_end_frame,
+                                        'detection_start_frame': detection_start_frame, 'detection_end_frame': detection_end_frame,
+                                        'detection_line': ((x1, y1), (x2, y2)), 'saved_paths': {},
+                                        'classification_stage': 'foreground_gate', 'gate_threshold': gate_result[1],
+                                        'inference_rect': inference_rect_for_gate,
+                                    })
+                                    print(f"背景候補を一次分類で除外: {gate_result[0]:.6f}")
+                                    continue
                                 enhancement_result: Optional[video_enhancement.EnhancementResult] = None
                                 if active_fixed_pattern_correction is not None:
                                     enhancement_result = video_enhancement.enhance_frames(
@@ -1470,6 +1543,7 @@ def create_line_video_clips(
                                 print(f"流星確率: {probability:.4f}")
                             
                                 is_meteor = probability >= model.get_meteor_decision_threshold()
+                                keep_full_media = _keep_full_event_media(probability, is_meteor)
                                 save_dir = meteor_save_path if is_meteor else not_meteor_save_path
                                 detection_label = "meteor" if is_meteor else "not_meteor"
                                 os.makedirs(save_dir, exist_ok=True)
@@ -1526,7 +1600,7 @@ def create_line_video_clips(
                                     else:
                                         print(f"エラー: 動画クリップの書き込み開始に失敗 ({output_clip_path})")
                             
-                                if save_options.get('full_video', False) and final_frames_for_clip:
+                                if save_options.get('full_video', False) and keep_full_media and final_frames_for_clip:
                                     full_video_path = os.path.join(save_dir, f"{base_filename}_full.mp4")
                                     clip_start_frame = actual_start_final if is_rtsp else adjusted_start_frame
                                     clip_start_datetime = base_datetime + timedelta(
@@ -1672,7 +1746,7 @@ def create_line_video_clips(
                                     except Exception as e_info:
                                         print(f"エラー: 検出情報ファイルの保存中にエラー: {e_info}")
                             
-                                if save_options.get('summary', False):
+                                if save_options.get('summary', False) and keep_full_media:
                                     if all(key in saved_paths for key in ['composite', 'annotated', 'video']):
                                         summary_video_path = os.path.join(save_dir, f"{base_filename}_summary.mp4")
                                         orig_h, orig_w = final_frames_for_clip[0].shape[:2]
@@ -1716,6 +1790,7 @@ def create_line_video_clips(
                             
                                 processed_clips_info.append({
                                     'path': saved_paths.get('video'), 'center': (cx, cy), 'probability': probability,
+                                    'inference_rect': inference_rect, 'heavy_outputs_skipped': not keep_full_media,
                                     'label': detection_label, 'timestamp': detection_datetime,
                                     'start_frame': adjusted_start_frame, 'end_frame': adjusted_end_frame, 'saved_paths': saved_paths,
                                     'detection_start_frame': detection_start_frame, 'detection_end_frame': detection_end_frame,
@@ -1929,18 +2004,22 @@ def create_line_video_clips(
 
                     else:
                         print(f"動画ファイルから最終クリップフレームを取得: {adjusted_start_frame} - {adjusted_end_frame}")
-                        final_frames_for_clip = frame_range_cache.read(
-                            analysis_source,
-                            adjusted_start_frame,
-                            adjusted_end_frame,
-                            decoder_threads,
+                        final_frames_for_clip = _resident_frame_slice(
+                            frames_for_finer_detect, actual_start_frame_index_finer,
+                            adjusted_start_frame, adjusted_end_frame,
                         )
+                        final_frames_already_masked = final_frames_for_clip is not None
+                        if final_frames_for_clip is None:
+                            final_frames_for_clip = frame_range_cache.read(
+                                analysis_source, adjusted_start_frame,
+                                adjusted_end_frame, decoder_threads,
+                            )
 
                     if not final_frames_for_clip:
                         print("警告: 最終クリップ用のフレームを取得できませんでした。スキップします。")
                         continue
 
-                    if mask is not None:
+                    if mask is not None and (is_rtsp or not final_frames_already_masked):
                         final_frames_for_clip = frame_range_cache.mask_frames(final_frames_for_clip, mask)
 
                     # The classifier sees the same detector evidence: legacy
@@ -1954,6 +2033,22 @@ def create_line_video_clips(
                         detection_end_frame,
                         frame_rate,
                     )
+                    inference_rect_for_gate = flash.classifier_rect(img_w, img_h) if flash else _noise_gate_cutout_rect(cx, cy, img_w, img_h)
+                    gate_result = model.predict_noise_gate(ml_source_frames, inference_rect_for_gate, frame_rate)
+                    if gate_result is not None and gate_result[0] < gate_result[1]:
+                        detection_counter += 1
+                        when = base_datetime + timedelta(seconds=((adjusted_start_frame + adjusted_end_frame) // 2) / frame_rate)
+                        processed_clips_info.append({
+                            'path': None, 'center': (cx, cy), 'probability': gate_result[0],
+                            'label': 'not_meteor', 'timestamp': when,
+                            'start_frame': adjusted_start_frame, 'end_frame': adjusted_end_frame,
+                            'detection_start_frame': detection_start_frame, 'detection_end_frame': detection_end_frame,
+                            'detection_line': ((x1, y1), (x2, y2)), 'saved_paths': {},
+                            'classification_stage': 'foreground_gate', 'gate_threshold': gate_result[1],
+                                        'inference_rect': inference_rect_for_gate,
+                        })
+                        print(f"背景候補を一次分類で除外: {gate_result[0]:.6f}")
+                        continue
                     enhancement_result: Optional[video_enhancement.EnhancementResult] = None
                     if active_fixed_pattern_correction is not None:
                         enhancement_result = video_enhancement.enhance_frames(
@@ -2040,6 +2135,7 @@ def create_line_video_clips(
                     print(f"流星確率: {probability:.4f}")
 
                     is_meteor = probability >= model.get_meteor_decision_threshold()
+                    keep_full_media = _keep_full_event_media(probability, is_meteor)
                     save_dir = meteor_save_path if is_meteor else not_meteor_save_path
                     detection_label = "meteor" if is_meteor else "not_meteor"
                     os.makedirs(save_dir, exist_ok=True)
@@ -2096,7 +2192,7 @@ def create_line_video_clips(
                         else:
                             print(f"エラー: 動画クリップの書き込み開始に失敗 ({output_clip_path})")
 
-                    if save_options.get('full_video', False) and final_frames_for_clip:
+                    if save_options.get('full_video', False) and keep_full_media and final_frames_for_clip:
                         full_video_path = os.path.join(save_dir, f"{base_filename}_full.mp4")
                         clip_start_frame = actual_start_final if is_rtsp else adjusted_start_frame
                         clip_start_datetime = base_datetime + timedelta(
@@ -2242,7 +2338,7 @@ def create_line_video_clips(
                         except Exception as e_info:
                             print(f"エラー: 検出情報ファイルの保存中にエラー: {e_info}")
 
-                    if save_options.get('summary', False):
+                    if save_options.get('summary', False) and keep_full_media:
                         if all(key in saved_paths for key in ['composite', 'annotated', 'video']):
                             summary_video_path = os.path.join(save_dir, f"{base_filename}_summary.mp4")
                             orig_h, orig_w = final_frames_for_clip[0].shape[:2]
@@ -2288,6 +2384,7 @@ def create_line_video_clips(
 
                     processed_clips_info.append({
                         'path': saved_paths.get('video'), 'center': (cx, cy), 'probability': probability,
+                                    'inference_rect': inference_rect, 'heavy_outputs_skipped': not keep_full_media,
                         'label': detection_label, 'timestamp': detection_datetime,
                         'start_frame': adjusted_start_frame, 'end_frame': adjusted_end_frame, 'saved_paths': saved_paths,
                                     'detection_start_frame': detection_start_frame, 'detection_end_frame': detection_end_frame,
@@ -2318,6 +2415,24 @@ def create_line_video_clips(
         if cancel_flag is not None and cancel_flag.is_set():
             final_message += " (キャンセルされました)"
         progress_callback((final_message, None))
+
+    rejected = [item for item in processed_clips_info if item.get('classification_stage') == 'foreground_gate']
+    if rejected and save_options.get('info', False):
+        # Keep every early decision reviewable against the original recording.
+        # These are noise decisions, not additional confirmed meteor events.
+        import json, hashlib
+        try:
+            os.makedirs(not_meteor_save_path, exist_ok=True)
+            source_id = hashlib.sha256(source.encode()).hexdigest()[:12]
+            record_path = os.path.join(not_meteor_save_path, f"noise_gate_{source_id}.json")
+            payload = {'source': source, 'frame_rate': frame_rate,
+                       'model': model.get_active_model_info(), 'rejections': rejected}
+            temporary = record_path + '.tmp'
+            with open(temporary, 'w', encoding='utf-8') as handle:
+                json.dump(payload, handle, ensure_ascii=False, indent=2, default=str)
+            os.replace(temporary, record_path)
+        except OSError as exc:
+            print(f"背景候補の記録を保存できませんでした: {exc}")
 
     return processed_clips_info
 

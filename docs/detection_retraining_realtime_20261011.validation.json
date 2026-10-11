@@ -1,0 +1,474 @@
+{
+  "main_model_sha256": "23e2bd8e584c9ec8df27875b4b0da562f1c053d2fd708d89d8168047f0be0abb",
+  "gate_sha256": "c214b25919321bd69439fcc61bdba5ff4d80ed5188fe337d038876880e76674f",
+  "timing": [
+    {
+      "source": "20261010/17/50.mp4",
+      "version": "after",
+      "repeat": 22,
+      "seconds": 47.16312470799312,
+      "cpu_seconds": 125.86641900000001,
+      "meteor_decisions": 0,
+      "non_meteor_decisions": 3252,
+      "output_files": 114,
+      "output_bytes": 78668996,
+      "duration_seconds": 60,
+      "status": "completed",
+      "peak_rss_bytes": 3794141184,
+      "opencv_threads_at_end": 18
+    },
+    {
+      "source": "20261010/17/49.mp4",
+      "version": "after",
+      "repeat": 22,
+      "seconds": 41.77720145805506,
+      "cpu_seconds": 88.60386499999998,
+      "meteor_decisions": 0,
+      "non_meteor_decisions": 3266,
+      "output_files": 12,
+      "output_bytes": 3434283,
+      "duration_seconds": 60,
+      "status": "completed",
+      "peak_rss_bytes": 3129458688,
+      "opencv_threads_at_end": 18
+    },
+    {
+      "source": "20261011/05/05.mp4",
+      "version": "after",
+      "repeat": 22,
+      "seconds": 45.16368399997009,
+      "cpu_seconds": 95.013637,
+      "meteor_decisions": 0,
+      "non_meteor_decisions": 3561,
+      "output_files": 1,
+      "output_bytes": 2373570,
+      "duration_seconds": 60,
+      "status": "completed",
+      "peak_rss_bytes": 3073966080,
+      "opencv_threads_at_end": 18
+    },
+    {
+      "source": "20261011/05/04.mp4",
+      "version": "after",
+      "repeat": 22,
+      "seconds": 48.285344082978554,
+      "cpu_seconds": 106.34275399999999,
+      "meteor_decisions": 0,
+      "non_meteor_decisions": 3518,
+      "output_files": 104,
+      "output_bytes": 30306171,
+      "duration_seconds": 60,
+      "status": "completed",
+      "peak_rss_bytes": 3751821312,
+      "opencv_threads_at_end": 18
+    },
+    {
+      "source": "20261010/20/30.mp4",
+      "version": "after",
+      "repeat": 22,
+      "seconds": 12.573605125013273,
+      "cpu_seconds": 27.870201,
+      "meteor_decisions": 0,
+      "non_meteor_decisions": 35,
+      "output_files": 34,
+      "output_bytes": 1314349,
+      "duration_seconds": 60,
+      "status": "completed",
+      "peak_rss_bytes": 3969335296,
+      "opencv_threads_at_end": 18
+    },
+    {
+      "source": "20261010/21/31.mp4",
+      "version": "after",
+      "repeat": 22,
+      "seconds": 15.551279583014548,
+      "cpu_seconds": 42.865412,
+      "meteor_decisions": 0,
+      "non_meteor_decisions": 17,
+      "output_files": 130,
+      "output_bytes": 8731816,
+      "duration_seconds": 60,
+      "status": "completed",
+      "peak_rss_bytes": 4371972096,
+      "opencv_threads_at_end": 18
+    },
+    {
+      "source": "20261011/02/25.mp4",
+      "version": "after",
+      "repeat": 22,
+      "seconds": 10.808657541987486,
+      "cpu_seconds": 24.881213000000006,
+      "meteor_decisions": 1,
+      "non_meteor_decisions": 0,
+      "output_files": 13,
+      "output_bytes": 773118,
+      "duration_seconds": 60,
+      "status": "completed",
+      "peak_rss_bytes": 4453318656,
+      "opencv_threads_at_end": 18
+    },
+    {
+      "source": "20261011/04/30.mp4",
+      "version": "after",
+      "repeat": 22,
+      "seconds": 10.93343533395091,
+      "cpu_seconds": 24.88225,
+      "meteor_decisions": 1,
+      "non_meteor_decisions": 0,
+      "output_files": 13,
+      "output_bytes": 572280,
+      "duration_seconds": 60,
+      "status": "completed",
+      "peak_rss_bytes": 3940974592,
+      "opencv_threads_at_end": 18
+    },
+    {
+      "source": "audit",
+      "version": "after",
+      "repeat": 22,
+      "seconds": 97.39051791699603,
+      "cpu_seconds": 566.844847,
+      "meteor_decisions": 32,
+      "non_meteor_decisions": 2,
+      "output_files": 0,
+      "output_bytes": 0,
+      "duration_seconds": 1200,
+      "status": "completed",
+      "peak_rss_bytes": 13373702144,
+      "opencv_threads_at_end": 18
+    }
+  ],
+  "confirmed_29": {
+    "expected": 29,
+    "matched": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29
+    ],
+    "missing": [],
+    "one_to_one_matched": 29,
+    "one_to_one_pairs": [
+      {
+        "fixture_id": 1,
+        "detection_index": 0
+      },
+      {
+        "fixture_id": 2,
+        "detection_index": 1
+      },
+      {
+        "fixture_id": 3,
+        "detection_index": 3
+      },
+      {
+        "fixture_id": 4,
+        "detection_index": 4
+      },
+      {
+        "fixture_id": 5,
+        "detection_index": 5
+      },
+      {
+        "fixture_id": 6,
+        "detection_index": 6
+      },
+      {
+        "fixture_id": 7,
+        "detection_index": 7
+      },
+      {
+        "fixture_id": 8,
+        "detection_index": 8
+      },
+      {
+        "fixture_id": 9,
+        "detection_index": 9
+      },
+      {
+        "fixture_id": 10,
+        "detection_index": 10
+      },
+      {
+        "fixture_id": 11,
+        "detection_index": 11
+      },
+      {
+        "fixture_id": 12,
+        "detection_index": 12
+      },
+      {
+        "fixture_id": 13,
+        "detection_index": 13
+      },
+      {
+        "fixture_id": 14,
+        "detection_index": 14
+      },
+      {
+        "fixture_id": 15,
+        "detection_index": 15
+      },
+      {
+        "fixture_id": 16,
+        "detection_index": 17
+      },
+      {
+        "fixture_id": 17,
+        "detection_index": 18
+      },
+      {
+        "fixture_id": 18,
+        "detection_index": 20
+      },
+      {
+        "fixture_id": 19,
+        "detection_index": 21
+      },
+      {
+        "fixture_id": 20,
+        "detection_index": 22
+      },
+      {
+        "fixture_id": 21,
+        "detection_index": 23
+      },
+      {
+        "fixture_id": 22,
+        "detection_index": 24
+      },
+      {
+        "fixture_id": 23,
+        "detection_index": 26
+      },
+      {
+        "fixture_id": 24,
+        "detection_index": 27
+      },
+      {
+        "fixture_id": 25,
+        "detection_index": 28
+      },
+      {
+        "fixture_id": 26,
+        "detection_index": 29
+      },
+      {
+        "fixture_id": 27,
+        "detection_index": 30
+      },
+      {
+        "fixture_id": 28,
+        "detection_index": 31
+      },
+      {
+        "fixture_id": 29,
+        "detection_index": 33
+      }
+    ]
+  },
+  "cascade": {
+    "training": {
+      "full": {
+        "threshold": 0.4404476142134689,
+        "accuracy": 1.0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "specificity": 1.0,
+        "f1": 1.0,
+        "pr_auc": 1.0,
+        "roc_auc": 1.0,
+        "tp": 2767,
+        "fn": 0,
+        "fp": 0,
+        "tn": 1855
+      },
+      "cascade": {
+        "threshold": 0.4404476142134689,
+        "accuracy": 1.0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "specificity": 1.0,
+        "f1": 1.0,
+        "pr_auc": 1.0,
+        "roc_auc": 1.0,
+        "tp": 2767,
+        "fn": 0,
+        "fp": 0,
+        "tn": 1855
+      },
+      "full_true_positives_lost": 0
+    },
+    "validation": {
+      "full": {
+        "threshold": 0.4404476142134689,
+        "accuracy": 0.9823356231599607,
+        "precision": 0.9880749574105622,
+        "recall": 0.9813874788494078,
+        "specificity": 0.9836448598130841,
+        "f1": 0.9847198641765704,
+        "pr_auc": 0.998539405905053,
+        "roc_auc": 0.99772285212771,
+        "tp": 580,
+        "fn": 11,
+        "fp": 7,
+        "tn": 421
+      },
+      "cascade": {
+        "threshold": 0.4404476142134689,
+        "accuracy": 0.9823356231599607,
+        "precision": 0.9880749574105622,
+        "recall": 0.9813874788494078,
+        "specificity": 0.9836448598130841,
+        "f1": 0.9847198641765704,
+        "pr_auc": 0.9982675356190447,
+        "roc_auc": 0.9971318215601626,
+        "tp": 580,
+        "fn": 11,
+        "fp": 7,
+        "tn": 421
+      },
+      "full_true_positives_lost": 0
+    },
+    "test": {
+      "full": {
+        "threshold": 0.4404476142134689,
+        "accuracy": 0.957345971563981,
+        "precision": 0.9513513513513514,
+        "recall": 1.0,
+        "specificity": 0.7428571428571429,
+        "f1": 0.9750692520775623,
+        "pr_auc": 0.9974301452082225,
+        "roc_auc": 0.9876623376623377,
+        "tp": 176,
+        "fn": 0,
+        "fp": 9,
+        "tn": 26
+      },
+      "cascade": {
+        "threshold": 0.4404476142134689,
+        "accuracy": 0.957345971563981,
+        "precision": 0.9513513513513514,
+        "recall": 1.0,
+        "specificity": 0.7428571428571429,
+        "f1": 0.9750692520775623,
+        "pr_auc": 0.9974301452082225,
+        "roc_auc": 0.9876623376623377,
+        "tp": 176,
+        "fn": 0,
+        "fp": 9,
+        "tn": 26
+      },
+      "full_true_positives_lost": 0
+    },
+    "gate_threshold": 0.7383997972413001,
+    "gate_sha256": "c214b25919321bd69439fcc61bdba5ff4d80ed5188fe337d038876880e76674f"
+  },
+  "tests": {
+    "passed": 45,
+    "command": "python -m pytest -q tests/test_event_noise_gate.py tests/test_detection_optimization.py tests/test_short_flash_detector.py tests/test_event_boost_model.py"
+  },
+  "timing_conditions": {
+    "single_video_seconds": 60,
+    "fps": 25,
+    "device": "mps",
+    "torch_threads": 4,
+    "decoder_threads": 2,
+    "foreground_gate_threads": 4,
+    "save_policy": "enabled legacy settings with documented compact negatives",
+    "audit_media_export": false,
+    "audit_file_workers": 4,
+    "tk_and_rtsp_capture_included": false
+  },
+  "canonical_recent_examples": 389,
+  "main_examples": 5852,
+  "native_gate_negative_examples": 131,
+  "native_gate_positive_examples": 29,
+  "confirmed_29_usage": "training and regression; not independent test data",
+  "unverified_04_30_prediction": true,
+  "installed_single": {
+    "source": "20261011/02/25.mp4",
+    "version": "after",
+    "repeat": 23,
+    "seconds": 10.698074375046417,
+    "cpu_seconds": 24.802699,
+    "meteor_decisions": 1,
+    "non_meteor_decisions": 0,
+    "output_files": 13,
+    "output_bytes": 773118,
+    "duration_seconds": 60,
+    "status": "completed",
+    "peak_rss_bytes": 4460806144,
+    "opencv_threads_at_end": 18
+  },
+  "installed_single_decisions_match": true,
+  "deployment": {
+    "app": "/Users/keisukematsumoto/Library/Application Support/MeteorDetector",
+    "backup": "/Users/keisukematsumoto/Library/Application Support/MeteorDetector/backups/detection-retrain-20261011-c3fkcwus",
+    "model_path": "/Users/keisukematsumoto/Library/Application Support/MeteorDetector/models/meteor_event_transformer_boost_v2.pth",
+    "model_sha256": "23e2bd8e584c9ec8df27875b4b0da562f1c053d2fd708d89d8168047f0be0abb",
+    "noise_gate_sha256": "c214b25919321bd69439fcc61bdba5ff4d80ed5188fe337d038876880e76674f",
+    "source_sha256": {
+      "config.py": "8ba7f723ea7bf25b5aa966ee9c82de1849b07b74f405e24aaf3449a4cf7b7c06",
+      "model.py": "7441706c9ba3ce360eb097f2d15f5bddc65ac5acd3136813883bc9ac2199699f",
+      "model_catalog.py": "6989139f484a05f6fc6a4f3c0d578854be66fec7a06a2243140e778c2b10b225",
+      "event_boost_model.py": "b51b257d7b293ae6e751844f6a8151e0c4840712da08208e4baa1d913832d53f",
+      "event_transformer.py": "5316b84cdfc626407d33ecaba9cf0eabe7f8b985bfd32bd3968b73399b8f038e",
+      "event_noise_gate.py": "233071ce5beeef36bbca2156ab1c1a90d644b0d8d1b7c174e1f75bf48dadd588",
+      "short_flash_detector.py": "643b04126f067d7278287c85eed9ebea3cbc5518fa8dfa8fd64abd8bf1ca78a9",
+      "video_processing.py": "4a5e48ff8e9d1d604c1c6f37d07266e80b283c913c1553c9cc3ff5d2d96a2b6d"
+    },
+    "running_legacy_ui_requires_restart": true,
+    "settings_changes": [
+      "selected_model_path"
+    ],
+    "legacy_gui_upgrade_patch": "/tmp/retrain_gui_upgrade.patch"
+  },
+  "installed_bright_batch": {
+    "source": "batch",
+    "version": "after",
+    "repeat": 23,
+    "seconds": 108.60782708396437,
+    "cpu_seconds": 489.953605,
+    "meteor_decisions": 0,
+    "non_meteor_decisions": 13597,
+    "output_files": 229,
+    "output_bytes": 114781139,
+    "duration_seconds": 240,
+    "status": "completed",
+    "peak_rss_bytes": 10382704640,
+    "opencv_threads_at_end": 18
+  },
+  "installed_bright_batch_decisions_match": true,
+  "installed_bright_batch_sources": [
+    "20261010/17/50.mp4",
+    "20261010/17/49.mp4",
+    "20261011/05/05.mp4",
+    "20261011/05/04.mp4"
+  ]
+}

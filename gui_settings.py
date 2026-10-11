@@ -1631,6 +1631,7 @@ class SettingsMixin:
             'observation_latitude': self.observation_latitude_var.get(),
             'observation_longitude': self.observation_longitude_var.get(),
             'selected_model_path': self.selected_model_path_var.get(),
+            'classifier_release_ack': getattr(self, '_classifier_release_ack', ''),
             'custom_model_paths': list(self.custom_model_paths),
             'ai_vlm_backend': self.ai_vlm_backend_var.get(),
             'lm_studio_vlm_url': self.lm_studio_vlm_url_var.get(),
@@ -1713,6 +1714,8 @@ class SettingsMixin:
             print(f"設定の保存に失敗しました: {e}")
 
     def load_settings(self):
+        preferred_model_path = config.MODEL_PATH
+        self._classifier_release_ack = model_catalog.load_model_metadata(preferred_model_path).get('release_id', '')
         if not os.path.exists(self.settings_file): return
         self.append_log(f"設定ファイル読み込み元: {self.settings_file}")
         self.append_log(f"マスクファイル読み込み元: {self.masks_file}")
@@ -1887,6 +1890,9 @@ class SettingsMixin:
             )
             self.custom_model_paths = [str(p) for p in settings.get('custom_model_paths', []) if isinstance(p, str)]
             saved_model_path = settings.get('selected_model_path', config.MODEL_PATH)
+            saved_model_path = model_catalog.upgraded_builtin_model_path(
+                saved_model_path, preferred_model_path, settings.get('classifier_release_ack', ''),
+            )
             self.selected_model_path_var.set(
                 saved_model_path if saved_model_path and os.path.exists(saved_model_path) else config.MODEL_PATH
             )

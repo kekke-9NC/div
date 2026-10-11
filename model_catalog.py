@@ -86,7 +86,15 @@ def load_model_metadata(model_path: str) -> Dict:
         "kymograph_size",
         "feature_count",
         "validation_metrics",
+        "test_metrics",
         "camera_policy",
+        "pretrained_encoder",
+        "noise_gate_file",
+        "noise_gate_sha256",
+        "noise_gate_policy",
+        "non_meteor_full_media_probability_min",
+        "release_id",
+        "upgrade_from",
     ):
         if key in payload:
             normalized[key] = payload[key]
@@ -167,3 +175,16 @@ def discover_model_paths(
 
     found.sort(key=lambda x: Path(x).name.lower())
     return found
+
+
+def upgraded_builtin_model_path(saved_path, preferred_path, acknowledged_release=""):
+    """Upgrade the bundled default once, while preserving deliberate choices."""
+    preferred = Path(preferred_path).expanduser().resolve()
+    saved = Path(saved_path).expanduser().resolve() if saved_path else None
+    metadata = load_model_metadata(str(preferred))
+    release = metadata.get("release_id")
+    if (release and release != acknowledged_release and preferred.is_file()
+            and saved is not None and saved.parent == preferred.parent
+            and saved.name in metadata.get("upgrade_from", [])):
+        return str(preferred)
+    return saved_path

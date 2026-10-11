@@ -40,6 +40,20 @@ datas = [
 # Filter out None
 datas = [d for d in datas if d is not None]
 
+# Include current event models and their input/threshold metadata alongside
+# the older checkpoints, so packaged apps offer the same model selection.
+from pathlib import Path
+for checkpoint in list(Path("models").glob("*.pth")) + list(Path("models/auxiliary").glob("*.pth")):
+    destination = str(checkpoint.parent)
+    datas.append((str(checkpoint), destination))
+    sidecar = Path(str(checkpoint) + ".meta.json")
+    if sidecar.is_file():
+        datas.append((str(sidecar), destination))
+for legacy_checkpoint in ("model_epoch_47.pth", "model_latest_1.pth"):
+    if Path(legacy_checkpoint).is_file():
+        datas.append((legacy_checkpoint, "."))
+datas += [("THIRD_PARTY_NOTICES.md", "."), ("assets/licenses", "assets/licenses")]
+
 # Hidden imports
 hidden_imports = [
     "tkinterdnd2",
@@ -66,6 +80,12 @@ hidden_imports = [
     "astrometry",
     "image_processing",
     "model",
+    "event_boost_model",
+    "event_transformer",
+    "event_noise_gate",
+    "transformers.models.dinov2",
+    "transformers.models.dinov2.modeling_dinov2",
+    "transformers.models.dinov2.configuration_dinov2",
     "utils",
     "camera_plate_model",
     "camera_model_builder",

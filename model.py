@@ -1,15 +1,29 @@
 import os
+import hashlib
+from pathlib import Path
+from event_noise_gate import EventNoiseGate
 import multiprocessing
 import threading
 from typing import Dict, Optional, Sequence
 
 import torch
 import torch.nn as nn
+import numpy as np
 from PIL import Image
 from torchvision import transforms
 
 import config
 import model_catalog
+from event_boost_model import (
+    ARCHITECTURE_NAME as EVENT_BOOST_ARCHITECTURE_NAME,
+    EventBoostClassifier,
+    extract_event_features,
+    extract_motion_features,
+)
+from event_transformer import (
+    ARCHITECTURE_NAME as EVENT_TRANSFORMER_ARCHITECTURE_NAME,
+    EventImageEncoder,
+)
 from universal_meteor_model import (
     ARCHITECTURE_NAME as UNIVERSAL_ARCHITECTURE_NAME,
     MeteorFusionUniversal,
@@ -119,7 +133,10 @@ device = _select_device()
 print(f"Using device: {device}")
 
 
-model: Optional[nn.Module] = None
+model = None
+_active_noise_gate = None
+EVENT_ARCHITECTURES = (UNIVERSAL_ARCHITECTURE_NAME, EVENT_BOOST_ARCHITECTURE_NAME,
+                       EVENT_TRANSFORMER_ARCHITECTURE_NAME)
 transform = None
 _model_ready = False
 _model_lock = threading.RLock()
@@ -155,19 +172,18 @@ def _build_transform(mean, std, input_resize):
 
 def _load_state_dict(model_path: str):
     try:
-        return torch.load(model_path, map_location=device, weights_only=True)
+        return torch.load(model_path, map_location="cpu", weights_only=True)
     except TypeError:
-        return torch.load(model_path, map_location=device)
+        return torch.load(model_path, map_location="cpu")
 
 
 def _reload_model_unlocked(model_path: Optional[str] = None, metadata: Optional[Dict] = None):
-    global model, transform, _model_ready, _active_model_info
+    global model, transform, _model_ready, _active_model_info, _active_noise_gate
 
     target_path = model_path or config.MODEL_PATH
     if not target_path:
         return False, "Model path is empty."
     if not os.path.exists(target_path):
-        _model_ready = False
         return False, f"Model file not found: {target_path}"
 
     meta = metadata if isinstance(metadata, dict) else model_catalog.load_model_metadata(target_path)
@@ -175,24 +191,30 @@ def _reload_model_unlocked(model_path: Optional[str] = None, metadata: Optional[
     try:
         state_dict = _load_state_dict(target_path)
         architecture = str(meta.get("architecture", "complex_cnn_v1"))
-        if architecture == UNIVERSAL_ARCHITECTURE_NAME:
+        if architecture in (EVENT_BOOST_ARCHITECTURE_NAME, EVENT_TRANSFORMER_ARCHITECTURE_NAME):
+            loaded = EventBoostClassifier(state_dict)
+            if architecture == EVENT_TRANSFORMER_ARCHITECTURE_NAME:
+                loaded.encoder = EventImageEncoder(state_dict["encoder"], device)
+            if int(meta.get("feature_count", loaded.feature_count)) != loaded.feature_count:
+                raise ValueError("EventBoost feature metadata does not match checkpoint")
+        elif architecture == UNIVERSAL_ARCHITECTURE_NAME:
             loaded = MeteorFusionUniversal(
                 feature_count=int(meta.get("feature_count", 12))
             ).to(device)
-        else:
+        elif architecture == "complex_cnn_v1":
             loaded = ComplexCNN(num_classes=2).to(device)
-        loaded.load_state_dict(state_dict)
-        loaded.eval()
+        else:
+            raise ValueError(f"Unsupported classifier architecture: {architecture}")
+        if isinstance(loaded, nn.Module):
+            loaded.load_state_dict(state_dict)
+            loaded.eval()
 
         mean = meta.get("mean", list(model_catalog.DEFAULT_MEAN))
         std = meta.get("std", list(model_catalog.DEFAULT_STD))
         input_resize = meta.get("input_resize", list(model_catalog.DEFAULT_INPUT_RESIZE))
 
-        model = loaded
-        transform = _build_transform(mean, std, input_resize)
-        _model_ready = True
-
-        _active_model_info = {
+        loaded_transform = _build_transform(mean, std, input_resize)
+        loaded_info = {
             "model_path": target_path,
             "mean": [float(x) for x in mean],
             "std": [float(x) for x in std],
@@ -205,7 +227,22 @@ def _reload_model_unlocked(model_path: Optional[str] = None, metadata: Optional[
                 meta.get("decision_threshold", config.METEOR_PROBABILITY_THRESHOLD)
             ),
             "target_recall": meta.get("target_recall"),
+            "non_meteor_full_media_probability_min": meta.get("non_meteor_full_media_probability_min", 0.),
         }
+        noise_gate = None
+        if meta.get("noise_gate_file"):
+            relative = Path(meta["noise_gate_file"])
+            gate_path = (Path(target_path).resolve().parent / relative).resolve()
+            if relative.is_absolute() or not gate_path.is_relative_to(Path(target_path).resolve().parent):
+                raise ValueError("Foreground gate must be beside the event model")
+            if hashlib.sha256(gate_path.read_bytes()).hexdigest() != meta.get("noise_gate_sha256"):
+                raise ValueError("Foreground gate checksum mismatch")
+            noise_gate = EventNoiseGate(_load_state_dict(str(gate_path)))
+            loaded_info["noise_gate_path"] = str(gate_path)
+            loaded_info["noise_gate_threshold"] = noise_gate.threshold
+        model, transform, _active_model_info = loaded, loaded_transform, loaded_info
+        _active_noise_gate = noise_gate
+        _model_ready = True
         config.MODEL_PATH = target_path
         print(f"Loaded model: {target_path}")
         print(f"Normalization mean/std: {_active_model_info['mean']} / {_active_model_info['std']}")
@@ -213,7 +250,6 @@ def _reload_model_unlocked(model_path: Optional[str] = None, metadata: Optional[
         print(f"Architecture: {architecture}")
         return True, "ok"
     except Exception as e:
-        _model_ready = False
         return False, str(e)
 
 
@@ -230,12 +266,12 @@ def get_active_model_info() -> Dict:
 def get_meteor_decision_threshold() -> float:
     """Return the calibrated threshold for the active classifier.
 
-    Universal event models store an operating threshold selected for their
-    validation recall target.  Older image-only models do not have that
+    Event models store an operating threshold selected on validation data.
+    Older image-only models do not have that
     calibration and continue to use the GUI/configuration threshold.
     """
     fallback = float(getattr(config, "METEOR_PROBABILITY_THRESHOLD", 0.5))
-    if _active_model_info.get("architecture") != UNIVERSAL_ARCHITECTURE_NAME:
+    if _active_model_info.get("architecture") not in EVENT_ARCHITECTURES:
         return fallback
     try:
         threshold = float(_active_model_info.get("decision_threshold", fallback))
@@ -252,6 +288,9 @@ def predict_meteor_probability(image_path: str) -> float:
     with _model_lock:
         if not _model_ready or model is None or transform is None:
             print("Warning: prediction requested before model is ready.")
+            return 0.0
+        if _active_model_info.get("architecture") in EVENT_ARCHITECTURES:
+            print("Warning: this model requires event frames; use predict_meteor_event.")
             return 0.0
         try:
             with Image.open(image_path) as source_image:
@@ -288,7 +327,7 @@ def predict_meteor_event(
     """Classify a complete event when supported, with legacy-image fallback."""
     with _model_lock:
         if (
-            _active_model_info.get("architecture") != UNIVERSAL_ARCHITECTURE_NAME
+            _active_model_info.get("architecture") not in EVENT_ARCHITECTURES
             or not _model_ready
             or model is None
         ):
@@ -302,6 +341,17 @@ def predict_meteor_event(
                 detected_line=detected_line,
                 frame_rate=frame_rate,
             )
+            if _active_model_info.get("architecture") in (EVENT_BOOST_ARCHITECTURE_NAME, EVENT_TRANSFORMER_ARCHITECTURE_NAME):
+                # Match the 16-bit training representation exactly.
+                image = (np.clip(image, 0., 1.) * 65535.).astype(np.uint16).astype(np.float32) / 65535.
+                kymograph = (np.clip(kymograph, 0., 1.) * 65535.).astype(np.uint16).astype(np.float32) / 65535.
+                vector = np.concatenate([
+                    extract_event_features(image, kymograph, features),
+                    extract_motion_features(frames, cutout_rect, frame_rate),
+                ])
+                if _active_model_info.get("architecture") == EVENT_TRANSFORMER_ARCHITECTURE_NAME:
+                    vector = np.concatenate([vector, model.encoder.encode([image])[0]])
+                return float(model.predict_proba(vector)[0])
             image_tensor = torch.from_numpy(image).unsqueeze(0).to(device)
             kymograph_tensor = torch.from_numpy(kymograph).unsqueeze(0).to(device)
             feature_tensor = torch.from_numpy(features).unsqueeze(0).to(device)
@@ -309,10 +359,22 @@ def predict_meteor_event(
                 logit = model(image_tensor, kymograph_tensor, feature_tensor)
                 return float(torch.sigmoid(logit)[0].item())
         except Exception as exc:
-            print(f"Universal event prediction error: {exc}")
-            if fallback_image_path:
-                return predict_meteor_probability(fallback_image_path)
+            print(f"Event prediction error: {exc}")
             return 0.0
+
+
+def predict_noise_gate(frames, cutout_rect, frame_rate):
+    """Return None for models without a gate, or if optional gating fails."""
+    with _model_lock:
+        gate = _active_noise_gate
+    if gate is None:
+        return None
+    try:
+        return gate.evaluate(frames, cutout_rect, frame_rate)
+    except Exception as exc:
+        # Never lose a meteor because an optional optimization failed.
+        print(f"Foreground gate bypassed: {exc}")
+        return None
 
 
 def _should_eager_load() -> bool:
