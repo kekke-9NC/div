@@ -1,0 +1,399 @@
+{
+  "architecture": "meteor_event_transformer_boost_v1",
+  "preprocess_version": 2,
+  "feature_count": 3713,
+  "class_names": [
+    "not_meteor",
+    "meteor"
+  ],
+  "meteor_class_index": 1,
+  "decision_threshold": 0.8822220810862557,
+  "input_resize": [
+    160,
+    160
+  ],
+  "mean": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "std": [
+    1.0,
+    1.0,
+    1.0
+  ],
+  "created_at": "2026-10-08T19:48:47.284325+00:00",
+  "training_events": 4173,
+  "validation_events": 1019,
+  "test_events": 180,
+  "reviewed_events": 5372,
+  "duplicate_events_excluded": [
+    "ml_training_data/reviewed/not_meteor/20221023_185154465_not_meteor_1_prob0.04_ea487159",
+    "ml_training_data/reviewed/not_meteor/20221023_185155265_not_meteor_3_prob0.06_017f34ac",
+    "ml_training_data/reviewed/not_meteor/20221023_185155665_not_meteor_2_prob0.06_309a8de0",
+    "ml_training_data/reviewed/not_meteor/20221023_185156799_not_meteor_4_prob0.07_0876671b",
+    "ml_training_data/reviewed/not_meteor/20221023_185202599_not_meteor_2_prob0.06_d3280675",
+    "ml_training_data/reviewed/not_meteor/20221023_191106466_not_meteor_1_prob0.04_c884fdcc",
+    "ml_training_data/reviewed/not_meteor/20251214_200101284_not_meteor_2_prob0.10",
+    "ml_training_data/reviewed/not_meteor/20251214_200600561_not_meteor_2_prob0.10",
+    "ml_training_data/reviewed/not_meteor/20251214_200701204_not_meteor_2_prob0.20",
+    "ml_training_data/reviewed/not_meteor/20260820_193624984_not_meteor_3_prob0.00",
+    "ml_training_data/reviewed/not_meteor/20260820_204630861_not_meteor_2_prob0.00",
+    "ml_training_data/reviewed/not_meteor/20260820_213848781_not_meteor_2_prob0.00",
+    "ml_training_data/reviewed/meteor/20221023_015601399_not_meteor_1_prob0.41_48d871cc",
+    "ml_training_data/reviewed/meteor/20221023_035336266_meteor_1_prob0.85_dde9e992",
+    "ml_training_data/reviewed/meteor/20221023_035616399_meteor_1_prob0.92_6db7e99f",
+    "ml_training_data/reviewed/meteor/20221023_040547999_meteor_1_prob0.73_a698b582",
+    "ml_training_data/reviewed/meteor/20221023_043542199_meteor_1_prob0.92_bf071b00",
+    "ml_training_data/reviewed/meteor/20221023_190406799_meteor_1_prob0.93_bd5f8e3a",
+    "ml_training_data/reviewed/meteor/20221023_190624266_meteor_1_prob0.94_27f7f001"
+  ],
+  "seed": 20261009,
+  "split_policy": "disjoint_capture_dates; validation_only_model_and_threshold_selection; no_refit",
+  "test_from": "2026-10-08",
+  "selected_candidate": 3,
+  "candidates": [
+    {
+      "parameters": {
+        "leaves": 15,
+        "iterations": 300,
+        "regularization": 3.0
+      },
+      "validation_metrics": {
+        "threshold": 0.8059322902066469,
+        "accuracy": 0.9813542688910697,
+        "precision": 0.9914089347079038,
+        "recall": 0.9763113367174281,
+        "specificity": 0.9883177570093458,
+        "f1": 0.9838022165387894,
+        "pr_auc": 0.9984051759629702,
+        "roc_auc": 0.9975607634770782,
+        "tp": 577,
+        "fn": 14,
+        "fp": 5,
+        "tn": 423
+      }
+    },
+    {
+      "parameters": {
+        "leaves": 15,
+        "iterations": 600,
+        "regularization": 8.0
+      },
+      "validation_metrics": {
+        "threshold": 0.608518915382571,
+        "accuracy": 0.9813542688910697,
+        "precision": 0.9880546075085325,
+        "recall": 0.9796954314720813,
+        "specificity": 0.9836448598130841,
+        "f1": 0.983857264231096,
+        "pr_auc": 0.9984828669223824,
+        "roc_auc": 0.9976595980201464,
+        "tp": 579,
+        "fn": 12,
+        "fp": 7,
+        "tn": 421
+      }
+    },
+    {
+      "parameters": {
+        "leaves": 31,
+        "iterations": 400,
+        "regularization": 5.0
+      },
+      "validation_metrics": {
+        "threshold": 0.438450897635726,
+        "accuracy": 0.9823356231599607,
+        "precision": 0.9815126050420168,
+        "recall": 0.988155668358714,
+        "specificity": 0.9742990654205608,
+        "f1": 0.984822934232715,
+        "pr_auc": 0.9984290442924652,
+        "roc_auc": 0.9975884371491374,
+        "tp": 584,
+        "fn": 7,
+        "fp": 11,
+        "tn": 417
+      }
+    },
+    {
+      "parameters": {
+        "leaves": 7,
+        "iterations": 600,
+        "regularization": 3.0
+      },
+      "validation_metrics": {
+        "threshold": 0.8822220810862557,
+        "accuracy": 0.9833169774288518,
+        "precision": 0.9965397923875432,
+        "recall": 0.9746192893401016,
+        "specificity": 0.9953271028037384,
+        "f1": 0.9854576561163387,
+        "pr_auc": 0.998343268975441,
+        "roc_auc": 0.9973710011543875,
+        "tp": 576,
+        "fn": 15,
+        "fp": 2,
+        "tn": 426
+      }
+    },
+    {
+      "parameters": {
+        "ensemble": [
+          0,
+          1,
+          2,
+          3
+        ]
+      },
+      "validation_metrics": {
+        "threshold": 0.880501277002691,
+        "accuracy": 0.9823356231599607,
+        "precision": 0.9965337954939342,
+        "recall": 0.9729272419627749,
+        "specificity": 0.9953271028037384,
+        "f1": 0.9845890410958904,
+        "pr_auc": 0.9985079182534482,
+        "roc_auc": 0.9976991318373737,
+        "tp": 575,
+        "fn": 16,
+        "fp": 2,
+        "tn": 426
+      }
+    },
+    {
+      "parameters": {
+        "linear_C": 0.001
+      },
+      "validation_metrics": {
+        "threshold": 0.7209252715110779,
+        "accuracy": 0.971540726202159,
+        "precision": 0.9844827586206897,
+        "recall": 0.9661590524534687,
+        "specificity": 0.9789719626168224,
+        "f1": 0.9752348420153715,
+        "pr_auc": 0.9966934173990034,
+        "roc_auc": 0.9950701329917612,
+        "tp": 571,
+        "fn": 20,
+        "fp": 9,
+        "tn": 419
+      }
+    },
+    {
+      "parameters": {
+        "linear_C": 0.01
+      },
+      "validation_metrics": {
+        "threshold": 0.5736725330352783,
+        "accuracy": 0.9685966633954858,
+        "precision": 0.9650582362728786,
+        "recall": 0.9813874788494078,
+        "specificity": 0.9509345794392523,
+        "f1": 0.9731543624161074,
+        "pr_auc": 0.9959989773305564,
+        "roc_auc": 0.9942043423944843,
+        "tp": 580,
+        "fn": 11,
+        "fp": 21,
+        "tn": 407
+      }
+    },
+    {
+      "parameters": {
+        "linear_C": 0.1
+      },
+      "validation_metrics": {
+        "threshold": 0.5347359776496887,
+        "accuracy": 0.9695780176643768,
+        "precision": 0.9635761589403974,
+        "recall": 0.9847715736040609,
+        "specificity": 0.9485981308411215,
+        "f1": 0.9740585774058578,
+        "pr_auc": 0.9951369164262396,
+        "roc_auc": 0.9932673909261983,
+        "tp": 582,
+        "fn": 9,
+        "fp": 22,
+        "tn": 406
+      }
+    },
+    {
+      "parameters": {
+        "linear_C": 1.0
+      },
+      "validation_metrics": {
+        "threshold": 0.40644127130508423,
+        "accuracy": 0.9656526005888125,
+        "precision": 0.9602649006622517,
+        "recall": 0.9813874788494078,
+        "specificity": 0.9439252336448598,
+        "f1": 0.9707112970711297,
+        "pr_auc": 0.9938287504421387,
+        "roc_auc": 0.9918085930705125,
+        "tp": 580,
+        "fn": 11,
+        "fp": 24,
+        "tn": 404
+      }
+    }
+  ],
+  "validation_metrics": {
+    "threshold": 0.8822220810862557,
+    "accuracy": 0.9833169774288518,
+    "precision": 0.9965397923875432,
+    "recall": 0.9746192893401016,
+    "specificity": 0.9953271028037384,
+    "f1": 0.9854576561163387,
+    "pr_auc": 0.998343268975441,
+    "roc_auc": 0.9973710011543875,
+    "tp": 576,
+    "fn": 15,
+    "fp": 2,
+    "tn": 426
+  },
+  "test_metrics": {
+    "threshold": 0.8822220810862557,
+    "accuracy": 0.9555555555555556,
+    "precision": 0.9536423841059603,
+    "recall": 0.993103448275862,
+    "specificity": 0.8,
+    "f1": 0.972972972972973,
+    "pr_auc": 0.9968708445889465,
+    "roc_auc": 0.987192118226601,
+    "tp": 144,
+    "fn": 1,
+    "fp": 7,
+    "tn": 28
+  },
+  "export_max_absolute_error": 0.0,
+  "camera_policy": "camera_date_source_previous_prediction_excluded_from_features",
+  "trained_on_all_reviewed_events": false,
+  "pretrained_encoder": "facebook/dinov2-small",
+  "dataset_sha256": "75d1137e4da64ff34c99eb476f26c30e4da12e5791eeb51715dc6b1a19d9d163",
+  "training_nights": [
+    "2022-10-22",
+    "2022-10-27",
+    "2022-10-28",
+    "2022-10-30",
+    "2022-10-31",
+    "2022-11-01",
+    "2022-11-02",
+    "2022-11-06",
+    "2022-11-08",
+    "2022-11-09",
+    "2022-11-10",
+    "2022-11-12",
+    "2022-11-13",
+    "2022-11-14",
+    "2022-11-15",
+    "2022-11-16",
+    "2022-11-18",
+    "2022-11-19",
+    "2022-11-21",
+    "2022-11-22",
+    "2022-11-25",
+    "2022-11-26",
+    "2022-11-28",
+    "2022-12-02",
+    "2022-12-03",
+    "2022-12-04",
+    "2022-12-06",
+    "2022-12-07",
+    "2022-12-08",
+    "2022-12-10",
+    "2022-12-11",
+    "2022-12-14",
+    "2022-12-15",
+    "2022-12-16",
+    "2022-12-31",
+    "2023-01-01",
+    "2023-01-03",
+    "2023-01-06",
+    "2023-01-07",
+    "2023-01-09",
+    "2023-01-11",
+    "2023-01-12",
+    "2023-01-18",
+    "2023-01-19",
+    "2023-01-20",
+    "2023-01-21",
+    "2023-01-22",
+    "2023-01-29",
+    "2023-01-31",
+    "2023-02-01",
+    "2023-02-04",
+    "2023-02-05",
+    "2023-02-06",
+    "2023-03-06",
+    "2023-03-08",
+    "2023-03-09",
+    "2023-03-10",
+    "2023-03-11",
+    "2023-03-12",
+    "2023-03-15",
+    "2025-12-06",
+    "2025-12-07",
+    "2025-12-14",
+    "2025-12-15",
+    "2026-07-09",
+    "2026-07-10",
+    "2026-07-11",
+    "2026-07-13",
+    "2026-07-14",
+    "2026-07-29",
+    "2026-07-30",
+    "2026-07-31",
+    "2026-08-01",
+    "2026-08-06",
+    "2026-08-07",
+    "2026-08-09",
+    "2026-08-11",
+    "2026-08-13",
+    "2026-08-20",
+    "2026-08-21",
+    "2026-08-22",
+    "2026-08-23",
+    "2026-08-24"
+  ],
+  "validation_nights": [
+    "2022-10-23",
+    "2022-10-26",
+    "2022-10-29",
+    "2022-11-04",
+    "2022-11-05",
+    "2022-11-07",
+    "2022-11-11",
+    "2022-11-17",
+    "2022-11-27",
+    "2022-12-09",
+    "2022-12-13",
+    "2022-12-28",
+    "2022-12-29",
+    "2022-12-30",
+    "2023-01-05",
+    "2023-01-08",
+    "2023-01-25",
+    "2023-01-26",
+    "2023-01-30",
+    "2023-03-07",
+    "2023-03-13",
+    "2025-12-08",
+    "2026-07-15",
+    "2026-08-02",
+    "2026-08-08",
+    "2026-08-12",
+    "2026-08-25"
+  ],
+  "test_nights": [
+    "2026-10-08",
+    "2026-10-09"
+  ],
+  "pretrained_encoder_revision": "ed25f3a31f01632728cabb09d1542f84ab7b0056",
+  "weights_sha256": "8f4afdb72482867f1ad04dbe4121c33460cdfb78e62b97d4ab9ffa36cdd9f38e",
+  "evaluation_limitations": [
+    "180 test events across two October capture dates; 35 negatives",
+    "October events were included only in an earlier aggregate exploratory diagnostic; final model/threshold selection used the separate validation nights",
+    "Selection metrics are exploratory, not a prospective or camera-independent guarantee"
+  ]
+}

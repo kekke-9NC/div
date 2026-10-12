@@ -1190,6 +1190,9 @@ def _run_realtime_rtsp(
         evidence=twin.enabled, mean_frames=mean if mean and not save_mean else 0,
         correction=dark_frame,
     )
+    products = (save_options or {}).get("_schedule_products")
+    if products is not None:
+        products.flush_archives = runner.flush_requested.set
     runner.start()
     status(f"[RTSP解析] {segment_duration}秒受け渡し・連続検出、保存は1分単位へ連結")
     try:
@@ -1217,7 +1220,36 @@ def _run_realtime_rtsp(
         runner.stop()
 
 
-def rtsp_save_and_process_thread_target(
+def rtsp_save_and_process_thread_target(*args, schedule_product_options=None, **kwargs):
+    import inspect
+    import rtsp_schedule_products
+    bound = inspect.signature(_rtsp_save_and_process_thread_target).bind(*args, **kwargs)
+    bound.apply_defaults()
+    values = bound.arguments
+    options = rtsp_schedule_products.processing_options(schedule_product_options)
+    callback = values["progress_callback"]
+    status = lambda message: callback((message, None)) if callback else print(message)
+    if values["time_limit_enabled"] and rtsp_schedule_products.enabled(options):
+        products = rtsp_schedule_products.recording_products(values["save_root"], options,
+            (values["start_hour"], values["start_minute"], values["end_hour"], values["end_minute"]),
+            status, values["mask"])
+    else:
+        products = rtsp_schedule_products.pending_recording_products(values["save_root"], status)
+        if products is None:
+            return _rtsp_save_and_process_thread_target(*args, **kwargs)
+    values["save_options"] = dict(values["save_options"] or {},
+        _schedule_event_callback=products.capture_event,
+        _schedule_event_error_callback=products.capture_event_failed, _schedule_products=products)
+    try:
+        return _rtsp_save_and_process_thread_target(**values)
+    finally:
+        # Continue preparing saved jobs; recording creates future windows only
+        # while it is actually attached to this worker.
+        with products.lock:
+            products.existing_only = True
+
+
+def _rtsp_save_and_process_thread_target(
     rtsp_url: str, save_root: str = config.RTSP_SAVE_ROOT,
     segment_duration: float = config.RTSP_SEGMENT_DURATION, scan_interval: float = config.RTSP_SCAN_INTERVAL,
     progress_callback: Optional[Callable[[Tuple[str, Optional[float]]], None]] = None,

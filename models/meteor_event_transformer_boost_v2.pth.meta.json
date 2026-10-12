@@ -405,7 +405,7 @@
   "correction_weight": 1.0,
   "selection_rationale": "validation precision preferred for false-positive reduction; both candidates recall >=0.98; test not used for selection",
   "noise_gate_policy": "all-sky calibrated lightweight event filter; native confirmed meteors included in training; original recording and rejection record retained",
-  "non_meteor_full_media_probability_min": 0.01,
+  "non_meteor_full_media_probability_min": 0.10,
   "release_id": "20261011-v2",
   "upgrade_from": [
     "meteor_event_transformer_boost_v1.pth"

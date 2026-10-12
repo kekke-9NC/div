@@ -17,6 +17,7 @@ can safely parse every stdout line.
 from __future__ import annotations
 
 import argparse
+import base64
 from datetime import datetime
 import json
 import math
@@ -142,6 +143,8 @@ class Bridge:
                         "width": int(mask.shape[1]),
                     },
                 )
+            elif command == "capture_rtsp_preview":
+                self._start_rtsp_preview(request_id, payload)
             elif command == "save_mask":
                 saved_path = self._save_mask_from_strokes(payload)
                 self.response(request_id, {"saved": True, "path": saved_path})
@@ -356,6 +359,65 @@ class Bridge:
         if monitor is not None:
             monitor.stop()
         self.response(request_id, {"stopped": True})
+
+    def _start_rtsp_preview(self, request_id: str, payload: Dict[str, Any]) -> None:
+        """Capture one frame for the mask editor without blocking the bridge loop."""
+        url = payload.get("url")
+        if not isinstance(url, str):
+            self.response(request_id, error="RTSP URLを指定してください")
+            return
+        parsed = urlparse(url)
+        if parsed.scheme.lower() not in {"rtsp", "rtsps"} or not parsed.hostname:
+            self.response(request_id, error="有効なRTSP URLを指定してください")
+            return
+
+        def worker() -> None:
+            capture = None
+            try:
+                import cv2
+
+                # Bound both connection and first-frame waits so a camera that
+                # is offline cannot leave the mask editor in a loading state.
+                capture = cv2.VideoCapture(
+                    url,
+                    cv2.CAP_FFMPEG,
+                    [
+                        int(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC), 8000,
+                        int(cv2.CAP_PROP_READ_TIMEOUT_MSEC), 5000,
+                    ],
+                )
+                if not capture.isOpened():
+                    raise RuntimeError("stream could not be opened")
+                ok, frame = capture.read()
+                if not ok or frame is None or frame.size == 0:
+                    raise RuntimeError("no frame received")
+
+                height, width = frame.shape[:2]
+                encoded_ok, encoded = cv2.imencode(
+                    ".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 88]
+                )
+                if not encoded_ok:
+                    raise RuntimeError("frame encoding failed")
+                self.response(
+                    request_id,
+                    {
+                        "jpegBase64": base64.b64encode(encoded.tobytes()).decode("ascii"),
+                        "width": int(width),
+                        "height": int(height),
+                    },
+                )
+            except Exception:
+                # OpenCV/FFmpeg exceptions can contain the full RTSP URL,
+                # including camera credentials. Keep the user-facing error safe.
+                self.response(
+                    request_id,
+                    error="RTSP映像を取得できませんでした。カメラの接続状態を確認してください。",
+                )
+            finally:
+                if capture is not None:
+                    capture.release()
+
+        threading.Thread(target=worker, name="swiftui-rtsp-mask-preview", daemon=True).start()
 
     def close(self) -> None:
         if self._camera_model_monitor is not None:

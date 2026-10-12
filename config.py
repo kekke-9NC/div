@@ -180,7 +180,7 @@ RTSP_CANNY_THRESH2 = 240
 
 
 # --- GUI関連 ---
-GUI_WINDOW_TITLE = "Meteor Detector v0.10.12.2"
+GUI_WINDOW_TITLE = "Meteor Detector v0.10.12.3"
 GUI_WINDOW_GEOMETRY = "1200x900"
 GUI_RESIZED_WIDTH = 640      # GUIで動画フレームをリサイズ表示する際の幅
 GUI_RESIZED_HEIGHT = 300     # GUIで動画フレームをリサイズ表示する際の高さ
@@ -224,6 +224,7 @@ DEFAULT_SAVE_DENOISED_FULL_VIDEO = False  # 旧個別出力。共通保存物補
 # --- 機械学習向けイベントデータセット ---
 DEFAULT_ML_TRAINING_EXPORT_ENABLED = False
 DEFAULT_ML_TRAINING_DATA_ROOT = os.path.join(EXE_DIR, "ml_training_data")
+DEFAULT_ML_TRAINING_MIN_PROBABILITY = 0.15
 
 # --- 過去動画フォルダの自動前処理 ---
 DEFAULT_AUTO_VIDEO_MASK_ENABLED = True

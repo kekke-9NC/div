@@ -1043,11 +1043,23 @@ struct SettingsView: View {
 
                 GlassCard {
                     VStack(alignment: .leading, spacing: 14) {
-                        SectionTitle("検出モデル", subtitle: "解析に使うPyTorchモデルを選択します")
+                        SectionTitle("検出モデル", subtitle: "新しい時系列モデルと従来モデルを切り替えられます")
                         HStack(spacing: 10) {
                             TextField("標準モデルを使用", text: $store.selectedModelPath)
                                 .textFieldStyle(.roundedBorder)
                                 .disabled(true)
+                            Menu("登録済みモデル") {
+                                Button("標準モデル") {
+                                    store.selectedModelPath = ""
+                                    store.saveSettings()
+                                }
+                                ForEach(store.availableDetectionModels, id: \.path) { url in
+                                    Button(store.detectionModelLabel(url)) {
+                                        store.selectedModelPath = url.path
+                                        store.saveSettings()
+                                    }
+                                }
+                            }
                             Button("選択") {
                                 chooseDetectionModel {
                                     store.selectedModelPath = $0
@@ -1072,6 +1084,11 @@ struct SettingsView: View {
                         Text("未選択の場合は、設定ファイルの標準モデルを使用します。")
                             .font(.system(size: 11))
                             .foregroundStyle(AppTheme.tertiaryText)
+                        if !store.selectedModelDetails.isEmpty {
+                            Text(store.selectedModelDetails)
+                                .font(.system(size: 11))
+                                .foregroundStyle(AppTheme.secondaryText)
+                        }
                     }
                 }
 
@@ -1137,6 +1154,9 @@ struct SettingsView: View {
                             Spacer()
                             Button("描く") {
                                 maskEditor.present()
+                                if let rtspSource = store.sources.first(where: { $0.kind == .rtsp }) {
+                                    maskEditor.loadRTSP(rtspSource.value, from: store)
+                                }
                             }
                             .buttonStyle(.bordered)
                         }

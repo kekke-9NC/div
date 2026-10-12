@@ -22,6 +22,7 @@ import cv2
 import config
 import media_time
 import rtsp_segments
+import rtsp_startup
 import temporal_mean
 from fixed_pattern import apply_fixed_pattern_correction
 from video_io import open_video_capture
@@ -113,7 +114,7 @@ class ChunkCatalog:
                 continue
         found = []
         for path in self.root.rglob("chunk_*.mp4"):
-            if "_temp_" in path.name or "_innovation" in path.name:
+            if "_temp_" in path.name or "_innovation" in path.name or rtsp_startup.is_deferred_recording(path):
                 continue
             try:
                 if not self.ready(path) or not rtsp_segments.is_finalized_mp4(path):
@@ -399,6 +400,7 @@ class RealtimeRunner:
         self.evidence = evidence
         self.mean_frames = mean_frames
         self.correction = correction
+        self.flush_requested = threading.Event()
         self.queue = queue.Queue()
         self.seen = set()
         self.seen_lock = threading.Lock()
@@ -447,7 +449,9 @@ class RealtimeRunner:
     def _archive(self):
         while not self.cancel.is_set():
             try:
-                self.archiver.compact()
+                flush = self.flush_requested.is_set()
+                self.flush_requested.clear()
+                self.archiver.compact(flush=flush)
             except Exception as exc:
                 self.status(f"[RTSP保存] 連結再試行予定（元動画は保持）: {exc}")
             self.cancel.wait(1)

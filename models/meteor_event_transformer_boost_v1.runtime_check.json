@@ -1,0 +1,11 @@
+{
+  "runtime_events_checked": 12,
+  "maximum_probability_error": 0.0,
+  "median_seconds_per_event": 0.07515658298507333,
+  "legacy_models_checked": [
+    "meteor_fusion_universal_v2.pth",
+    "meteor_fusion_universal_v1.pth",
+    "model_epoch_47.pth"
+  ],
+  "active_model": "/Users/keisukematsumoto/Desktop/other/div/models/meteor_event_transformer_boost_v1.pth"
+}

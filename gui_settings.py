@@ -1,4 +1,5 @@
 from gui_common import *
+import ml_training_data
 
 UI_BG = ui_theme.COLORS["content_raised"]
 UI_FIELD = ui_theme.COLORS["field"]
@@ -293,9 +294,18 @@ class SettingsMixin:
         ).pack(anchor=tk.W, padx=4, pady=(3, 1))
         ttk.Label(
             ml_frame,
-            text="通常差分・モノクロ動画・時間画像・時刻マップを、予測クラス別の未確認フォルダへ保存します。",
+            text="通常差分・モノクロ動画・時間画像・時刻マップを、予測クラス別の未確認フォルダへ保存します。設定した流星確率未満のイベントは保存しません。",
             style="Hint.TLabel",
         ).pack(anchor=tk.W, padx=24, pady=(0, 4))
+        ml_threshold_frame = ttk.Frame(ml_frame)
+        ml_threshold_frame.pack(fill=tk.X, padx=4, pady=2)
+        ttk.Label(ml_threshold_frame, text="流星確率の保存下限:").pack(side=tk.LEFT)
+        ttk.Entry(
+            ml_threshold_frame,
+            textvariable=self.ml_training_min_probability_var,
+            width=8,
+        ).pack(side=tk.LEFT, padx=(5, 4))
+        ttk.Label(ml_threshold_frame, text="（0〜1。これ未満は保存しません）", style="Hint.TLabel").pack(side=tk.LEFT)
         ml_path_frame = ttk.Frame(ml_frame)
         ml_path_frame.pack(fill=tk.X, padx=4, pady=2)
         ttk.Label(ml_path_frame, text="保存先:", width=10).pack(side=tk.LEFT)
@@ -1168,10 +1178,12 @@ class SettingsMixin:
         resize = meta.get("input_resize")
         resize_text = "no resize" if resize is None else f"{int(resize[0])}x{int(resize[1])}"
         architecture = meta.get("architecture", "complex_cnn_v1")
-        if architecture == "meteor_fusion_universal_v1":
+        if architecture in ("meteor_fusion_universal_v1", "meteor_event_boost_v1", "meteor_event_transformer_boost_v1"):
             threshold = float(meta.get("decision_threshold", 0.5))
+            label = {"meteor_event_boost_v1": "時系列・決定木モデル",
+                     "meteor_event_transformer_boost_v1": "Transformer転移学習モデル"}.get(architecture, "汎用カメラモデル")
             self.model_meta_info_var.set(
-                f"汎用カメラモデル / 推奨閾値={threshold:.3f} / resize={resize_text}"
+                f"{label} / 推奨閾値={threshold:.3f} / resize={resize_text}"
             )
         else:
             self.model_meta_info_var.set(f"mean={mean} std={std} resize={resize_text}")
@@ -1327,7 +1339,26 @@ class SettingsMixin:
             messagebox.showerror("設定エラー", "機械学習向けデータの保存先を指定してください。")
             return
         os.makedirs(root_dir, exist_ok=True)
-        ml_review.open_review_window(self, root_dir)
+        media_directories = {
+            "meteor": self.meteor_save_path_var.get(),
+            "not_meteor": self.not_meteor_save_path_var.get(),
+        }
+        try:
+            moved_count = ml_training_data.sync_reviewed_media(root_dir, media_directories)
+        except Exception as exc:
+            messagebox.showerror("検出メディアの分類更新エラー", str(exc), parent=self)
+            moved_count = 0
+        ml_review.open_review_window(
+            self,
+            root_dir,
+            media_directories,
+        )
+        if moved_count:
+            messagebox.showinfo(
+                "検出メディアの分類更新",
+                f"既に確定済みの分類に合わせて、動画・画像 {moved_count}件を保存フォルダ間で移動しました。",
+                parent=self,
+            )
 
     def fetch_archive_observation_location(self):
         def worker():
@@ -1626,6 +1657,7 @@ class SettingsMixin:
             'meteor_save_path': self.meteor_save_path_var.get(), 'not_meteor_save_path': self.not_meteor_save_path_var.get(),
             'ml_training_export_enabled': self.ml_training_export_enabled_var.get(),
             'ml_training_data_root': self.ml_training_data_root_var.get(),
+            'ml_training_min_probability': self.ml_training_min_probability_var.get(),
             'auto_video_mask_enabled': self.auto_video_mask_enabled_var.get(),
             'date_folder_twilight_filter_enabled': self.date_folder_twilight_filter_enabled_var.get(),
             'observation_latitude': self.observation_latitude_var.get(),
@@ -1657,6 +1689,7 @@ class SettingsMixin:
             'camera_control_base_url': self.camera_control_base_url_var.get(),
             'camera_control_ev_target': self.camera_control_ev_target_var.get(),
             # RTSP time limit settings
+            'rtsp_schedule_products': self._schedule_product_values(),
             'rtsp_time_limit_enabled': self.rtsp_time_limit_var.get(),
             'rtsp_start_hour': self.rtsp_start_hour_var.get(), 'rtsp_start_minute': self.rtsp_start_min_var.get(),
             'apply_rtsp_dark': self.apply_rtsp_dark_var.get(),
@@ -1737,6 +1770,7 @@ class SettingsMixin:
             self.toggle_time_limit_frame()
             
             # RTSP time limit settings
+            self._restore_schedule_product_values(settings.get('rtsp_schedule_products', {}))
             self.rtsp_time_limit_var.set(settings.get('rtsp_time_limit_enabled', False))
             self.rtsp_start_hour_var.set(settings.get('rtsp_start_hour', '17')); self.rtsp_start_min_var.set(settings.get('rtsp_start_minute', '00'))
             self.rtsp_end_hour_var.set(settings.get('rtsp_end_hour', '07')); self.rtsp_end_min_var.set(settings.get('rtsp_end_minute', '00'))
@@ -1873,6 +1907,12 @@ class SettingsMixin:
             self.ml_training_data_root_var.set(
                 settings.get('ml_training_data_root', config.DEFAULT_ML_TRAINING_DATA_ROOT)
             )
+            self.ml_training_min_probability_var.set(str(
+                settings.get(
+                    'ml_training_min_probability',
+                    config.DEFAULT_ML_TRAINING_MIN_PROBABILITY,
+                )
+            ))
             self.auto_video_mask_enabled_var.set(
                 settings.get('auto_video_mask_enabled', config.DEFAULT_AUTO_VIDEO_MASK_ENABLED)
             )

@@ -829,6 +829,18 @@ def _process_finer_detection_worker(
     return line_detected_indices, cutout_rect
 
 
+def _cache_scheduled_event(save_options, frames, fps, started_at, line, is_meteor):
+    callback = save_options.get("_schedule_event_callback")
+    if callback is not None and is_meteor:
+        try:
+            callback(frames, fps, started_at, line)
+        except Exception as exc:
+            failure_callback = save_options.get("_schedule_event_error_callback")
+            if failure_callback is not None:
+                failure_callback(frames, fps, started_at, line, exc)
+            print(f"[自動作成] 流星素材の準備に失敗: {exc}")
+
+
 def create_line_video_clips(
     source: str,
     is_rtsp: bool = False,
@@ -1570,6 +1582,11 @@ def create_line_video_clips(
                                 )
                                 saved_paths = {}
                                 denoise_metrics: Optional[Dict[str, float]] = None
+                                _cache_scheduled_event(
+                                    save_options, final_frames_for_clip, frame_rate,
+                                    base_datetime + timedelta(seconds=(actual_start_final if is_rtsp else adjusted_start_frame)/frame_rate),
+                                    ((x1, y1), (x2, y2)), is_meteor,
+                                )
 
                                 if save_options.get('ml_training_export_enabled', False):
                                     try:
@@ -1587,9 +1604,27 @@ def create_line_video_clips(
                                             frame_rate=frame_rate,
                                             detected_line=((x1, y1), (x2, y2)),
                                             frame_range=(adjusted_start_frame, adjusted_end_frame),
+                                            media_directories={
+                                                "meteor": meteor_save_path,
+                                                "not_meteor": not_meteor_save_path,
+                                            },
+                                            minimum_probability=save_options.get(
+                                                'ml_training_min_probability',
+                                                config.DEFAULT_ML_TRAINING_MIN_PROBABILITY,
+                                            ),
                                         )
-                                        saved_paths['ml_training_event'] = ml_event_dir
-                                        print(f"機械学習向けイベントを保存しました: {ml_event_dir}")
+                                        if ml_event_dir:
+                                            saved_paths['ml_training_event'] = ml_event_dir
+                                            print(f"機械学習向けイベントを保存しました: {ml_event_dir}")
+                                        else:
+                                            minimum = save_options.get(
+                                                'ml_training_min_probability',
+                                                config.DEFAULT_ML_TRAINING_MIN_PROBABILITY,
+                                            )
+                                            print(
+                                                f"流星確率 {probability:.3f} が学習データの保存下限 "
+                                                f"{float(minimum):.3f} 未満のため保存しません。"
+                                            )
                                     except Exception as e_ml:
                                         print(f"機械学習向けイベントの保存に失敗: {e_ml}")
                             
@@ -2165,6 +2200,11 @@ def create_line_video_clips(
                     )
                     saved_paths = {}
                     denoise_metrics: Optional[Dict[str, float]] = None
+                    _cache_scheduled_event(
+                        save_options, final_frames_for_clip, frame_rate,
+                        base_datetime + timedelta(seconds=(actual_start_final if is_rtsp else adjusted_start_frame)/frame_rate),
+                        ((x1, y1), (x2, y2)), is_meteor,
+                    )
 
                     if save_options.get('ml_training_export_enabled', False):
                         try:
@@ -2182,9 +2222,27 @@ def create_line_video_clips(
                                 frame_rate=frame_rate,
                                 detected_line=((x1, y1), (x2, y2)),
                                 frame_range=(adjusted_start_frame, adjusted_end_frame),
+                                media_directories={
+                                    "meteor": meteor_save_path,
+                                    "not_meteor": not_meteor_save_path,
+                                },
+                                minimum_probability=save_options.get(
+                                    'ml_training_min_probability',
+                                    config.DEFAULT_ML_TRAINING_MIN_PROBABILITY,
+                                ),
                             )
-                            saved_paths['ml_training_event'] = ml_event_dir
-                            print(f"機械学習向けイベントを保存しました: {ml_event_dir}")
+                            if ml_event_dir:
+                                saved_paths['ml_training_event'] = ml_event_dir
+                                print(f"機械学習向けイベントを保存しました: {ml_event_dir}")
+                            else:
+                                minimum = save_options.get(
+                                    'ml_training_min_probability',
+                                    config.DEFAULT_ML_TRAINING_MIN_PROBABILITY,
+                                )
+                                print(
+                                    f"流星確率 {probability:.3f} が学習データの保存下限 "
+                                    f"{float(minimum):.3f} 未満のため保存しません。"
+                                )
                         except Exception as e_ml:
                             print(f"機械学習向けイベントの保存に失敗: {e_ml}")
 

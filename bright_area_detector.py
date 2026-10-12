@@ -679,7 +679,16 @@ def _get_model(status_callback: Optional[Callable[[str], None]] = None):
     _model_loading = True
     try:
         if not torch.cuda.is_available():
-            raise RuntimeError("ローカルLLM機能はNVIDIA GPU (CUDA) 環境でのみ利用できます。")
+            if not torch.backends.mps.is_available():
+                raise RuntimeError("内蔵AIにはCUDAまたはApple SiliconのMPSが必要です。")
+            from transformers import Qwen3VLForConditionalGeneration, AutoProcessor
+            model_path = FULL_MODEL_DIR if _has_model_files(FULL_MODEL_DIR) else MODEL_ID
+            _log("内蔵AIをApple Siliconでロード中...", status_callback)
+            _model = Qwen3VLForConditionalGeneration.from_pretrained(
+                model_path, torch_dtype=torch.float16, low_cpu_mem_usage=True).to("mps")
+            _processor = _load_processor_compat(AutoProcessor, model_path, status_callback)
+            _reset_offload_timer()
+            return _model, _processor
 
         from transformers import Qwen3VLForConditionalGeneration, AutoProcessor, BitsAndBytesConfig
         from huggingface_hub import snapshot_download
@@ -850,9 +859,10 @@ def _call_vlm(
     temperature: float = 0.1,
     top_p: float = 0.9,
     max_tokens: int = 128,
+    force_local: bool = False,
 ) -> str:
     """VLMを呼び出してテキスト応答を取得"""
-    if _ai_backend == AI_BACKEND_LM_STUDIO:
+    if not force_local and _ai_backend == AI_BACKEND_LM_STUDIO:
         data_uri = _image_to_data_uri(image)
         messages = [
             {"role": "system", "content": system_prompt},
@@ -896,15 +906,15 @@ def _call_vlm(
         videos=video_inputs,
         padding=True,
         return_tensors="pt",
-    ).to("cuda")
+    ).to(next(model.parameters()).device)
     
     if stream_callback:
         streamer = TextIteratorStreamer(processor, skip_prompt=True, skip_special_tokens=True)
         generation_kwargs = dict(
             **inputs,
-            max_new_tokens=512,
-            temperature=0.7,
-            top_p=0.8,
+            max_new_tokens=max_tokens,
+            temperature=temperature,
+            top_p=top_p,
             top_k=20,
             do_sample=True,
             streamer=streamer,
@@ -924,9 +934,9 @@ def _call_vlm(
         with torch.no_grad():
             generated_ids = model.generate(
                 **inputs,
-                max_new_tokens=512,
-                temperature=0.7,
-                top_p=0.8,
+                max_new_tokens=max_tokens,
+                temperature=temperature,
+                top_p=top_p,
                 top_k=20,
                 do_sample=True,
             )
@@ -1468,3 +1478,11 @@ def detect_meteors_with_boxes(
         log(f"流星検出中にエラーが発生しました: {e}")
         return None
 
+
+
+def detect_meteor_boxes_local(image, log=print):
+    """Internal localization regardless of the interactive LM Studio selection."""
+    text = _call_vlm(STRICT_BOX_SYSTEM_PROMPT,
+        _strict_box_user_prompt("meteor trails", "stars, clouds, aircraft and noise"),
+        image, status_callback=log, force_local=True)
+    return _parse_boxes(text)

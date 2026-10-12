@@ -28,7 +28,8 @@ def workspace_validation(tmp_path_factory):
     executable = build / "validate"
     subprocess.run(
         ["swiftc", "-parse-as-library", str(app / "PythonBridge.swift"),
-         str(app / "WorkspaceStore.swift"), str(ROOT / "tests/swift/WorkspaceSettingsValidation.swift"),
+         str(app / "WorkspaceStore.swift"), str(app / "MaskPreviewFrame.swift"),
+         str(ROOT / "tests/swift/WorkspaceSettingsValidation.swift"),
          "-I", str(build), "-L", str(build), "-lMeteorDetectorCore",
          "-Xlinker", "-rpath", "-Xlinker", str(build), "-o", str(executable)],
         check=True, capture_output=True, text=True, timeout=120,

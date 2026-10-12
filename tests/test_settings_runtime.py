@@ -22,6 +22,7 @@ def test_legacy_runtime_settings_preserve_processing_controls(tmp_path):
         "full_video_timestamp": {"enabled": False, "position": "左上", "size_percent": "2.4"},
         "ml_training_export_enabled": True,
         "ml_training_data_root": str(tmp_path / "training"),
+        "ml_training_min_probability": "0.2",
         "auto_video_mask_enabled": False,
         "processed_video_encoding": {
             "codec": "H.264 / AVC", "quality": "高品質", "bitrate_mbps": "70"
@@ -40,6 +41,7 @@ def test_legacy_runtime_settings_preserve_processing_controls(tmp_path):
     assert runtime.encoding == {"codec": "h264", "quality": "high", "bitrate_mbps": 70}
     assert runtime.save_option_extras["full_video_timestamp_position"] == "左上"
     assert runtime.save_option_extras["ml_training_export_enabled"] is True
+    assert runtime.save_option_extras["ml_training_min_probability"] == 0.2
     assert runtime.save_option_extras["auto_video_mask_enabled"] is False
     assert runtime.lm_studio_api_key == "secret-for-test"
     fake_config = SimpleNamespace(ASTROMETRY_API_KEY="old")
@@ -51,11 +53,21 @@ def test_legacy_runtime_settings_preserve_processing_controls(tmp_path):
     assert runtime.use_plate_solve is True
 
 
+def test_ml_training_probability_floor_defaults_to_point_15(tmp_path):
+    runtime = from_legacy_settings({
+        "ml_training_export_enabled": True,
+        "ml_training_data_root": str(tmp_path / "training"),
+    }, tmp_path)
+    assert runtime.save_option_extras["ml_training_min_probability"] == 0.15
+
+
 @pytest.mark.parametrize("settings,field", [
     ({"advanced_settings": {"min_line_length": "NaN"}}, "advanced_settings.min_line_length"),
     ({"full_video_timestamp": {"size_percent": "999"}}, "full_video_timestamp.size_percent"),
     ({"processed_video_encoding": {"codec": "bad"}}, "processed_video_encoding.codec"),
     ({"ml_training_export_enabled": True, "ml_training_data_root": ""}, "保存先"),
+    ({"ml_training_export_enabled": True, "ml_training_min_probability": "1.1"}, "ml_training_min_probability"),
+    ({"ml_training_export_enabled": True, "ml_training_min_probability": "NaN"}, "ml_training_min_probability"),
 ])
 def test_invalid_legacy_settings_report_the_field_without_echoing_values(tmp_path, settings, field):
     settings["unknown_secret"] = "do-not-log-me"

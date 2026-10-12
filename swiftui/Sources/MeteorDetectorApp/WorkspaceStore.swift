@@ -454,6 +454,48 @@ final class WorkspaceStore: ObservableObject {
         return "このモデルを実行時に適用します"
     }
 
+    var availableDetectionModels: [URL] {
+        let folders = [rootURL.appendingPathComponent("models"), rootURL]
+        return folders.flatMap { folder in
+            (try? FileManager.default.contentsOfDirectory(
+                at: folder, includingPropertiesForKeys: [.isRegularFileKey]
+            )) ?? []
+        }.filter {
+            $0.pathExtension == "pth" &&
+            ((try? $0.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true)
+        }.sorted { $0.lastPathComponent < $1.lastPathComponent }
+    }
+
+    func detectionModelLabel(_ url: URL) -> String {
+        switch url.lastPathComponent {
+        case "meteor_event_transformer_boost_v1.pth": return "Transformer（転移学習・時系列）"
+        case "meteor_event_boost_v1.pth": return "EventBoost（時系列・決定木）"
+        case "meteor_fusion_universal_v2.pth": return "従来モデル：Universal v2"
+        case "meteor_fusion_universal_v1.pth": return "従来モデル：Universal v1"
+        default: return url.deletingPathExtension().lastPathComponent
+        }
+    }
+
+    var selectedModelDetails: String {
+        let path = selectedModelPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !path.isEmpty,
+              let data = try? Data(contentsOf: URL(fileURLWithPath: path + ".meta.json")),
+              let metadata = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        else { return "" }
+        let architecture = metadata["architecture"] as? String ?? ""
+        guard ["meteor_event_boost_v1", "meteor_event_transformer_boost_v1", "meteor_fusion_universal_v1"].contains(architecture)
+        else { return "" }
+        let threshold = (metadata["decision_threshold"] as? NSNumber)?.doubleValue ?? 0.5
+        var details = String(format: "モデル推奨の判定閾値：%.3f", threshold)
+        if let metrics = metadata["test_metrics"] as? [String: Any],
+           let precision = metrics["precision"] as? NSNumber,
+           let recall = metrics["recall"] as? NSNumber {
+            details += String(format: " ／ 未学習データの適合率：%.1f%%、再現率：%.1f%%",
+                              precision.doubleValue * 100, recall.doubleValue * 100)
+        }
+        return details
+    }
+
     var plateSolveConfigurationIsValid: Bool {
         guard plateSolveEnabled else { return true }
         let path = plateSolvePath.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1192,6 +1234,29 @@ final class WorkspaceStore: ObservableObject {
                 }
             case .failure(let error):
                 self.appendLog("検出マスクを保存できませんでした: \(error.localizedDescription)", level: .error)
+                completion(.failure(error))
+            }
+        }
+    }
+
+    func captureRTSPMaskPreview(
+        url: String,
+        completion: @escaping (Result<MaskPreviewFrame, BridgeError>) -> Void
+    ) {
+        bridge.request("capture_rtsp_preview", payload: ["url": url]) { result in
+            switch result {
+            case .success(let payload):
+                guard let encoded = payload["jpegBase64"] as? String,
+                      let data = Data(base64Encoded: encoded),
+                      let image = NSImage(data: data),
+                      let width = payload["width"] as? Int,
+                      let height = payload["height"] as? Int,
+                      width > 0, height > 0 else {
+                    completion(.failure(.backend("RTSP映像データを読み取れませんでした。")))
+                    return
+                }
+                completion(.success(MaskPreviewFrame(image: image, width: width, height: height)))
+            case .failure(let error):
                 completion(.failure(error))
             }
         }

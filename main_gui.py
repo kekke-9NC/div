@@ -92,6 +92,9 @@ class App(
                 self._apply_plate_solve_model(selected)
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
         self.after(100, self.update_progress)
+        self._startup_analysis_ready = False
+        self.after(5000, self._check_rtsp_schedule_autostart)
+        self.after(250, self._prepare_startup_analysis)
 
     def _migrate_legacy_settings_files(self):
         """Move legacy setting files from CWD to app directory if needed."""
@@ -494,6 +497,9 @@ class App(
         self.ml_training_data_root_var = tk.StringVar(
             value=config.DEFAULT_ML_TRAINING_DATA_ROOT
         )
+        self.ml_training_min_probability_var = tk.StringVar(
+            value=str(config.DEFAULT_ML_TRAINING_MIN_PROBABILITY)
+        )
         self.auto_video_mask_enabled_var = tk.BooleanVar(
             value=config.DEFAULT_AUTO_VIDEO_MASK_ENABLED
         )
@@ -539,6 +545,7 @@ class App(
         self.rtsp_fps_var = tk.StringVar(value=str(config.RTSP_FPS))
         self.rtsp_notification_sound_var = tk.BooleanVar(value=True)
         # RTSP time limit for recording (similar to periodic scan)
+        self._init_schedule_product_vars()
         self.rtsp_time_limit_var = tk.BooleanVar(value=False)
         self.rtsp_start_hour_var = tk.StringVar(value="17")
         self.rtsp_start_min_var = tk.StringVar(value="00")
@@ -921,6 +928,8 @@ class App(
             # Stop FFmpeg before destroying Tk.  The concat worker is a daemon
             # thread, so destroying the app first could otherwise orphan it.
             self.stop_video_concat()
+            import rtsp_schedule_products
+            rtsp_schedule_products.stop_background_products()
             if self.noise_twin_training_process is not None:
                 try:
                     self.noise_twin_training_process.terminate()

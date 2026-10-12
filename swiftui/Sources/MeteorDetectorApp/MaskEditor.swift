@@ -98,6 +98,34 @@ final class MaskEditorState: ObservableObject {
         }
     }
 
+    func loadRTSP(_ url: String, from store: WorkspaceStore) {
+        guard !isSaving else { return }
+        loadGeneration &+= 1
+        let generation = loadGeneration
+        saveGeneration &+= 1
+        isSaving = false
+        image = nil
+        strokes.removeAll()
+        isLoading = true
+        status = "RTSP映像を読み込んでいます…"
+
+        store.captureRTSPMaskPreview(url: url) { [weak self] result in
+            guard let self,
+                  self.isPresented,
+                  self.loadGeneration == generation else { return }
+            self.isLoading = false
+            switch result {
+            case .success(let frame):
+                self.image = frame.image
+                self.pixelSize = CGSize(width: frame.width, height: frame.height)
+                self.strokes.removeAll()
+                self.status = "左ドラッグで除外領域を塗ります"
+            case .failure(let error):
+                self.status = error.localizedDescription
+            }
+        }
+    }
+
     @discardableResult
     func beginSave() -> Int {
         saveGeneration &+= 1

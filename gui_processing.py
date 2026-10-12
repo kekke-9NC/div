@@ -4,7 +4,169 @@ import ui_state
 
 
 class ProcessingMixin:
+    def _prompt_startup_analysis(self, jobs, recordings):
+        dialog = Toplevel(self)
+        dialog.title("解析の開始方法")
+        dialog.transient(self)
+        dialog.resizable(False, False)
+        result = [None]
+
+        def choose(value):
+            result[0] = value
+            dialog.destroy()
+
+        frame = ttk.Frame(dialog, padding=24)
+        frame.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(frame, text="前回の未完了データが見つかりました。",
+                  font="TkHeadingFont").pack(anchor=tk.W)
+        details = f"未完了の録画スケジュール: {len(jobs)}件\n解析・前処理待ちの録画: {len(recordings)}件"
+        if jobs:
+            first = jobs[0]
+            details += f"\n録画期間: {first['start'].replace('T', ' ')} 〜 {first['end'].replace('T', ' ')}"
+        ttk.Label(frame, text=details, wraplength=580).pack(anchor=tk.W, pady=(12, 8))
+        ttk.Label(frame, text="「途中から再開」は保存済みの進捗・設定を引き継ぎます。\n"
+                  "「新しく開始」は前回の処理を保留し、今回の録画から解析します。\n"
+                  "保留した録画と再開用の情報は残り、次回起動時に再開できます。",
+                  wraplength=580).pack(anchor=tk.W, pady=(0, 18))
+        buttons = ttk.Frame(frame)
+        buttons.pack(fill=tk.X)
+        ttk.Button(buttons, text="途中から再開", command=lambda: choose("resume")).pack(side=tk.LEFT)
+        ttk.Button(buttons, text="新しく開始", command=lambda: choose("fresh")).pack(side=tk.LEFT, padx=10)
+        ttk.Button(buttons, text="後で選ぶ", command=lambda: choose(None)).pack(side=tk.RIGHT)
+        dialog.protocol("WM_DELETE_WINDOW", lambda: choose(None))
+        dialog.update_idletasks()
+        x = self.winfo_rootx() + max(0, (self.winfo_width() - dialog.winfo_reqwidth()) // 2)
+        y = self.winfo_rooty() + max(0, (self.winfo_height() - dialog.winfo_reqheight()) // 2)
+        dialog.geometry(f"+{x}+{y}")
+        dialog.grab_set()
+        self.wait_window(dialog)
+        return result[0]
+
+    def _prepare_startup_analysis(self):
+        if getattr(self, "_startup_analysis_ready", False):
+            return True
+        if getattr(self, "_startup_analysis_prompt_open", False):
+            return False
+        import rtsp_startup
+        import rtsp_schedule_products
+        self._startup_analysis_prompt_open = True
+        try:
+            jobs = rtsp_startup.pending_jobs(config.RTSP_SAVE_ROOT)
+            recordings = rtsp_startup.pending_recordings(config.RTSP_SAVE_ROOT)
+            if jobs or recordings:
+                choice = self._prompt_startup_analysis(jobs, recordings)
+                if choice is None:
+                    self.append_log("開始方法の選択を保留しました。「開始」ボタンで選び直せます。")
+                    return False
+                if choice == "fresh":
+                    rtsp_startup.defer_previous(config.RTSP_SAVE_ROOT, jobs)
+                    self.append_log("新しく開始します。前回の解析を保留し、今回の録画から処理します。")
+                else:
+                    rtsp_schedule_products.resume_pending_products(config.RTSP_SAVE_ROOT,
+                        lambda message: self.progress_queue.put((message, None)))
+                    self.append_log("前回の解析を途中から再開します。解析待ちの録画はRTSP開始時に再開します。")
+            self._startup_analysis_ready = True
+            return True
+        except Exception as exc:
+            self.append_log(f"開始方法の準備に失敗しました。録画は保持し、自動開始を保留します: {exc}")
+            return False
+        finally:
+            self._startup_analysis_prompt_open = False
+
+    def _current_rtsp_schedule_window_key(self):
+        """Return the current RTSP schedule window identity, if it is active."""
+        if not self.rtsp_time_limit_var.get():
+            return None
+
+        try:
+            start_hour = int(self.rtsp_start_hour_var.get())
+            start_minute = int(self.rtsp_start_min_var.get())
+            end_hour = int(self.rtsp_end_hour_var.get())
+            end_minute = int(self.rtsp_end_min_var.get())
+            start_minute_of_day = start_hour * 60 + start_minute
+            end_minute_of_day = end_hour * 60 + end_minute
+            if not (
+                0 <= start_hour <= 23 and 0 <= end_hour <= 23
+                and 0 <= start_minute <= 59 and 0 <= end_minute <= 59
+            ):
+                return None
+        except (TypeError, ValueError):
+            return None
+
+        if start_minute_of_day == end_minute_of_day:
+            return None
+
+        now = datetime.now()
+        current_minute_of_day = now.hour * 60 + now.minute
+        crosses_midnight = start_minute_of_day > end_minute_of_day
+        if crosses_midnight:
+            is_active = (
+                current_minute_of_day >= start_minute_of_day
+                or current_minute_of_day < end_minute_of_day
+            )
+            window_start_date = now.date()
+            if current_minute_of_day < end_minute_of_day:
+                from datetime import timedelta
+                window_start_date -= timedelta(days=1)
+        else:
+            is_active = start_minute_of_day <= current_minute_of_day < end_minute_of_day
+            window_start_date = now.date()
+
+        if not is_active:
+            return None
+        return (
+            f"{window_start_date.isoformat()}-"
+            f"{start_hour:02d}{start_minute:02d}-"
+            f"{end_hour:02d}{end_minute:02d}"
+        )
+
+    def _check_rtsp_schedule_autostart(self):
+        """Start the configured RTSP capture when its scheduled window opens."""
+        try:
+            if not getattr(self, "_startup_analysis_ready", True):
+                return
+            window_key = self._current_rtsp_schedule_window_key()
+            attempted_key = getattr(self, "_rtsp_schedule_autostart_attempted_window", None)
+            suppressed_key = getattr(self, "_rtsp_schedule_autostart_suppressed_window", None)
+            if window_key and window_key not in (attempted_key, suppressed_key):
+                selected_source = ui_state.select_source_by_priority(
+                    getattr(self, "processing_source_priority", ui_state.SOURCE_PRIORITY_DEFAULT),
+                    periodic_enabled=self.periodic_scan_var.get(),
+                    has_rtsp=bool(self.rtsp_urls),
+                    has_folder=bool(self.folder_paths),
+                )
+                if selected_source == "rtsp":
+                    is_running = any(
+                        thread is not None and thread.is_alive()
+                        for thread in (
+                            self.worker_thread,
+                            self.rtsp_thread,
+                            self.periodic_scan_thread,
+                        )
+                    )
+                    if is_running:
+                        if self.rtsp_thread and self.rtsp_thread.is_alive():
+                            self._rtsp_schedule_autostart_attempted_window = window_key
+                    else:
+                        # Latch before starting so invalid settings cannot trigger a
+                        # dialog on every timer tick during the same schedule.
+                        self._rtsp_schedule_autostart_attempted_window = window_key
+                        self.append_log(
+                            "録画スケジュールの時間帯内のため、RTSP録画を自動開始します。"
+                        )
+                        self.start_processing()
+        except Exception as exc:
+            self.append_log(f"RTSP録画スケジュールの自動開始に失敗: {exc}")
+        finally:
+            try:
+                self.after(5000, self._check_rtsp_schedule_autostart)
+            except Exception:
+                pass
+
     def start_processing(self):
+        if not getattr(self, "_startup_analysis_ready", True):
+            if not self._prepare_startup_analysis():
+                return
         # 詳細設定をconfigに適用
         self.apply_advanced_settings_to_config()
         if self.noise_twin_training_process is not None:
@@ -95,6 +257,13 @@ class ProcessingMixin:
                 'auto_video_mask_cache_dir': config.AUTO_VIDEO_MASK_CACHE_DIR,
             })
             if params['save_options']['ml_training_export_enabled']:
+                try:
+                    ml_min_probability = float(self.ml_training_min_probability_var.get())
+                except (TypeError, ValueError) as exc:
+                    raise ValueError("学習データの流星確率下限は0〜1の数値で指定してください。") from exc
+                if not 0.0 <= ml_min_probability <= 1.0:
+                    raise ValueError("学習データの流星確率下限は0〜1の範囲で指定してください。")
+                params['save_options']['ml_training_min_probability'] = ml_min_probability
                 if not params['save_options']['ml_training_data_root']:
                     raise ValueError("機械学習向けデータの保存先が空です。")
                 os.makedirs(params['save_options']['ml_training_data_root'], exist_ok=True)
@@ -228,6 +397,18 @@ class ProcessingMixin:
             )
             self.append_log(f"固定パターン補正 {correction_state} ({mode})")
             
+            try:
+                import rtsp_schedule_products
+                product_options = rtsp_schedule_products.processing_options(self._schedule_product_values())
+                if rtsp_schedule_products.enabled(product_options):
+                    if not rtsp_time_limit:
+                        raise ValueError("自動作成には「時間帯を指定して録画する」をONにしてください。")
+                    if (rtsp_sh, rtsp_sm) == (rtsp_eh, rtsp_em):
+                        raise ValueError("録画スケジュールの開始・終了時刻を異なる時刻にしてください。")
+            except ValueError as exc:
+                messagebox.showerror("自動作成の設定", str(exc))
+                self.cancel_processing(restore_button_state=True)
+                return
             rtsp_args = (
                 url, config.RTSP_SAVE_ROOT, config.RTSP_SEGMENT_DURATION, config.RTSP_SCAN_INTERVAL, self.progress_queue.put,
                 params['mask'], params['global_wcs_info'], params['plate_solve_mask'],
@@ -239,7 +420,8 @@ class ProcessingMixin:
                 params['rtsp_notification_sound'],
                 params['noise_twin_options'],
             )
-            self.rtsp_thread = threading.Thread(target=file_utils.rtsp_save_and_process_thread_target, args=rtsp_args, daemon=True)
+            self.rtsp_thread = threading.Thread(target=file_utils.rtsp_save_and_process_thread_target, args=rtsp_args,
+                kwargs={"schedule_product_options": product_options}, daemon=True)
             self.rtsp_thread.start()
             self._update_live_preview_button_state()
 
@@ -267,6 +449,11 @@ class ProcessingMixin:
             self.cancel_processing(restore_button_state=True)
 
     def cancel_processing(self, restore_button_state=False):
+        if not restore_button_state and self.rtsp_thread and self.rtsp_thread.is_alive():
+            window_key = self._current_rtsp_schedule_window_key()
+            if window_key:
+                self._rtsp_schedule_autostart_suppressed_window = window_key
+
         # リクエストが来たら直ちにキャンセルフラグを立て、UIを更新する
         if not self.cancel_flag.is_set():
             self.append_log("キャンセル要求を受け付けました...")

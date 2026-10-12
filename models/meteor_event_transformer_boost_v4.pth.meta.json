@@ -1,0 +1,404 @@
+{
+  "architecture": "meteor_event_transformer_boost_v1",
+  "preprocess_version": 2,
+  "feature_count": 3713,
+  "class_names": [
+    "not_meteor",
+    "meteor"
+  ],
+  "meteor_class_index": 1,
+  "decision_threshold": 0.4694749846533225,
+  "input_resize": [
+    160,
+    160
+  ],
+  "mean": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "std": [
+    1.0,
+    1.0,
+    1.0
+  ],
+  "created_at": "2026-10-11T12:00:08.033865+00:00",
+  "training_events": 5276,
+  "validation_events": 1019,
+  "test_events": 211,
+  "reviewed_events": 6506,
+  "duplicate_events_excluded": [
+    "ml_training_data/reviewed/not_meteor/20221023_185154465_not_meteor_1_prob0.04_ea487159",
+    "ml_training_data/reviewed/not_meteor/20221023_185155265_not_meteor_3_prob0.06_017f34ac",
+    "ml_training_data/reviewed/not_meteor/20221023_185155665_not_meteor_2_prob0.06_309a8de0",
+    "ml_training_data/reviewed/not_meteor/20221023_185156799_not_meteor_4_prob0.07_0876671b",
+    "ml_training_data/reviewed/not_meteor/20221023_185202599_not_meteor_2_prob0.06_d3280675",
+    "ml_training_data/reviewed/not_meteor/20221023_191106466_not_meteor_1_prob0.04_c884fdcc",
+    "ml_training_data/reviewed/not_meteor/20251214_200101284_not_meteor_2_prob0.10",
+    "ml_training_data/reviewed/not_meteor/20251214_200600561_not_meteor_2_prob0.10",
+    "ml_training_data/reviewed/not_meteor/20251214_200701204_not_meteor_2_prob0.20",
+    "ml_training_data/reviewed/not_meteor/20260820_193624984_not_meteor_3_prob0.00",
+    "ml_training_data/reviewed/not_meteor/20260820_204630861_not_meteor_2_prob0.00",
+    "ml_training_data/reviewed/not_meteor/20260820_213848781_not_meteor_2_prob0.00",
+    "ml_training_data/reviewed/meteor/20221023_015601399_not_meteor_1_prob0.41_48d871cc",
+    "ml_training_data/reviewed/meteor/20221023_035336266_meteor_1_prob0.85_dde9e992",
+    "ml_training_data/reviewed/meteor/20221023_035616399_meteor_1_prob0.92_6db7e99f",
+    "ml_training_data/reviewed/meteor/20221023_040547999_meteor_1_prob0.73_a698b582",
+    "ml_training_data/reviewed/meteor/20221023_043542199_meteor_1_prob0.92_bf071b00",
+    "ml_training_data/reviewed/meteor/20221023_190406799_meteor_1_prob0.93_bd5f8e3a",
+    "ml_training_data/reviewed/meteor/20221023_190624266_meteor_1_prob0.94_27f7f001"
+  ],
+  "seed": 20261009,
+  "split_policy": "disjoint_capture_dates; validation_only_model_and_threshold_selection; no_refit",
+  "test_from": "2026-10-08",
+  "selected_candidate": 4,
+  "explicit_test_nights": [
+    "2026-10-08",
+    "2026-10-09"
+  ],
+  "validation_before": "2026-10-10",
+  "extra_reviewed_roots": [
+    "ml_training_data/experiments/retrain_20261011/hard_negatives"
+  ],
+  "correction_weight": 1.0,
+  "candidates": [
+    {
+      "parameters": {
+        "leaves": 15,
+        "iterations": 300,
+        "regularization": 3.0
+      },
+      "validation_metrics": {
+        "threshold": 0.3902041928319262,
+        "accuracy": 0.9823356231599607,
+        "precision": 0.9864176570458404,
+        "recall": 0.9830795262267343,
+        "specificity": 0.9813084112149533,
+        "f1": 0.9847457627118644,
+        "pr_auc": 0.9988167955543273,
+        "roc_auc": 0.9982446985151099,
+        "tp": 581,
+        "fn": 10,
+        "fp": 8,
+        "tn": 420
+      }
+    },
+    {
+      "parameters": {
+        "leaves": 15,
+        "iterations": 600,
+        "regularization": 8.0
+      },
+      "validation_metrics": {
+        "threshold": 0.3489264396450598,
+        "accuracy": 0.9823356231599607,
+        "precision": 0.9864176570458404,
+        "recall": 0.9830795262267343,
+        "specificity": 0.9813084112149533,
+        "f1": 0.9847457627118644,
+        "pr_auc": 0.9988186335969508,
+        "roc_auc": 0.9982446985151098,
+        "tp": 581,
+        "fn": 10,
+        "fp": 8,
+        "tn": 420
+      }
+    },
+    {
+      "parameters": {
+        "leaves": 31,
+        "iterations": 400,
+        "regularization": 5.0
+      },
+      "validation_metrics": {
+        "threshold": 0.28957690199379943,
+        "accuracy": 0.9823356231599607,
+        "precision": 0.9815126050420168,
+        "recall": 0.988155668358714,
+        "specificity": 0.9742990654205608,
+        "f1": 0.984822934232715,
+        "pr_auc": 0.9987863472193739,
+        "roc_auc": 0.9981735376441008,
+        "tp": 584,
+        "fn": 7,
+        "fp": 11,
+        "tn": 417
+      }
+    },
+    {
+      "parameters": {
+        "leaves": 7,
+        "iterations": 600,
+        "regularization": 3.0
+      },
+      "validation_metrics": {
+        "threshold": 0.6501506838604646,
+        "accuracy": 0.9813542688910697,
+        "precision": 0.993103448275862,
+        "recall": 0.9746192893401016,
+        "specificity": 0.9906542056074766,
+        "f1": 0.9837745516652434,
+        "pr_auc": 0.998691555427889,
+        "roc_auc": 0.9980272625203599,
+        "tp": 576,
+        "fn": 15,
+        "fp": 4,
+        "tn": 424
+      }
+    },
+    {
+      "parameters": {
+        "ensemble": [
+          0,
+          1,
+          2,
+          3
+        ]
+      },
+      "validation_metrics": {
+        "threshold": 0.4694749846533225,
+        "accuracy": 0.9833169774288518,
+        "precision": 0.9914383561643836,
+        "recall": 0.9796954314720813,
+        "specificity": 0.9883177570093458,
+        "f1": 0.985531914893617,
+        "pr_auc": 0.9989110022254888,
+        "roc_auc": 0.9983909736388507,
+        "tp": 579,
+        "fn": 12,
+        "fp": 5,
+        "tn": 423
+      }
+    },
+    {
+      "parameters": {
+        "linear_C": 0.001
+      },
+      "validation_metrics": {
+        "threshold": 0.6331179141998291,
+        "accuracy": 0.971540726202159,
+        "precision": 0.9778911564625851,
+        "recall": 0.9729272419627749,
+        "specificity": 0.969626168224299,
+        "f1": 0.9754028837998303,
+        "pr_auc": 0.9969920788069646,
+        "roc_auc": 0.9954773313092019,
+        "tp": 575,
+        "fn": 16,
+        "fp": 13,
+        "tn": 415
+      }
+    },
+    {
+      "parameters": {
+        "linear_C": 0.01
+      },
+      "validation_metrics": {
+        "threshold": 0.5869808793067932,
+        "accuracy": 0.9735034347399412,
+        "precision": 0.9731543624161074,
+        "recall": 0.9813874788494078,
+        "specificity": 0.9626168224299065,
+        "f1": 0.9772535804549284,
+        "pr_auc": 0.9969003239653218,
+        "roc_auc": 0.9952915223682338,
+        "tp": 580,
+        "fn": 11,
+        "fp": 16,
+        "tn": 412
+      }
+    },
+    {
+      "parameters": {
+        "linear_C": 0.1
+      },
+      "validation_metrics": {
+        "threshold": 0.4678354561328888,
+        "accuracy": 0.9744847890088322,
+        "precision": 0.9700499168053245,
+        "recall": 0.9864636209813875,
+        "specificity": 0.9579439252336449,
+        "f1": 0.9781879194630873,
+        "pr_auc": 0.9967439396974274,
+        "roc_auc": 0.9950029255024748,
+        "tp": 583,
+        "fn": 8,
+        "fp": 18,
+        "tn": 410
+      }
+    },
+    {
+      "parameters": {
+        "linear_C": 1.0
+      },
+      "validation_metrics": {
+        "threshold": 0.2685171067714691,
+        "accuracy": 0.9695780176643768,
+        "precision": 0.9605263157894737,
+        "recall": 0.988155668358714,
+        "specificity": 0.9439252336448598,
+        "f1": 0.9741451209341118,
+        "pr_auc": 0.9963339990249176,
+        "roc_auc": 0.9944277084618183,
+        "tp": 584,
+        "fn": 7,
+        "fp": 24,
+        "tn": 404
+      }
+    }
+  ],
+  "validation_metrics": {
+    "threshold": 0.4694749846533225,
+    "accuracy": 0.9833169774288518,
+    "precision": 0.9914383561643836,
+    "recall": 0.9796954314720813,
+    "specificity": 0.9883177570093458,
+    "f1": 0.985531914893617,
+    "pr_auc": 0.9989110022254888,
+    "roc_auc": 0.9983909736388507,
+    "tp": 579,
+    "fn": 12,
+    "fp": 5,
+    "tn": 423
+  },
+  "test_metrics": {
+    "threshold": 0.4694749846533225,
+    "accuracy": 0.966824644549763,
+    "precision": 0.9617486338797814,
+    "recall": 1.0,
+    "specificity": 0.8,
+    "f1": 0.9805013927576601,
+    "pr_auc": 0.9982827370410066,
+    "roc_auc": 0.9915584415584416,
+    "tp": 176,
+    "fn": 0,
+    "fp": 7,
+    "tn": 28
+  },
+  "export_max_absolute_error": 0.0,
+  "camera_policy": "camera_date_source_previous_prediction_excluded_from_features",
+  "trained_on_all_reviewed_events": false,
+  "pretrained_encoder": "facebook/dinov2-small",
+  "pretrained_encoder_revision": "ed25f3a31f01632728cabb09d1542f84ab7b0056",
+  "dataset_sha256": "655ba7f0591f8fbf16c5b40f0a8a38bd82a89692d076a1d509d48130b5f7541e",
+  "training_nights": [
+    "2022-10-22",
+    "2022-10-27",
+    "2022-10-28",
+    "2022-10-30",
+    "2022-10-31",
+    "2022-11-01",
+    "2022-11-02",
+    "2022-11-06",
+    "2022-11-08",
+    "2022-11-09",
+    "2022-11-10",
+    "2022-11-12",
+    "2022-11-13",
+    "2022-11-14",
+    "2022-11-15",
+    "2022-11-16",
+    "2022-11-18",
+    "2022-11-19",
+    "2022-11-21",
+    "2022-11-22",
+    "2022-11-25",
+    "2022-11-26",
+    "2022-11-28",
+    "2022-12-02",
+    "2022-12-03",
+    "2022-12-04",
+    "2022-12-06",
+    "2022-12-07",
+    "2022-12-08",
+    "2022-12-10",
+    "2022-12-11",
+    "2022-12-14",
+    "2022-12-15",
+    "2022-12-16",
+    "2022-12-31",
+    "2023-01-01",
+    "2023-01-03",
+    "2023-01-06",
+    "2023-01-07",
+    "2023-01-09",
+    "2023-01-11",
+    "2023-01-12",
+    "2023-01-18",
+    "2023-01-19",
+    "2023-01-20",
+    "2023-01-21",
+    "2023-01-22",
+    "2023-01-29",
+    "2023-01-31",
+    "2023-02-01",
+    "2023-02-04",
+    "2023-02-05",
+    "2023-02-06",
+    "2023-03-06",
+    "2023-03-08",
+    "2023-03-09",
+    "2023-03-10",
+    "2023-03-11",
+    "2023-03-12",
+    "2023-03-15",
+    "2025-12-06",
+    "2025-12-07",
+    "2025-12-14",
+    "2025-12-15",
+    "2026-07-09",
+    "2026-07-10",
+    "2026-07-11",
+    "2026-07-13",
+    "2026-07-14",
+    "2026-07-29",
+    "2026-07-30",
+    "2026-07-31",
+    "2026-08-01",
+    "2026-08-06",
+    "2026-08-07",
+    "2026-08-09",
+    "2026-08-11",
+    "2026-08-13",
+    "2026-08-20",
+    "2026-08-21",
+    "2026-08-22",
+    "2026-08-23",
+    "2026-08-24",
+    "2026-10-10",
+    "2026-10-11"
+  ],
+  "validation_nights": [
+    "2022-10-23",
+    "2022-10-26",
+    "2022-10-29",
+    "2022-11-04",
+    "2022-11-05",
+    "2022-11-07",
+    "2022-11-11",
+    "2022-11-17",
+    "2022-11-27",
+    "2022-12-09",
+    "2022-12-13",
+    "2022-12-28",
+    "2022-12-29",
+    "2022-12-30",
+    "2023-01-05",
+    "2023-01-08",
+    "2023-01-25",
+    "2023-01-26",
+    "2023-01-30",
+    "2023-03-07",
+    "2023-03-13",
+    "2025-12-08",
+    "2026-07-15",
+    "2026-08-02",
+    "2026-08-08",
+    "2026-08-12",
+    "2026-08-25"
+  ],
+  "test_nights": [
+    "2026-10-08",
+    "2026-10-09"
+  ]
+}

@@ -1,5 +1,3 @@
-#!/usr/bin/env bash
+#!/bin/bash
 set -euo pipefail
-
-cd "$(dirname "$0")"
-exec ./run_mac.sh "$@"
+exec /Users/keisukematsumoto/Desktop/other/meteor-detector-swiftui/run_mac.command "$@"

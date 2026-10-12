@@ -30,6 +30,7 @@ import config
 import media_time
 import rtsp_segments
 import rtsp_live
+import rtsp_startup
 from fixed_pattern import apply_fixed_pattern_correction
 
 
@@ -236,7 +237,7 @@ class RtspNoiseTwinPipeline:
         candidates: list[tuple[Path, os.stat_result]] = []
         for path in self.spool_root.rglob("*.mp4"):
             key = str(path)
-            if self.work_root in path.parents or key in self.enqueued:
+            if self.work_root in path.parents or key in self.enqueued or rtsp_startup.is_deferred_recording(path):
                 continue
             try:
                 metadata = path.stat()
@@ -615,7 +616,7 @@ class RtspNoiseTwinPipeline:
             if self.spool_root in evidence.parents:
                 continue
             video = evidence.with_name(evidence.name.replace("_innovation.mp4", ".mp4"))
-            if video.exists():
+            if video.exists() and not rtsp_startup.is_deferred_recording(video):
                 marker = noise_twin.load_processing_marker(str(video)) or {}
                 if not marker.get("analyzed", False):
                     self.analysis_queue.put((str(video), str(evidence)))
@@ -629,7 +630,7 @@ class RtspNoiseTwinPipeline:
             if data.get("method") != "temporal_mean" or data.get("analyzed") is True:
                 continue
             video = Path(str(marker)[: -len(".preprocessed.json")])
-            if video.exists():
+            if video.exists() and not rtsp_startup.is_deferred_recording(video):
                 self.analysis_queue.put((str(video), ""))
         for marker in self.save_root.rglob("*.mp4.analysis_pending.json"):
             if self.spool_root in marker.parents:
@@ -644,7 +645,7 @@ class RtspNoiseTwinPipeline:
             ):
                 continue
             video = Path(str(marker)[: -len(".analysis_pending.json")])
-            if video.exists():
+            if video.exists() and not rtsp_startup.is_deferred_recording(video):
                 self.analysis_queue.put((str(video), ""))
 
     def start(self) -> None:

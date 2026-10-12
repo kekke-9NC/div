@@ -90,3 +90,21 @@ tests/test_sun_times.py
 
 README.md
 .conda/
+
+# Reproducible event-model diagnostics (deployment metadata stays visible)
+models/*.evaluation.json
+models/diagnostics/event_boost_initial/
+models/diagnostics/event_boost_features/
+
+# Disposable scheduled RTSP product cache and recovery manifests
+.schedule_cache/
+.schedule_jobs/
+schedule_products/
+
+# Local recordings, generated previews, and downloaded distribution data
+0000_saved_data/
+rtsp_nights/
+direction_rtsp_test/
+artifacts/
+.meteor-download-*/
+流星app-Mac-20260813/流星app.app/Contents/Resources/

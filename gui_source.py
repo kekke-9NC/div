@@ -348,8 +348,10 @@ class SourceMixin:
         
         # 録画時間外でも解析は継続する旨の説明
         ttk.Label(self.rtsp_time_limit_detail_frame, text="録画時間外でも、すでに保存済みの動画の解析は継続します。", style="Hint.TLabel").pack(anchor=tk.W, pady=(4,0))
+        ttk.Label(self.rtsp_time_limit_detail_frame, text="アプリ起動中は、設定した開始時刻に録画を自動開始します。", style="Hint.TLabel").pack(anchor=tk.W, pady=(4,0))
         ttk.Label(lf_rtsp, text="0.5秒単位の映像を連続解析します。流星の反映は通常約1.5〜2秒＋解析時間。録画は後から約1分単位へまとめて保存します。", style="Hint.TLabel", wraplength=650).pack(anchor=tk.W, pady=(6, 0))
         
+        self._build_schedule_product_controls(rtsp_time_frame)
         self.toggle_rtsp_time_limit_frame()
         
         # ===== 定期スキャン (移設) =====
@@ -1088,7 +1090,8 @@ atomcam2で利用する場合は、GitHubで公開されている
     def toggle_rtsp_time_limit_frame(self):
         """Toggle visibility of the RTSP time limit detail frame."""
         if self.rtsp_time_limit_var.get():
-            self.rtsp_time_limit_detail_frame.pack(fill=tk.X, pady=5, padx=20)
+            options = {"before": self.rtsp_schedule_product_frame} if hasattr(self, "rtsp_schedule_product_frame") else {}
+            self.rtsp_time_limit_detail_frame.pack(fill=tk.X, pady=5, padx=20, **options)
         else:
             self.rtsp_time_limit_detail_frame.pack_forget()
 
@@ -1263,3 +1266,133 @@ atomcam2で利用する場合は、GitHubで公開されている
     def select_save_path(self, path_var):
         directory = filedialog.askdirectory(title="保存先を選択", initialdir=path_var.get())
         if directory: path_var.set(directory)
+
+    def _init_schedule_product_vars(self):
+        import rtsp_schedule_products
+        self.schedule_product_vars = {}
+        for name, value in rtsp_schedule_products.DEFAULTS.items():
+            cls = tk.BooleanVar if isinstance(value, bool) else tk.StringVar
+            self.schedule_product_vars[name] = cls(master=self, value=value)
+
+    def _schedule_product_values(self):
+        return {name: variable.get() for name, variable in self.schedule_product_vars.items()}
+
+    def _restore_schedule_product_values(self, values):
+        for name, value in values.items():
+            if name in self.schedule_product_vars:
+                self.schedule_product_vars[name].set(value)
+
+    def _build_schedule_product_controls(self, parent):
+        frame = ttk.LabelFrame(parent, text="スケジュール終了後に自動作成")
+        self.rtsp_schedule_product_frame = frame
+        frame.pack(fill=tk.X, pady=(8, 0))
+        for name, label in (("timelapse", "タイムラプス"), ("blend_video", "比較明合成動画（流星の切り抜き）"),
+                            ("blend_image", "比較明合成画像（流星の切り抜き）"),
+                            ("concatenate", "等倍速で連結し、検証後に元の録画を削除して置き換える")):
+            ttk.Checkbutton(frame, text=label, variable=self.schedule_product_vars[name]).pack(anchor=tk.W)
+        ttk.Label(frame, text="録画中から連結・切り抜きを準備します。再起動時に不足キャッシュを補完します。", style="Hint.TLabel").pack(anchor=tk.W, pady=4)
+        row = ttk.Frame(frame)
+        row.pack(fill=tk.X)
+        ttk.Button(row, text="タイムラプス・切り抜きの詳細設定", command=self._schedule_product_details).pack(side=tk.LEFT)
+        ttk.Button(row, text="キャッシュ管理（上限150GB）", command=self._schedule_cache_dialog).pack(side=tk.LEFT, padx=8)
+        ttk.Label(frame, text="初期設定: 15秒 / 60fps・RTSPマスク適用・配信と同じ星座ON・スケジュール全体", style="Hint.TLabel", wraplength=650).pack(anchor=tk.W, pady=4)
+
+    def _schedule_product_details(self):
+        window = tk.Toplevel(self)
+        window.title("スケジュール自動作成の詳細設定")
+        window.transient(self)
+        frame = ttk.Frame(window, padding=16)
+        frame.pack(fill=tk.BOTH, expand=True)
+        values = self.schedule_product_vars
+        fields = (("duration", "タイムラプスの長さ（秒）", .1, 300),
+                  ("fps", "出力FPS", 1, 120), ("mean_radius", "時間平均の前後フレーム数（0でOFF）", 0, 10),
+                  ("timestamp_size", "時刻の文字サイズ（画面高さの%）", .1, 20),
+                  ("crop_margin", "線検出の切り抜き余白（px）", 0, 500))
+        for row, (name, label, lower, upper) in enumerate(fields):
+            ttk.Label(frame, text=label).grid(row=row, column=0, sticky=tk.W, pady=4)
+            ttk.Spinbox(frame, from_=lower, to=upper, textvariable=values[name], width=10).grid(row=row, column=1, sticky=tk.W)
+        row = len(fields)
+        ttk.Checkbutton(frame, text="配信と同じ星座を重ねる", variable=values["constellations"]).grid(row=row, column=0, columnspan=2, sticky=tk.W)
+        row += 1
+        ttk.Checkbutton(frame, text="切り抜きに内蔵AIを使用（初期値OFF：検出座標を使用）",
+                        variable=values["ai_crop"]).grid(row=row, column=0, columnspan=3, sticky=tk.W)
+        row += 1
+        ttk.Checkbutton(frame, text="撮影時刻を表示する", variable=values["timestamp"]).grid(row=row, column=0, sticky=tk.W)
+        ttk.Combobox(frame, textvariable=values["timestamp_position"], state="readonly",
+                     values=("bottom_right", "bottom_left", "top_right", "top_left"), width=15).grid(row=row, column=1)
+        for name, label, kind in (("output_dir", "出力先（空欄はRTSP保存先内）", "dir"),
+                                 ("sky_config", "配信の星座設定JSON（空欄は標準）", "file")):
+            row += 1
+            ttk.Label(frame, text=label).grid(row=row, column=0, sticky=tk.W, pady=(8, 0))
+            row += 1
+            ttk.Entry(frame, textvariable=values[name], width=60).grid(row=row, column=0, columnspan=2, sticky=tk.EW)
+            def browse(variable=values[name], mode=kind):
+                path = filedialog.askdirectory(parent=window) if mode == "dir" else filedialog.askopenfilename(parent=window, filetypes=[("JSON", "*.json")])
+                if path:
+                    variable.set(path)
+            ttk.Button(frame, text="参照", command=browse).grid(row=row, column=2, padx=6)
+        row += 1
+        ttk.Label(frame, text="RTSPのマスクを自動で適用します。時間は録画スケジュール全体です。\n切り抜きは情報ファイルと同じ流星の検出座標＋余白を使用し、画像と動画で共有します。\n内蔵AIは選択時のみ使用し、枠が得られない場合は検出座標を使います。", style="Hint.TLabel").grid(row=row, column=0, columnspan=3, sticky=tk.W, pady=10)
+        def close():
+            import rtsp_schedule_products
+            try:
+                rtsp_schedule_products.normalize_options(self._schedule_product_values())
+            except ValueError as exc:
+                messagebox.showerror("設定エラー", str(exc), parent=window)
+                return
+            window.destroy()
+        ttk.Button(frame, text="閉じる", command=close).grid(row=row+1, column=2)
+        window.protocol("WM_DELETE_WINDOW", close)
+
+    def _schedule_cache_dialog(self):
+        import rtsp_schedule_products
+        window = tk.Toplevel(self)
+        window.title("自動作成キャッシュ管理")
+        window.transient(self)
+        frame = ttk.Frame(window, padding=16)
+        frame.pack(fill=tk.BOTH, expand=True)
+        summary = tk.StringVar(value="読み込み中...")
+        ttk.Label(frame, textvariable=summary).pack(anchor=tk.W)
+        ttk.Label(frame, text="上限150GB。古い素材から自動削除します。削除した素材は元録画から再作成します。", wraplength=600).pack(anchor=tk.W, pady=6)
+        tree = ttk.Treeview(frame, columns=("size",), show="tree headings", selectmode="extended", height=12)
+        tree.heading("#0", text="素材（sample=タイムラプス / cutouts=切り抜き / concat=連結）")
+        tree.heading("size", text="容量MB")
+        tree.column("#0", width=510)
+        tree.column("size", width=90)
+        tree.pack(fill=tk.BOTH, expand=True)
+        events = queue.Queue()
+        def work(keys=None, clear=False):
+            try:
+                cache = rtsp_schedule_products.ProductCache(Path(config.RTSP_SAVE_ROOT)/".schedule_cache")
+                if clear:
+                    cache.clear(keys)
+                with rtsp_schedule_products._CACHE_LOCK:
+                    entries = [(p.name, sum(f.stat().st_size for f in p.rglob("*") if f.is_file())) for p in cache.entries()]
+                events.put(("done", entries))
+            except Exception as exc:
+                events.put(("error", str(exc)))
+        def refresh(keys=None, clear=False):
+            summary.set("処理中...")
+            threading.Thread(target=work, args=(keys, clear), daemon=True).start()
+        def poll():
+            if not window.winfo_exists():
+                return
+            try:
+                kind, payload = events.get_nowait()
+                if kind == "error":
+                    summary.set(payload)
+                else:
+                    tree.delete(*tree.get_children())
+                    for name, size in payload:
+                        tree.insert("", tk.END, iid=name, text=name, values=(f"{size/1_000_000:.1f}",))
+                    summary.set(f"使用量 {sum(size for _, size in payload)/1_000_000_000:.2f} GB / 150 GB")
+            except queue.Empty:
+                pass
+            window.after(100, poll)
+        row = ttk.Frame(frame)
+        row.pack(fill=tk.X, pady=(10, 0))
+        ttk.Button(row, text="一覧更新", command=refresh).pack(side=tk.LEFT)
+        ttk.Button(row, text="選択した素材を削除", command=lambda: refresh(list(tree.selection()), True)).pack(side=tk.LEFT, padx=8)
+        ttk.Button(row, text="すべてのキャッシュを削除", command=lambda: refresh(None, True)).pack(side=tk.LEFT)
+        refresh()
+        poll()
