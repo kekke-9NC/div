@@ -121,7 +121,7 @@ def _select_model_event_frames(
 
 
 class _SavedEventIndex(list):
-    """Append-only result list with an exact time-bucket overlap index.
+    """Result list with an exact time-bucket overlap index.
 
     Live analyses retain every result for their caller. Duplicate checks need
     only nearby event times, even after hours of cloud/noise decisions. Bucket
@@ -133,17 +133,32 @@ class _SavedEventIndex(list):
         self.buckets = {}
         self.long_events = []
 
-    def append(self, item):
+    def _index_item(self, item, index):
         first = item.get('detection_start_frame', item.get('start_frame', -1))
         last = item.get('detection_end_frame', item.get('end_frame', -1))
         low, high = int(first // self.bucket_frames), int(last // self.bucket_frames)
-        index = len(self)
-        super().append(item)
         if high - low > 1024:
             self.long_events.append(index)
         else:
             for bucket in range(low, high + 1):
                 self.buckets.setdefault(bucket, []).append(index)
+
+    def append(self, item):
+        index = len(self)
+        super().append(item)
+        self._index_item(item, index)
+
+    def prune_before(self, cutoff, default_end):
+        """Discard expired results and rebuild bucket positions after compaction."""
+        retained = [item for item in self
+                    if item.get('end_frame', default_end) >= cutoff]
+        if len(retained) == len(self):
+            return
+        super().__setitem__(slice(None), retained)
+        self.buckets.clear()
+        self.long_events.clear()
+        for index, item in enumerate(self):
+            self._index_item(item, index)
 
     def overlapping(self, bounds, margin):
         low = int((bounds[0] - margin) // self.bucket_frames)
@@ -1251,8 +1266,7 @@ def create_line_video_clips(
                     # Duplicate checks need only recent tracks, not an entire
                     # night's events retained in memory.
                     cutoff = current_frame_index - int(frame_rate * 30)
-                    processed_clips_info[:] = [item for item in processed_clips_info
-                        if item.get("end_frame", current_frame_index) >= cutoff]
+                    processed_clips_info.prune_before(cutoff, current_frame_index)
 
                 # RTSP時、またはRTSP録画ファイル時は専用パラメータを使用（ノイズ対策）
                 # RTSP録画ファイルのパスにRTSP_SAVE_ROOTが含まれているかチェック
