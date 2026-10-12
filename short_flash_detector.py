@@ -40,8 +40,10 @@ class FlashCandidate:
 
 def candidate_from_points(points, frame_rate=25.0):
     """Validate a component track, keeping its luminous head, not its decay."""
+    if len(points) < 2:
+        return None
     pts = np.asarray(points, dtype=np.float64)
-    if len(pts) < 2 or pts[-1, 0] - pts[0, 0] > frame_rate * 3:
+    if pts[-1, 0] - pts[0, 0] > frame_rate * 3:
         return None
     peak = float(pts[:, 6].max())
     pts = pts[pts[:, 6] >= max(8.0, peak * .20)]
@@ -87,13 +89,19 @@ def _component_detections(residual, labels, stats, centers):
         flat_labels = labels.ravel()[pixels]
         flat_values = residual.ravel()[pixels]
         scores = np.bincount(flat_labels, weights=flat_values, minlength=count)
-        has_peak = np.bincount(flat_labels[flat_values >= 5], minlength=count) > 0
-        eligible = eligible[(scores[eligible] >= 20) & has_peak[eligible]]
+        peaks = np.zeros(count, dtype=residual.dtype)
+        np.maximum.at(peaks, flat_labels, flat_values)
+        eligible = eligible[(scores[eligible] >= 20) & (peaks[eligible] >= 5)]
         eligible = eligible[np.argsort(-scores[eligible], kind='stable')[:400]]
-        for k in eligible:
-            x, y, w, h, area = map(int, stats[k])
-            values = residual[y:y+h, x:x+w][labels[y:y+h, x:x+w] == k]
-            detections.append([*centers[k], int(scores[k]), w, h, int(values.max())])
+        # All component peaks are now known from that same sparse pixel pass.
+        # Avoid hundreds of temporary crop masks and reductions per frame.
+        detections = [list(row) for row in zip(
+            centers[eligible, 0].tolist(), centers[eligible, 1].tolist(),
+            scores[eligible].astype(np.int64).tolist(),
+            stats[eligible, cv2.CC_STAT_WIDTH].tolist(),
+            stats[eligible, cv2.CC_STAT_HEIGHT].tolist(),
+            peaks[eligible].astype(np.int64).tolist(),
+        )]
     else:
         for k in eligible:
             x, y, w, h, area = map(int, stats[k])
@@ -172,21 +180,20 @@ class ShortFlashDetector:
             if detections:
                 tree = cKDTree(np.asarray(detections)[:, :2])
                 choices = []
-                positions, gates = [], []
-                for tid, tr in enumerate(self.active):
-                    last = tr[-1]
-                    gap = index - last[0]
-                    velocity = np.zeros(2)
-                    if len(tr) >= 2:
-                        previous = tr[-2]
-                        velocity = (np.asarray(last[1:3]) - previous[1:3]) / max(1, last[0] - previous[0])
-                    gate = 40 if len(tr) < 2 else max(12, min(90, np.linalg.norm(velocity) * gap * .7 + 12))
-                    positions.append(np.asarray(last[1:3]) + velocity * gap)
-                    gates.append(gate)
-                if positions:
+                positions, gates = _track_predictions(self.active, index)
+                if len(positions):
                     # Exact nearest-neighbour queries, with the same tree,
                     # arithmetic, and greedy tie ordering as individual calls.
                     distances, indices = tree.query(np.asarray(positions))
+                    # A batched two-component dot can round differently from
+                    # scalar BLAS norm. Recheck every boundary-near comparison
+                    # with the original arithmetic; greedy choices stay exact.
+                    for tid in np.flatnonzero(np.abs(distances - gates) <= 1e-10):
+                        tr = self.active[tid]
+                        if len(tr) >= 2:
+                            last, previous = tr[-1], tr[-2]
+                            velocity = (np.asarray(last[1:3]) - previous[1:3]) / max(1, last[0] - previous[0])
+                            gates[tid] = max(12, min(90, np.linalg.norm(velocity) * (index-last[0]) * .7 + 12))
                     for tid in np.flatnonzero(distances < gates):
                         choices.append((float(distances[tid]), int(tid), int(indices[tid])))
                 used_tracks, used_detections = set(), set()
@@ -219,3 +226,22 @@ class ShortFlashDetector:
                           if (c := candidate_from_points(tr, self.frame_rate)) is not None)
             self.active = []
         return result
+
+
+def _track_predictions(active, index):
+    """Predict all tracks with the original elementwise arithmetic and order."""
+    if not active:
+        return np.empty((0, 2)), np.empty(0)
+    lasts = [track[-1] for track in active]
+    previous = [track[-2] if len(track) >= 2 else track[-1] for track in active]
+    xy = np.asarray([point[1:3] for point in lasts])
+    before = np.asarray([point[1:3] for point in previous])
+    times = np.asarray([point[0] for point in lasts], dtype=np.int64)
+    before_times = np.asarray([point[0] for point in previous], dtype=np.int64)
+    gaps = index - times
+    velocities = (xy - before) / np.maximum(1, times - before_times)[:, None]
+    positions = xy + velocities * gaps[:, None]
+    norms = np.sqrt(np.einsum('ij,ij->i', velocities, velocities))
+    gates = np.maximum(12, np.minimum(90, norms * gaps * .7 + 12))
+    gates[np.fromiter((len(track) < 2 for track in active), dtype=bool, count=len(active))] = 40
+    return positions, gates

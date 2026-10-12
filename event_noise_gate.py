@@ -7,8 +7,9 @@ remaining decision. Training and runtime share this representation.
 from __future__ import annotations
 import cv2
 import numpy as np
-from universal_meteor_model import _crop_square
+from universal_meteor_model import _crop_square, _uint8_median
 from event_boost_model import EventBoostClassifier
+from temporal_statistics import temporal_median, half_integer_percentiles
 
 GATE_PREPROCESS_VERSION = 2
 BACKGROUND_BRIGHTNESS_MIN = 60.
@@ -19,14 +20,15 @@ def extract_noise_gate_features(frames, rect=None, frame_rate=25.):
         raise ValueError('Noise gate needs chronological frames')
     stack = np.stack([_crop_square(frame, rect, 64) for frame in frames])
     values = stack.astype(np.float32)
-    background = np.median(stack, axis=0).astype(np.float32)
+    background = temporal_median(stack).astype(np.float32)
     delta = values - background
     positive = np.maximum(delta, 0.)
     maximum = positive.max(axis=0)
-    noise = max(.5, float(np.median(np.abs(np.diff(values, axis=0)))) / .954) if len(values)>1 else .5
+    noise = (max(.5, _uint8_median(np.abs(np.diff(stack.astype(np.int16), axis=0)).astype(np.uint8)) / .954)
+             if len(values) > 1 else .5)
     result = [len(values)/max(1.,frame_rate), float(len(values)), noise]
     for array in (background, maximum, positive, np.maximum(-delta,0.)):
-        result.extend([float(array.mean()),float(array.std()), *np.percentile(array,[0,50,90,99,99.9,100]).tolist()])
+        result.extend([float(array.mean()),float(array.std()), *half_integer_percentiles(array,[0,50,90,99,99.9,100]).tolist()])
     for level in (1.,2.,4.,8.):
         result.extend([float((maximum>level*noise).mean()),float((positive>level*noise).mean())])
     for curve in (positive.mean(axis=(1,2)),positive.max(axis=(1,2)),(positive>3*noise).mean(axis=(1,2))):
