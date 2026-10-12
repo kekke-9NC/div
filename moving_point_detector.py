@@ -16,6 +16,8 @@ from typing import List, Sequence, Tuple
 
 import cv2
 import numpy as np
+from temporal_statistics import temporal_median
+from scipy.spatial import cKDTree
 
 
 Point = Tuple[float, float]
@@ -201,7 +203,7 @@ def detect_moving_point_tracks(
     if gray_frames.dtype == np.uint8:
         # Integer medians (including the mean of two middle values) are exact
         # half-integers in float32. Partition the smaller uint8 cube first.
-        background = np.median(gray_frames, axis=0).astype(np.float32)
+        background = temporal_median(gray_frames).astype(np.float32)
     else:
         gray_frames = gray_frames.astype(np.float32)
         background = np.median(gray_frames, axis=0)
@@ -222,7 +224,9 @@ def detect_moving_point_tracks(
     for frame_index, frame_detections in enumerate(detections):
         used = set()
         next_active: List[dict] = []
-        for track in sorted(active, key=lambda item: item["scores"][-1], reverse=True):
+        ordered_active = sorted(active, key=lambda item: item["scores"][-1], reverse=True)
+        nearby = _nearby_detections(ordered_active, frame_detections, frame_index, max_step)
+        for track_index, track in enumerate(ordered_active):
             last_frame = int(track["times"][-1])
             gap = frame_index - last_frame
             if gap > max_gap + 1:
@@ -230,7 +234,9 @@ def detect_moving_point_tracks(
                 continue
             previous_x, previous_y = track["points"][-1]
             best = None
-            for detection_index, detection in enumerate(frame_detections):
+            search_indices = nearby[track_index] if nearby is not None else range(len(frame_detections))
+            for detection_index in search_indices:
+                detection = frame_detections[detection_index]
                 if detection_index in used:
                     continue
                 dx = detection["x"] - previous_x
@@ -281,3 +287,15 @@ def detect_moving_point_tracks(
         if completed is not None:
             tracks.append(completed)
     return _deduplicate_tracks(tracks)[:max_candidates]
+
+
+def _nearby_detections(tracks, detections, frame_index, max_step):
+    """Prune impossible spatial matches, retaining the original tie ordering."""
+    if len(tracks) * len(detections) < 1024 or max_step <= 0:
+        return None
+    points = np.asarray([(d['x'], d['y']) for d in detections])
+    positions = np.asarray([track['points'][-1] for track in tracks])
+    radii = np.asarray([max_step * max(1, frame_index - int(track['times'][-1])) for track in tracks])
+    # The scalar math.hypot check remains authoritative at the radius edge.
+    # Include a numerical halo so tree rounding cannot discard an eligible pair.
+    return cKDTree(points).query_ball_point(positions, radii + 1e-10, return_sorted=True)

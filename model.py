@@ -227,6 +227,7 @@ def _reload_model_unlocked(model_path: Optional[str] = None, metadata: Optional[
                 meta.get("decision_threshold", config.METEOR_PROBABILITY_THRESHOLD)
             ),
             "target_recall": meta.get("target_recall"),
+            "foreground_gate_audit_only": bool(meta.get("foreground_gate_audit_only", False)),
             "non_meteor_full_media_probability_min": meta.get("non_meteor_full_media_probability_min", 0.),
         }
         noise_gate = None
@@ -334,33 +335,42 @@ def predict_meteor_event(
             if fallback_image_path:
                 return predict_meteor_probability(fallback_image_path)
             return 0.0
-        try:
-            image, kymograph, features = build_universal_inputs(
-                frames=frames,
-                rect=cutout_rect,
-                detected_line=detected_line,
-                frame_rate=frame_rate,
-            )
-            if _active_model_info.get("architecture") in (EVENT_BOOST_ARCHITECTURE_NAME, EVENT_TRANSFORMER_ARCHITECTURE_NAME):
-                # Match the 16-bit training representation exactly.
-                image = (np.clip(image, 0., 1.) * 65535.).astype(np.uint16).astype(np.float32) / 65535.
-                kymograph = (np.clip(kymograph, 0., 1.) * 65535.).astype(np.uint16).astype(np.float32) / 65535.
-                vector = np.concatenate([
-                    extract_event_features(image, kymograph, features),
-                    extract_motion_features(frames, cutout_rect, frame_rate),
-                ])
-                if _active_model_info.get("architecture") == EVENT_TRANSFORMER_ARCHITECTURE_NAME:
-                    vector = np.concatenate([vector, model.encoder.encode([image])[0]])
-                return float(model.predict_proba(vector)[0])
+        # Pin one model revision for this event. Independent NumPy/OpenCV
+        # preprocessing can run on the archive workers concurrently; only
+        # accelerator submission needs serialization. Retaining this reference
+        # also keeps a model reload from mixing old and new event features.
+        event_model = model
+        architecture = _active_model_info.get("architecture")
+    try:
+        image, kymograph, features = build_universal_inputs(
+            frames=frames,
+            rect=cutout_rect,
+            detected_line=detected_line,
+            frame_rate=frame_rate,
+        )
+        if architecture in (EVENT_BOOST_ARCHITECTURE_NAME, EVENT_TRANSFORMER_ARCHITECTURE_NAME):
+            # Match the 16-bit training representation exactly.
+            image = (np.clip(image, 0., 1.) * 65535.).astype(np.uint16).astype(np.float32) / 65535.
+            kymograph = (np.clip(kymograph, 0., 1.) * 65535.).astype(np.uint16).astype(np.float32) / 65535.
+            vector = np.concatenate([
+                extract_event_features(image, kymograph, features),
+                extract_motion_features(frames, cutout_rect, frame_rate),
+            ])
+            if architecture == EVENT_TRANSFORMER_ARCHITECTURE_NAME:
+                with _model_lock:
+                    encoded = event_model.encoder.encode([image])[0]
+                vector = np.concatenate([vector, encoded])
+            return float(event_model.predict_proba(vector)[0])
+        with _model_lock:
             image_tensor = torch.from_numpy(image).unsqueeze(0).to(device)
             kymograph_tensor = torch.from_numpy(kymograph).unsqueeze(0).to(device)
             feature_tensor = torch.from_numpy(features).unsqueeze(0).to(device)
             with torch.inference_mode():
-                logit = model(image_tensor, kymograph_tensor, feature_tensor)
+                logit = event_model(image_tensor, kymograph_tensor, feature_tensor)
                 return float(torch.sigmoid(logit)[0].item())
-        except Exception as exc:
-            print(f"Event prediction error: {exc}")
-            return 0.0
+    except Exception as exc:
+        print(f"Event prediction error: {exc}")
+        return 0.0
 
 
 def predict_noise_gate(frames, cutout_rect, frame_rate):

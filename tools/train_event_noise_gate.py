@@ -68,8 +68,10 @@ def train(args):
     metadata = json.loads(Path(str(full) + '.meta.json').read_text())
     full_threshold = metadata['decision_threshold']
     events, _ = reviewed_events(Path(args.reviewed_root))
+    # Newly reviewed cloud negatives must enter training too. Restricting
+    # training negatives to old auxiliary examples ignores later corrections.
     by_hash = {event['clip_sha256']: event for event in events
-               if event['label'] == 1 or records.get(event['clip_sha256'], {}).get('split') in ('validation', 'test')}
+               if event['clip_sha256'] in records}
     for root in args.extra_reviewed_root:
         extra, _ = reviewed_events(Path(root))
         for event in extra:

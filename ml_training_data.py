@@ -14,6 +14,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
+from temporal_statistics import temporal_median
 
 
 SCHEMA_VERSION = 1
@@ -50,7 +51,7 @@ def build_temporal_representations(
         return [], cv2.cvtColor(blank, cv2.COLOR_GRAY2BGR), blank
 
     stack = np.stack(crops).astype(np.int16)
-    background = np.median(stack, axis=0).astype(np.int16)
+    background = temporal_median(stack).astype(np.int16)
     response = np.abs(stack - background).astype(np.uint8)
 
     groups = np.array_split(np.arange(len(crops)), 3)

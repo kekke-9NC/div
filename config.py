@@ -19,6 +19,7 @@ else:
 
 # Resolve model path relative to this file (portable/exe-friendly).
 _MODEL_CANDIDATES = [
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "meteor_event_transformer_boost_v5.pth"),
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "meteor_event_transformer_boost_v2.pth"),
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "meteor_event_transformer_boost_v1.pth"),
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "meteor_fusion_universal_v2.pth"),
@@ -180,7 +181,7 @@ RTSP_CANNY_THRESH2 = 240
 
 
 # --- GUI関連 ---
-GUI_WINDOW_TITLE = "Meteor Detector v0.10.12.3"
+GUI_WINDOW_TITLE = "Meteor Detector v0.10.13.1"
 GUI_WINDOW_GEOMETRY = "1200x900"
 GUI_RESIZED_WIDTH = 640      # GUIで動画フレームをリサイズ表示する際の幅
 GUI_RESIZED_HEIGHT = 300     # GUIで動画フレームをリサイズ表示する際の高さ

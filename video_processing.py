@@ -79,20 +79,19 @@ def _deduplicate_candidate_lines(
 ) -> List[Tuple[Tuple[int, int], Tuple[int, int]]]:
     """Collapse Hough and moving-point lines describing the same event."""
     unique = []
+    centers = []
     for line in lines:
         (x1, y1), (x2, y2) = line
         center_x = (int(x1) + int(x2)) / 2.0
         center_y = (int(y1) + int(y2)) / 2.0
         if any(
-            math.hypot(
-                center_x - (int(other[0][0]) + int(other[1][0])) / 2.0,
-                center_y - (int(other[0][1]) + int(other[1][1])) / 2.0,
-            )
+            math.hypot(center_x - other_x, center_y - other_y)
             < config.DUPLICATE_DETECTION_THRESHOLD
-            for other in unique
+            for other_x, other_y in centers
         ):
             continue
         unique.append(line)
+        centers.append((center_x, center_y))
     return unique
 
 
@@ -121,16 +120,68 @@ def _select_model_event_frames(
     return frames[relative_start : relative_end + 1]
 
 
+class _SavedEventIndex(list):
+    """Result list with an exact time-bucket overlap index.
+
+    Live analyses retain every result for their caller. Duplicate checks need
+    only nearby event times, even after hours of cloud/noise decisions. Bucket
+    hits remain in insertion order and undergo the original exact checks.
+    """
+    def __init__(self, frame_rate):
+        super().__init__()
+        self.bucket_frames = max(1, int(frame_rate))
+        self.buckets = {}
+        self.long_events = []
+
+    def _index_item(self, item, index):
+        first = item.get('detection_start_frame', item.get('start_frame', -1))
+        last = item.get('detection_end_frame', item.get('end_frame', -1))
+        low, high = int(first // self.bucket_frames), int(last // self.bucket_frames)
+        if high - low > 1024:
+            self.long_events.append(index)
+        else:
+            for bucket in range(low, high + 1):
+                self.buckets.setdefault(bucket, []).append(index)
+
+    def append(self, item):
+        index = len(self)
+        super().append(item)
+        self._index_item(item, index)
+
+    def prune_before(self, cutoff, default_end):
+        """Discard expired results and rebuild bucket positions after compaction."""
+        retained = [item for item in self
+                    if item.get('end_frame', default_end) >= cutoff]
+        if len(retained) == len(self):
+            return
+        super().__setitem__(slice(None), retained)
+        self.buckets.clear()
+        self.long_events.clear()
+        for index, item in enumerate(self):
+            self._index_item(item, index)
+
+    def overlapping(self, bounds, margin):
+        low = int((bounds[0] - margin) // self.bucket_frames)
+        high = int((bounds[1] + margin) // self.bucket_frames)
+        if high - low > 1024:
+            return iter(self)
+        indices = set(self.long_events)
+        for bucket in range(low, high + 1):
+            indices.update(self.buckets.get(bucket, ()))
+        return (self[index] for index in sorted(indices))
+
+
 def _candidate_already_saved(line, bounds, saved, frame_rate, temporal=False):
     """Suppress another view of an event, never all later events at a position."""
     center = np.mean(line, axis=0)
-    for item in saved:
+    margin = 0 if temporal else max(1, int(frame_rate * .25))
+    nearby = saved.overlapping(bounds, margin) if isinstance(saved, _SavedEventIndex) else saved
+    for item in nearby:
         if temporal and item.get('label') != 'meteor':
             # A previously rejected coarse crop must not block better evidence.
             continue
         first = item.get('detection_start_frame', item.get('start_frame', -1))
         last = item.get('detection_end_frame', item.get('end_frame', -1))
-        margin = 0 if temporal else max(1, int(frame_rate * .25))
         if bounds[0] > last + margin or bounds[1] < first - margin:
             continue
         previous_center = item.get('center')
@@ -203,27 +254,30 @@ def _read_video_frame_range(
     start_frame: int,
     end_frame: int,
     decoder_threads: int = 2,
+    reader=None,
 ) -> List[np.ndarray]:
     """Read an inclusive frame range without disturbing the main stream.
 
     The detector consumes a video sequentially while the finer stage needs to
     inspect a small window around each coarse candidate.  Seeking the same
     ``VideoCapture`` used by the sequential generator corrupts that stream's
-    position and silently skips later frames.  A short-lived sidecar capture
-    keeps both operations independent and makes file processing deterministic.
+    position and silently skips later frames. An independent sidecar capture
+    keeps those cursors separate; a supplied reader retains its decoder across
+    adjacent ranges. Only complete cached ranges feed the main detector.
     """
     start = max(0, int(start_frame))
     end = max(start - 1, int(end_frame))
     if end < start:
         return []
 
-    capture = _open_video_capture(source, decoder_threads)
+    capture = reader.open(source, decoder_threads) if reader is not None else _open_video_capture(source, decoder_threads)
     if not capture.isOpened():
         return []
 
     frames: List[np.ndarray] = []
     try:
-        capture.set(cv2.CAP_PROP_POS_FRAMES, start)
+        if reader is None or int(capture.get(cv2.CAP_PROP_POS_FRAMES)) != start:
+            capture.set(cv2.CAP_PROP_POS_FRAMES, start)
         target_count = end - start + 1
         read_count = 0
         max_read_attempts = target_count + 2 * max(1, int(capture.get(cv2.CAP_PROP_FPS) or config.DEFAULT_FPS))
@@ -238,8 +292,31 @@ def _read_video_frame_range(
             elif current > end:
                 break
     finally:
-        capture.release()
+        if reader is None:
+            capture.release()
+        elif len(frames) != end - start + 1:
+            reader.close()
     return frames
+
+
+class _VideoRangeReader:
+    """Keep one side decoder for adjacent requests, independent of main reads."""
+    def __init__(self):
+        self.capture = None
+        self.key = None
+
+    def open(self, source, decoder_threads):
+        key = (source, decoder_threads)
+        if self.capture is None or self.key != key or not self.capture.isOpened():
+            self.close()
+            self.capture = _open_video_capture(source, decoder_threads)
+            self.key = key
+        return self.capture
+
+    def close(self):
+        if self.capture is not None:
+            self.capture.release()
+        self.capture = self.key = None
 
 
 class _VideoFrameRangeCache:
@@ -258,6 +335,16 @@ class _VideoFrameRangeCache:
         self.masked = {}
         self.mask_snapshot = None
         self.resized_masks = {}
+        self.reader = _VideoRangeReader()
+
+    def close(self):
+        self.reader.close()
+
+    def __del__(self):
+        self.close()
+
+    def _read(self, source, first, last, threads):
+        return _read_video_frame_range(source, first, last, threads, reader=self.reader)
 
     def read(self, source, start_frame, end_frame, decoder_threads=2):
         start, end = max(0, int(start_frame)), int(end_frame)
@@ -270,13 +357,13 @@ class _VideoFrameRangeCache:
                 if cached_first <= start and end <= last:
                     return list(self.frames[start-cached_first:end-cached_first+1])
                 if start <= last+1 and end >= cached_first-1:
-                    head = _read_video_frame_range(source, start, cached_first-1, decoder_threads) if start < cached_first else []
-                    tail = _read_video_frame_range(source, last+1, end, decoder_threads) if end > last else []
+                    head = self._read(source, start, cached_first-1, decoder_threads) if start < cached_first else []
+                    tail = self._read(source, last+1, end, decoder_threads) if end > last else []
                     if len(head) == max(0, cached_first-start) and len(tail) == max(0, end-last):
                         first = min(start, cached_first)
                         frames = head + self.frames + tail
         if frames is None:
-            frames = _read_video_frame_range(source, start, end, decoder_threads)
+            frames = self._read(source, start, end, decoder_threads)
             first = start
         result = list(frames[start-first:end-first+1])
         if len(result) == end-start+1:
@@ -324,6 +411,49 @@ class _VideoFrameRangeCache:
                 print(f"フレームへのマスク適用中にエラー: {exc}")
                 result.append(frame)
         return result
+
+
+class _CachedSequentialCapture:
+    """Reuse decoded lookahead frames while preserving the detector's cursor."""
+    def __init__(self, capture, cache, source, decoder_threads):
+        self.capture = capture
+        self.cache = cache
+        self.source = source
+        self.decoder_threads = decoder_threads
+        self.position = self.native_position = 0
+
+    def __getattr__(self, name):
+        return getattr(self.capture, name)
+
+    def get(self, prop):
+        if prop == cv2.CAP_PROP_POS_FRAMES:
+            return float(self.position)
+        return self.capture.get(prop)
+
+    def read(self):
+        key = self.cache.key
+        if key is not None:
+            source, threads, first, last = key
+            if (source == self.source and threads == self.decoder_threads
+                    and first <= self.position <= last):
+                frame = self.cache.frames[self.position - first]
+                self.position += 1
+                return True, frame
+        if self.native_position != self.position:
+            if self.capture.set(cv2.CAP_PROP_POS_FRAMES, self.position):
+                self.native_position = self.position
+            else:
+                # A reader that cannot seek must still advance chronologically.
+                while self.native_position < self.position:
+                    ok, _ = self.capture.read()
+                    if not ok:
+                        return False, None
+                    self.native_position += 1
+        ok, frame = self.capture.read()
+        if ok:
+            self.position += 1
+            self.native_position += 1
+        return ok, frame
 
 
 _FULL_VIDEO_TIMESTAMP_POSITIONS = {
@@ -720,6 +850,13 @@ def _keep_full_event_media(is_meteor):
     return bool(is_meteor)
 
 
+def _reportable_detections(items, audit_gate_only=False):
+    """Keep fast background rejections in the audit, separate from event results."""
+    return [item for item in items if not (audit_gate_only
+            and item.get('classification_stage') == 'foreground_gate'
+            and item.get('label') == 'not_meteor')]
+
+
 def _resident_frame_slice(frames, first, start, end):
     """Reuse decoded, already masked frames only for a complete exact range."""
     if first <= start <= end < first + len(frames):
@@ -1075,10 +1212,13 @@ def create_line_video_clips(
     if progress_callback:
         progress_callback((f'"{source}" の処理を開始...', None))
 
-    processed_clips_info: List[Dict[str, Any]] = []
+    processed_clips_info: List[Dict[str, Any]] = _SavedEventIndex(frame_rate)
+    audit_gate_only = bool(model.get_active_model_info().get('foreground_gate_audit_only', False))
     detection_counter = 0
     flash_detector = short_flash_detector.ShortFlashDetector(frame_rate, config.BORDER_SIZE)
     frame_range_cache = _VideoFrameRangeCache()
+    if not is_rtsp and cap.get(cv2.CAP_PROP_BACKEND) == cv2.CAP_FFMPEG:
+        cap = _CachedSequentialCapture(cap, frame_range_cache, analysis_source, decoder_threads)
     summary_writer = _SummaryVideoWriter(progress_callback)
 
     try:
@@ -1126,8 +1266,7 @@ def create_line_video_clips(
                     # Duplicate checks need only recent tracks, not an entire
                     # night's events retained in memory.
                     cutoff = current_frame_index - int(frame_rate * 30)
-                    processed_clips_info[:] = [item for item in processed_clips_info
-                        if item.get("end_frame", current_frame_index) >= cutoff]
+                    processed_clips_info.prune_before(cutoff, current_frame_index)
 
                 # RTSP時、またはRTSP録画ファイル時は専用パラメータを使用（ノイズ対策）
                 # RTSP録画ファイルのパスにRTSP_SAVE_ROOTが含まれているかチェック
@@ -1163,17 +1302,7 @@ def create_line_video_clips(
                 ):
                     moving_frames = frame_window
                     if mask is not None:
-                        moving_frames = []
-                        for frame in frame_window:
-                            try:
-                                resized_mask = cv2.resize(
-                                    mask, (frame.shape[1], frame.shape[0])
-                                ).astype(np.uint8)
-                                moving_frames.append(
-                                    cv2.bitwise_and(frame, frame, mask=resized_mask)
-                                )
-                            except cv2.error:
-                                moving_frames.append(frame)
+                        moving_frames = frame_range_cache.mask_frames(frame_window, mask)
                     moving_tracks = moving_point_detector.detect_moving_point_tracks(
                         moving_frames,
                         frame_rate=frame_rate,
@@ -2472,6 +2601,7 @@ def create_line_video_clips(
         import traceback; traceback.print_exc()
     finally:
         summary_writer.finish()
+        frame_range_cache.close()
         if cap.isOpened():
             cap.release()
             print("動画キャプチャを解放しました。")
@@ -2482,9 +2612,10 @@ def create_line_video_clips(
         if prepared_mean is not None:
             prepared_mean.cleanup()
 
+    reportable = _reportable_detections(processed_clips_info, audit_gate_only)
     if progress_callback:
         # Emit a single concise completion line including full path and detection count.
-        final_message = f'完了: {source} 検出: {detection_counter}件'
+        final_message = f'完了: {source} 検出: {len(reportable)}件'
         if cancel_flag is not None and cancel_flag.is_set():
             final_message += " (キャンセルされました)"
         progress_callback((final_message, None))
@@ -2507,7 +2638,7 @@ def create_line_video_clips(
         except OSError as exc:
             print(f"背景候補の記録を保存できませんでした: {exc}")
 
-    return processed_clips_info
+    return reportable
 
 
 if __name__ == '__main__':

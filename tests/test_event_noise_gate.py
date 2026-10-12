@@ -82,7 +82,7 @@ def test_builtin_release_upgrade_preserves_custom_or_acknowledged_choices(tmp_pa
 
 def test_frame_cache_preserves_surrounding_resident_window():
     frames = [np.full((4, 4, 3), i, np.uint8) for i in range(30)]
-    def read(source, start, end, threads):
+    def read(source, start, end, threads, reader=None):
         return frames[start:end+1]
     cache = video_processing._VideoFrameRangeCache(48 * 20 * 2)
     with patch.object(video_processing, '_read_video_frame_range', side_effect=read) as decoder:
@@ -103,21 +103,19 @@ def test_resident_slice_requires_complete_range_and_keeps_list_private():
     assert len(frames) == 5
 
 
-def test_compact_exports_never_change_meteor_media(monkeypatch):
+def test_regular_media_preserves_every_meteor_and_omits_background(monkeypatch):
     monkeypatch.setattr(model, 'get_active_model_info', lambda: {
         'non_meteor_full_media_probability_min': .01,
     })
     monkeypatch.setattr(model, 'get_meteor_decision_threshold', lambda: .44)
-    assert video_processing._keep_full_event_media(.8, True)
-    assert video_processing._keep_full_event_media(0., True)
-    assert not video_processing._keep_full_event_media(.005, False)
-    assert video_processing._keep_full_event_media(.01, False)
-    assert video_processing._keep_full_event_media(float('nan'), False)
+    assert video_processing._keep_full_event_media(True)
+    assert not video_processing._keep_full_event_media(False)
 
 
-def test_models_without_compact_export_policy_keep_previous_media(monkeypatch):
+def test_models_without_compact_export_policy_use_the_current_label_policy(monkeypatch):
     monkeypatch.setattr(model, 'get_active_model_info', lambda: {})
-    assert video_processing._keep_full_event_media(0., False)
+    assert video_processing._keep_full_event_media(True)
+    assert not video_processing._keep_full_event_media(False)
 
 
 def test_invalid_gate_checksum_preserves_active_classifier(monkeypatch, tmp_path):

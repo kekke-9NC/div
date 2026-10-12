@@ -108,8 +108,10 @@ def choose_validation_split(events, seed):
                + abs(len(pair[1]) / len(events) - .2))
 
 
-def choose_threshold(labels, probabilities):
+def choose_threshold(labels, probabilities, maximum_threshold=None):
     candidates = np.unique(np.r_[.5, probabilities])
+    if maximum_threshold is not None:
+        candidates = np.unique(np.r_[candidates[candidates <= maximum_threshold], maximum_threshold])
     # Maximize validation F1, then recall; the test set is not consulted.
     return max(candidates, key=lambda t: (
         2 * np.sum((probabilities >= t) & (labels == 1)) / max(
@@ -193,6 +195,24 @@ def train(args):
     _, val_local = choose_validation_split([events[i] for i in validation_pool], args.seed)
     validation = validation_pool[val_local]
     training = np.array(sorted(set(development) - set(validation)))
+    preserved = np.zeros(len(events), dtype=bool)
+    preservation = None
+    if args.preserve_model:
+        previous_path = Path(args.preserve_model)
+        previous_meta = json.loads(Path(str(previous_path) + '.meta.json').read_text())
+        previous = EventBoostClassifier(torch.load(previous_path, map_location='cpu', weights_only=True))
+        previous_probabilities = previous.predict_proba(x)
+        # Only reviewed positives from development enter calibration. Held-out
+        # test scores never choose an operating threshold or a candidate.
+        preserved[development] = (y[development] == 1) & (
+            previous_probabilities[development] >= previous_meta['decision_threshold'])
+        preservation = dict(model_sha256=hashlib.sha256(previous_path.read_bytes()).hexdigest(),
+                            threshold=previous_meta['decision_threshold'],
+                            development_positives=int(preserved.sum()))
+        print('Preserve baseline reviewed meteors', preservation, flush=True)
+    def calibrated_threshold(estimator_probabilities):
+        bound = float(estimator_probabilities[preserved].min()) * .99 if preserved.any() else None
+        return float(choose_threshold(y[validation], estimator_probabilities[validation], bound))
     for name, indices in (("training", training), ("validation", validation), ("test", test)):
         if len(np.unique(y[indices])) != 2:
             raise ValueError(f"{name} must contain both classes")
@@ -209,8 +229,9 @@ def train(args):
             weights = np.array([args.correction_weight if events[i]["metadata"].get("was_misclassified") else 1.
                                 for i in training])
             estimator.fit(x[training], y[training], sample_weight=weights)
-            probabilities = estimator.predict_proba(x[validation])[:, 1]
-            threshold = float(choose_threshold(y[validation], probabilities))
+            all_probabilities = estimator.predict_proba(x)[:, 1]
+            probabilities = all_probabilities[validation]
+            threshold = calibrated_threshold(all_probabilities)
             metrics = metrics_for(y[validation], probabilities, threshold)
             estimators.append(estimator)
             candidates.append({"parameters": {"leaves": leaves, "iterations": iterations,
@@ -218,8 +239,9 @@ def train(args):
                                "validation_metrics": metrics})
             print("candidate", json.dumps(candidates[-1]), flush=True)
         # Also consider averaging the fixed candidates, selected by validation only.
-        ensemble_p = np.mean([e.predict_proba(x[validation])[:, 1] for e in estimators], axis=0)
-        ensemble_t = float(choose_threshold(y[validation], ensemble_p))
+        ensemble_all = np.mean([e.predict_proba(x)[:, 1] for e in estimators], axis=0)
+        ensemble_p = ensemble_all[validation]
+        ensemble_t = calibrated_threshold(ensemble_all)
         candidates.append({"parameters": {"ensemble": list(range(len(estimators)))},
                            "validation_metrics": metrics_for(y[validation], ensemble_p, ensemble_t)})
         linear_estimators = []
@@ -227,8 +249,9 @@ def train(args):
             for c in (.001, .01, .1, 1.):
                 estimator = make_pipeline(StandardScaler(), LogisticRegression(C=c, max_iter=1000))
                 estimator.fit(x[training], y[training], logisticregression__sample_weight=weights)
-                probabilities = estimator.predict_proba(x[validation])[:, 1]
-                threshold = float(choose_threshold(y[validation], probabilities))
+                all_probabilities = estimator.predict_proba(x)[:, 1]
+                probabilities = all_probabilities[validation]
+                threshold = calibrated_threshold(all_probabilities)
                 candidates.append({"parameters": {"linear_C": c},
                                    "validation_metrics": metrics_for(y[validation], probabilities, threshold)})
                 linear_estimators.append(estimator)
@@ -260,6 +283,8 @@ def train(args):
         if export_error > (2e-6 if linear_chosen else 1e-10):
             raise RuntimeError(f"Export prediction mismatch: {export_error}")
         threshold = candidates[selected]["validation_metrics"]["threshold"]
+        if preserved.any() and np.any(actual[preserved] < threshold):
+            raise RuntimeError('Export lost a baseline reviewed development meteor')
         test_metrics = metrics_for(y[test], actual[test], threshold)
 
     output = Path(args.output)
@@ -279,6 +304,7 @@ def train(args):
         "explicit_test_nights": sorted(test_nights), "validation_before": args.validation_before,
         "extra_reviewed_roots": args.extra_reviewed_root,
         "correction_weight": args.correction_weight,
+        "preserved_baseline": preservation,
         "candidates": candidates, "validation_metrics": metrics_for(y[validation], actual[validation], threshold),
         "test_metrics": test_metrics, "export_max_absolute_error": export_error,
         "camera_policy": "camera_date_source_previous_prediction_excluded_from_features",
@@ -318,6 +344,7 @@ if __name__ == "__main__":
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--threads", type=int, default=4)
     parser.add_argument("--correction-weight", type=float, default=1., help="Weight explicitly corrected human labels more heavily")
+    parser.add_argument('--preserve-model', help='Preserve this model\'s reviewed development true positives while calibrating; held-out test excluded')
     parser.add_argument("--encoder-checkpoint", default="ml_training_data/dinov2_small_encoder.pth")
     parser.add_argument("--no-image-encoder", action="store_true",
                         help="Diagnostic ablation: train without the pretrained image Transformer")

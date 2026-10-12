@@ -14,6 +14,7 @@ import cv2
 import numpy as np
 import torch
 import torch.nn as nn
+from temporal_statistics import temporal_median
 
 
 ARCHITECTURE_NAME = "meteor_fusion_universal_v1"
@@ -76,21 +77,49 @@ def _line_in_crop(
     )
 
 
+def _uint8_median(values: np.ndarray) -> float:
+    """Exact scalar median without partitioning an entire residual cube."""
+    if not values.size:
+        return float('nan')
+    # OpenCV counts uint8 bins without NumPy's full int64 pixel conversion.
+    # Its float32 bin counts are exact up to 2**24 samples; use integer
+    # bincount for larger cubes so no histogram count can lose precision.
+    if values.size <= 2**24:
+        histogram = cv2.calcHist([values.reshape(1, -1)], [0], None, [256], [0, 256]).ravel()
+    else:
+        histogram = np.bincount(values.ravel(), minlength=256)
+    counts = np.cumsum(histogram, dtype=np.int64)
+    middle = np.searchsorted(counts, [(values.size - 1) // 2 + 1, values.size // 2 + 1])
+    return float(middle.sum()) * .5
+
+
 def _robust_residual_cube(stack: np.ndarray) -> Tuple[np.ndarray, float]:
     """Return positive temporal residuals in local noise-sigma units."""
     values = stack.astype(np.float32)
     # uint8 medians are exact integers/half-integers in float32, including
     # even-length clips. Partition one-byte pixels rather than a float cube.
-    background = (np.median(stack, axis=0).astype(np.float32)
+    background = (temporal_median(stack).astype(np.float32)
                   if stack.dtype == np.uint8 else np.median(values, axis=0))
-    abs_deviation = np.abs(values - background)
-    temporal_sigma = 1.4826 * np.median(abs_deviation, axis=0)
-
-    if len(values) > 1:
-        frame_delta = np.diff(values, axis=0)
-        global_sigma = float(np.median(np.abs(frame_delta))) / 0.954
+    if stack.dtype == np.uint8:
+        # Twice a uint8 deviation is an integer in [0, 510], even when
+        # the background is a half-integer. Its median / 2 is exactly the
+        # original float32 MAD (including quarter-integer even medians).
+        integers = stack.astype(np.int16)
+        deviations = np.abs(integers * 2 - (background * 2).astype(np.int16))
+        mad = temporal_median(deviations).astype(np.float32) * .5
+        temporal_sigma = 1.4826 * mad
+        if len(values) > 1:
+            delta = np.abs(np.diff(integers, axis=0)).astype(np.uint8)
+            global_sigma = _uint8_median(delta) / 0.954
+        else:
+            global_sigma = 0.0  # A single frame equals its own background.
     else:
-        global_sigma = float(np.median(abs_deviation)) * 1.4826
+        abs_deviation = np.abs(values - background)
+        temporal_sigma = 1.4826 * np.median(abs_deviation, axis=0)
+        if len(values) > 1:
+            global_sigma = float(np.median(np.abs(np.diff(values, axis=0)))) / 0.954
+        else:
+            global_sigma = float(np.median(abs_deviation)) * 1.4826
     global_sigma = max(1.0, global_sigma)
     sigma = np.maximum(temporal_sigma, global_sigma)
     positive = np.maximum(values - background, 0.0)

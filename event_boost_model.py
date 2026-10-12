@@ -142,8 +142,11 @@ def extract_motion_features(frames, rect=None, frame_rate=15.):
     response, _ = _robust_residual_cube(stack)
     curves = [[] for _ in range(8)]
     positions = []
-    for frame in response:
-        peak = float(frame.max())
+    peaks = response.max(axis=(1, 2))
+    means = response.mean(axis=(1, 2))
+    percentiles = np.percentile(response, 99.5, axis=(1, 2))
+    for frame, peak, mean, percentile in zip(response, peaks, means, percentiles):
+        peak = float(peak)
         mask = (frame > max(3., peak * .3)).astype(np.uint8)
         count, labels, components, centroids = cv2.connectedComponentsWithStats(mask, 8)
         if count > 1:
@@ -155,7 +158,7 @@ def extract_motion_features(frames, rect=None, frame_rate=15.):
             position = centroids[best] / 128.
         else:
             area, eig, position = 0., np.zeros(2), np.zeros(2)
-        values = [peak, float(frame.mean()), float(np.percentile(frame, 99.5)),
+        values = [peak, float(mean), float(percentile),
                   float(mask.mean()), area / 16384., float(count - 1),
                   float(np.sqrt(max(eig[1], 0.)) / 128.),
                   float(eig[0] / max(eig[1], 1e-8))]
@@ -203,6 +206,13 @@ class EventBoostClassifier:
                  for key, value in tree.items()}
                 for tree in member["trees"]
             ]
+        # Live calls traverse one row. Python scalars avoid repeated NumPy
+        # scalar boxing/int conversions at every node, with identical float64
+        # thresholds, leaf values, tree order and accumulation arithmetic.
+        self.scalar_members = [
+            (float(member['bias']), [tuple(tree[key].tolist() for key in
+                ('leaf', 'feature', 'threshold', 'left', 'right', 'value'))
+                for tree in member['trees']]) for member in self.members]
 
     def predict_proba(self, features):
         values = np.atleast_2d(np.asarray(features, dtype=np.float64))
@@ -221,14 +231,13 @@ class EventBoostClassifier:
             # temporary boolean arrays for single-row numerical traversal.
             probability = 0.
             row = values[0]
-            for member in self.members:
-                logit = float(member["bias"])
-                for tree in member["trees"]:
+            for bias, trees in self.scalar_members:
+                logit = bias
+                for leaf, feature, threshold, left, right, value in trees:
                     node = 0
-                    while not tree["leaf"][node]:
-                        node = int(tree["left"][node] if row[tree["feature"][node]] <= tree["threshold"][node]
-                                   else tree["right"][node])
-                    logit += float(tree["value"][node])
+                    while not leaf[node]:
+                        node = left[node] if row[feature[node]] <= threshold[node] else right[node]
+                    logit += value[node]
                 probability += 1. / (1. + np.exp(-np.clip(logit, -700, 700)))
             return (np.array([probability]) + linear_probability) / member_count
         probability = np.zeros(len(values), dtype=np.float64)

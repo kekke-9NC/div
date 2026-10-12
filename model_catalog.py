@@ -92,6 +92,7 @@ def load_model_metadata(model_path: str) -> Dict:
         "noise_gate_file",
         "noise_gate_sha256",
         "noise_gate_policy",
+        "foreground_gate_audit_only",
         "non_meteor_full_media_probability_min",
         "release_id",
         "upgrade_from",
