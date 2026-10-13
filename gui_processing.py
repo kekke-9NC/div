@@ -5,6 +5,8 @@ import ui_state
 
 class ProcessingMixin:
     def _prompt_startup_analysis(self, jobs, recordings):
+        if legacy_resume.resume_rtsp_requested():
+            return "resume"
         dialog = Toplevel(self)
         dialog.title("解析の開始方法")
         dialog.transient(self)

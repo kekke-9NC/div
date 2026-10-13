@@ -1752,7 +1752,9 @@ class SettingsMixin:
         if not os.path.exists(self.settings_file): return
         self.append_log(f"設定ファイル読み込み元: {self.settings_file}")
         self.append_log(f"マスクファイル読み込み元: {self.masks_file}")
-        if not messagebox.askyesno("設定の復元", "前回の設定を復元しますか？"): return
+        if not legacy_resume.resume_rtsp_requested() and not messagebox.askyesno(
+                "設定の復元", "前回の設定を復元しますか？"):
+            return
         
         try:
             with open(self.settings_file, 'r', encoding='utf-8') as f: settings = json.load(f)

@@ -94,7 +94,8 @@ class App(
         self.after(100, self.update_progress)
         self._startup_analysis_ready = False
         self.after(5000, self._check_rtsp_schedule_autostart)
-        self.after(250, self._prepare_startup_analysis)
+        self.after(250, self.start_processing if legacy_resume.resume_rtsp_requested()
+                   else self._prepare_startup_analysis)
 
     def _migrate_legacy_settings_files(self):
         """Move legacy setting files from CWD to app directory if needed."""
