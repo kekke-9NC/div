@@ -157,7 +157,7 @@ def area_crops(integrals, x, y, width, height):
 
 
 def small_temporal_median(values):
-    if values.dtype not in (np.uint8,np.int16) or not 1 <= values.shape[0] <= 32 or values.size > 1024**2:
+    if values.dtype not in (np.uint8,np.int16) or not 1 <= values.shape[0] <= 32 or values.size > 4*1024**2:
         return None
     _load()
     function = _median_function if values.dtype == np.uint8 else _median_i16_function

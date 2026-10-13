@@ -26,7 +26,7 @@ def temporal_median(values):
     time last once reduces that work, with the same middle samples, dtype and
     even-length mean. The caller's chronological cube is never reordered.
     """
-    if values.dtype in (np.uint8,np.int16) and 1 <= values.shape[0] <= 32 and values.size <= 1024**2:
+    if values.dtype in (np.uint8,np.int16) and 1 <= values.shape[0] <= 32 and values.size <= 4*1024**2:
         from component_statistics import small_temporal_median
         native = small_temporal_median(values)
         if native is not None:

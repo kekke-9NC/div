@@ -23,6 +23,15 @@ def test_signed_temporal_median_matches_numpy_for_all_short_lengths():
         np.testing.assert_array_equal(temporal_median(values[:,::2,::2]),np.median(values[:,::2,::2],axis=0))
 
 
+def test_native_temporal_median_covers_full_event_crops_exactly():
+    rng = np.random.default_rng(45)
+    for dtype in (np.uint8,np.int16):
+        values = rng.integers(0,256,(32,256,256),dtype=dtype)
+        before = values.copy()
+        np.testing.assert_array_equal(temporal_median(values),np.median(values,axis=0))
+        np.testing.assert_array_equal(values,before)
+
+
 def test_signed_temporal_median_falls_back_without_new_native_symbol():
     import component_statistics
     values = np.arange(120,dtype=np.int16).reshape(6,4,5)
