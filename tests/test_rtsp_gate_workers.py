@@ -9,6 +9,14 @@ import model
 from rtsp_gate_workers import LiveGateFeatures, _worker_diagnostics
 
 
+def test_shared_gate_and_main_pool_leaves_cpu_capacity_and_is_bounded():
+    for cores,expected in ((1,1),(4,1),(8,3),(18,8),(64,8)):
+        with patch('rtsp_gate_workers.os.cpu_count',return_value=cores):
+            workers = LiveGateFeatures()
+            assert workers.workers == expected
+            workers.close()
+
+
 def test_spawned_main_event_inputs_match_every_value_and_keep_parent_evidence():
     rng = np.random.default_rng(613)
     workers = LiveGateFeatures(workers=2)

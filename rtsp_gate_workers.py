@@ -183,7 +183,10 @@ class LiveFlashDetector:
 
 class LiveGateFeatures:
     def __init__(self, workers=None):
-        self.workers = workers or max(1, min(6, (os.cpu_count() or 1) // 3))
+        # This pool owns both gate features and the more expensive main-event
+        # features. Half the logical cores leaves capacity for decoding, the
+        # serial chronological proposers and the annotation process.
+        self.workers = workers or max(1,min(8,((os.cpu_count() or 1)-1)//2))
         self.pool = None
         self.lock = threading.Lock()
         self.failed = False
