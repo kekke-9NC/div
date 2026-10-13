@@ -4,6 +4,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Identical to element equality for contiguous uint8 arrays of equal shape. */
+#ifdef _WIN32
+__declspec(dllexport)
+#endif
+int meteor_uint8_equal(const uint8_t *left, const uint8_t *right, size_t bytes) {
+    return bytes == 0 || memcmp(left, right, bytes) == 0;
+}
+
 /* One exact integer pass over connected-component labels. The background
  * and ineligible labels contribute nothing, matching the NumPy reference. */
 #ifdef _WIN32

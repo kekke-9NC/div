@@ -4,6 +4,30 @@ import component_statistics
 import cv2
 
 
+def test_mask_equality_matches_numpy_without_changing_or_copying_inputs():
+    rng = np.random.default_rng(849)
+    for shape in ((0,8),(8,8),(1080,1920)):
+        left = rng.integers(0,256,shape,dtype=np.uint8)
+        right = left.copy()
+        assert component_statistics.same_uint8_pixels(left,right)
+        assert component_statistics.same_uint8_pixels(left,left)
+        for index in (0,left.size//2,left.size-1):
+            if not left.size:
+                continue
+            right.flat[index] ^= np.uint8(1)
+            assert not component_statistics.same_uint8_pixels(left,right)
+            right.flat[index] ^= np.uint8(1)
+        np.testing.assert_array_equal(left,right)
+        for a,b in ((left[:,::2],right[:,::2]),(left[::-1],right[::-1]),
+                    (left.astype(np.float32),right.astype(np.float32)),
+                    (left.astype(bool),right.astype(bool)),(left,right.reshape(-1))):
+            assert component_statistics.same_uint8_pixels(a,b)==np.array_equal(a,b)
+        with patch.object(component_statistics,'_load',return_value=None):
+            assert component_statistics.same_uint8_pixels(left,right)==np.array_equal(left,right)
+    assert not component_statistics.same_uint8_pixels(np.array([np.nan]),np.array([np.nan]))
+    assert component_statistics.same_uint8_pixels(np.array([0.]),np.array([-0.]))
+
+
 def test_native_scores_and_peaks_match_exact_numpy_reference_and_keep_inputs():
     rng = np.random.default_rng(521)
     for count in (3, 400, 4096):

@@ -1,6 +1,7 @@
 import os
 import math
 import hashlib
+import component_statistics
 import cv2
 import numpy as np
 from pathlib import Path
@@ -398,7 +399,7 @@ class _VideoFrameRangeCache:
         """Apply the same resized uint8 mask once per retained raw frame."""
         if (self.mask_snapshot is None
                 or mask.dtype != self.mask_snapshot.dtype
-                or not np.array_equal(mask, self.mask_snapshot)):
+                or not component_statistics.same_uint8_pixels(mask, self.mask_snapshot)):
             self.mask_snapshot = mask.copy()
             self.masked.clear()
             self.gray.clear()

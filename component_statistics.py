@@ -21,6 +21,7 @@ _batch_function = None
 _median_function = None
 _median_range_function = None
 _median_i16_function = None
+_same_pixels_function = None
 
 
 def _library_name():
@@ -44,7 +45,7 @@ def build_library(destination):
 
 
 def _load():
-    global _checked, _function, _area_function, _fractional_function, _batch_function, _median_function, _median_range_function, _median_i16_function
+    global _checked, _function, _area_function, _fractional_function, _batch_function, _median_function, _median_range_function, _median_i16_function, _same_pixels_function
     with _lock:
         if _checked:
             return _function
@@ -94,11 +95,25 @@ def _load():
             if _median_i16_function is not None:
                 _median_i16_function.argtypes = [ctypes.c_void_p,ctypes.c_size_t,ctypes.c_size_t,ctypes.c_void_p]
                 _median_i16_function.restype = ctypes.c_int
+            _same_pixels_function = getattr(loaded,'meteor_uint8_equal',None)
+            if _same_pixels_function is not None:
+                _same_pixels_function.argtypes = [ctypes.c_void_p,ctypes.c_void_p,ctypes.c_size_t]
+                _same_pixels_function.restype = ctypes.c_int
         except (OSError, AttributeError, RuntimeError, subprocess.SubprocessError):
             # Native acceleration is optional. Never alter component scores
             # or detection availability when compilation/loading is absent.
             _function = None
         return _function
+
+
+def same_uint8_pixels(left, right):
+    """Exact equality without allocating an image-sized boolean temporary."""
+    if left.shape != right.shape:
+        return False
+    if (left.dtype==np.uint8 and right.dtype==np.uint8 and left.flags.c_contiguous
+            and right.flags.c_contiguous and _load() is not None and _same_pixels_function is not None):
+        return bool(_same_pixels_function(left.ctypes.data,right.ctypes.data,left.nbytes))
+    return np.array_equal(left,right)
 
 
 def aggregate(labels, values, eligible, count):
