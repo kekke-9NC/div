@@ -36,6 +36,7 @@ def run_resume(args, settings, options, noise, correction, mask):
     import rtsp_live
     import rtsp_schedule_products as products
     import rtsp_startup
+    import rtsp_segments
     import video_processing
     import torch
 
@@ -77,6 +78,24 @@ def run_resume(args, settings, options, noise, correction, mask):
     targets = {str(root/item['relative']): item for item in inputs}
     duration = sum(item['frame_count']/item['fps'] for item in inputs)
     consumed, sessions, publications, detections, failures = {}, [], [], [], []
+    validated_archives = {}
+    for copied, item in targets.items():
+        marker = Path(copied+'.archived.json')
+        if not marker.exists():
+            continue
+        archive = root/json.loads(marker.read_text())['archive']
+        if archive not in validated_archives:
+            capture_marker = Path(str(archive)+'.capture.json')
+            if not archive.exists() or not capture_marker.exists():
+                validated_archives[archive] = None
+            else:
+                data = json.loads(capture_marker.read_text())
+                fps, count, size = rtsp_segments._properties(archive)
+                validated_archives[archive] = (data if count==data['frame_count']
+                    and abs(fps-data['fps'])<.05 and list(size)==data['size'] else None)
+        metadata = validated_archives[archive]
+        if metadata and item['relative'] in metadata.get('sources',[]):
+            publications.append((copied, dict(item)))
     lock = threading.RLock()
     cancel = threading.Event()
     restored = []
