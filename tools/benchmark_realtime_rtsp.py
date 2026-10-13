@@ -125,7 +125,7 @@ def run_replay(args, settings, options, noise, correction, mask):
             original = getattr(owner, name)
             def wrapped(*values, **kwargs):
                 thread = threading.current_thread()
-                if not (thread.name.startswith('rtsp-') or thread.name == 'RTSPProposalPipeline'):
+                if not (thread.name.startswith('rtsp-') or thread.name in ('RTSPProposalPipeline', 'RTSPWindowPipeline')):
                     return original(*values, **kwargs)
                 key = (thread.ident, name)
                 with profile_lock:

@@ -1052,7 +1052,7 @@ def _coarse_proposals(diff_img, frame_window, first_frame, frame_rate, mask, roi
 class _LiveProposalPipeline:
     """Overlap chronological proposals with classification and saving.
 
-    Two resident windows bound read-ahead. Acknowledgements are emitted only
+    Two windows per stage bound read-ahead. Acknowledgements are emitted only
     after the consumer finishes a window, so cancellation retains unprocessed
     spool input. The flash detector has one owner for its entire session.
     """
@@ -1060,40 +1060,58 @@ class _LiveProposalPipeline:
         self.generator, self.cap = generator, cap
         self.stop = threading.Event()
         self.queue = queue.Queue(maxsize=2)
+        self.windows = queue.Queue(maxsize=2)
         self.current_proposals = None
         self.cap.defer_analysis_ack = True
-        def put(value):
+        def put(target, value):
             while not self.stop.is_set():
                 try:
-                    self.queue.put(value, timeout=.1)
+                    target.put(value, timeout=.1)
                     return True
                 except queue.Full:
                     pass
             return False
+        def decode():
+            try:
+                for data in generator:
+                    if not put(self.windows, (data, bool(cap.analysis_final_frame))):
+                        break
+            except BaseException as exc:
+                put(self.windows, exc)
+            finally:
+                generator.close()
+                put(self.windows, None)
         def produce():
             cache = _VideoFrameRangeCache()
             gray_cache = moving_point_detector.GrayFrameCache()
             flash = short_flash_detector.ShortFlashDetector(cap.get(cv2.CAP_PROP_FPS), config.BORDER_SIZE)
             try:
-                for data in generator:
-                    if self.stop.is_set():
+                while not self.stop.is_set():
+                    try:
+                        packet = self.windows.get(timeout=.1)
+                    except queue.Empty:
+                        continue
+                    if packet is None:
                         break
+                    if isinstance(packet, BaseException):
+                        raise packet
+                    data, final = packet
                     cache.retain_live_frames(data[4])
-                    final = bool(cap.analysis_final_frame)
                     proposals = _coarse_proposals(data[0], data[-1], data[1][0],
                         cap.get(cv2.CAP_PROP_FPS), mask, roi, cancel,
                         config.RTSP_MIN_LINE_LENGTH, config.RTSP_HOUGH_THRESHOLD,
                         config.RTSP_CANNY_THRESH1, config.RTSP_CANNY_THRESH2, True,
                         flash, cache, gray_cache, final, executor)
-                    if not put((data, proposals, final)):
+                    if not put(self.queue, (data, proposals, final)):
                         break
             except BaseException as exc:
-                put(exc)
+                put(self.queue, exc)
             finally:
-                generator.close()
                 cache.close()
-                put(None)
+                put(self.queue, None)
+        self.decoder = threading.Thread(target=decode, name='RTSPWindowPipeline', daemon=True)
         self.thread = threading.Thread(target=produce, name='RTSPProposalPipeline', daemon=True)
+        self.decoder.start()
         self.thread.start()
 
     def __iter__(self):
@@ -1112,6 +1130,7 @@ class _LiveProposalPipeline:
 
     def close(self):
         self.stop.set()
+        self.decoder.join()
         self.thread.join()
         self.cap.defer_analysis_ack = False
 
