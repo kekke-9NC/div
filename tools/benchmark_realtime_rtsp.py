@@ -136,6 +136,17 @@ def run_replay(args, settings, options, noise, correction, mask):
     worker_profiles = {}
     profile_lock = threading.Lock()
     restored = []
+    # Past-recording replay must not start the current wall-clock night's
+    # job when a benchmark crosses its scheduled start. Finish the saved job
+    # at its historical end, leaving production's clock behavior unchanged.
+    replay_now = ((schedule_window[1] if schedule_window is not None else
+                   max(datetime.fromisoformat(item['start_time']) + timedelta(seconds=item['frame_count']/item['fps'])
+                       for item in inputs)) + timedelta(seconds=1))
+    original_tick = products.ScheduleProducts.tick
+    def replay_tick(service, now=None):
+        return original_tick(service,replay_now if now is None else now)
+    products.ScheduleProducts.tick = replay_tick
+    restored.append((products.ScheduleProducts,'tick',original_tick))
     product_keys = []
     if hasattr(products.ScheduleProducts, '_timelapse_key'):
         original_key = products.ScheduleProducts._timelapse_key
@@ -245,7 +256,7 @@ def run_replay(args, settings, options, noise, correction, mask):
         video_processing.create_line_video_clips = original_detect
         video_processing._SavedEventIndex = original_index
         file_utils.save_rtsp_video_segments = original_recorder
-        for owner, name, original in restored:
+        for owner, name, original in reversed(restored):
             setattr(owner, name, original)
         for index, ((_thread, name), profiler) in enumerate(worker_profiles.items()):
             profiler.dump_stats(str(args.output / f'worker-{name}-{index:03d}.pstats'))
@@ -263,6 +274,7 @@ def run_replay(args, settings, options, noise, correction, mask):
                 profile_enabled=args.profile, media_enabled=not args.no_save,
                 input_frames=sum(item['frame_count'] for item in inputs),
                 detection_interval=config.RTSP_LIVE_DETECT_INTERVAL, scheduled_products=product_options,
+                replay_clock=replay_now.isoformat(),
                 schedule_window=None if schedule_window is None else [value.isoformat() for value in schedule_window],
                 errors=errors, meteor=sum(item.get('label') == 'meteor' for item in items),
                 background_gate=sum(item.get('classification_stage') == 'foreground_gate' for item in items),
