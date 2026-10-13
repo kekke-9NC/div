@@ -475,7 +475,7 @@ class BacklogDiscoveryTests(unittest.TestCase):
         runner = rtsp_live.RealtimeRunner('unused', lambda *_args: None, threading.Event())
         with mock.patch.object(rtsp_live.config, 'RTSP_SCAN_INTERVAL', .1):
             self.assertEqual(runner._discovery_interval(), .1)
-            for index in range(100):
+            for index in range(10):
                 runner.queue.put(index)
             self.assertEqual(runner._discovery_interval(), 1.0)
             runner.queue.get_nowait()

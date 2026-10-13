@@ -445,10 +445,10 @@ class RealtimeRunner:
         self.threads = []
 
     def _discovery_interval(self):
-        # A queued backlog of at least fifty seconds already supplies the
+        # A queued backlog of at least five seconds already supplies the
         # detector. Avoid repeatedly walking thousands of durable inputs while
         # it catches up. Live discovery resumes its normal cadence near the tail.
-        return max(1.0, config.RTSP_SCAN_INTERVAL) if self.queue.qsize() >= 100 else config.RTSP_SCAN_INTERVAL
+        return max(1.0, config.RTSP_SCAN_INTERVAL) if self.queue.qsize() >= 10 else config.RTSP_SCAN_INTERVAL
 
     def _scan(self):
         last_status = 0.0
