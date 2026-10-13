@@ -168,6 +168,9 @@ class ProcessingMixin:
                 pass
 
     def start_processing(self):
+        if (getattr(self, "_shutdown_requested", False)
+                or getattr(self, "_shutdown_in_progress", False)):
+            return
         if not getattr(self, "_startup_analysis_ready", True):
             if not self._prepare_startup_analysis():
                 return

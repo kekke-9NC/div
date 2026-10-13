@@ -26,3 +26,16 @@ def test_shutdown_cancels_once_waits_for_workers_then_finishes():
     app.rtsp_thread.is_alive.return_value=False
     app._wait_for_recording_shutdown()
     app._finish_closing.assert_called_once()
+
+
+def test_queued_start_does_not_clear_cancel_or_start_during_shutdown():
+    tree=ast.parse(Path('gui_processing.py').read_text())
+    method=next(n for n in ast.walk(tree) if isinstance(n,ast.FunctionDef) and n.name=='start_processing')
+    scope={}
+    exec(compile(ast.Module(body=[method],type_ignores=[]),'gui_processing.py','exec'),scope)
+    for key in ('_shutdown_requested','_shutdown_in_progress'):
+        app=Mock();app._shutdown_requested=False;app._shutdown_in_progress=False
+        setattr(app,key,True)
+        scope['start_processing'](app)
+        app.cancel_flag.clear.assert_not_called()
+        app._prepare_startup_analysis.assert_not_called()
