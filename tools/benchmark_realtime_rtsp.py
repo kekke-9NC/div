@@ -120,6 +120,19 @@ def run_replay(args, settings, options, noise, correction, mask):
     worker_profiles = {}
     profile_lock = threading.Lock()
     restored = []
+    product_keys = []
+    if hasattr(products.ScheduleProducts, '_timelapse_key'):
+        original_key = products.ScheduleProducts._timelapse_key
+        def observe_key(service, job):
+            key = original_key(service, job)
+            product_keys.append(dict(key=key, options=dict(job['options']),
+                archives=service._source_revision(job),
+                samples=[(index, when, service._source_stamp(service.cache.root /
+                    (job['id'] + f'_sample_{int(index):06d}') / 'frame.png'))
+                    for index, when in sorted(job['samples'].items())]))
+            return key
+        restored.append((products.ScheduleProducts, '_timelapse_key', original_key))
+        products.ScheduleProducts._timelapse_key = observe_key
     if args.profile:
         def install_profile(owner, name):
             original = getattr(owner, name)
@@ -196,7 +209,7 @@ def run_replay(args, settings, options, noise, correction, mask):
             file_utils.rtsp_save_and_process_thread_target(
                 rtsp_url='rtsp://isolated-recording-replay', save_root=str(root),
                 segment_duration=config.RTSP_SEGMENT_DURATION, scan_interval=config.RTSP_SCAN_INTERVAL,
-                progress_callback=lambda _value: None, mask=mask,
+                progress_callback=lambda value: print(value[0]) if str(value[0]).startswith('[自動作成]') else None, mask=mask,
                 meteor_save_path=str(args.output/'meteor'), not_meteor_save_path=str(args.output/'not_meteor'),
                 cancel_flag=cancel, save_options=options, interval=float(settings.get('interval', 1)),
                 duration=float(settings.get('duration', 1)), summary_video_config=settings.get('summary_video_config'),
@@ -217,6 +230,7 @@ def run_replay(args, settings, options, noise, correction, mask):
         for index, ((_thread, name), profiler) in enumerate(worker_profiles.items()):
             profiler.dump_stats(str(args.output / f'worker-{name}-{index:03d}.pstats'))
     seconds = time.perf_counter()-started
+    (args.output / 'product_keys.json').write_text(json.dumps(product_keys, indent=2))
     after = resource.getrusage(resource.RUSAGE_SELF)
     items = [dict(row['detection'], source_video=str(Path(row['source']).relative_to(root))) for row in detections]
     return dict(seconds=seconds, input_seconds=duration, processing_ratio=seconds/duration,

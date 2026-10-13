@@ -949,6 +949,28 @@ class ScheduleProducts:
         if written != count or rtsp_segments._properties(output)[1] != count:
             raise IOError("タイムラプス動画のフレーム数検証に失敗しました")
 
+    def _timelapse_key(self, job):
+        samples = []
+        for index, when in sorted(job["samples"].items()):
+            path = self.cache.root / (job["id"] + f"_sample_{int(index):06d}") / "frame.png"
+            samples.append((index, when, self._source_stamp(path)))
+        revision = (job["options"], self._source_revision(job), samples)
+        digest = hashlib.sha256(json.dumps(revision, sort_keys=True).encode()).hexdigest()[:24]
+        return job["id"] + "_timelapse_" + digest
+
+    def _prepare_timelapse(self, job):
+        # This product depends only on captured samples. During a backlog it
+        # can render while the detector is still finding events for the blends.
+        # A changed archive/sample revision produces a different cache key;
+        # final publication still waits for detection and validates that key.
+        if not job["options"]["timelapse"] or not job["samples"] or "timelapse" in job["outputs"]:
+            return
+        key = self._timelapse_key(job)
+        if not (self.cache.root / key / "timelapse.mp4").exists():
+            self.status(f"[自動作成] タイムラプスを並行準備: {len(job['archives'])}録画・{len(job['samples'])}素材 ({key})")
+        reserve = int(job["options"]["duration"] * 48_000_000 / 8) + 16 * 1024**2
+        self.cache.build(key, reserve, lambda directory: self._timelapse(job, directory / "timelapse.mp4"))
+
     def _blends(self, job, directory):
         events = job["events"]
         if not events:
@@ -1235,7 +1257,17 @@ class ScheduleProducts:
             if job["options"]["timelapse"] and "timelapse" not in job["outputs"]:
                 with tempfile.TemporaryDirectory(prefix=".timelapse_", dir=output) as temporary:
                     path = Path(temporary) / "timelapse.mp4"
-                    self._timelapse(job, path)
+                    key = self._timelapse_key(job)
+                    with self.cache.pin([key]):
+                        prepared = self.cache.root / key / "timelapse.mp4"
+                        if prepared.exists():
+                            shutil.copyfile(prepared, path)
+                            fps, count, _ = rtsp_segments._properties(path)
+                            if count != round(job["options"]["duration"] * job["options"]["fps"]) or abs(fps-job["options"]["fps"]) > .05:
+                                raise IOError("準備済みタイムラプスのフレーム数/FPSが一致しません")
+                        else:
+                            self.status(f"[自動作成] タイムラプス素材更新のため再生成: {key}")
+                            self._timelapse(job, path)
                     os.replace(path, output / path.name)
                 job["outputs"]["timelapse"] = str(output / "timelapse.mp4")
                 self._save(job)
@@ -1283,6 +1315,9 @@ class ScheduleProducts:
             self._prepare_concatenation(job)
             if now >= datetime.fromisoformat(job["end"]):
                 self.flush_archives()
+                self._archives(job)
+                self._prepare_samples(job)
+                self._prepare_timelapse(job)
                 if not self._drained(job):
                     continue
                 self._archives(job)

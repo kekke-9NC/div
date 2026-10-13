@@ -695,6 +695,37 @@ class ScheduleProductTests(unittest.TestCase):
             self.assertIsNone(service._source_frame(job, start))
             self.assertIsNotNone(service._source_frame(job, start+timedelta(seconds=10)))
 
+    def test_timelapse_preparation_overlaps_backlog_without_early_publication(self):
+        with tempfile.TemporaryDirectory() as root:
+            service = self.service(root, timelapse=True)
+            start = datetime(2026, 10, 12, 20)
+            source = self.archive(root, start, count=600)
+            service._job(start)
+            with mock.patch.object(service, "_timelapse", wraps=service._timelapse) as render:
+                with mock.patch.object(service, "_drained", return_value=False):
+                    service.tick(start+timedelta(seconds=61))
+                job = next(iter(service.jobs.values()))
+                self.assertEqual(render.call_count, 1)
+                self.assertEqual(job["state"], "recording")
+                self.assertFalse(job["outputs"])
+                self.assertTrue(source.exists())
+                self.assertTrue((service.cache.root/service._timelapse_key(job)/"timelapse.mp4").exists())
+                service.tick(start+timedelta(seconds=62))
+                self.assertEqual(render.call_count, 1)
+                self.assertEqual(job["state"], "complete")
+                self.assertTrue(Path(job["outputs"]["timelapse"]).exists())
+
+    def test_prepared_timelapse_key_changes_when_sample_pixels_are_replaced(self):
+        with tempfile.TemporaryDirectory() as root:
+            service = self.service(root, timelapse=True)
+            job = service._job(datetime(2026, 10, 12, 20))
+            job["samples"] = {"0": job["start"]}
+            key = job["id"] + "_sample_000000"
+            service.cache.put(key, {"frame.png": products.png_bytes(np.zeros((64, 96, 3), np.uint8))})
+            before = service._timelapse_key(job)
+            (service.cache.root/key/"frame.png").write_bytes(products.png_bytes(np.full((64, 96, 3), 80, np.uint8)))
+            self.assertNotEqual(service._timelapse_key(job), before)
+
     def test_concat_validates_then_replaces_and_records_capture_time(self):
         with tempfile.TemporaryDirectory() as root:
             service = self.service(root, concatenate=True)
