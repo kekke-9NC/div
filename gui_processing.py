@@ -486,8 +486,13 @@ class ProcessingMixin:
     def update_progress(self):
         if self.start_time_gui:
             elapsed_str = time.strftime("%H:%M:%S", time.gmtime(time.time() - self.start_time_gui))
-            self.elapsed_label.config(text=f"経過: {elapsed_str}")
+            text = f"経過: {elapsed_str}"
+            if text != getattr(self, "_last_elapsed_text", None):
+                self.elapsed_label.config(text=text)
+                self._last_elapsed_text = text
 
+        self._pending_log_batch = []
+        latest_pipeline_status = None
         try:
             # Never drain an unbounded backlog in one Tk callback. Yield back to Tk so
             # buttons, redraws, and window movement remain responsive.
@@ -496,10 +501,7 @@ class ProcessingMixin:
                 if isinstance(value, dict) and "pipeline_status" in value:
                     # This queue is the only worker -> Tk bridge.  Do not let
                     # background workers call ``after`` directly.
-                    try:
-                        self.status_panel.update_status(value["pipeline_status"])
-                    except Exception:
-                        pass
+                    latest_pipeline_status = value["pipeline_status"]
                     continue
                 if isinstance(value, dict) and "plate_solve_ui" in value:
                     # Plate solving is intentionally performed off the Tk
@@ -538,7 +540,10 @@ class ProcessingMixin:
                     elapsed = time.time() - self.start_time_gui
                     avg_time = elapsed / self.progress['value']
                     eta_sec = avg_time * (self.progress['maximum'] - self.progress['value'])
-                    self.eta_label.config(text=f"ETA: {time.strftime('%H:%M:%S', time.gmtime(eta_sec))}")
+                    text = f"ETA: {time.strftime('%H:%M:%S', time.gmtime(eta_sec))}"
+                    if text != getattr(self, "_last_eta_text", None):
+                        self.eta_label.config(text=text)
+                        self._last_eta_text = text
 
                 if message:
                     # Shorten messages that reference temporary copied files
@@ -607,6 +612,15 @@ class ProcessingMixin:
                         self.cancel_flag.clear()
         except queue.Empty:
             pass
+        finally:
+            messages = self._pending_log_batch
+            self._pending_log_batch = None
+            self.append_logs(messages)
+            if latest_pipeline_status is not None:
+                try:
+                    self.status_panel.update_status(latest_pipeline_status)
+                except Exception:
+                    pass
 
         self.after(100, self.update_progress)
 

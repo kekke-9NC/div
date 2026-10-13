@@ -180,7 +180,17 @@ class StatusPanel(ttk.Frame):
            - pending_sources: int
            - processors_busy: List[bool] (length = concurrency)
         """
+        signature = (
+            int(status.get('download_queue_size', 0)),
+            int(status.get('pending_sources', 0)),
+            tuple(status.get('processors_busy', []) or []),
+            self.dl_canvas.winfo_width(), self.pr_canvas.winfo_width(),
+            self.dl_canvas.winfo_height(), self.pr_canvas.winfo_height(),
+        )
         self._last_status = status
+        if signature == getattr(self, "_last_drawn_status", None):
+            return
+        self._last_drawn_status = signature
         # update download canvas
         dl_q = int(status.get('download_queue_size', 0))
         pending = int(status.get('pending_sources', 0))

@@ -94,39 +94,50 @@ class PreviewMixin:
             except Exception:
                 pass
             return
-        if not self.log_text.winfo_exists():
+        pending = getattr(self, "_pending_log_batch", None)
+        if pending is not None:
+            pending.append(str(message))
             return
-        self.log_text.config(state='normal')
+        self.append_logs([str(message)])
 
+    def append_logs(self, messages):
+        """Insert a poll's complete log in one Text update on the Tk thread."""
+        if not messages or not self.log_text.winfo_exists():
+            return
         timestamp = datetime.now().strftime("%H:%M:%S")
-        self.log_text.insert(tk.END, f"[{timestamp}] {message}\n")
-        self._log_line_count = getattr(self, "_log_line_count", 0) + 1
-        if self._log_line_count > 5000:
-            # A Text widget which grows for a multi-night archive eventually
-            # consumes substantial Tk-side memory.  Remove a block at once so
-            # pruning is infrequent and does not churn the display tree.
-            try:
-                self.log_text.delete("1.0", "501.0")
-                self._log_line_count -= 500
-                self._summary_log_line_map.clear()
-            except Exception:
-                pass
-        summary_ref = self._extract_summary_video_ref(message)
-        if summary_ref:
-            resolved_path = self._resolve_summary_video_path(summary_ref)
-            if resolved_path:
-                line_no = self.log_text.index("end-2c").split('.')[0]
-                self.log_text.tag_add("summary_hover", f"{line_no}.0", f"{line_no}.end")
-                self._summary_log_line_map[line_no] = {
-                    "summary_ref": summary_ref,
-                    "resolved_path": resolved_path,
+        lines = [f"[{timestamp}] {message}\n" for message in messages]
+        self.log_text.config(state='normal')
+        try:
+            # end-1c is the insertion line before Tk's mandatory final newline.
+            first_line = int(self.log_text.index("end-1c").split('.')[0])
+            self.log_text.insert(tk.END, "".join(lines))
+            line_no = first_line
+            for message, text in zip(messages, lines):
+                summary_ref = self._extract_summary_video_ref(message)
+                if summary_ref:
+                    resolved_path = self._resolve_summary_video_path(summary_ref)
+                    if resolved_path:
+                        key = str(line_no)
+                        self.log_text.tag_add("summary_hover", f"{key}.0", f"{key}.end")
+                        self._summary_log_line_map[key] = {
+                            "summary_ref": summary_ref, "resolved_path": resolved_path,
+                        }
+                line_no += text.count("\n")
+            self._log_line_count = getattr(self, "_log_line_count", 0) + sum(
+                text.count("\n") for text in lines)
+            if self._log_line_count > 5000:
+                removed = ((self._log_line_count - 5000 + 499) // 500) * 500
+                self.log_text.delete("1.0", f"{removed + 1}.0")
+                self._log_line_count -= removed
+                # Text tags move with their text; update the matching lookup too.
+                self._summary_log_line_map = {
+                    str(int(key) - removed): value
+                    for key, value in self._summary_log_line_map.items()
+                    if int(key) > removed
                 }
-
-        # The crash reports pointed at Text.yview/GetYView while the display
-        # tree was being updated.  Archive logs are a live tail, so keep the
-        # implementation simple and avoid querying yview for every line.
-        self.log_text.see(tk.END)
-        self.log_text.config(state='disabled')
+            self.log_text.see(tk.END)
+        finally:
+            self.log_text.config(state='disabled')
 
     def _init_summary_log_hover_preview(self):
         self._summary_log_line_map = {}
