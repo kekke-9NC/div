@@ -8,6 +8,7 @@ from concurrent.futures import ProcessPoolExecutor
 import multiprocessing
 from multiprocessing import shared_memory
 import os
+import queue
 import sys
 import threading
 
@@ -37,6 +38,32 @@ def _event_inputs(crops, motion_crops, rect, line, frame_rate):
     vector = np.concatenate([extract_event_features(image,kymograph,physical),
                              extract_motion_features_from_crops(motion_crops,frame_rate)])
     return image,kymograph,physical,vector
+
+
+_EVENT_OUTPUT_RESERVE = 2*1024**2
+_EVENT_SLOT_LIMIT = 32*1024**2
+
+
+def _shared_event_inputs(name, crop_shape, motion_shape, rect, line, frame_rate):
+    memory = shared_memory.SharedMemory(name=name)
+    try:
+        crop_bytes,motion_bytes = int(np.prod(crop_shape)),int(np.prod(motion_shape))
+        offset = (crop_bytes+motion_bytes+7)//8*8
+        limit = offset+_EVENT_OUTPUT_RESERVE
+        if limit>memory.size:
+            raise ValueError('Incomplete event input slot')
+        crops = np.ndarray(crop_shape,np.uint8,buffer=memory.buf)
+        motion = np.ndarray(motion_shape,np.uint8,buffer=memory.buf,offset=crop_bytes)
+        result = []
+        for values in _event_inputs(crops,motion,rect,line,frame_rate):
+            if values.dtype != np.float32 or offset+values.nbytes>limit:
+                raise ValueError('Event output exceeded the bounded shared slot')
+            np.copyto(np.ndarray(values.shape,values.dtype,buffer=memory.buf,offset=offset),values)
+            result.append((values.shape,values.dtype.str,offset))
+            offset += values.nbytes
+        return result
+    finally:
+        memory.close()
 
 
 def _moving_tracks(name, shape, dtype, options):
@@ -197,6 +224,10 @@ class LiveGateFeatures:
         self.flash_proposers = []
         self.active = False
         self.quiet_windows = 0
+        self.event_slots = queue.Queue(maxsize=self.workers)
+        for _ in range(self.workers):
+            self.event_slots.put(None)
+        self.event_memories = {}
 
     def activate(self):
         with self.lock:
@@ -266,16 +297,60 @@ class LiveGateFeatures:
         if self._local() or not self.active:
             return None
         from event_pixels import _crop_square
+        acquired = False
+        slot = None
         try:
+            # Borrow before materializing input stacks. At most workers slots
+            # and their bounded input temporaries can be live simultaneously.
+            required = (len(frames)*(256**2+128**2)+7)//8*8+_EVENT_OUTPUT_RESERVE
+            if required>_EVENT_SLOT_LIMIT:
+                return None
+            while not self.closed:
+                try:
+                    slot = self.event_slots.get(timeout=.1)
+                    acquired = True
+                    break
+                except queue.Empty:
+                    pass
+            if not acquired or self.closed:
+                return None
             # Only exact grayscale model crops cross the process boundary;
             # frame identity and inference ownership remain in the parent.
             crops = np.stack([_crop_square(frame,rect,256) for frame in frames])
             motion = np.stack([_crop_square(frame,rect,128) for frame in frames])
-            return self._executor().submit(_event_inputs,crops,motion,rect,line,frame_rate).result()
+            with self.lock:
+                if self.closed:
+                    return None
+                if slot is None or slot.size<required:
+                    if slot is not None:
+                        self.event_memories.pop(slot.name)
+                        slot.close()
+                        slot.unlink()
+                        slot = None
+                    slot = shared_memory.SharedMemory(create=True,size=required)
+                    self.event_memories[slot.name] = slot
+            np.copyto(np.ndarray(crops.shape,np.uint8,buffer=slot.buf),crops)
+            np.copyto(np.ndarray(motion.shape,np.uint8,buffer=slot.buf,offset=crops.nbytes),motion)
+            metadata = self._executor().submit(_shared_event_inputs,slot.name,crops.shape,motion.shape,rect,line,frame_rate).result()
+            start = (crops.nbytes+motion.nbytes+7)//8*8
+            arrays = []
+            if len(metadata)!=4:
+                raise ValueError('Incomplete event outputs')
+            for shape,dtype,offset in metadata:
+                kind = np.dtype(dtype)
+                if (kind!=np.dtype(np.float32) or any(part<=0 for part in shape) or offset!=start or offset%4
+                        or offset+int(np.prod(shape))*kind.itemsize>required):
+                    raise ValueError('Invalid event output layout')
+                arrays.append(np.ndarray(shape,kind,buffer=slot.buf,offset=offset).copy())
+                start += arrays[-1].nbytes
+            return tuple(arrays)
         except Exception as exc:
             self.failed = True
             print(f"[RTSP解析] CPU主分類前処理を通常経路へ戻します: {exc}")
             return None
+        finally:
+            if acquired:
+                self.event_slots.put(slot)
 
     def _moving_tracks(self, frames, gray_cache, options):
         import moving_point_detector
@@ -317,6 +392,14 @@ class LiveGateFeatures:
             if pool is not None:
                 pool.shutdown(wait=True, cancel_futures=True)
         finally:
+            # Pool completion does not imply that parents finished copying.
+            # Collect every slot only after all borrowers returned it.
+            for _ in range(self.workers):
+                self.event_slots.get()
+            for memory in self.event_memories.values():
+                memory.close()
+                memory.unlink()
+            self.event_memories.clear()
             for detector in flash_proposers:
                 detector.close()
             with self.moving_lock:

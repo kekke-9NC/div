@@ -37,8 +37,73 @@ def test_spawned_main_event_inputs_match_every_value_and_keep_parent_evidence():
                     np.testing.assert_array_equal(getattr(observed,field),getattr(expected,field))
                 np.testing.assert_array_equal(np.stack(frames),before)
         assert not workers.pool.submit(_worker_diagnostics).result()['torch_loaded']
+        names = list(workers.event_memories)
     finally:
         workers.close()
+    assert not workers.event_memories
+    from multiprocessing import shared_memory
+    for name in names:
+        try:
+            leaked = shared_memory.SharedMemory(name=name)
+        except FileNotFoundError:
+            continue
+        leaked.close()
+        raise AssertionError('event slot leaked')
+
+
+def test_event_slot_capacity_is_checked_before_materializing_crops():
+    workers = LiveGateFeatures(workers=2)
+    workers.activate()
+    try:
+        with patch('rtsp_gate_workers.np.stack',side_effect=AssertionError('oversized crops')):
+            assert workers.prepare_meteor([object()]*400,None,None,25) is None
+        assert not workers.failed and not workers.event_memories and workers.pool is None
+    finally:
+        workers.close()
+
+
+def test_close_waits_for_parent_event_copy_before_unlinking_the_slot():
+    import threading
+    from multiprocessing import shared_memory
+    from rtsp_gate_workers import _shared_event_inputs
+    workers = LiveGateFeatures(workers=2)
+    workers.activate()
+    frames = [np.full((40,40,3),i,np.uint8) for i in range(3)]
+    pending = Future()
+    submitted,closing = threading.Event(),threading.Event()
+    arguments,results = [],[]
+    pool = Mock()
+    def submit(function,*args):
+        assert function is _shared_event_inputs
+        arguments.extend(args)
+        submitted.set()
+        return pending
+    pool.submit.side_effect = submit
+    pool.shutdown.side_effect = lambda **_kw: closing.set()
+    with patch('rtsp_gate_workers.ProcessPoolExecutor',return_value=pool):
+        caller = threading.Thread(target=lambda:results.append(workers.prepare_meteor(frames,None,None,25)))
+        caller.start()
+        assert submitted.wait(2)
+        closer = threading.Thread(target=workers.close)
+        closer.start()
+        assert closing.wait(2)
+        assert closer.is_alive()
+        name = arguments[0]
+        handle = shared_memory.SharedMemory(name=name)
+        handle.close()
+        pending.set_result(_shared_event_inputs(*arguments))
+        caller.join(2)
+        closer.join(2)
+        assert not caller.is_alive() and not closer.is_alive()
+    assert len(results)==1 and all(array.base is None for array in results[0])
+    assert not workers.event_memories
+    try:
+        leaked = shared_memory.SharedMemory(name=name)
+    except FileNotFoundError:
+        pass
+    else:
+        leaked.close()
+        raise AssertionError('event slot was not released after parent copy')
 
 
 def test_cpu_event_worker_failure_returns_to_identical_local_preparation():
