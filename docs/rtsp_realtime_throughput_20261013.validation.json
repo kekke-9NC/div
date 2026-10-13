@@ -4,8 +4,8 @@
   "production_commit": "573ea1c",
   "benchmark_commit": "d6ab4454e0d6b8a782cab65fa663485e4a3836cb",
   "baseline_top_level_python_snapshot_matches_commit": true,
-  "installed_app_modified": false,
-  "installed_app_processing_started": false,
+  "installed_app_modified": true,
+  "installed_app_processing_started": true,
   "isolated_replay": true,
   "auditor_model": "gpt-6-luna",
   "host": {
@@ -6013,5 +6013,713 @@
       "79bbe97 run took 301.465 seconds; no stable realtime claim from that revision"
     ],
     "model_warmup_includes_initial_graph_trace_and_exact_probes": true
+  },
+  "actual_legacy_app_deployment": {
+    "manifest": {
+      "installed_code_commit": "549ba28f3a36386678ba48327286cd7a97d6d4ae",
+      "verified_processing_commit": "320dfc8",
+      "version": "0.10.14.1",
+      "backup": "/Users/keisukematsumoto/Library/Application Support/MeteorDetector/backups/rtsp-throughput-20261014-025200",
+      "installed_root": "/Users/keisukematsumoto/Library/Application Support/MeteorDetector",
+      "bundle_root": "/Users/keisukematsumoto/Desktop/other/div/流星app-Mac-20260813/流星app.app/Contents/Resources/MeteorDetector",
+      "updated_files": [
+        {
+          "kind": "installed",
+          "relative": "bootstrap_launcher.py",
+          "prior_sha256": "a792560b34777fa2ca60049a3dd0a1989b67883ab32c1c81dfce6ea8fa45d6c6",
+          "sha256": "5496e010060e35b40999af2296243949c2895267ebe2467d5bd433f86e8801af",
+          "matches_source": true
+        },
+        {
+          "kind": "installed",
+          "relative": "config.py",
+          "prior_sha256": "237db583195dc9364b56d438227d907e9d9b228139fadccf90b3941b6e3e7a54",
+          "sha256": "5d9bfeb7f37beee57fc59648a20039a9f5b090df4413439007ce0cdbbdef3fc9",
+          "matches_source": true
+        },
+        {
+          "kind": "installed",
+          "relative": "main_gui.py",
+          "prior_sha256": "f0d4b6b92a4fdd1d0efc430094328cfb22a0946192b611eec60f1e24359a9a33",
+          "sha256": "1f5943e61b6950ed5323538943dcb44f7abd87f1dbe03707095fe6e28e2d6b2f",
+          "matches_source": true
+        },
+        {
+          "kind": "installed",
+          "relative": "gui_app.py",
+          "prior_sha256": null,
+          "sha256": "a183846a4666b3f7b9941810ea02259ed6f8af8dfbb10577793a224748782951",
+          "matches_source": true
+        },
+        {
+          "kind": "installed",
+          "relative": "gui_common.py",
+          "prior_sha256": "7eeee320f81a07d6d70e4d73ea1ac3f3e5062105b7f0ffd87dbb4b6dc79e82ff",
+          "sha256": "f9f4c44f293924d2a37da6fe359c7c186b5e6e04b962335e680d8210e5e40676",
+          "matches_source": true
+        },
+        {
+          "kind": "installed",
+          "relative": "gui_dialogs.py",
+          "prior_sha256": "cd7f29209da67f180d9db6ecbe7187c92a126c9eee6e767927775876b3f0f2a8",
+          "sha256": "4dfcdb346df0a3c399b1c39de1bf3a8c0a8e2b997f6bc730c691327454e23041",
+          "matches_source": true
+        },
+        {
+          "kind": "installed",
+          "relative": "gui_plate_solve.py",
+          "prior_sha256": "a7c5670d3491f5b6844fd5bee770bdc46b56068f14e83c23911060b91e3b1232",
+          "sha256": "65e495d4ac478548adccaf06e195ca7b6b0fdad2dd3773f9f5fa2c79191782c9",
+          "matches_source": true
+        },
+        {
+          "kind": "installed",
+          "relative": "gui_settings.py",
+          "prior_sha256": "6284e92ca362b7791c505661b3cdeec0f8feb4aa6ca5e328c5d30ab5e51f034e",
+          "sha256": "b01fab8c26ffe8f701f617058e25c6c0dc0a86c6abea3d16c3d88dc804c6b88c",
+          "matches_source": true
+        },
+        {
+          "kind": "installed",
+          "relative": "gui_source.py",
+          "prior_sha256": "791b4c8996de6393a6f6097c62cbd306c558d189ecb6157d813651e99b7e7336",
+          "sha256": "82a4b695479ed53d132f136028cb087c7536014ca3b2c48523499a9d957c366c",
+          "matches_source": true
+        },
+        {
+          "kind": "installed",
+          "relative": "camera_model_builder.py",
+          "prior_sha256": "151e6d592a387bfb740e74cb695ac8102f4a1d90eb225420674c98374647b298",
+          "sha256": "1693aa7360f4d8fc991efde880b36364a8c98405dedff39b73ac45dec419bcdf",
+          "matches_source": true
+        },
+        {
+          "kind": "installed",
+          "relative": "camera_model_catalog.py",
+          "prior_sha256": "989b75e56cc4783354791a508bedd12027aa58817eace1d0bfb6959b2535666a",
+          "sha256": "09ba0dd3e64314a21b3a2c3647032b0bd91588777e0a03adb1071c52802cac08",
+          "matches_source": true
+        },
+        {
+          "kind": "installed",
+          "relative": "camera_model_monitor.py",
+          "prior_sha256": "117f6d960012075e08abc7f7b785da4a8549dd1451701fb25c5bf964c7decd88",
+          "sha256": "30d7e18832f4cf9de7264f72a4cba7f6d97a6ea8236031aa31b9df3d3da38b64",
+          "matches_source": true
+        },
+        {
+          "kind": "installed",
+          "relative": "camera_model_visualization.py",
+          "prior_sha256": null,
+          "sha256": "3df3e56942d5456b9ab9b2ce29e6225fc91cc5e27df55e8efebc3d95ffc03164",
+          "matches_source": true
+        },
+        {
+          "kind": "installed",
+          "relative": "legacy_settings.py",
+          "prior_sha256": null,
+          "sha256": "de98072ba502a2465c3527299516cf0eb85c3b6886de40d42a094773aca6fa02",
+          "matches_source": true
+        },
+        {
+          "kind": "installed",
+          "relative": "local_wideangle_astrometry.py",
+          "prior_sha256": "aee68ecfd4d1688c668ec230a13e199b89cd2c6778ed65d61e8bdbeea1b5cd56",
+          "sha256": "20e525e0bf1e68ddb829ae87d6076564e8723495dcc74010292c5164e22f82c0",
+          "matches_source": true
+        },
+        {
+          "kind": "installed",
+          "relative": "meteor_trail_timelapse.py",
+          "prior_sha256": null,
+          "sha256": "d7a15c7aaa030ee28a9bcfbc8c9d1d858432cf13dcc1c5460a9fa14162de714f",
+          "matches_source": true
+        },
+        {
+          "kind": "installed",
+          "relative": "process_lock.py",
+          "prior_sha256": null,
+          "sha256": "dd934a4c399ec76dd5e6b7ef450ab3e9bda5abc2344bb0518355f192a9b9b688",
+          "matches_source": true
+        },
+        {
+          "kind": "installed",
+          "relative": "settings_runtime.py",
+          "prior_sha256": null,
+          "sha256": "971ea1792f59812624e39574752317b0ba9761a2c7caf70e4d4aa79fd532ce6b",
+          "matches_source": true
+        },
+        {
+          "kind": "installed",
+          "relative": "sun_times.py",
+          "prior_sha256": "640319b18d2038603fb9a0ce51cfd1597076f8d62dc7f3da085a5beca2443484",
+          "sha256": "5a0bc507640a76d1562a43c32cd0600faf8b65ff36deb2e2100e2fdded1e5b94",
+          "matches_source": true
+        },
+        {
+          "kind": "installed",
+          "relative": "trajectory_camera_model.py",
+          "prior_sha256": "371e9b491b21779fb48d686614644d3c9bbce4af5110f130951782b621821fb5",
+          "sha256": "01bbab6a042eb834d405011b8b0b69ff77a28492d5ea9aa13a5478b0c9a08162",
+          "matches_source": true
+        },
+        {
+          "kind": "installed",
+          "relative": "component_statistics.py",
+          "prior_sha256": null,
+          "sha256": "981a066e15ff112fa3669a76b4c7b86792b434a7e3cf8b6ed77844e08a4dc190",
+          "matches_source": true
+        },
+        {
+          "kind": "installed",
+          "relative": "event_boost_model.py",
+          "prior_sha256": "51e4cda80b084565a2cf80e59126fe2a94e52c476ac19a50c56f94136bcdb8dc",
+          "sha256": "ab62d710fc9b378ca1b7141e0938c557f5b500c7d812ffbce3a834f6b2bc45fe",
+          "matches_source": true
+        },
+        {
+          "kind": "installed",
+          "relative": "event_encoder_pixels.py",
+          "prior_sha256": null,
+          "sha256": "df9c23721eaeb22769153cf9e7ac1c25f2bf5c30c27820ea5f04710c090f9233",
+          "matches_source": true
+        },
+        {
+          "kind": "installed",
+          "relative": "event_noise_gate.py",
+          "prior_sha256": "a32b21cbd969ace48a4d6c41ac212f1b0e8ed68b988eea33972ff4b25d8222ea",
+          "sha256": "1da8eca57c726a7014d93b4e191dc154dd04c7427714b53f393f23e3da3a858b",
+          "matches_source": true
+        },
+        {
+          "kind": "installed",
+          "relative": "event_pixels.py",
+          "prior_sha256": null,
+          "sha256": "13eaf747a97df4d3fdd93702889a2bea36260398211708a405a96e5da997626b",
+          "matches_source": true
+        },
+        {
+          "kind": "installed",
+          "relative": "event_representation.py",
+          "prior_sha256": null,
+          "sha256": "e64586302d89622bbe86137a67d6d7a9291913ca8ed7d28d0c1eec074af4ba12",
+          "matches_source": true
+        },
+        {
+          "kind": "installed",
+          "relative": "event_transformer.py",
+          "prior_sha256": "5316b84cdfc626407d33ecaba9cf0eabe7f8b985bfd32bd3968b73399b8f038e",
+          "sha256": "9ecdcff471560bb461f6314e4857c162f7f77446d8bd3fbd85aaec13e60f745e",
+          "matches_source": true
+        },
+        {
+          "kind": "installed",
+          "relative": "file_utils.py",
+          "prior_sha256": "235725894e77f685d03a06b96065f1c61bad71cd92563bb4d88a13cb949d9ae2",
+          "sha256": "c25b7804de67a8dc04ea28ac3fb8508a1b8263f4adb974278794c1bc3550a337",
+          "matches_source": true
+        },
+        {
+          "kind": "installed",
+          "relative": "image_processing.py",
+          "prior_sha256": "e1272c7e2d4ed5824ec8a1d82385c4dda5ff99b301528c8e2074462074b4d528",
+          "sha256": "7027d834d3a97406d39d38e8fefa137a73c7650e2f3d230a7e18cd29fd212017",
+          "matches_source": true
+        },
+        {
+          "kind": "installed",
+          "relative": "model.py",
+          "prior_sha256": "e3bcf251c2e82e8d8087111dac60e14c7d6fe1e9e335ec89d95f2cdb3073f040",
+          "sha256": "2d90c1442e59309738dd71cc7365bc26a13316370dff66fd44989f07198787ec",
+          "matches_source": true
+        },
+        {
+          "kind": "installed",
+          "relative": "moving_point_detector.py",
+          "prior_sha256": "e9374825dbeb8403960c56a8129264951a994d928d4a701bf99b4c2c32100d16",
+          "sha256": "6ff0af6366d196a07c74b83750b62f6a1bf05d9b8b7f3fe7355ce6931609070e",
+          "matches_source": true
+        },
+        {
+          "kind": "installed",
+          "relative": "rtsp_annotation_worker.py",
+          "prior_sha256": null,
+          "sha256": "e4fff1fb7c4053dc40798506158c63e440a3b8572b0399bab95fc8872540cf03",
+          "matches_source": true
+        },
+        {
+          "kind": "installed",
+          "relative": "rtsp_gate_workers.py",
+          "prior_sha256": null,
+          "sha256": "c5efa15f98baeed5353defde5112df88788c7679a07cc4a5d13d768ce84254a9",
+          "matches_source": true
+        },
+        {
+          "kind": "installed",
+          "relative": "rtsp_live.py",
+          "prior_sha256": "e14176f435f67ff1ad3f661de81eb657f5e31fd01adc1ef6b0c8694f7ffdf99d",
+          "sha256": "986cc1e82cb81042aaa0163b78e028a7815cc83952dcd027be11e40486fa5afe",
+          "matches_source": true
+        },
+        {
+          "kind": "installed",
+          "relative": "rtsp_schedule_products.py",
+          "prior_sha256": "7838f2b262fa0d49c8e05bf84113bffca116ef7400d015749883ba01afe479e5",
+          "sha256": "cf8db963a3c86c16b777f7b28b363a65c67921a719297acf9bdc84729155ee8d",
+          "matches_source": true
+        },
+        {
+          "kind": "installed",
+          "relative": "short_flash_detector.py",
+          "prior_sha256": "a76b52100f658681b3eefc818eb0ffa89a15681cfd1519c4eab17ed9d5859cf5",
+          "sha256": "3410aff43787ae060d308aed36a78f7e85c7a343646463228503220a6f9223e0",
+          "matches_source": true
+        },
+        {
+          "kind": "installed",
+          "relative": "temporal_statistics.py",
+          "prior_sha256": "33d128be3e8cb73af019b9fabbbfaadef793d9923338a14439691f901b82f723",
+          "sha256": "fa24ddd909ad48482b7a4f35459cbc795a2be9834d62798b84d4eea0a6732d27",
+          "matches_source": true
+        },
+        {
+          "kind": "installed",
+          "relative": "universal_meteor_model.py",
+          "prior_sha256": "0649282d4286122d913a6ba7e77a6f68bba6d25d30cfe9f0801f410fb92d7661",
+          "sha256": "8f0b10fc6e117979b5ca20f64fcf66e1161001a1d166ac28868f90dfa1c88d42",
+          "matches_source": true
+        },
+        {
+          "kind": "installed",
+          "relative": "video_creation.py",
+          "prior_sha256": "3dc3d541a407b72d6a100800d28deb21a3b025a1272855e202744479f60a5335",
+          "sha256": "5bd6c612bd7d88993cf6493a0fdf72c1742690203876864414bb197fc9f82d5e",
+          "matches_source": true
+        },
+        {
+          "kind": "installed",
+          "relative": "video_encoding.py",
+          "prior_sha256": "51c42dfa286550b3c3300ed3c7941b3f715102a3545473a7284eb2cdc0a6491c",
+          "sha256": "b14237fbc470e3cff47468545c104369efe950b7500056d6e486c090ed998744",
+          "matches_source": true
+        },
+        {
+          "kind": "installed",
+          "relative": "video_processing.py",
+          "prior_sha256": "587ed89f8e55fef12e188729e991d921418a0d3cf052146a1df8388c6b076d1f",
+          "sha256": "9a188d0efe796df2098dc2c148b6b40ac96ec4d3af8453fc304068aed68eeddf",
+          "matches_source": true
+        },
+        {
+          "kind": "installed",
+          "relative": "assets/component_statistics.c",
+          "prior_sha256": null,
+          "sha256": "137607ea3a7a7573227d6f22efb23ccecc51edbf0c7975087358c13c83fb1b6c",
+          "matches_source": true
+        },
+        {
+          "kind": "installed",
+          "relative": "assets/component_statistics.dylib",
+          "prior_sha256": null,
+          "sha256": "8cb2427936159ae879b2effa4adbe289bf507de4dbc6f4e49f26bf58751d1d78",
+          "matches_source": true
+        },
+        {
+          "kind": "bundle",
+          "relative": "bootstrap_launcher.py",
+          "prior_sha256": "a792560b34777fa2ca60049a3dd0a1989b67883ab32c1c81dfce6ea8fa45d6c6",
+          "sha256": "5496e010060e35b40999af2296243949c2895267ebe2467d5bd433f86e8801af",
+          "matches_source": true
+        },
+        {
+          "kind": "bundle",
+          "relative": "config.py",
+          "prior_sha256": "237db583195dc9364b56d438227d907e9d9b228139fadccf90b3941b6e3e7a54",
+          "sha256": "5d9bfeb7f37beee57fc59648a20039a9f5b090df4413439007ce0cdbbdef3fc9",
+          "matches_source": true
+        },
+        {
+          "kind": "bundle",
+          "relative": "main_gui.py",
+          "prior_sha256": "844ce8bf4ccf53f662795e71b4cb538e1c7918b3063739e5e5b6272915c4a435",
+          "sha256": "1f5943e61b6950ed5323538943dcb44f7abd87f1dbe03707095fe6e28e2d6b2f",
+          "matches_source": true
+        },
+        {
+          "kind": "bundle",
+          "relative": "gui_app.py",
+          "prior_sha256": null,
+          "sha256": "a183846a4666b3f7b9941810ea02259ed6f8af8dfbb10577793a224748782951",
+          "matches_source": true
+        },
+        {
+          "kind": "bundle",
+          "relative": "gui_common.py",
+          "prior_sha256": "7eeee320f81a07d6d70e4d73ea1ac3f3e5062105b7f0ffd87dbb4b6dc79e82ff",
+          "sha256": "f9f4c44f293924d2a37da6fe359c7c186b5e6e04b962335e680d8210e5e40676",
+          "matches_source": true
+        },
+        {
+          "kind": "bundle",
+          "relative": "gui_dialogs.py",
+          "prior_sha256": "cd7f29209da67f180d9db6ecbe7187c92a126c9eee6e767927775876b3f0f2a8",
+          "sha256": "4dfcdb346df0a3c399b1c39de1bf3a8c0a8e2b997f6bc730c691327454e23041",
+          "matches_source": true
+        },
+        {
+          "kind": "bundle",
+          "relative": "gui_plate_solve.py",
+          "prior_sha256": "a7c5670d3491f5b6844fd5bee770bdc46b56068f14e83c23911060b91e3b1232",
+          "sha256": "65e495d4ac478548adccaf06e195ca7b6b0fdad2dd3773f9f5fa2c79191782c9",
+          "matches_source": true
+        },
+        {
+          "kind": "bundle",
+          "relative": "gui_settings.py",
+          "prior_sha256": "e3b20f71abe4991ba4d6b675f8af06c3675ba35f16450dd2f732b9edf985fd70",
+          "sha256": "b01fab8c26ffe8f701f617058e25c6c0dc0a86c6abea3d16c3d88dc804c6b88c",
+          "matches_source": true
+        },
+        {
+          "kind": "bundle",
+          "relative": "gui_source.py",
+          "prior_sha256": "72d8593cb6c6f04688873f5d78da87908d0014614f7b9db8f4b0afd143602be2",
+          "sha256": "82a4b695479ed53d132f136028cb087c7536014ca3b2c48523499a9d957c366c",
+          "matches_source": true
+        },
+        {
+          "kind": "bundle",
+          "relative": "camera_model_builder.py",
+          "prior_sha256": "151e6d592a387bfb740e74cb695ac8102f4a1d90eb225420674c98374647b298",
+          "sha256": "1693aa7360f4d8fc991efde880b36364a8c98405dedff39b73ac45dec419bcdf",
+          "matches_source": true
+        },
+        {
+          "kind": "bundle",
+          "relative": "camera_model_catalog.py",
+          "prior_sha256": "989b75e56cc4783354791a508bedd12027aa58817eace1d0bfb6959b2535666a",
+          "sha256": "09ba0dd3e64314a21b3a2c3647032b0bd91588777e0a03adb1071c52802cac08",
+          "matches_source": true
+        },
+        {
+          "kind": "bundle",
+          "relative": "camera_model_monitor.py",
+          "prior_sha256": "117f6d960012075e08abc7f7b785da4a8549dd1451701fb25c5bf964c7decd88",
+          "sha256": "30d7e18832f4cf9de7264f72a4cba7f6d97a6ea8236031aa31b9df3d3da38b64",
+          "matches_source": true
+        },
+        {
+          "kind": "bundle",
+          "relative": "camera_model_visualization.py",
+          "prior_sha256": null,
+          "sha256": "3df3e56942d5456b9ab9b2ce29e6225fc91cc5e27df55e8efebc3d95ffc03164",
+          "matches_source": true
+        },
+        {
+          "kind": "bundle",
+          "relative": "legacy_settings.py",
+          "prior_sha256": null,
+          "sha256": "de98072ba502a2465c3527299516cf0eb85c3b6886de40d42a094773aca6fa02",
+          "matches_source": true
+        },
+        {
+          "kind": "bundle",
+          "relative": "local_wideangle_astrometry.py",
+          "prior_sha256": "aee68ecfd4d1688c668ec230a13e199b89cd2c6778ed65d61e8bdbeea1b5cd56",
+          "sha256": "20e525e0bf1e68ddb829ae87d6076564e8723495dcc74010292c5164e22f82c0",
+          "matches_source": true
+        },
+        {
+          "kind": "bundle",
+          "relative": "meteor_trail_timelapse.py",
+          "prior_sha256": null,
+          "sha256": "d7a15c7aaa030ee28a9bcfbc8c9d1d858432cf13dcc1c5460a9fa14162de714f",
+          "matches_source": true
+        },
+        {
+          "kind": "bundle",
+          "relative": "process_lock.py",
+          "prior_sha256": null,
+          "sha256": "dd934a4c399ec76dd5e6b7ef450ab3e9bda5abc2344bb0518355f192a9b9b688",
+          "matches_source": true
+        },
+        {
+          "kind": "bundle",
+          "relative": "settings_runtime.py",
+          "prior_sha256": null,
+          "sha256": "971ea1792f59812624e39574752317b0ba9761a2c7caf70e4d4aa79fd532ce6b",
+          "matches_source": true
+        },
+        {
+          "kind": "bundle",
+          "relative": "sun_times.py",
+          "prior_sha256": "640319b18d2038603fb9a0ce51cfd1597076f8d62dc7f3da085a5beca2443484",
+          "sha256": "5a0bc507640a76d1562a43c32cd0600faf8b65ff36deb2e2100e2fdded1e5b94",
+          "matches_source": true
+        },
+        {
+          "kind": "bundle",
+          "relative": "trajectory_camera_model.py",
+          "prior_sha256": "371e9b491b21779fb48d686614644d3c9bbce4af5110f130951782b621821fb5",
+          "sha256": "01bbab6a042eb834d405011b8b0b69ff77a28492d5ea9aa13a5478b0c9a08162",
+          "matches_source": true
+        },
+        {
+          "kind": "bundle",
+          "relative": "component_statistics.py",
+          "prior_sha256": null,
+          "sha256": "981a066e15ff112fa3669a76b4c7b86792b434a7e3cf8b6ed77844e08a4dc190",
+          "matches_source": true
+        },
+        {
+          "kind": "bundle",
+          "relative": "event_boost_model.py",
+          "prior_sha256": "51e4cda80b084565a2cf80e59126fe2a94e52c476ac19a50c56f94136bcdb8dc",
+          "sha256": "ab62d710fc9b378ca1b7141e0938c557f5b500c7d812ffbce3a834f6b2bc45fe",
+          "matches_source": true
+        },
+        {
+          "kind": "bundle",
+          "relative": "event_encoder_pixels.py",
+          "prior_sha256": null,
+          "sha256": "df9c23721eaeb22769153cf9e7ac1c25f2bf5c30c27820ea5f04710c090f9233",
+          "matches_source": true
+        },
+        {
+          "kind": "bundle",
+          "relative": "event_noise_gate.py",
+          "prior_sha256": "a32b21cbd969ace48a4d6c41ac212f1b0e8ed68b988eea33972ff4b25d8222ea",
+          "sha256": "1da8eca57c726a7014d93b4e191dc154dd04c7427714b53f393f23e3da3a858b",
+          "matches_source": true
+        },
+        {
+          "kind": "bundle",
+          "relative": "event_pixels.py",
+          "prior_sha256": null,
+          "sha256": "13eaf747a97df4d3fdd93702889a2bea36260398211708a405a96e5da997626b",
+          "matches_source": true
+        },
+        {
+          "kind": "bundle",
+          "relative": "event_representation.py",
+          "prior_sha256": null,
+          "sha256": "e64586302d89622bbe86137a67d6d7a9291913ca8ed7d28d0c1eec074af4ba12",
+          "matches_source": true
+        },
+        {
+          "kind": "bundle",
+          "relative": "event_transformer.py",
+          "prior_sha256": "5316b84cdfc626407d33ecaba9cf0eabe7f8b985bfd32bd3968b73399b8f038e",
+          "sha256": "9ecdcff471560bb461f6314e4857c162f7f77446d8bd3fbd85aaec13e60f745e",
+          "matches_source": true
+        },
+        {
+          "kind": "bundle",
+          "relative": "file_utils.py",
+          "prior_sha256": "ed592cac2c919878190bebe5c29198825dd533d3dd444826759ec86b5f5e05a2",
+          "sha256": "c25b7804de67a8dc04ea28ac3fb8508a1b8263f4adb974278794c1bc3550a337",
+          "matches_source": true
+        },
+        {
+          "kind": "bundle",
+          "relative": "image_processing.py",
+          "prior_sha256": "e1272c7e2d4ed5824ec8a1d82385c4dda5ff99b301528c8e2074462074b4d528",
+          "sha256": "7027d834d3a97406d39d38e8fefa137a73c7650e2f3d230a7e18cd29fd212017",
+          "matches_source": true
+        },
+        {
+          "kind": "bundle",
+          "relative": "model.py",
+          "prior_sha256": "e3bcf251c2e82e8d8087111dac60e14c7d6fe1e9e335ec89d95f2cdb3073f040",
+          "sha256": "2d90c1442e59309738dd71cc7365bc26a13316370dff66fd44989f07198787ec",
+          "matches_source": true
+        },
+        {
+          "kind": "bundle",
+          "relative": "moving_point_detector.py",
+          "prior_sha256": "e9374825dbeb8403960c56a8129264951a994d928d4a701bf99b4c2c32100d16",
+          "sha256": "6ff0af6366d196a07c74b83750b62f6a1bf05d9b8b7f3fe7355ce6931609070e",
+          "matches_source": true
+        },
+        {
+          "kind": "bundle",
+          "relative": "rtsp_annotation_worker.py",
+          "prior_sha256": null,
+          "sha256": "e4fff1fb7c4053dc40798506158c63e440a3b8572b0399bab95fc8872540cf03",
+          "matches_source": true
+        },
+        {
+          "kind": "bundle",
+          "relative": "rtsp_gate_workers.py",
+          "prior_sha256": null,
+          "sha256": "c5efa15f98baeed5353defde5112df88788c7679a07cc4a5d13d768ce84254a9",
+          "matches_source": true
+        },
+        {
+          "kind": "bundle",
+          "relative": "rtsp_live.py",
+          "prior_sha256": "79c2118606386de2add2af53bc98c78402b52768820da2c883d4f8b42036229b",
+          "sha256": "986cc1e82cb81042aaa0163b78e028a7815cc83952dcd027be11e40486fa5afe",
+          "matches_source": true
+        },
+        {
+          "kind": "bundle",
+          "relative": "rtsp_schedule_products.py",
+          "prior_sha256": "7042e4a716e545307433d4453be767dbb91cd95666e18fe4b64d4f4c35904687",
+          "sha256": "cf8db963a3c86c16b777f7b28b363a65c67921a719297acf9bdc84729155ee8d",
+          "matches_source": true
+        },
+        {
+          "kind": "bundle",
+          "relative": "short_flash_detector.py",
+          "prior_sha256": "a76b52100f658681b3eefc818eb0ffa89a15681cfd1519c4eab17ed9d5859cf5",
+          "sha256": "3410aff43787ae060d308aed36a78f7e85c7a343646463228503220a6f9223e0",
+          "matches_source": true
+        },
+        {
+          "kind": "bundle",
+          "relative": "temporal_statistics.py",
+          "prior_sha256": "33d128be3e8cb73af019b9fabbbfaadef793d9923338a14439691f901b82f723",
+          "sha256": "fa24ddd909ad48482b7a4f35459cbc795a2be9834d62798b84d4eea0a6732d27",
+          "matches_source": true
+        },
+        {
+          "kind": "bundle",
+          "relative": "universal_meteor_model.py",
+          "prior_sha256": "0649282d4286122d913a6ba7e77a6f68bba6d25d30cfe9f0801f410fb92d7661",
+          "sha256": "8f0b10fc6e117979b5ca20f64fcf66e1161001a1d166ac28868f90dfa1c88d42",
+          "matches_source": true
+        },
+        {
+          "kind": "bundle",
+          "relative": "video_creation.py",
+          "prior_sha256": "2e5f801636bac277fc11f4a19f5b57c839e0a8b663aec8c843949c3e382d2132",
+          "sha256": "5bd6c612bd7d88993cf6493a0fdf72c1742690203876864414bb197fc9f82d5e",
+          "matches_source": true
+        },
+        {
+          "kind": "bundle",
+          "relative": "video_encoding.py",
+          "prior_sha256": "51c42dfa286550b3c3300ed3c7941b3f715102a3545473a7284eb2cdc0a6491c",
+          "sha256": "b14237fbc470e3cff47468545c104369efe950b7500056d6e486c090ed998744",
+          "matches_source": true
+        },
+        {
+          "kind": "bundle",
+          "relative": "video_processing.py",
+          "prior_sha256": "587ed89f8e55fef12e188729e991d921418a0d3cf052146a1df8388c6b076d1f",
+          "sha256": "9a188d0efe796df2098dc2c148b6b40ac96ec4d3af8453fc304068aed68eeddf",
+          "matches_source": true
+        },
+        {
+          "kind": "bundle",
+          "relative": "assets/component_statistics.c",
+          "prior_sha256": null,
+          "sha256": "137607ea3a7a7573227d6f22efb23ccecc51edbf0c7975087358c13c83fb1b6c",
+          "matches_source": true
+        },
+        {
+          "kind": "bundle",
+          "relative": "assets/component_statistics.dylib",
+          "prior_sha256": null,
+          "sha256": "8cb2427936159ae879b2effa4adbe289bf507de4dbc6f4e49f26bf58751d1d78",
+          "matches_source": true
+        }
+      ],
+      "settings_before_sha256": "851ec1c4d9578c8a5d631b5bf4ac7750906ceae9a0b3bec88aab649ae9a5fefa",
+      "settings_at_install_sha256": "851ec1c4d9578c8a5d631b5bf4ac7750906ceae9a0b3bec88aab649ae9a5fefa",
+      "models_replaced": false,
+      "recordings_modified_by_install": false
+    },
+    "observation": {
+      "observed_at": "2026-10-14T03:02:24.110297",
+      "main_gui_pid": 27827,
+      "version": "0.10.14.1",
+      "installed_code_commit": "549ba28f3a36386678ba48327286cd7a97d6d4ae",
+      "verified_processing_commit": "320dfc8",
+      "backup": "/Users/keisukematsumoto/Library/Application Support/MeteorDetector/backups/rtsp-throughput-20261014-025200",
+      "application_bundle": "/Users/keisukematsumoto/Desktop/other/div/流星app-Mac-20260813/流星app.app",
+      "selected_model": "meteor_event_transformer_boost_v5.pth",
+      "preset": "clear",
+      "setting_keys_changed_since_backup": [
+        "camera_model_auto_select",
+        "detection_mask_path",
+        "rtsp_preset"
+      ],
+      "settings_note": "Restoring and applying the model also lets the app write its usual saved settings; only rtsp_preset was directly changed for weather",
+      "camera_rtsp_tcp_connected": true,
+      "camera_recording_start": "2026-10-14T02:57:41+09:00",
+      "new_recording_completed_probe": {
+        "programs": [],
+        "stream_groups": [],
+        "streams": [
+          {
+            "codec_name": "mpeg4",
+            "width": 1920,
+            "height": 1080,
+            "r_frame_rate": "25/1"
+          }
+        ],
+        "format": {
+          "duration": "0.520000"
+        }
+      },
+      "old_pending_recording_progress_observed": true,
+      "native_library_loaded_from_installed_assets": true,
+      "mps_libraries_loaded": true,
+      "ui_note": "Restore and resume choice succeeded, then Start invoked via File menu; subsequent CUA AX/screenshot queries timed out while workers kept recording and consuming backlog",
+      "sessions": [
+        {
+          "session": "20261014/02/57_41_86ce18ef6b39",
+          "raw_chunks_remaining": 565,
+          "consumed_markers": 0,
+          "latest_mtime": "2026-10-14T03:02:23.630080"
+        },
+        {
+          "session": "20261013/04/29_06_58d7cf0e5670",
+          "raw_chunks_remaining": 3672,
+          "consumed_markers": 0,
+          "latest_mtime": "2026-10-13T04:59:44.801600"
+        },
+        {
+          "session": "20261012/23/30_23_53891da6414d",
+          "raw_chunks_remaining": 3044,
+          "consumed_markers": 3,
+          "latest_mtime": "2026-10-13T04:25:38.276906"
+        }
+      ],
+      "runtime_source_hashes_match_deployed_manifest": true
+    },
+    "auditor_model": "gpt-6-luna",
+    "new_camera_session_analysis_ack_confirmed": false,
+    "old_backlog_consumption_confirmed": true,
+    "runtime_kept_running": true,
+    "limitations": [
+      "Live recorder and legacy GUI are now active; isolated timing excluded this simultaneous load",
+      "Preset changed to clear, while prior comparison used saved cloudy preset",
+      "New camera session recording is confirmed; its analysis acknowledgements were still zero while older recordings were being resumed",
+      "CUA AX and screenshot retrieval timed out after Start; OS sampling showed active Tcl event loop/drawing",
+      "GUI support modules synchronized for compatibility were backed up, but all GUI features were not exhaustively exercised"
+    ],
+    "intermediate_benchmark_cleanup": {
+      "removed_intermediate_snapshot_roots": [
+        "/private/tmp/meteor-rtsp-realtime-20261013/resume-next-profile30/rtsp",
+        "/private/tmp/meteor-rtsp-realtime-20261013/resume-next-fast30/rtsp",
+        "/private/tmp/meteor-rtsp-realtime-20261013/resume-next-profile4-30/rtsp",
+        "/private/tmp/meteor-rtsp-realtime-20261013/resume-next-annotation4-30/rtsp",
+        "/private/tmp/meteor-rtsp-realtime-20261013/resume-next-final300/rtsp",
+        "/private/tmp/meteor-rtsp-realtime-20261013/resume-next-lazy300/rtsp",
+        "/private/tmp/meteor-rtsp-realtime-20261013/resume-next-workers300/rtsp",
+        "/private/tmp/meteor-rtsp-realtime-20261013/resume-next-shared300/rtsp",
+        "/private/tmp/meteor-rtsp-realtime-20261013/resume-next-pipeline300/rtsp",
+        "/private/tmp/meteor-rtsp-realtime-20261013/resume-next-completion300/rtsp",
+        "/private/tmp/meteor-rtsp-realtime-20261013/resume-next-encoder300/rtsp",
+        "/private/tmp/meteor-rtsp-realtime-20261013/resume-next-mask300/rtsp"
+      ],
+      "retained_artifact_references": [],
+      "original_recordings_modified": false,
+      "final_and_baseline_snapshots_retained": true,
+      "detection_media_and_measurement_logs_retained": true
+    }
   }
 }
