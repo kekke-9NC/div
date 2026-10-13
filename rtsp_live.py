@@ -309,6 +309,7 @@ class MinuteArchiver:
         self.seconds = seconds
         self.catalog = ChunkCatalog(root, ready)
         self.recovered = set()
+        self.archive_targets = {}
 
     def _recover(self):
         for marker in self.root.glob("[0-9]*/[0-9]*/*_minute_*.mp4.capture.json"):
@@ -367,13 +368,28 @@ class MinuteArchiver:
             write_json(str(path) + ".archived.json", {"archive": str(output.relative_to(self.root))})
         self.status(f"[RTSP保存] 1分アーカイブ保存: {output.name} ({len(paths)}区間)")
 
+    def _archive_target(self, path):
+        """Reuse an unchanged publication sidecar; still check its target each poll."""
+        marker = Path(str(path) + ".archived.json")
+        try:
+            stat = marker.stat()
+        except FileNotFoundError:
+            self.archive_targets.pop(path, None)
+            return None
+        identity = (stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+        cached = self.archive_targets.get(path)
+        if cached is None or cached[0] != identity:
+            target = self.root / json.loads(marker.read_text(encoding="utf-8"))["archive"]
+            self.archive_targets[path] = (identity, target)
+        return self.archive_targets[path][1]
+
     def _cleanup(self, path):
         consumed = Path(str(path) + ".analysis_consumed.json")
         archived = Path(str(path) + ".archived.json")
         if not consumed.exists() or not archived.exists():
             return
-        archive = self.root / json.loads(archived.read_text(encoding="utf-8"))["archive"]
-        if not archive.exists() or not rtsp_segments.is_finalized_mp4(archive):
+        archive = self._archive_target(path)
+        if archive is None or not archive.exists() or not rtsp_segments.is_finalized_mp4(archive):
             return
         for item in (path, path.with_name(path.stem + "_innovation.mp4"),
                      *(Path(str(path) + suffix) for suffix in (
@@ -385,17 +401,24 @@ class MinuteArchiver:
         self._recover()
         paths = self.catalog.paths()
         groups = {}
+        present = set(paths)
+        self.archive_targets = {path: value for path, value in self.archive_targets.items()
+                                if path in present}
+        target_exists = {}
         for path in paths:
             archived = Path(str(path) + ".archived.json")
-            if archived.exists():
-                target = self.root / json.loads(archived.read_text(encoding='utf-8'))['archive']
-                if target.exists():
+            target = self._archive_target(path)
+            if target is not None:
+                if target not in target_exists:
+                    target_exists[target] = target.exists()
+                if target_exists[target]:
                     self._cleanup(path)
                     continue
                 # A stale publication marker is not proof that pixels survive.
                 # Remove only that marker, then republish the retained originals
                 # and validate all frames before normal consumed cleanup.
                 archived.unlink()
+                self.archive_targets.pop(path, None)
                 self.status(f"[RTSP保存] 欠落した連結先を元区間から復旧: {target.name}")
             groups.setdefault(path.parent, []).append(path)
         for session_paths in groups.values():
