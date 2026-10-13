@@ -16,6 +16,13 @@ import threading
 import time
 
 
+def historical_replay_now(schedule_window,inputs):
+    end = (schedule_window[1] if schedule_window is not None else
+           max(datetime.fromisoformat(item['start_time']) + timedelta(seconds=item['frame_count']/item['fps'])
+               for item in inputs))
+    return end+timedelta(seconds=1)
+
+
 def run_replay(args, settings, options, noise, correction, mask):
     import cProfile
     import numpy as np
@@ -139,9 +146,7 @@ def run_replay(args, settings, options, noise, correction, mask):
     # Past-recording replay must not start the current wall-clock night's
     # job when a benchmark crosses its scheduled start. Finish the saved job
     # at its historical end, leaving production's clock behavior unchanged.
-    replay_now = ((schedule_window[1] if schedule_window is not None else
-                   max(datetime.fromisoformat(item['start_time']) + timedelta(seconds=item['frame_count']/item['fps'])
-                       for item in inputs)) + timedelta(seconds=1))
+    replay_now = historical_replay_now(schedule_window,inputs)
     original_tick = products.ScheduleProducts.tick
     def replay_tick(service, now=None):
         return original_tick(service,replay_now if now is None else now)
