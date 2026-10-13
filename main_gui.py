@@ -7,6 +7,8 @@ if __name__ == "__main__":
     # any GUI imports, model initialization or application lock acquisition.
     sys._meteor_cpu_spawn_ready = True
     multiprocessing.freeze_support()
+    from runtime_scheduling import configure_native_return_scheduling
+    configure_native_return_scheduling()
 
 if __name__ != "__mp_main__":
     from gui_app import *
