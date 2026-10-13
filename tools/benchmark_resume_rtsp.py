@@ -21,7 +21,7 @@ def rebase(value, source, target):
     if isinstance(value, list):
         return [rebase(item, source, target) for item in value]
     if isinstance(value, dict):
-        return {key: rebase(item, source, target) for key, item in value.items()}
+        return {rebase(key, source, target): rebase(item, source, target) for key, item in value.items()}
     return value
 
 
