@@ -905,6 +905,25 @@ class ScheduleProductTests(unittest.TestCase):
                 frame = products.decode_png(service.cache.read(key, "frame.png"))
                 self.assertGreater(frame.mean(), 200)
 
+    def test_replaced_archive_invalidates_timelapse_published_before_later_failure(self):
+        with tempfile.TemporaryDirectory() as root:
+            service = self.service(root,timelapse=True)
+            start = datetime(2026,10,12,20)
+            source = self.archive(root,start,count=600)
+            job = service._job(start)
+            service._archives(job)
+            service._prepare_samples(job)
+            service._finish(job)
+            output = Path(job['outputs']['timelapse'])
+            job['state'] = 'rendering'  # A later blend/concat step failed.
+            rtsp_live.write_json(str(source)+'.capture.json',dict(rtsp_live.timing(source),revision='replaced'))
+            service._prepare_samples(job)
+            self.assertNotIn('timelapse',job['outputs'])
+            self.assertTrue(output.exists(),'keep the previous file until atomic replacement')
+            service._finish(job)
+            self.assertEqual(job['state'],'complete')
+            self.assertTrue(Path(job['outputs']['timelapse']).exists())
+
     def test_new_overlapping_archive_invalidates_old_sample_pixels(self):
         with tempfile.TemporaryDirectory() as root:
             service = self.service(root, timelapse=True)

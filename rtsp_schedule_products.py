@@ -940,6 +940,7 @@ class ScheduleProducts:
         if changed:
             self._clear_sample_cache(job,count)
             job["samples"].clear()
+            job['outputs'].pop('timelapse',None)
             self.sample_gaps.pop(job["id"], None)
             self.status("[自動作成] 録画の差し替えを検知。タイムラプス素材を再作成します")
         job["sample_source_versions"] = source_versions
@@ -999,6 +1000,7 @@ class ScheduleProducts:
         count = max(1,round(job['options']['duration']*job['options']['fps']))
         self._clear_sample_cache(job,count)
         job['samples'].clear()
+        job['outputs'].pop('timelapse',None)
         job['sample_source_versions'] = {}
         self.sample_gaps.pop(job['id'],None)
         self._save(job)
@@ -1425,7 +1427,11 @@ class ScheduleProducts:
                 job["blends_done"] = True
                 self._save(job)
             if job["options"]["concatenate"]:
+                if job['options']['timelapse']:
+                    self._assert_sample_sources(job)
                 self._concatenate(job, output / "recording.mp4")
+            elif job['options']['timelapse']:
+                self._assert_sample_sources(job)
         self._assert_capture_ready(job)
         job["state"] = "complete"
         self._save(job)
