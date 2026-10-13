@@ -373,13 +373,15 @@ def predict_meteor_event(
         return 0.0
 
 
-def predict_noise_gate(frames, cutout_rect, frame_rate):
+def predict_noise_gate(frames, cutout_rect, frame_rate, feature_workers=None):
     """Return None for models without a gate, or if optional gating fails."""
     with _model_lock:
         gate = _active_noise_gate
     if gate is None:
         return None
     try:
+        if feature_workers is not None:
+            return gate.evaluate_features(feature_workers.extract(frames, cutout_rect, frame_rate))
         return gate.evaluate(frames, cutout_rect, frame_rate)
     except Exception as exc:
         # Never lose a meteor because an optional optimization failed.

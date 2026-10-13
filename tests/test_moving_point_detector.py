@@ -2,11 +2,15 @@ import unittest
 
 import cv2
 import numpy as np
+from unittest.mock import patch
 
-from moving_point_detector import detect_moving_point_tracks
+from moving_point_detector import detect_moving_point_tracks, _frame_detections
 
 
 class MovingPointDetectorTests(unittest.TestCase):
+    def test_empty_threshold_image_needs_no_components(self):
+        with patch('cv2.connectedComponentsWithStats', side_effect=AssertionError('empty image')):
+            self.assertEqual(_frame_detections(np.zeros((120, 160), np.float32), 8, 5, 150), [])
     def test_tracks_a_bright_point_without_a_line(self):
         frames = []
         for index in range(12):

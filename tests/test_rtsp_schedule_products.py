@@ -751,6 +751,24 @@ class ScheduleProductTests(unittest.TestCase):
                 frame = products.decode_png(service.cache.read(key, "frame.png"))
                 self.assertGreater(frame.mean(), 200)
 
+    def test_new_overlapping_archive_invalidates_old_sample_pixels(self):
+        with tempfile.TemporaryDirectory() as root:
+            service = self.service(root, timelapse=True)
+            start = datetime(2026, 10, 12, 20)
+            source = self.archive(root, start, count=600)
+            job = service._job(start)
+            service._archives(job)
+            service._prepare_samples(job)
+            original = service._timelapse_key(job)
+            overlapping = self.archive(root, start+timedelta(seconds=30), count=300,
+                                       name="00_30_aabbccddeeff_minute_000000001.mp4")
+            job["archives"].append(str(overlapping))
+            with mock.patch.object(service, "_source_frame", wraps=service._source_frame) as read:
+                service._prepare_samples(job)
+                self.assertEqual(read.call_count, 6)
+            self.assertNotEqual(service._timelapse_key(job), original)
+            self.assertTrue(source.exists() and overlapping.exists())
+
     def test_concat_validates_then_replaces_and_records_capture_time(self):
         with tempfile.TemporaryDirectory() as root:
             service = self.service(root, concatenate=True)

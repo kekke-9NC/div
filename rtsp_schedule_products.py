@@ -848,8 +848,21 @@ class ScheduleProducts:
         # Persist the identities behind the disposable PNGs. Replacing an
         # existing archive must rebuild its samples as well as the final MP4.
         previous = job.get("sample_source_versions", {})
-        if any(source in source_versions and json.dumps(stamp) != json.dumps(source_versions[source])
-               for source, stamp in previous.items()):
+        changed = bool(set(previous) - set(source_versions)) or any(
+            source in source_versions and json.dumps(stamp) != json.dumps(source_versions[source])
+            for source, stamp in previous.items())
+        sample_times = sorted(datetime.fromisoformat(when) for when in job["samples"].values())
+        for source in set(source_versions) - set(previous):
+            if not sample_times:
+                break
+            data = self._timing(source)
+            low = datetime.fromisoformat(data["start_time"])
+            high = low + timedelta(seconds=data["frame_count"] / data["fps"])
+            position = bisect_right(sample_times, low-timedelta(microseconds=1))
+            if position < len(sample_times) and sample_times[position] < high:
+                changed = True
+                break
+        if changed:
             self.cache.clear([job["id"] + f"_sample_{int(index):06d}" for index in job["samples"]])
             job["samples"].clear()
             self.sample_gaps.pop(job["id"], None)

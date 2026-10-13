@@ -2,12 +2,20 @@ import unittest
 
 import cv2
 import numpy as np
+from unittest.mock import patch
 
 from short_flash_detector import ShortFlashDetector, candidate_from_points
 import video_processing
 
 
 class ShortFlashTests(unittest.TestCase):
+    def test_empty_foreground_still_advances_background_and_flushes_tracks(self):
+        detector = ShortFlashDetector(25, 5)
+        with patch('cv2.connectedComponentsWithStats', side_effect=AssertionError('empty image')):
+            self.assertEqual(detector.consume([np.full((120, 160, 3), 17, np.uint8)]*8, 0, final=True), [])
+        self.assertEqual(detector.last_frame, 7)
+        self.assertFalse(detector.active)
+        np.testing.assert_array_equal(detector.background, np.full((120, 160), 17, np.float32))
     def test_two_frame_motion_is_kept(self):
         points = [[10, 90, 80, 200, 5, 16, 40],
                   [11, 92, 96, 250, 5, 16, 50]]

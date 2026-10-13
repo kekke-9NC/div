@@ -1143,6 +1143,8 @@ def _run_realtime_rtsp(
     notify_on_detection, noise_twin_options, rtsp_fps,
 ):
     effective_cancel = cancel_flag or threading.Event()
+    from rtsp_gate_workers import LiveGateFeatures
+    gate_features = LiveGateFeatures()
     options = dict(noise_twin_options or {})
     twin = noise_twin.NoiseTwinOptions.from_value(options)
     mean = temporal_mean.normalize_window(options.get("temporal_mean_frames", 0))
@@ -1168,6 +1170,7 @@ def _run_realtime_rtsp(
         detector_options = dict(save_options or {})
         detector_options.update(
             _rtsp_live_capture=capture, _rtsp_live_evidence_capture=evidence,
+            _rtsp_gate_features=gate_features,
             rtsp_analysis_context={"base_datetime": capture.started_at},
         )
         processed_options = dict(options, already_processed=True)
@@ -1217,7 +1220,10 @@ def _run_realtime_rtsp(
                 preview_callback, requested_fps=rtsp_fps,
             )
     finally:
-        runner.stop()
+        try:
+            runner.stop()
+        finally:
+            gate_features.close()
 
 
 def rtsp_save_and_process_thread_target(*args, schedule_product_options=None, **kwargs):

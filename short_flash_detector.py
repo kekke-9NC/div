@@ -42,6 +42,16 @@ def candidate_from_points(points, frame_rate=25.0):
     """Validate a component track, keeping its luminous head, not its decay."""
     if len(points) < 2:
         return None
+    # These existing rejection conditions depend only on the original scalar
+    # observations. Check them before allocating a matrix for noise tracks.
+    if points[-1][0] - points[0][0] > frame_rate * 3:
+        return None
+    peak_value = max(point[6] for point in points)
+    if peak_value < 12:
+        return None
+    selected = [point for point in points if point[6] >= max(8.0, peak_value * .20)]
+    if len(selected) < 2 or max(max(point[4:6]) for point in selected) < 8:
+        return None
     pts = np.asarray(points, dtype=np.float64)
     if pts[-1, 0] - pts[0, 0] > frame_rate * 3:
         return None
@@ -81,8 +91,9 @@ def _component_detections(residual, labels, stats, centers):
     ) + 1
     if len(eligible) > 400:
         # Aggregate exact integer sums in one image pass. The old loop
-        # visited thousands of cloud/noise components only to discard
-        # all but 400. Weighted bincount is exact for these uint8 sums.
+        # visited each cloud/noise component in Python. The same aggregation
+        # is also cheaper for moderately dense frames; retain the small-loop
+        # path for sparse images. Bincount is exact for these uint8 sums.
         keep = np.zeros(count, dtype=bool)
         keep[eligible] = True
         pixels = keep[labels.ravel()]
@@ -175,8 +186,11 @@ class ShortFlashDetector:
                     permitted[max(0, y1):min(height, y2), max(0, x1):min(width, x2)] = 1
                     permitted_shape = gray.shape
                 binary &= permitted
-            count, labels, stats, centers = cv2.connectedComponentsWithStats(binary, 8)
-            detections = _component_detections(residual, labels, stats, centers)
+            if cv2.countNonZero(binary):
+                count, labels, stats, centers = cv2.connectedComponentsWithStats(binary, 8)
+                detections = _component_detections(residual, labels, stats, centers)
+            else:
+                detections = []
             if detections:
                 tree = cKDTree(np.asarray(detections)[:, :2])
                 choices = []

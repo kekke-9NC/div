@@ -219,6 +219,7 @@ def run_replay(args, settings, options, noise, correction, mask):
     video_processing._SavedEventIndex = ObservedIndex
     file_utils.save_rtsp_video_segments = recorder
     before = resource.getrusage(resource.RUSAGE_SELF)
+    before_children = resource.getrusage(resource.RUSAGE_CHILDREN)
     try:
         with (args.output / 'pipeline.log').open('w') as log, contextlib.redirect_stdout(log):
             # These are the actual GUI entry point's arguments. Incoming network
@@ -250,6 +251,10 @@ def run_replay(args, settings, options, noise, correction, mask):
     seconds = time.perf_counter()-started
     (args.output / 'product_keys.json').write_text(json.dumps(product_keys, indent=2))
     after = resource.getrusage(resource.RUSAGE_SELF)
+    after_children = resource.getrusage(resource.RUSAGE_CHILDREN)
+    parent_cpu = after.ru_utime+after.ru_stime-before.ru_utime-before.ru_stime
+    child_cpu = (after_children.ru_utime+after_children.ru_stime
+                 -before_children.ru_utime-before_children.ru_stime)
     items = [dict(row['detection'], source_video=str(Path(row['source']).relative_to(root))) for row in detections]
     return dict(seconds=seconds, input_seconds=duration, processing_ratio=seconds/duration,
                 target_ratio=.25, meets_target=seconds <= duration*.25, faster_than_realtime=seconds < duration,
@@ -261,4 +266,6 @@ def run_replay(args, settings, options, noise, correction, mask):
                 errors=errors, meteor=sum(item.get('label') == 'meteor' for item in items),
                 background_gate=sum(item.get('classification_stage') == 'foreground_gate' for item in items),
                 peak_rss_bytes=after.ru_maxrss,
-                cpu_seconds=after.ru_utime+after.ru_stime-before.ru_utime-before.ru_stime), items
+                largest_child_peak_rss_bytes=after_children.ru_maxrss,
+                parent_cpu_seconds=parent_cpu, child_cpu_seconds=child_cpu,
+                cpu_seconds=parent_cpu+child_cpu), items

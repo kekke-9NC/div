@@ -7,7 +7,7 @@ remaining decision. Training and runtime share this representation.
 from __future__ import annotations
 import cv2
 import numpy as np
-from universal_meteor_model import _crop_square, _uint8_median
+from event_pixels import _crop_square, _uint8_median
 from event_boost_model import EventBoostClassifier
 from temporal_statistics import temporal_median, half_integer_percentiles
 
@@ -64,6 +64,9 @@ class EventNoiseGate:
 
     def evaluate(self,frames,rect=None,frame_rate=25.):
         features=extract_noise_gate_features(frames,rect,frame_rate)
+        return self.evaluate_features(features)
+
+    def evaluate_features(self, features):
         # Dark-sky faint meteors keep the full classifier path. This is a
         # radiometric condition on the actual crop, never a clock/date rule.
         if self.brightness_min is not None and features[6] < self.brightness_min:

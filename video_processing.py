@@ -1057,7 +1057,7 @@ def _cache_scheduled_event(save_options, frames, fps, started_at, line, is_meteo
 
 def _coarse_proposals(diff_img, frame_window, first_frame, frame_rate, mask, roi,
                       cancel_flag, min_length, hough, canny1, canny2, use_temporal,
-                      flash_detector, frame_cache, gray_cache, final, executor):
+                      flash_detector, frame_cache, gray_cache, final, executor, cpu_features=None):
     """Run independent proposers concurrently; join the stateful flash task.
 
     Each next window waits for all three tasks, even if one fails. The flash
@@ -1069,7 +1069,8 @@ def _coarse_proposals(diff_img, frame_window, first_frame, frame_rate, mask, roi
         canny_thresh1=canny1, canny_thresh2=canny2, hough_threshold=hough))]
     if config.MOVING_POINT_DETECT_ENABLED and use_temporal and frame_window:
         frames = frame_cache.mask_frames(frame_window, mask) if mask is not None else frame_window
-        calls.append((moving_point_detector.detect_moving_point_tracks, (frames,), dict(
+        moving_proposer = cpu_features.moving_tracks if cpu_features is not None else moving_point_detector.detect_moving_point_tracks
+        calls.append((moving_proposer, (frames,), dict(
             frame_rate=frame_rate, scale=config.MOVING_POINT_SCALE,
             threshold=config.MOVING_POINT_RESIDUAL_THRESHOLD, max_gap=config.MOVING_POINT_MAX_GAP,
             max_step=config.MOVING_POINT_MAX_STEP, max_candidates=config.MOVING_POINT_MAX_CANDIDATES,
@@ -1084,7 +1085,7 @@ def _coarse_proposals(diff_img, frame_window, first_frame, frame_rate, mask, roi
         values = [future.result() for future in futures]
     hough_lines, moving, flashes = values[0], [], []
     for (fn, _args, _kwargs), value in zip(calls[1:], values[1:]):
-        if fn == moving_point_detector.detect_moving_point_tracks:
+        if fn == moving_point_detector.detect_moving_point_tracks or (cpu_features is not None and fn == cpu_features.moving_tracks):
             moving = value
         else:
             flashes = value
@@ -1098,7 +1099,7 @@ class _LiveProposalPipeline:
     after the consumer finishes a window, so cancellation retains unprocessed
     spool input. The flash detector has one owner for its entire session.
     """
-    def __init__(self, generator, cap, mask, roi, cancel, executor):
+    def __init__(self, generator, cap, mask, roi, cancel, executor, cpu_features=None):
         self.generator, self.cap = generator, cap
         self.stop = threading.Event()
         self.queue = queue.Queue(maxsize=2)
@@ -1143,7 +1144,7 @@ class _LiveProposalPipeline:
                         cap.get(cv2.CAP_PROP_FPS), mask, roi, cancel,
                         config.RTSP_MIN_LINE_LENGTH, config.RTSP_HOUGH_THRESHOLD,
                         config.RTSP_CANNY_THRESH1, config.RTSP_CANNY_THRESH2, True,
-                        flash, cache, gray_cache, final, executor)
+                        flash, cache, gray_cache, final, executor, cpu_features)
                     if not put(self.queue, (data, proposals, final)):
                         break
             except BaseException as exc:
@@ -1436,7 +1437,8 @@ def create_line_video_clips(
             include_frame_window=True,
         )
         if is_rtsp and getattr(cap, 'continuous_rtsp', False):
-            proposal_pipeline = _LiveProposalPipeline(diff_generator, cap, mask, roi, cancel_flag, coarse_executor)
+            proposal_pipeline = _LiveProposalPipeline(diff_generator, cap, mask, roi, cancel_flag, coarse_executor,
+                                                       save_options.get('_rtsp_gate_features'))
             diff_generator = iter(proposal_pipeline)
 
         last_read_frame_index_by_diff = -1
@@ -1665,7 +1667,8 @@ def create_line_video_clips(
                                     if core is not None and model.get_active_model_info().get('architecture') in model.EVENT_ARCHITECTURES:
                                         inference_rect = cand['flash'].classifier_rect(img_w, img_h) if cand['flash'] else _noise_gate_cutout_rect(cand['cx'], cand['cy'], img_w, img_h)
                                         gate_frames = frame_range_cache.noise_gate_frames(core, inference_rect) if is_rtsp else core
-                                        gate = model.predict_noise_gate(gate_frames, None if is_rtsp else inference_rect, frame_rate)
+                                        gate = model.predict_noise_gate(gate_frames, None if is_rtsp else inference_rect, frame_rate,
+                                            feature_workers=save_options.get('_rtsp_gate_features') if is_rtsp else None)
                                 return indices, rect, gate
 
                             if num_workers == 1:
@@ -1780,7 +1783,8 @@ def create_line_video_clips(
                                 inference_rect_for_gate = cand['flash'].classifier_rect(img_w, img_h) if cand['flash'] else _noise_gate_cutout_rect(cx, cy, img_w, img_h)
                                 gate_result = confirmed['gate_result']
                                 if gate_result is None:
-                                    gate_result = model.predict_noise_gate(frame_range_cache.noise_gate_frames(ml_source_frames, inference_rect_for_gate) if is_rtsp else ml_source_frames, None if is_rtsp else inference_rect_for_gate, frame_rate)
+                                    gate_result = model.predict_noise_gate(frame_range_cache.noise_gate_frames(ml_source_frames, inference_rect_for_gate) if is_rtsp else ml_source_frames, None if is_rtsp else inference_rect_for_gate, frame_rate,
+                                        feature_workers=save_options.get('_rtsp_gate_features') if is_rtsp else None)
                                 if gate_result is not None and gate_result[0] < gate_result[1]:
                                     detection_counter += 1
                                     when = base_datetime + timedelta(seconds=((adjusted_start_frame + adjusted_end_frame) // 2) / frame_rate)
@@ -2397,7 +2401,8 @@ def create_line_video_clips(
                         frame_rate,
                     )
                     inference_rect_for_gate = flash.classifier_rect(img_w, img_h) if flash else _noise_gate_cutout_rect(cx, cy, img_w, img_h)
-                    gate_result = model.predict_noise_gate(frame_range_cache.noise_gate_frames(ml_source_frames, inference_rect_for_gate) if is_rtsp else ml_source_frames, None if is_rtsp else inference_rect_for_gate, frame_rate)
+                    gate_result = model.predict_noise_gate(frame_range_cache.noise_gate_frames(ml_source_frames, inference_rect_for_gate) if is_rtsp else ml_source_frames, None if is_rtsp else inference_rect_for_gate, frame_rate,
+                        feature_workers=save_options.get('_rtsp_gate_features') if is_rtsp else None)
                     if gate_result is not None and gate_result[0] < gate_result[1]:
                         detection_counter += 1
                         when = base_datetime + timedelta(seconds=((adjusted_start_frame + adjusted_end_frame) // 2) / frame_rate)

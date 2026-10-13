@@ -70,6 +70,8 @@ def _frame_detections(
     """Extract small bright components from one residual frame."""
     smoothed = cv2.GaussianBlur(residual, (3, 3), 0)
     binary = (smoothed >= float(threshold)).astype(np.uint8)
+    if not cv2.countNonZero(binary):
+        return []
     component_count, labels, stats, centroids = cv2.connectedComponentsWithStats(
         binary, connectivity=8
     )
@@ -217,6 +219,7 @@ def detect_moving_point_tracks(
     max_components_per_frame: int = 150,
     max_candidates: int = 20,
     gray_cache: GrayFrameCache | None = None,
+    _prepared_gray: np.ndarray | None = None,
 ) -> List[MovingPointTrack]:
     """Return coherent moving bright-point tracks in ``frames``.
 
@@ -231,8 +234,9 @@ def detect_moving_point_tracks(
     if not 0.25 <= scale <= 1.0:
         raise ValueError("scale must be between 0.25 and 1.0")
 
-    gray_frames = np.stack(gray_cache.convert(frames, scale) if gray_cache is not None
-                           else [_gray_small(frame, scale) for frame in frames])
+    gray_frames = (_prepared_gray if _prepared_gray is not None else
+                   np.stack(gray_cache.convert(frames, scale) if gray_cache is not None
+                            else [_gray_small(frame, scale) for frame in frames]))
     if gray_frames.dtype == np.uint8:
         # Integer medians (including the mean of two middle values) are exact
         # half-integers in float32. Partition the smaller uint8 cube first.
