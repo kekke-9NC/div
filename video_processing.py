@@ -1207,6 +1207,17 @@ def _rtsp_finer_revision(mask_revision=None):
                 getattr(model._active_noise_gate,'threshold',None),getattr(model._active_noise_gate,'brightness_min',None))
 
 
+def _finer_publication_order(confirmed):
+    """Retain actual CPU completion order across the lookahead boundary.
+
+    Cached evidence was completed by the producer, before consumer fallback
+    tasks began. Sorting by that recorded completion avoids imposing the
+    artificial completion order of futures that only look up ready results.
+    Uncached tasks keep their original completion order.
+    """
+    return sorted(confirmed,key=lambda item: item.get('preparation_order',float('inf')))
+
+
 def _prepare_live_finer_packet(data, proposals, frame_rate, mask, cancel, frame_cache, cpu_features, executor):
     """Prepare independent candidate evidence; history decisions stay with the consumer."""
     lines,flashes = proposals
@@ -1803,7 +1814,7 @@ def create_line_video_clips(
                             # 並列処理で確認された候補を収集
                             confirmed_candidates_parallel = []
                         
-                            def collect_finer_result(cand, line_detected_indices, cutout_rect_finer, gate_result=None, prepared_event=None):
+                            def collect_finer_result(cand, line_detected_indices, cutout_rect_finer, gate_result=None, prepared_event=None, preparation_order=None):
                                 if line_detected_indices:
                                     print(f"\n--- 詳細検出確認 中心: ({cand['cx']}, {cand['cy']}) ---")
                                     confirmed_candidates_parallel.append({
@@ -1812,6 +1823,7 @@ def create_line_video_clips(
                                         'cutout_rect_finer': cutout_rect_finer,
                                         'gate_result': gate_result,
                                         'prepared_event': prepared_event,
+                                        **({'preparation_order':preparation_order} if preparation_order is not None else {}),
                                     })
                                 else:
                                     print(f"候補 ({cand['cx']}, {cand['cy']}): 詳細検出では流星は見つかりませんでした。")
@@ -1833,7 +1845,7 @@ def create_line_video_clips(
                                         and cached[0] == _rtsp_finer_revision(mask_revision)):
                                     result = cached[1].get(cand['line'])
                                     if result is not None:
-                                        return result
+                                        return (*result,tuple(cached[1]).index(cand['line']))
                                 return _refine_and_gate_candidate(cand,worker_kwargs,frames_for_finer_detect,actual_start_finer,
                                     total_frames,frame_rate,is_rtsp,buffer_start_frame_finer_parallel,
                                     buffer_end_frame_finer_parallel,img_w,img_h,frame_range_cache,save_options,cancel_flag)
@@ -1868,7 +1880,7 @@ def create_line_video_clips(
                             print(f"並列処理完了: {len(confirmed_candidates_parallel)}件の検出を確認")
                         
                             # 確認された候補に対して保存処理を実行
-                            for confirmed in confirmed_candidates_parallel:
+                            for confirmed in _finer_publication_order(confirmed_candidates_parallel):
                                 if cancel_flag is not None and cancel_flag.is_set():
                                     break
                             

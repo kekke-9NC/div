@@ -15,6 +15,16 @@ from universal_meteor_model import _crop_square, _gray, _robust_residual_cube
 
 
 class DetectionOptimizationTests(unittest.TestCase):
+    def test_finer_publication_restores_actual_producer_completion_order(self):
+        events = [dict(id='prepared-later',preparation_order=4),dict(id='fallback-a'),
+                  dict(id='prepared-first',preparation_order=0),dict(id='fallback-b'),
+                  dict(id='prepared-middle',preparation_order=2)]
+        ordered = video_processing._finer_publication_order(events)
+        self.assertEqual([event['id'] for event in ordered],
+                         ['prepared-first','prepared-middle','prepared-later','fallback-a','fallback-b'])
+        self.assertEqual([event['id'] for event in events],
+                         ['prepared-later','fallback-a','prepared-first','fallback-b','prepared-middle'])
+
     def test_lookahead_finer_evidence_matches_consumer_with_independent_mask_cache(self):
         from concurrent.futures import ThreadPoolExecutor
         import model
