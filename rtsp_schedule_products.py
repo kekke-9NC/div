@@ -414,6 +414,7 @@ class ScheduleProducts:
         self.flush_archives = lambda: None
         self.thread = None
         self.overlay_module = None
+        self.annotation_worker = None
         self.source_data = {}
         self.source_stamps = {}
         self.source_indexes = {}
@@ -903,9 +904,19 @@ class ScheduleProducts:
             payload = job["sky_payload"]
             if frame.shape[:2] != (payload["height"], payload["width"]):
                 raise ValueError("配信の星座モデルと録画の解像度が一致しません")
-            layer = self.overlay_module.render_layer(payload, when, self._mask(job), job["sky_opacity"])
-            alpha = layer[:, :, 3:4].astype(np.float32)/255
-            frame = np.rint(frame*(1-alpha) + layer[:, :, :3][:, :, ::-1]*alpha).astype(np.uint8)
+            mask = self._mask(job)
+            rendered = None
+            if self.thread is not None and threading.current_thread() is self.thread and not self.cancel.is_set():
+                if self.annotation_worker is None:
+                    from rtsp_annotation_worker import AnnotationWorker
+                    self.annotation_worker = AnnotationWorker()
+                rendered = self.annotation_worker.render(frame,payload,when,mask,job['sky_opacity'])
+            if rendered is None:
+                layer = self.overlay_module.render_layer(payload, when, mask, job["sky_opacity"])
+                alpha = layer[:, :, 3:4].astype(np.float32)/255
+                frame = np.rint(frame*(1-alpha) + layer[:, :, :3][:, :, ::-1]*alpha).astype(np.uint8)
+            else:
+                frame = rendered
         if options["timestamp"]:
             import timelapse_creator
             frame = timelapse_creator._draw_timestamp(frame, when, timelapse_creator._normalize_timestamp_settings({
@@ -1502,6 +1513,8 @@ class ScheduleProducts:
         self.cancel.set()
         if self.thread:
             self.thread.join(timeout=5)
+        if self.annotation_worker is not None:
+            self.annotation_worker.close()
 
 
 _SERVICE_LOCK = threading.RLock()
