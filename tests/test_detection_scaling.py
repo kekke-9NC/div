@@ -314,3 +314,49 @@ def test_model_reload_during_preprocessing_keeps_one_revision_per_event():
                         extract_event_features=lambda *args: np.zeros(2),
                         extract_motion_features=lambda *args: np.zeros(2)):
         assert model.predict_meteor_event([object()], None, None, 25) == .75
+
+
+def test_prepared_event_keeps_exact_vectors_and_requires_identical_evidence():
+    rng = np.random.default_rng(985)
+    frames = list(rng.integers(0,256,(8,80,96,3),dtype=np.uint8))
+    rect,line = (3,5,72,75),((25,30),(45,50))
+    vectors = []
+    class Classifier:
+        def predict_proba(self, vector):
+            vectors.append(vector.copy())
+            return np.array([.75])
+    architecture = model.EVENT_BOOST_ARCHITECTURE_NAME
+    with patch.multiple(model,model=Classifier(),_model_ready=True,
+                        _active_model_info={'architecture':architecture}):
+        prepared = model.prepare_meteor_inputs(frames,rect,line,25)
+        assert prepared.matches(frames,rect,line,25,architecture)
+        assert not prepared.matches([frame.copy() for frame in frames],rect,line,25,architecture)
+        assert not prepared.matches(frames,rect,line,24,architecture)
+        assert not prepared.matches(frames,rect,((26,30),(45,50)),25,architecture)
+        assert not prepared.matches(frames,(4,5,72,75),line,25,architecture)
+        assert not prepared.matches(frames,rect,line,25,model.UNIVERSAL_ARCHITECTURE_NAME)
+        assert model.predict_meteor_event(frames,rect,line,25) == .75
+        with patch.object(model,'_prepare_meteor_inputs',side_effect=AssertionError('recomputed')):
+            assert model.predict_meteor_event(frames,rect,line,25,prepared=prepared) == .75
+        np.testing.assert_array_equal(vectors[0],vectors[1])
+        with patch.object(model,'_prepare_meteor_inputs',wraps=model._prepare_meteor_inputs) as prepare:
+            assert model.predict_meteor_event([frame.copy() for frame in frames],rect,line,25,prepared=prepared) == .75
+            assert prepare.call_count == 1
+
+
+def test_prepared_event_model_reload_uses_new_weights_and_rechecks_architecture():
+    frames = [np.zeros((40,40,3),np.uint8)]*3
+    old = type('Classifier',(),{'predict_proba':lambda self,v:np.array([.75])})()
+    new = type('Classifier',(),{'predict_proba':lambda self,v:np.array([.25])})()
+    with patch.multiple(model,model=old,_model_ready=True,
+                        _active_model_info={'architecture':model.EVENT_BOOST_ARCHITECTURE_NAME}):
+        prepared = model.prepare_meteor_inputs(frames,None,None,25)
+        with model._model_lock:
+            model.model = new
+        assert model.predict_meteor_event(frames,None,None,25,prepared=prepared) == .25
+        model._active_model_info = {'architecture':model.EVENT_TRANSFORMER_ARCHITECTURE_NAME}
+        image,kymo,features = prepared.image,prepared.kymograph,prepared.features
+        new.encoder = type('Encoder',(),{'encode':lambda self,images:np.zeros((1,4),np.float32)})()
+        with patch.object(model,'_prepare_meteor_inputs',wraps=model._prepare_meteor_inputs) as prepare:
+            assert model.predict_meteor_event(frames,None,None,25,prepared=prepared) == .25
+            assert prepare.call_count == 1

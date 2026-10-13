@@ -197,7 +197,7 @@ class LiveGateFeatures:
         with self.lock:
             if self.closed:
                 return
-            if candidates >= 12:
+            if candidates >= 2:
                 self.active, self.quiet_windows = True, 0
             elif self.active:
                 self.quiet_windows += 1

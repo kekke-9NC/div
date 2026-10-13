@@ -1683,7 +1683,7 @@ def create_line_video_clips(
                             # 並列処理で確認された候補を収集
                             confirmed_candidates_parallel = []
                         
-                            def collect_finer_result(cand, line_detected_indices, cutout_rect_finer, gate_result=None):
+                            def collect_finer_result(cand, line_detected_indices, cutout_rect_finer, gate_result=None, prepared_event=None):
                                 if line_detected_indices:
                                     print(f"\n--- 詳細検出確認 中心: ({cand['cx']}, {cand['cy']}) ---")
                                     confirmed_candidates_parallel.append({
@@ -1691,6 +1691,7 @@ def create_line_video_clips(
                                         'line_detected_indices': line_detected_indices,
                                         'cutout_rect_finer': cutout_rect_finer,
                                         'gate_result': gate_result,
+                                        'prepared_event': prepared_event,
                                     })
                                 else:
                                     print(f"候補 ({cand['cx']}, {cand['cy']}): 詳細検出では流星は見つかりませんでした。")
@@ -1711,7 +1712,7 @@ def create_line_video_clips(
                                     temporal_bounds=(cand['flash'].start_frame, cand['flash'].end_frame) if cand['flash'] else None,
                                     **worker_kwargs,
                                 )
-                                gate = None
+                                gate = prepared_event = None
                                 if indices:
                                     low, high = min(indices), max(indices)
                                     pad = int(config.FINER_DETECT_PADDING_SECONDS * frame_rate)
@@ -1725,7 +1726,7 @@ def create_line_video_clips(
                                         # keep the established fallback below.
                                         clip_high = min(clip_high, buffer_end_frame_finer_parallel)
                                         if clip_low < buffer_start_frame_finer_parallel:
-                                            return indices, rect, None
+                                            return indices, rect, None, None
                                     model_pad = max(0, int(round(config.MODEL_EVENT_PADDING_SECONDS * frame_rate)))
                                     core_low, core_high = max(clip_low, low-model_pad), min(clip_high, high+model_pad)
                                     core = _resident_frame_slice(frames_for_finer_detect, actual_start_finer, core_low, core_high)
@@ -1734,7 +1735,12 @@ def create_line_video_clips(
                                         gate_frames = frame_range_cache.noise_gate_frames(core, inference_rect) if is_rtsp else core
                                         gate = model.predict_noise_gate(gate_frames, None if is_rtsp else inference_rect, frame_rate,
                                             feature_workers=save_options.get('_rtsp_gate_features') if is_rtsp else None)
-                                return indices, rect, gate
+                                        if is_rtsp and (gate is None or gate[0] >= gate[1]) and not (cancel_flag is not None and cancel_flag.is_set()):
+                                            try:
+                                                prepared_event = model.prepare_meteor_inputs(core,inference_rect,cand['line'],frame_rate)
+                                            except Exception as exc:
+                                                print(f"分類前処理を通常経路で再試行します: {exc}")
+                                return indices, rect, gate, prepared_event
 
                             if num_workers == 1:
                                 for cand in valid_candidates:
@@ -1943,6 +1949,7 @@ def create_line_video_clips(
                                     detected_line=((x1, y1), (x2, y2)),
                                     frame_rate=frame_rate,
                                     fallback_image_path=temp_diff_image_path,
+                                    **({'prepared': confirmed['prepared_event']} if confirmed.get('prepared_event') is not None else {}),
                                 )
                                 try: os.remove(temp_diff_image_path)
                                 except OSError as e: print(f"警告: 一時差分ファイルの削除に失敗: {e}")

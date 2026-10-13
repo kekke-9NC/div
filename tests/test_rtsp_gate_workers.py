@@ -87,6 +87,25 @@ def test_supported_frozen_gui_allows_cpu_workers(monkeypatch):
     workers.close()
 
 
+def test_activity_switches_placement_and_resets_for_each_connection():
+    workers = LiveGateFeatures(workers=2)
+    workers.observe(1)
+    assert not workers.active
+    workers.observe(2)
+    assert workers.active
+    for _ in range(31):
+        workers.observe(0)
+    assert workers.active
+    workers.observe(0)
+    assert not workers.active
+    workers.observe(2)
+    workers.reset_activity()
+    assert not workers.active and workers.quiet_windows == 0
+    workers.close()
+    workers.observe(20)
+    assert workers.closed
+
+
 def test_closed_workers_cannot_restart_or_allocate_shared_pixels():
     import moving_point_detector
     workers = LiveGateFeatures(workers=2)
