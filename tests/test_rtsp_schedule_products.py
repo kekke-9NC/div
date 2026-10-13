@@ -220,6 +220,75 @@ class ScheduleProductTests(unittest.TestCase):
             self.assertTrue(cache.put("new", {"a": b"1234"}))
             self.assertLessEqual(cache.size(), 9)
 
+    def test_cache_publishing_reuses_shared_inventory_without_file_walks(self):
+        with tempfile.TemporaryDirectory() as root:
+            cache = products.ProductCache(root, 20)
+            cache.put('old', {'frame.png': b'1234'})
+            with mock.patch.object(Path, 'rglob', side_effect=AssertionError('repeated full inventory')):
+                manager = products.ProductCache(root, 20)
+                self.assertTrue(manager.put('new', {'frame.png': b'5678'}))
+                self.assertEqual(cache.entry_sizes(), [('old', 4), ('new', 4)])
+                cache.clear(['old'])
+                self.assertEqual(manager.entry_sizes(), [('new', 4)])
+            self.assertEqual(cache.size(), 4)
+
+    def test_cache_pending_clear_cannot_report_successful_publication(self):
+        with tempfile.TemporaryDirectory() as root:
+            cache = products.ProductCache(root, 20)
+            cache.put('input', {'frame.png': b'1234'})
+            with cache.pin(['input']):
+                cache.clear(['input'])
+                self.assertFalse(cache.put('input', {'frame.png': b'5678'}))
+                self.assertFalse(cache.build('input', 4, lambda directory: None))
+            self.assertEqual(cache.entry_sizes(), [])
+            self.assertTrue(cache.put('input', {'frame.png': b'5678'}))
+            self.assertEqual(cache.size(), 4)
+
+    def test_cache_external_entries_and_explicit_size_reconcile(self):
+        with tempfile.TemporaryDirectory() as root:
+            cache = products.ProductCache(root, 10)
+            external = Path(root)/'external'
+            external.mkdir()
+            (external/'frame.png').write_bytes(b'1234')
+            self.assertEqual(cache.entry_sizes(), [('external', 4)])
+            (external/'frame.png').write_bytes(b'12345678')
+            self.assertEqual(cache.size(), 8)
+            self.assertTrue(cache.put('new', {'frame.png': b'1234'}))
+            self.assertEqual(cache.entry_sizes(), [('new', 4)])
+
+    def test_cache_root_replacement_invalidates_inventory(self):
+        with tempfile.TemporaryDirectory() as parent:
+            root = Path(parent)/'cache'
+            cache = products.ProductCache(root, 20)
+            cache.put('old', {'frame.png': b'1234'})
+            root.rename(Path(parent)/'previous')
+            root.mkdir()
+            self.assertEqual(cache.entry_sizes(), [])
+            self.assertTrue(cache.put('new', {'frame.png': b'5678'}))
+            self.assertEqual(cache.size(), 4)
+
+    def test_cache_clear_during_build_rejects_same_key_put(self):
+        with tempfile.TemporaryDirectory() as root:
+            cache = products.ProductCache(root, 20)
+            def writer(directory):
+                (directory/'recording.mp4').write_bytes(b'1234')
+                cache.clear(['video'])
+                self.assertFalse(cache.put('video', {'frame.png': b'5678'}))
+                self.assertFalse(cache.build('video', 4, lambda target: None))
+            self.assertFalse(cache.build('video', 8, writer))
+            self.assertEqual(cache.size(), 0)
+
+    def test_cache_active_writer_overshoot_and_unmanaged_bytes_count_for_quota(self):
+        with tempfile.TemporaryDirectory() as root:
+            cache = products.ProductCache(root, 20)
+            (Path(root)/'unmanaged').write_bytes(b'1234')
+            def writer(directory):
+                (directory/'recording.mp4').write_bytes(b'0'*17)
+                self.assertFalse(cache.put('event', {'frame.png': b'x'}))
+            with self.assertRaisesRegex(IOError, '予約容量'):
+                cache.build('video', 8, writer)
+            self.assertEqual(cache.size(), 4)
+
     def test_video_build_reservation_does_not_block_delivery_or_get_removed(self):
         with tempfile.TemporaryDirectory() as root:
             cache = products.ProductCache(root, 20)

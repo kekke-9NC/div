@@ -34,6 +34,7 @@ _CACHE_LOCK = threading.RLock()
 _CACHE_BUILDS = {}
 _CACHE_PINS = Counter()
 _CACHE_CLEAR_PENDING = set()
+_CACHE_STATES = {}
 CONCAT_GROUP_SIZE = 10
 DEFAULTS = dict(timelapse=False, blend_video=False, blend_image=False, concatenate=False,
                 duration=15.0, fps=60.0, constellations=True, timestamp=True,
@@ -103,7 +104,12 @@ def overlapping_schedule_windows(started_at, ended_at, clock):
 
 
 class ProductCache:
-    """Atomic cache entries with oldest-created-first eviction and shared locking."""
+    """Atomic immutable entries with shared capacity accounting.
+
+    Published entries are only changed through this class. Explicit size queries
+    reconcile disk contents; root replacement or external entry additions also
+    invalidate the ledger. Restart always inventories the actual files.
+    """
     def __init__(self, root, limit=CACHE_LIMIT):
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
@@ -116,26 +122,82 @@ class ProductCache:
             self._trim(0)
 
     def entries(self):
-        return sorted((p for p in self.root.iterdir() if p.is_dir() and not p.name.startswith(".")),
-                      key=lambda p: (p.stat().st_mtime_ns, p.name))
+        with _CACHE_LOCK:
+            state = self._state()
+            return sorted(state['entries'], key=lambda path: (state['entries'][path][1], path.name))
+
+    def _root_stamp(self):
+        stat = self.root.stat()
+        return stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_ctime_ns
+
+    def _state(self, refresh=False):
+        stamp = self._root_stamp()
+        state = _CACHE_STATES.get(self.root)
+        if refresh or state is None or state['stamp'] != stamp:
+            entries = {}
+            unmanaged = 0
+            for entry in self.root.iterdir():
+                if entry in _CACHE_BUILDS:
+                    continue
+                if entry.is_dir():
+                    size = sum(path.stat().st_size for path in entry.rglob('*') if path.is_file())
+                    if entry.name.startswith('.'):
+                        unmanaged += size
+                    else:
+                        entries[entry] = size, entry.stat().st_mtime_ns
+                elif entry.is_file():
+                    unmanaged += entry.stat().st_size
+            state = dict(stamp=stamp, entries=entries,
+                         size=unmanaged+sum(value[0] for value in entries.values()))
+            _CACHE_STATES[self.root] = state
+        return state
+
+    def _sync_stamp(self):
+        state = _CACHE_STATES.get(self.root)
+        if state is not None:
+            state['stamp'] = self._root_stamp()
+
+    def _published(self, target, size):
+        state = _CACHE_STATES[self.root]
+        previous = state['entries'].get(target, (0, 0))[0]
+        state['entries'][target] = size, target.stat().st_mtime_ns
+        state['size'] += size-previous
+        self._sync_stamp()
+
+    def _delete(self, target):
+        state = self._state()
+        shutil.rmtree(target)
+        state['size'] -= state['entries'].pop(target, (0, 0))[0]
+        self._sync_stamp()
+
+    def entry_sizes(self):
+        with _CACHE_LOCK:
+            state = self._state()
+            return [(path.name, state['entries'][path][0]) for path in self.entries()]
 
     def size(self):
         with _CACHE_LOCK:
-            return sum(p.stat().st_size for p in self.root.rglob("*") if p.is_file())
+            used = self._state(refresh=True)['size']
+            return used + sum(path.stat().st_size for temporary, (_reserved, target) in _CACHE_BUILDS.items()
+                              if target.parent == self.root for path in temporary.rglob('*') if path.is_file())
 
     def _trim(self, incoming):
-        used = self.size()
+        state = self._state()
+        used = state['size']
         for temporary, (reserved, target) in _CACHE_BUILDS.items():
             if target.parent == self.root:
-                written = sum(p.stat().st_size for p in temporary.rglob("*") if p.is_file())
-                used += max(0, reserved-written)
+                # Active video writers normally contain just one output file.
+                # Count overshoot too, preserving the previous quota behavior
+                # even if a writer violates its reservation before rejection.
+                written = sum(path.stat().st_size for path in temporary.rglob('*') if path.is_file())
+                used += max(reserved, written)
         for entry in self.entries():
             if used + incoming <= self.limit:
                 break
             if _CACHE_PINS[entry]:
                 continue
-            size = sum(p.stat().st_size for p in entry.rglob("*") if p.is_file())
-            shutil.rmtree(entry)
+            size = state['entries'][entry][0]
+            self._delete(entry)
             used -= size
         return used + incoming <= self.limit
 
@@ -143,9 +205,12 @@ class ProductCache:
         """Files are already encoded bytes; no transient on-disk quota overshoot."""
         size = sum(len(data) for data in files.values())
         with _CACHE_LOCK:
+            self._state()
             if size > self.limit:
                 return False
             target = self.root / key
+            if target in _CACHE_CLEAR_PENDING:
+                return False
             if target.exists():
                 return True
             if not self._trim(size):
@@ -155,9 +220,11 @@ class ProductCache:
                 for name, data in files.items():
                     (temporary / name).write_bytes(data)
                 temporary.rename(target)
+                self._published(target, size)
             finally:
                 if temporary.exists():
                     shutil.rmtree(temporary)
+                self._sync_stamp()
             return True
 
     def build(self, key, reserve, writer):
@@ -168,13 +235,17 @@ class ProductCache:
         from taking each other's capacity. The writer must respect its bound.
         """
         with _CACHE_LOCK:
+            self._state()
             target = self.root / key
+            if target in _CACHE_CLEAR_PENDING:
+                return False
             if target.exists():
                 return True
             if reserve > self.limit or not self._trim(reserve):
                 return False
             temporary = Path(tempfile.mkdtemp(prefix=".entry_", dir=self.root))
             _CACHE_BUILDS[temporary] = (reserve, target)
+            self._sync_stamp()
         try:
             writer(temporary)
             written = sum(p.stat().st_size for p in temporary.rglob("*") if p.is_file())
@@ -186,6 +257,7 @@ class ProductCache:
                     return False
                 if not target.exists():
                     temporary.rename(target)
+                    self._published(target, written)
                 return True
         finally:
             with _CACHE_LOCK:
@@ -193,6 +265,7 @@ class ProductCache:
                 _CACHE_CLEAR_PENDING.discard(target)
                 if temporary.exists():
                     shutil.rmtree(temporary)
+                self._sync_stamp()
 
     @contextmanager
     def pin(self, keys):
@@ -212,7 +285,7 @@ class ProductCache:
                         if path in _CACHE_CLEAR_PENDING:
                             _CACHE_CLEAR_PENDING.discard(path)
                             if path.exists():
-                                shutil.rmtree(path)
+                                self._delete(path)
 
     def read(self, key, name):
         with _CACHE_LOCK:
@@ -227,7 +300,7 @@ class ProductCache:
                     if _CACHE_PINS[entry]:
                         _CACHE_CLEAR_PENDING.add(entry)
                     else:
-                        shutil.rmtree(entry)
+                        self._delete(entry)
             for _temporary, (_reserved, target) in _CACHE_BUILDS.items():
                 if target.parent == self.root and (allowed is None or target.name in allowed):
                     _CACHE_CLEAR_PENDING.add(target)

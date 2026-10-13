@@ -1367,7 +1367,7 @@ atomcam2で利用する場合は、GitHubで公開されている
                 if clear:
                     cache.clear(keys)
                 with rtsp_schedule_products._CACHE_LOCK:
-                    entries = [(p.name, sum(f.stat().st_size for f in p.rglob("*") if f.is_file())) for p in cache.entries()]
+                    entries = cache.entry_sizes()
                 events.put(("done", entries))
             except Exception as exc:
                 events.put(("error", str(exc)))
