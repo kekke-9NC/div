@@ -10,7 +10,7 @@ import queue
 from typing import List, Tuple, Optional, Callable, Dict, Any
 from astropy.io import fits
 from astropy.wcs import WCS
-from collections import deque
+from collections import deque, OrderedDict
 from contextlib import nullcontext
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait
 from multiprocessing import cpu_count
@@ -335,6 +335,11 @@ class _VideoFrameRangeCache:
         self.frames = []
         self.masked = {}
         self.gray = {}
+        self.gate_crops = OrderedDict()
+        self.crop_lock = threading.Lock()
+        self.crop_budget = min(64 * 1024**2, max_bytes // 32)
+        self.crop_bytes = 0
+        self.crop_hits = self.crop_misses = 0
         self.mask_snapshot = None
         self.resized_masks = {}
         self.reader = _VideoRangeReader()
@@ -392,6 +397,9 @@ class _VideoFrameRangeCache:
             self.mask_snapshot = mask.copy()
             self.masked.clear()
             self.gray.clear()
+            with self.crop_lock:
+                self.gate_crops.clear()
+                self.crop_bytes = 0
             self.resized_masks.clear()
         retained = {id(frame) for frame in self.frames}
         result = []
@@ -424,13 +432,17 @@ class _VideoFrameRangeCache:
         is limited here, never the frames available for inference or saving.
         """
         frames = list(frames)
-        capacity = (self.max_bytes // (2 * frames[0].nbytes + frames[0].shape[0]*frames[0].shape[1])) if frames else 0
+        capacity = ((self.max_bytes - self.crop_budget) // (2 * frames[0].nbytes + frames[0].shape[0]*frames[0].shape[1])) if frames else 0
         self.key = None
         self.frames = frames[-capacity:] if capacity else []
         retained = {id(frame) for frame in self.frames}
         self.masked = {key: value for key, value in self.masked.items() if key in retained}
         retained.update(id(frame) for frame in self.masked.values())
         self.gray = {key: value for key, value in self.gray.items() if key in retained}
+        gray_ids = {id(frame) for frame in self.gray.values()}
+        with self.crop_lock:
+            self.gate_crops = OrderedDict((key, value) for key, value in self.gate_crops.items() if key[0] in gray_ids)
+            self.crop_bytes = sum(value.nbytes for value in self.gate_crops.values())
 
     def gray_frames(self, frames):
         """Reuse pixel-exact grayscale for spatially different gate crops."""
@@ -439,12 +451,42 @@ class _VideoFrameRangeCache:
         result = []
         for frame in frames:
             key = id(frame)
-            value = self.gray.get(key)
+            with self.crop_lock:
+                value = self.gray.get(key)
             if value is None:
                 value = frame if frame.ndim == 2 else cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                 if key in retained:
-                    self.gray[key] = value
+                    with self.crop_lock:
+                        value = self.gray.setdefault(key, value)
             result.append(value)
+        return result
+
+    def noise_gate_frames(self, frames, rect):
+        """Reuse exactly the same resized 64-pixel crop across overlapping events."""
+        from universal_meteor_model import _crop_square
+        grays = self.gray_frames(frames)
+        with self.crop_lock:
+            retained = {id(frame) for frame in self.gray.values()}
+        result = []
+        for frame in grays:
+            key = (id(frame), None if rect is None else tuple(rect))
+            with self.crop_lock:
+                cropped = self.gate_crops.get(key)
+                if cropped is not None:
+                    self.gate_crops.move_to_end(key)
+                    self.crop_hits += 1
+            if cropped is None:
+                cropped = _crop_square(frame, rect, 64)
+                with self.crop_lock:
+                    self.crop_misses += 1
+                    if id(frame) in retained and cropped.nbytes <= self.crop_budget:
+                        while self.gate_crops and self.crop_bytes + cropped.nbytes > self.crop_budget:
+                            _, removed = self.gate_crops.popitem(last=False)
+                            self.crop_bytes -= removed.nbytes
+                        if key not in self.gate_crops:
+                            self.gate_crops[key] = cropped
+                            self.crop_bytes += cropped.nbytes
+            result.append(cropped)
         return result
 
 
@@ -1622,8 +1664,8 @@ def create_line_video_clips(
                                     core = _resident_frame_slice(frames_for_finer_detect, actual_start_finer, core_low, core_high)
                                     if core is not None and model.get_active_model_info().get('architecture') in model.EVENT_ARCHITECTURES:
                                         inference_rect = cand['flash'].classifier_rect(img_w, img_h) if cand['flash'] else _noise_gate_cutout_rect(cand['cx'], cand['cy'], img_w, img_h)
-                                        gate_frames = frame_range_cache.gray_frames(core) if is_rtsp else core
-                                        gate = model.predict_noise_gate(gate_frames, inference_rect, frame_rate)
+                                        gate_frames = frame_range_cache.noise_gate_frames(core, inference_rect) if is_rtsp else core
+                                        gate = model.predict_noise_gate(gate_frames, None if is_rtsp else inference_rect, frame_rate)
                                 return indices, rect, gate
 
                             if num_workers == 1:
@@ -1738,7 +1780,7 @@ def create_line_video_clips(
                                 inference_rect_for_gate = cand['flash'].classifier_rect(img_w, img_h) if cand['flash'] else _noise_gate_cutout_rect(cx, cy, img_w, img_h)
                                 gate_result = confirmed['gate_result']
                                 if gate_result is None:
-                                    gate_result = model.predict_noise_gate(frame_range_cache.gray_frames(ml_source_frames) if is_rtsp else ml_source_frames, inference_rect_for_gate, frame_rate)
+                                    gate_result = model.predict_noise_gate(frame_range_cache.noise_gate_frames(ml_source_frames, inference_rect_for_gate) if is_rtsp else ml_source_frames, None if is_rtsp else inference_rect_for_gate, frame_rate)
                                 if gate_result is not None and gate_result[0] < gate_result[1]:
                                     detection_counter += 1
                                     when = base_datetime + timedelta(seconds=((adjusted_start_frame + adjusted_end_frame) // 2) / frame_rate)
@@ -2355,7 +2397,7 @@ def create_line_video_clips(
                         frame_rate,
                     )
                     inference_rect_for_gate = flash.classifier_rect(img_w, img_h) if flash else _noise_gate_cutout_rect(cx, cy, img_w, img_h)
-                    gate_result = model.predict_noise_gate(frame_range_cache.gray_frames(ml_source_frames) if is_rtsp else ml_source_frames, inference_rect_for_gate, frame_rate)
+                    gate_result = model.predict_noise_gate(frame_range_cache.noise_gate_frames(ml_source_frames, inference_rect_for_gate) if is_rtsp else ml_source_frames, None if is_rtsp else inference_rect_for_gate, frame_rate)
                     if gate_result is not None and gate_result[0] < gate_result[1]:
                         detection_counter += 1
                         when = base_datetime + timedelta(seconds=((adjusted_start_frame + adjusted_end_frame) // 2) / frame_rate)

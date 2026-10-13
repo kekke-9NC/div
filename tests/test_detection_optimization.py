@@ -15,6 +15,29 @@ from universal_meteor_model import _crop_square, _gray, _robust_residual_cube
 
 
 class DetectionOptimizationTests(unittest.TestCase):
+    def test_live_noise_gate_crop_reuse_is_feature_exact_and_bounded(self):
+        from event_noise_gate import extract_noise_gate_features
+        from concurrent.futures import ThreadPoolExecutor
+        rng = np.random.default_rng(417)
+        frames = list(rng.integers(0, 256, (6, 90, 120, 3), dtype=np.uint8))
+        cache = video_processing._VideoFrameRangeCache(max_bytes=8*1024**2)
+        cache.retain_live_frames(frames)
+        rect = (11, 23, 89, 80)
+        expected = extract_noise_gate_features(frames, rect, 25)
+        actual = cache.noise_gate_frames(frames, rect)
+        np.testing.assert_array_equal(extract_noise_gate_features(actual, None, 25), expected)
+        again = cache.noise_gate_frames(frames, rect)
+        self.assertTrue(all(a is b for a, b in zip(actual, again)))
+        self.assertEqual(cache.crop_hits, len(frames))
+        with ThreadPoolExecutor(max_workers=9) as workers:
+            results = list(workers.map(lambda x: cache.noise_gate_frames(frames, (x, 0, x+70, 80)), range(80)))
+        for index, crops in enumerate(results):
+            for frame, cropped in zip(frames, crops):
+                np.testing.assert_array_equal(cropped, _crop_square(frame, (index, 0, index+70, 80), 64))
+        self.assertLessEqual(cache.crop_bytes, cache.crop_budget)
+        self.assertEqual(cache.crop_bytes, sum(f.nbytes for f in cache.gate_crops.values()))
+        cache.retain_live_frames([frame.copy() for frame in frames])
+        self.assertFalse(cache.gate_crops)
     def test_live_mask_reuse_is_pixel_exact_bounded_and_invalidates(self):
         rng = np.random.default_rng(629)
         frames = list(rng.integers(0, 256, (12, 30, 40, 3), dtype=np.uint8))
