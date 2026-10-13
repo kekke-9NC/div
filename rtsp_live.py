@@ -430,6 +430,12 @@ class RealtimeRunner:
         self.seen_lock = threading.Lock()
         self.threads = []
 
+    def _discovery_interval(self):
+        # A queued backlog of at least fifty seconds already supplies the
+        # detector. Avoid repeatedly walking thousands of durable inputs while
+        # it catches up. Live discovery resumes its normal cadence near the tail.
+        return max(1.0, config.RTSP_SCAN_INTERVAL) if self.queue.qsize() >= 100 else config.RTSP_SCAN_INTERVAL
+
     def _scan(self):
         last_status = 0.0
         while not self.cancel.is_set():
@@ -443,7 +449,7 @@ class RealtimeRunner:
             if self.queue.qsize() >= 10 and time.monotonic() - last_status >= 10:
                 self.status(f"[RTSP解析] 解析待ち: {self.queue.qsize()}区間（録画は継続）")
                 last_status = time.monotonic()
-            self.cancel.wait(config.RTSP_SCAN_INTERVAL)
+            self.cancel.wait(self._discovery_interval())
 
     def _consume(self, path):
         write_json(str(path) + ".analysis_consumed.json", {"consumed": True})

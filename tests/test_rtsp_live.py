@@ -453,5 +453,24 @@ class RtspLiveTests(unittest.TestCase):
                                         for a, b in zip(decoded, expected)), 1.5)
 
 
+class BacklogDiscoveryTests(unittest.TestCase):
+    def test_large_backlog_reduces_discovery_walks_and_tail_restores_live_cadence(self):
+        runner = rtsp_live.RealtimeRunner('unused', lambda *_args: None, threading.Event())
+        with mock.patch.object(rtsp_live.config, 'RTSP_SCAN_INTERVAL', .1):
+            self.assertEqual(runner._discovery_interval(), .1)
+            for index in range(100):
+                runner.queue.put(index)
+            self.assertEqual(runner._discovery_interval(), 1.0)
+            runner.queue.get_nowait()
+            self.assertEqual(runner._discovery_interval(), .1)
+
+    def test_discovery_does_not_reduce_a_long_configured_interval(self):
+        runner = rtsp_live.RealtimeRunner('unused', lambda *_args: None, threading.Event())
+        for index in range(100):
+            runner.queue.put(index)
+        with mock.patch.object(rtsp_live.config, 'RTSP_SCAN_INTERVAL', 2.0):
+            self.assertEqual(runner._discovery_interval(), 2.0)
+
+
 if __name__ == "__main__":
     unittest.main()
