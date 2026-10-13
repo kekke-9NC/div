@@ -342,6 +342,8 @@ class ScheduleProducts:
         self.thread = None
         self.overlay_module = None
         self.source_data = {}
+        self.source_indexes = {}
+        self.sample_gaps = {}
         self.ai_unavailable = None
         self.stream_signatures = {}
         self.source_properties = {}
@@ -603,7 +605,13 @@ class ScheduleProducts:
 
     def _source_frame(self, job, when, radius=0):
         sources = job["archives"]
-        starts = [datetime.fromisoformat(self._timing(path)["start_time"]) for path in sources]
+        revision = tuple(sources)
+        cached = self.source_indexes.get(job["id"])
+        if cached is None or cached[0] != revision:
+            starts = [datetime.fromisoformat(self._timing(path)["start_time"]) for path in sources]
+            self.source_indexes[job["id"]] = revision, starts
+        else:
+            starts = cached[1]
         position = bisect_right(starts, when)-1
         if position < 0:
             return None
@@ -816,6 +824,14 @@ class ScheduleProducts:
             return
         start, end = datetime.fromisoformat(job["start"]), datetime.fromisoformat(job["end"])
         count = max(1, round(options["duration"]*options["fps"]))
+        revision = (tuple(job["archives"]), job["start"], job["end"], count,
+                    options["mean_radius"])
+        cached = self.sample_gaps.get(job["id"])
+        if cached is None or cached[0] != revision:
+            gaps = set()
+            self.sample_gaps[job["id"]] = revision, gaps
+        else:
+            gaps = cached[1]
         # Sampling uses the full schedule clock, never a dusk/dawn filter.
         for index in range(count):
             if self.cancel.is_set():
@@ -823,11 +839,14 @@ class ScheduleProducts:
             key = job["id"] + f"_sample_{index:06d}"
             if (self.cache.root / key / "frame.png").is_file():
                 continue
+            if index in gaps:
+                continue
             when = start + (end-start)*(index/max(1, count-1))
             if index == count-1:
                 when = end-timedelta(milliseconds=40)
             frame = self._source_frame(job, when, options["mean_radius"])
             if frame is None:
+                gaps.add(index)
                 continue  # Real connection gaps remain gaps, not fabricated frames.
             mask = self._mask(job)
             if mask is not None:
@@ -888,8 +907,12 @@ class ScheduleProducts:
         count = max(1, round(options["duration"]*options["fps"]))
         # Stretch only actual captured samples when a connection gap removed slots.
         def frames():
+            previous_index, frame = None, None
             for position in np.linspace(0, len(available)-1, count):
                 index = available[int(round(position))]
+                if index == previous_index:
+                    yield frame
+                    continue
                 key = job["id"] + f"_sample_{index:06d}"
                 frame = decode_png(self.cache.read(key, "frame.png"))
                 if frame is None:
@@ -901,6 +924,7 @@ class ScheduleProducts:
                     if mask is not None:
                         frame = cv2.bitwise_and(frame, frame, mask=cv2.resize(mask, (frame.shape[1], frame.shape[0]), interpolation=cv2.INTER_NEAREST))
                     frame = self._annotate(job, frame, when)
+                previous_index = index
                 yield frame
         self._write_video(output, frames(), options["fps"])
 

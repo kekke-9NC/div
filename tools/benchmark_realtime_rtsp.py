@@ -37,6 +37,8 @@ def run_replay(args, settings, options, noise, correction, mask):
     paths, inputs, sessions = [], [], []
     remaining = args.replay_seconds
     for source in args.sources:
+        if args.replay_seconds and remaining <= 0:
+            break
         if source.is_dir():
             original = sorted(source.glob('chunk_*.mp4'))
             selected = []
@@ -56,8 +58,11 @@ def run_replay(args, settings, options, noise, correction, mask):
             directory = root / '.rtsp_live' / f'session_{len(sessions):04d}'
             directory.mkdir(parents=True)
             listing = directory / 'segments.csv'
-            subprocess.run([shutil.which('ffmpeg') or 'ffmpeg', '-nostdin', '-v', 'error',
-                '-i', str(source), '-map', '0:v:0', '-an', '-c', 'copy', '-f', 'segment',
+            command = [shutil.which('ffmpeg') or 'ffmpeg', '-nostdin', '-v', 'error',
+                '-i', str(source)]
+            if args.replay_seconds:
+                command += ['-t', str(remaining)]
+            subprocess.run(command + ['-map', '0:v:0', '-an', '-c', 'copy', '-f', 'segment',
                 '-segment_time', str(config.RTSP_SEGMENT_DURATION), '-reset_timestamps', '1',
                 '-segment_list', str(listing), '-segment_list_type', 'csv',
                 str(directory / 'chunk_%09d.mp4')], check=True)
@@ -68,6 +73,7 @@ def run_replay(args, settings, options, noise, correction, mask):
                 fps, count, size = rtsp_segments._properties(path)
                 selected.append((path, dict(start_time=(started + timedelta(seconds=float(row[1]))).isoformat(),
                     fps=fps, frame_count=count, size=list(size))))
+                remaining -= count / fps
             listing.unlink()  # Timing below is authoritative; no source file is changed.
         if not selected:
             continue

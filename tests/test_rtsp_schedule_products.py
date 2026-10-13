@@ -648,6 +648,38 @@ class ScheduleProductTests(unittest.TestCase):
             self.assertLess(float(frame[:, :12].mean()), 3)
             self.assertTrue(source.exists())
 
+    def test_timelapse_repeated_slots_decode_once_with_exact_frames(self):
+        with tempfile.TemporaryDirectory() as root:
+            service = self.service(root, timelapse=True)
+            job = service._job(datetime(2026, 10, 12, 20))
+            originals = [np.full((64, 96, 3), value, np.uint8) for value in (17, 73)]
+            job["samples"] = {"0": job["start"], "5": job["end"]}
+            for index, frame in zip((0, 5), originals):
+                service.cache.put(job["id"] + f"_sample_{index:06d}",
+                                  {"frame.png": products.png_bytes(frame)})
+            emitted = []
+            with mock.patch.object(products, "decode_png", wraps=products.decode_png) as decode, \
+                 mock.patch.object(service, "_write_video", side_effect=lambda _path, frames, _fps:
+                                   emitted.extend(frame.copy() for frame in frames)):
+                service._timelapse(job, Path(root)/"timelapse.mp4")
+            self.assertEqual(decode.call_count, 2)
+            self.assertEqual(len(emitted), 6)
+            for actual, expected in zip(emitted, [originals[0]]*3 + [originals[1]]*3):
+                np.testing.assert_array_equal(actual, expected)
+
+    def test_missing_sample_slots_retry_when_archives_change(self):
+        with tempfile.TemporaryDirectory() as root:
+            service = self.service(root, timelapse=True)
+            job = service._job(datetime(2026, 10, 12, 20))
+            with mock.patch.object(service, "_source_frame", return_value=None) as read:
+                service._prepare_samples(job)
+                self.assertEqual(read.call_count, 6)
+                service._prepare_samples(job)
+                self.assertEqual(read.call_count, 6)
+                job["archives"].append("new-minute.mp4")
+                service._prepare_samples(job)
+                self.assertEqual(read.call_count, 12)
+
     def test_concat_validates_then_replaces_and_records_capture_time(self):
         with tempfile.TemporaryDirectory() as root:
             service = self.service(root, concatenate=True)
