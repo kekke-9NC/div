@@ -943,7 +943,11 @@ class ScheduleProducts:
                     frame = self._annotate(job, frame, when)
                 previous_index = index
                 yield frame
-        self._write_video(output, frames(), options["fps"])
+        from video_encoding import write_repeated_images
+        written = write_repeated_images(output, frames(), options["fps"], self.cancel,
+                                       {"codec": "h264", "quality": "standard"})
+        if written != count or rtsp_segments._properties(output)[1] != count:
+            raise IOError("タイムラプス動画のフレーム数検証に失敗しました")
 
     def _blends(self, job, directory):
         events = job["events"]

@@ -659,8 +659,9 @@ class ScheduleProductTests(unittest.TestCase):
                                   {"frame.png": products.png_bytes(frame)})
             emitted = []
             with mock.patch.object(products, "decode_png", wraps=products.decode_png) as decode, \
-                 mock.patch.object(service, "_write_video", side_effect=lambda _path, frames, _fps:
-                                   emitted.extend(frame.copy() for frame in frames)):
+                 mock.patch("video_encoding.write_repeated_images", side_effect=lambda _path, frames, *_args:
+                            (emitted.extend(frame.copy() for frame in frames), 6)[1]), \
+                 mock.patch.object(rtsp_segments, "_properties", return_value=(6, 6, (96, 64))):
                 service._timelapse(job, Path(root)/"timelapse.mp4")
             self.assertEqual(decode.call_count, 2)
             self.assertEqual(len(emitted), 6)
