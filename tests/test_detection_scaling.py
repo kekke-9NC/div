@@ -14,6 +14,40 @@ from short_flash_detector import _track_predictions
 from temporal_statistics import half_integer_percentiles
 
 
+def test_dense_component_ranking_matches_scalar_peaks_including_low_peak_ties():
+    import cv2
+    from short_flash_detector import _component_detections
+    residual = np.zeros((160, 320), np.uint8)
+    for index in range(1000):
+        y, x = divmod(index, 64)
+        residual[y*8:y*8+3, x*5:x*5+3] = 4 + index % 11
+    _, labels, stats, centers = cv2.connectedComponentsWithStats((residual > 0).astype(np.uint8), 8)
+    expected = []
+    for k in range(1, len(stats)):
+        x, y, w, h, area = stats[k]
+        if not 3 <= area <= 1000 or w > 350 or h > 350:
+            continue
+        values = residual[y:y+h, x:x+w][labels[y:y+h, x:x+w] == k]
+        peak, score = int(values.max()), int(values.sum())
+        if peak >= 5 and score >= 20:
+            expected.append([*centers[k], score, w, h, peak])
+    expected.sort(key=lambda value: value[2], reverse=True)
+    assert _component_detections(residual, labels, stats, centers) == expected[:400]
+
+
+def test_live_gray_cache_preserves_pixels_scale_and_window_eviction():
+    import moving_point_detector as moving
+    rng = np.random.default_rng(556)
+    frames = list(rng.integers(0, 256, (10, 100, 120, 3), dtype=np.uint8))
+    cache = moving.GrayFrameCache()
+    for scale in (.5, .5, 1.):
+        actual = cache.convert(frames[2:8], scale)
+        for raw, gray in zip(frames[2:8], actual):
+            np.testing.assert_array_equal(gray, moving._gray_small(raw, scale))
+    cache.convert(frames[5:10], .5)
+    assert set(cache.entries) == {id(frame) for frame in frames[5:10]}
+
+
 def test_histogram_percentiles_match_numpy_linear_interpolation_exactly():
     rng = np.random.default_rng(614)
     quantiles = [0, 50, 90, 99, 99.9, 100]

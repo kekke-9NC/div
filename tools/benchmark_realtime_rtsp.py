@@ -175,7 +175,7 @@ def run_replay(args, settings, options, noise, correction, mask):
         file_utils.save_rtsp_video_segments = original_recorder
     seconds = time.perf_counter()-started
     after = resource.getrusage(resource.RUSAGE_SELF)
-    items = [dict(row['detection'], source_video=row['source']) for row in detections]
+    items = [dict(row['detection'], source_video=str(Path(row['source']).relative_to(root))) for row in detections]
     return dict(seconds=seconds, input_seconds=duration, processing_ratio=seconds/duration,
                 target_ratio=.25, meets_target=seconds <= duration*.25, faster_than_realtime=seconds < duration,
                 completed=completed, sessions=len(sessions), chunks=len(paths),

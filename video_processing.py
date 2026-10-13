@@ -11,7 +11,8 @@ from typing import List, Tuple, Optional, Callable, Dict, Any
 from astropy.io import fits
 from astropy.wcs import WCS
 from collections import deque
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import nullcontext
+from concurrent.futures import ThreadPoolExecutor, as_completed, wait
 from multiprocessing import cpu_count
 
 import config
@@ -993,6 +994,42 @@ def _cache_scheduled_event(save_options, frames, fps, started_at, line, is_meteo
             print(f"[自動作成] 流星素材の準備に失敗: {exc}")
 
 
+def _coarse_proposals(diff_img, frame_window, first_frame, frame_rate, mask, roi,
+                      cancel_flag, min_length, hough, canny1, canny2, use_temporal,
+                      flash_detector, frame_cache, gray_cache, final, executor):
+    """Run independent proposers concurrently; join the stateful flash task.
+
+    Each next window waits for all three tasks, even if one fails. The flash
+    detector therefore always observes native frames in chronological order.
+    Candidate merging keeps the original flash, moving-point, Hough ordering.
+    """
+    calls = [(image_processing.detect_lines, (diff_img,), dict(
+        min_length=min_length, mask=mask, roi=roi, cancel_flag=cancel_flag,
+        canny_thresh1=canny1, canny_thresh2=canny2, hough_threshold=hough))]
+    if config.MOVING_POINT_DETECT_ENABLED and use_temporal and frame_window:
+        frames = frame_cache.mask_frames(frame_window, mask) if mask is not None else frame_window
+        calls.append((moving_point_detector.detect_moving_point_tracks, (frames,), dict(
+            frame_rate=frame_rate, scale=config.MOVING_POINT_SCALE,
+            threshold=config.MOVING_POINT_RESIDUAL_THRESHOLD, max_gap=config.MOVING_POINT_MAX_GAP,
+            max_step=config.MOVING_POINT_MAX_STEP, max_candidates=config.MOVING_POINT_MAX_CANDIDATES,
+            gray_cache=gray_cache)))
+    if config.SHORT_FLASH_DETECT_ENABLED and use_temporal and frame_window:
+        calls.append((flash_detector.consume, (frame_window, first_frame), dict(mask=mask, roi=roi, final=final)))
+    if executor is None:
+        values = [fn(*args, **kwargs) for fn, args, kwargs in calls]
+    else:
+        futures = [executor.submit(fn, *args, **kwargs) for fn, args, kwargs in calls]
+        wait(futures)
+        values = [future.result() for future in futures]
+    hough_lines, moving, flashes = values[0], [], []
+    for (fn, _args, _kwargs), value in zip(calls[1:], values[1:]):
+        if fn == moving_point_detector.detect_moving_point_tracks:
+            moving = value
+        else:
+            flashes = value
+    return _deduplicate_candidate_lines([c.line for c in flashes] + [c.line for c in moving] + hough_lines), flashes
+
+
 def create_line_video_clips(
     source: str,
     is_rtsp: bool = False,
@@ -1235,6 +1272,11 @@ def create_line_video_clips(
     if not is_rtsp and cap.get(cv2.CAP_PROP_BACKEND) == cv2.CAP_FFMPEG:
         cap = _CachedSequentialCapture(cap, frame_range_cache, analysis_source, decoder_threads)
     summary_writer = _SummaryVideoWriter(progress_callback)
+    coarse_executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix='rtsp-proposals') if is_rtsp else None
+    candidate_executor = ThreadPoolExecutor(max_workers=max(1, int(save_options.get(
+        'finer_detection_workers', config.RTSP_PARALLEL_WORKERS or max(1, cpu_count() // 2)))),
+        thread_name_prefix='rtsp-finer') if is_rtsp else None
+    moving_gray_cache = moving_point_detector.GrayFrameCache() if is_rtsp else None
 
     try:
         evidence_cap = save_options.get("_rtsp_live_evidence_capture")
@@ -1301,49 +1343,15 @@ def create_line_video_clips(
                     effective_canny_thresh1 = 50    # デフォルト値
                     effective_canny_thresh2 = 150   # デフォルト値
 
-                lines = image_processing.detect_lines(
-                    diff_img, min_length=effective_min_length, mask=mask, roi=roi, cancel_flag=cancel_flag,
-                    canny_thresh1=effective_canny_thresh1, canny_thresh2=effective_canny_thresh2,
-                    hough_threshold=effective_hough_threshold
+                lines, flash_candidates = _coarse_proposals(
+                    diff_img, frame_window, start_index_diff, frame_rate, mask, roi,
+                    cancel_flag, effective_min_length, effective_hough_threshold,
+                    effective_canny_thresh1, effective_canny_thresh2, use_rtsp_params,
+                    flash_detector, frame_range_cache, moving_gray_cache,
+                    (not is_rtsp and current_frame_index == total_frames - 1)
+                    or getattr(cap, "analysis_final_frame", False), coarse_executor,
                 )
-
-                # Hough detects a spatial line in a composite image.  A short
-                # point-like meteor can instead be identified by a coherent
-                # displacement across the original frame window.  Keep both
-                # candidate families and let the existing finer stage and
-                # classifier make the final decision.
-                if (
-                    config.MOVING_POINT_DETECT_ENABLED
-                    and use_rtsp_params
-                    and frame_window
-                ):
-                    moving_frames = frame_window
-                    if mask is not None:
-                        moving_frames = frame_range_cache.mask_frames(frame_window, mask)
-                    moving_tracks = moving_point_detector.detect_moving_point_tracks(
-                        moving_frames,
-                        frame_rate=frame_rate,
-                        scale=config.MOVING_POINT_SCALE,
-                        threshold=config.MOVING_POINT_RESIDUAL_THRESHOLD,
-                        max_gap=config.MOVING_POINT_MAX_GAP,
-                        max_step=config.MOVING_POINT_MAX_STEP,
-                        max_candidates=config.MOVING_POINT_MAX_CANDIDATES,
-                    )
-                    # Prefer the temporally tracked geometry when both
-                    # detectors describe the same event.  The finer stage
-                    # crops around this line, so retaining Hough's first line
-                    # can make a real event look like a weak classifier input.
-                    lines = [track.line for track in moving_tracks] + lines
-
-                flash_candidates = []
-                if config.SHORT_FLASH_DETECT_ENABLED and use_rtsp_params and frame_window:
-                    flash_candidates = flash_detector.consume(
-                        frame_window, start_index_diff, mask=mask, roi=roi,
-                        final=(not is_rtsp and current_frame_index == total_frames - 1)
-                        or getattr(cap, "analysis_final_frame", False),
-                    )
                 flash_by_line = {candidate.line: candidate for candidate in flash_candidates}
-                lines = _deduplicate_candidate_lines([c.line for c in flash_candidates] + lines)
 
                 if not lines:
                     continue
@@ -1515,10 +1523,8 @@ def create_line_video_clips(
                                     except Exception as e:
                                         print(f"詳細処理中にエラー ({cand['cx']}, {cand['cy']}): {e}")
                             else:
-                                with ThreadPoolExecutor(
-                                    max_workers=num_workers,
-                                    thread_name_prefix="finer-detect",
-                                ) as executor:
+                                with (nullcontext(candidate_executor) if candidate_executor is not None else
+                                      ThreadPoolExecutor(max_workers=num_workers, thread_name_prefix="finer-detect")) as executor:
                                     futures = {
                                         executor.submit(
                                             refine_and_gate, cand,
@@ -2624,6 +2630,9 @@ def create_line_video_clips(
         print(f"動画処理ループ中に予期せぬエラーが発生しました: {e_main_loop}")
         import traceback; traceback.print_exc()
     finally:
+        for executor in (coarse_executor, candidate_executor):
+            if executor is not None:
+                executor.shutdown(wait=True)
         summary_writer.finish()
         frame_range_cache.close()
         if cap.isOpened():

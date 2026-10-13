@@ -30,6 +30,7 @@ def main():
                         help='Select this many seconds of existing spool input (0 selects all)')
     parser.add_argument('--timeout', type=float, default=1800)
     parser.add_argument('--no-products', action='store_true', help='Diagnostic replay without scheduled products')
+    parser.add_argument('--opencv-threads', type=int, default=0, help='Diagnostic OpenCV worker budget override')
     parser.add_argument('sources', type=Path, nargs='+')
     args = parser.parse_args()
     if args.windows < 0 or args.concurrency < 1:
@@ -55,6 +56,8 @@ def main():
     import model
     import video_processing
     from obs_meteor_overlay.legacy_detection_mask import LegacyDetectionMask
+    if args.opencv_threads:
+        cv2.setNumThreads(args.opencv_threads)
 
     config.RTSP_SAVE_ROOT = str(args.settings.resolve().parent / 'rtsp')
     config.TEMP_CLIP_DIR = str(args.output / 'temporary')

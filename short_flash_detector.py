@@ -89,19 +89,18 @@ def _component_detections(residual, labels, stats, centers):
         flat_labels = labels.ravel()[pixels]
         flat_values = residual.ravel()[pixels]
         scores = np.bincount(flat_labels, weights=flat_values, minlength=count)
-        peaks = np.zeros(count, dtype=residual.dtype)
-        np.maximum.at(peaks, flat_labels, flat_values)
-        eligible = eligible[(scores[eligible] >= 20) & (peaks[eligible] >= 5)]
-        eligible = eligible[np.argsort(-scores[eligible], kind='stable')[:400]]
-        # All component peaks are now known from that same sparse pixel pass.
-        # Avoid hundreds of temporary crop masks and reductions per frame.
-        detections = [list(row) for row in zip(
-            centers[eligible, 0].tolist(), centers[eligible, 1].tolist(),
-            scores[eligible].astype(np.int64).tolist(),
-            stats[eligible, cv2.CC_STAT_WIDTH].tolist(),
-            stats[eligible, cv2.CC_STAT_HEIGHT].tolist(),
-            peaks[eligible].astype(np.int64).tolist(),
-        )]
+        eligible = eligible[scores[eligible] >= 20]
+        eligible = eligible[np.argsort(-scores[eligible], kind='stable')]
+        # A component outside the first 400 accepted scores cannot survive
+        # the existing limit. Compute peaks only until that exact set is known,
+        # retaining stable label order for ties and the original peak filter.
+        for k in eligible:
+            x, y, w, h, _area = map(int, stats[k])
+            peak = int(residual[y:y+h, x:x+w][labels[y:y+h, x:x+w] == k].max())
+            if peak >= 5:
+                detections.append([*centers[k], int(scores[k]), w, h, peak])
+                if len(detections) == 400:
+                    break
     else:
         for k in eligible:
             x, y, w, h, area = map(int, stats[k])
