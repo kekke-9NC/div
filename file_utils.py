@@ -1196,9 +1196,9 @@ def _run_realtime_rtsp(
     products = (save_options or {}).get("_schedule_products")
     if products is not None:
         products.flush_archives = runner.flush_requested.set
-    runner.start()
-    status(f"[RTSP解析] {segment_duration}秒受け渡し・連続検出、保存は1分単位へ連結")
     try:
+        runner.start()
+        status(f"[RTSP解析] {segment_duration}秒受け渡し・連続検出、保存は1分単位へ連結")
         if twin.enabled or mean:
             pipeline = noise_twin_pipeline.RtspNoiseTwinPipeline(
                 rtsp_url=rtsp_url, save_root=save_root, model_path=twin.model_path,
@@ -1221,7 +1221,8 @@ def _run_realtime_rtsp(
             )
     finally:
         try:
-            runner.stop()
+            if runner.threads:
+                runner.stop()
         finally:
             gate_features.close()
 

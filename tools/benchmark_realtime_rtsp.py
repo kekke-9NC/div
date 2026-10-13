@@ -170,6 +170,7 @@ def run_replay(args, settings, options, noise, correction, mask):
                             (short_flash_detector.ShortFlashDetector, 'consume'),
                             (image_processing, 'detect_lines'),
                             (video_processing, '_process_finer_detection_worker'),
+                            (video_processing._VideoFrameRangeCache, 'noise_gate_frames'),
                             (video_processing, '_coarse_proposals'),
                             (image_processing._WindowExtrema, 'reduce'),
                             (rtsp_live.SegmentCapture, 'read'),

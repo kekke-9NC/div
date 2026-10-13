@@ -15,6 +15,22 @@ from universal_meteor_model import _crop_square, _gray, _robust_residual_cube
 
 
 class DetectionOptimizationTests(unittest.TestCase):
+    def test_cached_gate_integrals_preserve_crops_and_total_memory_budget(self):
+        rng = np.random.default_rng(328)
+        frames = list(rng.integers(0, 256, (6, 520, 600, 3), dtype=np.uint8))
+        cache = video_processing._VideoFrameRangeCache(max_bytes=32*1024**2, integral_budget=8*1024**2)
+        cache.retain_live_frames(frames)
+        for rect in ((3, 7, 259, 263), (5, 9, 389, 393), (0, 0, 128, 128),
+                     (-4, -8, 384, 384), (0, 0, -88, -8), (7, 9, 167, 169)):
+            actual = cache.noise_gate_frames(frames, rect)
+            for frame, crop in zip(frames, actual):
+                np.testing.assert_array_equal(crop, _crop_square(frame, rect, 64))
+        total = (sum(f.nbytes for f in cache.frames)+sum(f.nbytes for f in cache.masked.values())
+                 +sum(f.nbytes for f in cache.gray.values())+cache.crop_bytes+cache.integral_bytes)
+        self.assertLessEqual(total, cache.max_bytes)
+        self.assertLessEqual(cache.integral_bytes, cache.integral_budget)
+        cache.retain_live_frames([frame.copy() for frame in frames])
+        self.assertFalse(cache.integrals)
     def test_live_noise_gate_crop_reuse_is_feature_exact_and_bounded(self):
         from event_noise_gate import extract_noise_gate_features
         from concurrent.futures import ThreadPoolExecutor

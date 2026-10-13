@@ -11,6 +11,10 @@ pathex = [str(root)]
 # Files required by runtime app (main_gui + local module deps).
 PAYLOAD_FILES = [
     "main_gui.py",
+    "gui_app.py",
+    "rtsp_gate_workers.py",
+    "event_pixels.py",
+    "component_statistics.py",
     "astrometry.py",
     "auto_time_updater.py",
     "bright_area_detector.py",
@@ -70,6 +74,7 @@ for rel in PAYLOAD_FILES:
     rel_path = Path(rel)
     add_data(root / rel_path, str(Path("payload") / rel_path.parent))
 add_data(root / "assets" / "constellations.lines.json", "payload/assets")
+add_data(root / "assets" / "component_statistics.c", "payload/assets")
 add_data(root / "THIRD_PARTY_NOTICES.md", "payload")
 
 

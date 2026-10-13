@@ -29,6 +29,21 @@ import video_processor
 
 
 class RtspLiveTests(unittest.TestCase):
+    def test_atomic_json_encoder_keeps_identical_bytes_and_prior_document_on_failure(self):
+        import io
+        value = dict(sky='流星', values=[0,.125,None,True,dict(x=3)])
+        expected = io.StringIO()
+        json.dump(value,expected,ensure_ascii=False)
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root)/'state.json'
+            rtsp_live.write_json(path,value)
+            self.assertEqual(path.read_text(),expected.getvalue())
+            with mock.patch('rtsp_live.json.dumps',side_effect=ValueError('invalid sky model')):
+                with self.assertRaises(ValueError):
+                    rtsp_live.write_json(path,value)
+            self.assertEqual(path.read_text(),expected.getvalue())
+            self.assertEqual(list(Path(root).iterdir()),[path])
+
     def test_pipeline_natural_eof_preserves_final_ack_and_evidence_pixels(self):
         from concurrent.futures import ThreadPoolExecutor
         with tempfile.TemporaryDirectory() as root:

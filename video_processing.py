@@ -329,7 +329,7 @@ class _VideoFrameRangeCache:
     large/high-resolution windows from accumulating across candidates/files.
     """
 
-    def __init__(self, max_bytes: int = 1536 * 1024 * 1024):
+    def __init__(self, max_bytes: int = 1536 * 1024 * 1024, integral_budget: int = 0):
         self.max_bytes = max_bytes
         self.key = None
         self.frames = []
@@ -340,6 +340,9 @@ class _VideoFrameRangeCache:
         self.crop_budget = min(64 * 1024**2, max_bytes // 32)
         self.crop_bytes = 0
         self.crop_hits = self.crop_misses = 0
+        self.integral_budget = min(integral_budget, max_bytes//4)
+        self.integrals = OrderedDict()
+        self.integral_bytes = 0
         self.mask_snapshot = None
         self.resized_masks = {}
         self.reader = _VideoRangeReader()
@@ -400,6 +403,8 @@ class _VideoFrameRangeCache:
             with self.crop_lock:
                 self.gate_crops.clear()
                 self.crop_bytes = 0
+                self.integrals.clear()
+                self.integral_bytes = 0
             self.resized_masks.clear()
         retained = {id(frame) for frame in self.frames}
         result = []
@@ -432,7 +437,7 @@ class _VideoFrameRangeCache:
         is limited here, never the frames available for inference or saving.
         """
         frames = list(frames)
-        capacity = ((self.max_bytes - self.crop_budget) // (2 * frames[0].nbytes + frames[0].shape[0]*frames[0].shape[1])) if frames else 0
+        capacity = ((self.max_bytes - self.crop_budget - self.integral_budget) // (2 * frames[0].nbytes + frames[0].shape[0]*frames[0].shape[1])) if frames else 0
         self.key = None
         self.frames = frames[-capacity:] if capacity else []
         retained = {id(frame) for frame in self.frames}
@@ -443,6 +448,8 @@ class _VideoFrameRangeCache:
         with self.crop_lock:
             self.gate_crops = OrderedDict((key, value) for key, value in self.gate_crops.items() if key[0] in gray_ids)
             self.crop_bytes = sum(value.nbytes for value in self.gate_crops.values())
+            self.integrals = OrderedDict((key, value) for key, value in self.integrals.items() if key in gray_ids)
+            self.integral_bytes = sum(value.nbytes for value in self.integrals.values())
 
     def gray_frames(self, frames):
         """Reuse pixel-exact grayscale for spatially different gate crops."""
@@ -467,27 +474,71 @@ class _VideoFrameRangeCache:
         grays = self.gray_frames(frames)
         with self.crop_lock:
             retained = {id(frame) for frame in self.gray.values()}
-        result = []
-        for frame in grays:
-            key = (id(frame), None if rect is None else tuple(rect))
-            with self.crop_lock:
-                cropped = self.gate_crops.get(key)
-                if cropped is not None:
+        keys = [(id(frame), None if rect is None else tuple(rect)) for frame in grays]
+        with self.crop_lock:
+            result = [self.gate_crops.get(key) for key in keys]
+            for key, value in zip(keys,result):
+                if value is not None:
                     self.gate_crops.move_to_end(key)
                     self.crop_hits += 1
-            if cropped is None:
-                cropped = _crop_square(frame, rect, 64)
-                with self.crop_lock:
-                    self.crop_misses += 1
-                    if id(frame) in retained and cropped.nbytes <= self.crop_budget:
-                        while self.gate_crops and self.crop_bytes + cropped.nbytes > self.crop_budget:
-                            _, removed = self.gate_crops.popitem(last=False)
-                            self.crop_bytes -= removed.nbytes
-                        if key not in self.gate_crops:
-                            self.gate_crops[key] = cropped
-                            self.crop_bytes += cropped.nbytes
-            result.append(cropped)
+        missing = [i for i,value in enumerate(result) if value is None]
+        native_indices = [i for i in missing if id(grays[i]) in retained]
+        native = self._integral_gate_crops([grays[i] for i in native_indices],rect)
+        if native is not None:
+            for i,value in zip(native_indices,native):
+                result[i] = value
+        for i in missing:
+            if result[i] is None:
+                result[i] = _crop_square(grays[i],rect,64)
+        with self.crop_lock:
+            self.crop_misses += len(missing)
+            for i in missing:
+                key, cropped = keys[i], result[i]
+                if id(grays[i]) in retained and cropped.nbytes <= self.crop_budget and key not in self.gate_crops:
+                    while self.gate_crops and self.crop_bytes + cropped.nbytes > self.crop_budget:
+                        _, removed = self.gate_crops.popitem(last=False)
+                        self.crop_bytes -= removed.nbytes
+                    self.gate_crops[key] = cropped
+                    self.crop_bytes += cropped.nbytes
         return result
+
+    def _integral_gate_crops(self, frames, rect):
+        if not frames or not self.integral_budget:
+            return None
+        frame = frames[0]
+        if any(value.dtype != np.uint8 or value.shape != frame.shape for value in frames) or frame.size*255 >= 2**31:
+            return None
+        if rect is None:
+            x1, y1, x2, y2 = 0, 0, frame.shape[1], frame.shape[0]
+        else:
+            x1, y1, x2, y2 = map(int, rect)
+            x1, y1 = max(0, x1), max(0, y1)
+            x2, y2 = min(frame.shape[1], x2), min(frame.shape[0], y2)
+            x1, x2, _ = slice(x1, x2).indices(frame.shape[1])
+            y1, y2, _ = slice(y1, y2).indices(frame.shape[0])
+        width, height = x2-x1, y2-y1
+        if not width == height == 160 and (min(width,height) < 64 or width%64 or height%64):
+            return None
+        from component_statistics import area_crops
+        integrals = []
+        with self.crop_lock:
+            for frame in frames:
+                key = id(frame)
+                integral = self.integrals.get(key)
+                if integral is None:
+                    size = (frame.shape[0]+1)*(frame.shape[1]+1)*4
+                    if size > self.integral_budget:
+                        return None
+                    while self.integrals and self.integral_bytes + size > self.integral_budget:
+                        _, removed = self.integrals.popitem(last=False)
+                        self.integral_bytes -= removed.nbytes
+                    integral = cv2.integral(frame,sdepth=cv2.CV_32S)
+                    self.integrals[key] = integral
+                    self.integral_bytes += integral.nbytes
+                else:
+                    self.integrals.move_to_end(key)
+                integrals.append(integral)
+        return area_crops(integrals,x1,y1,width,height)
 
 
 class _CachedSequentialCapture:
@@ -1105,6 +1156,8 @@ class _LiveProposalPipeline:
         self.queue = queue.Queue(maxsize=2)
         self.windows = queue.Queue(maxsize=2)
         self.current_proposals = None
+        if cpu_features is not None:
+            cpu_features.reset_activity()
         self.cap.defer_analysis_ack = True
         def put(target, value):
             while not self.stop.is_set():
@@ -1127,7 +1180,8 @@ class _LiveProposalPipeline:
         def produce():
             cache = _VideoFrameRangeCache()
             gray_cache = moving_point_detector.GrayFrameCache()
-            flash = short_flash_detector.ShortFlashDetector(cap.get(cv2.CAP_PROP_FPS), config.BORDER_SIZE)
+            flash = (cpu_features.flash_detector(cap.get(cv2.CAP_PROP_FPS), config.BORDER_SIZE) if cpu_features is not None
+                     else short_flash_detector.ShortFlashDetector(cap.get(cv2.CAP_PROP_FPS), config.BORDER_SIZE))
             try:
                 while not self.stop.is_set():
                     try:
@@ -1145,12 +1199,16 @@ class _LiveProposalPipeline:
                         config.RTSP_MIN_LINE_LENGTH, config.RTSP_HOUGH_THRESHOLD,
                         config.RTSP_CANNY_THRESH1, config.RTSP_CANNY_THRESH2, True,
                         flash, cache, gray_cache, final, executor, cpu_features)
+                    if cpu_features is not None:
+                        cpu_features.observe(len(proposals[0]))
                     if not put(self.queue, (data, proposals, final)):
                         break
             except BaseException as exc:
                 put(self.queue, exc)
             finally:
                 cache.close()
+                if cpu_features is not None:
+                    flash.close()
                 put(self.queue, None)
         self.decoder = threading.Thread(target=decode, name='RTSPWindowPipeline', daemon=True)
         self.thread = threading.Thread(target=produce, name='RTSPProposalPipeline', daemon=True)
@@ -1416,7 +1474,8 @@ def create_line_video_clips(
     audit_gate_only = bool(model.get_active_model_info().get('foreground_gate_audit_only', False))
     detection_counter = 0
     flash_detector = short_flash_detector.ShortFlashDetector(frame_rate, config.BORDER_SIZE)
-    frame_range_cache = _VideoFrameRangeCache()
+    frame_range_cache = (_VideoFrameRangeCache(max_bytes=2048*1024**2, integral_budget=512*1024**2)
+                         if is_rtsp else _VideoFrameRangeCache())
     if not is_rtsp and cap.get(cv2.CAP_PROP_BACKEND) == cv2.CAP_FFMPEG:
         cap = _CachedSequentialCapture(cap, frame_range_cache, analysis_source, decoder_threads)
     summary_writer = _SummaryVideoWriter(progress_callback)

@@ -114,6 +114,18 @@ from PyInstaller.utils.hooks import collect_all
 tmp_ret = collect_all('tkinterdnd2')
 datas += tmp_ret[0]
 binaries = tmp_ret[1]
+
+# Ship the exact component aggregator so a packaged app needs no compiler.
+import tempfile
+import subprocess
+from component_statistics import build_library, _library_name
+native_build = tempfile.TemporaryDirectory(prefix="meteor_native_package_")
+try:
+    native_library = build_library(Path(native_build.name) / _library_name())
+    binaries.append((str(native_library), "assets"))
+except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+    print(f"Optional component accelerator unavailable; NumPy fallback retained: {exc}")
+datas.append(("assets/component_statistics.c", "assets"))
 hidden_imports += tmp_ret[2]
 
 # Construct arguments

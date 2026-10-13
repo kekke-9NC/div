@@ -33,7 +33,9 @@ def write_json(path, value):
     fd, temporary = tempfile.mkstemp(prefix=".meteor_meta_", dir=path.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(value, handle, ensure_ascii=False)
+            # dumps uses the native encoder for a whole document; dump's
+            # token-by-token writes held the GIL for large saved sky models.
+            handle.write(json.dumps(value, ensure_ascii=False))
         os.replace(temporary, path)
     finally:
         Path(temporary).unlink(missing_ok=True)
