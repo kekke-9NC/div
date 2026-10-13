@@ -4869,5 +4869,1149 @@
       "/private/tmp/meteor-rtsp-realtime-20261013/startup-resume-full/diagnostic_result.json",
       "/private/tmp/meteor-rtsp-realtime-20261013/startup-resume-300-after/result.json"
     ]
+  },
+  "latest_production_commit": "320dfc8",
+  "latest_startup_resume_optimization": {
+    "date": "2026-10-14",
+    "code_commit": "320dfc8",
+    "auditor_model": "gpt-6-luna",
+    "workflow": "Copied saved state; production startup resume handler and RTSP analysis worker target; no packaged GUI launch",
+    "tested_input_seconds": 300,
+    "all_pending_seconds": 3601.8,
+    "selected_chunks": 600,
+    "decoded_frames": 7500,
+    "source_start": "2026-10-13T03:55:46.195990",
+    "source_end": "2026-10-13T04:00:46.195990",
+    "source_codec": "MPEG4 Simple Profile, yuv420p, 1920x1080, 25 fps",
+    "installed_app_modified": false,
+    "installed_app_processing_started": false,
+    "camera_network_replaced": true,
+    "copy_and_model_warmup_timed": false,
+    "startup_handler_timed": true,
+    "selected_archive_flush_and_worker_shutdown_in_total_seconds": true,
+    "mean_detection_seconds": 272.29317647899734,
+    "mean_detection_ratio": 0.9076439215966577,
+    "mean_seconds_including_shutdown": 272.9419261664734,
+    "each_faster_than_video": true,
+    "meets_25percent": false,
+    "time_reduction_from_531bf0d": 0.5202930225137059,
+    "time_reduction_from_da1724d": 0.44491279855487986,
+    "runs": [
+      {
+        "directory": "/private/tmp/meteor-rtsp-realtime-20261013/resume-next-process300",
+        "code_commit": "a233b39",
+        "result": {
+          "seconds": 428.7122059579706,
+          "input_seconds": 300.0,
+          "input_frames": 7500,
+          "detection_seconds": 428.2289127080003,
+          "processing_ratio": 1.4274297090266677,
+          "end_to_end_ratio": 1.4290406865265686,
+          "completion_reason": "selected_pending_recordings_complete",
+          "startup_choices": [
+            {
+              "jobs": 3,
+              "recordings": 7204,
+              "choice": "resume"
+            }
+          ],
+          "sessions": [
+            {
+              "first": ".rtsp_live/20261012/23/30_23_53891da6414d/chunk_000031846.mp4",
+              "seconds": 425.86638274998404,
+              "decoded_frames": 7500,
+              "eof": true
+            }
+          ],
+          "consumed_chunks": 600,
+          "total_chunks": 600,
+          "archived_pending_chunks": 600,
+          "archived_pending_frames": 7500,
+          "all_pending_chunks": 7204,
+          "subset_seconds": 300.0,
+          "jobs": [
+            {
+              "id": "20261011T1738_20261012T0518",
+              "state": "rendering",
+              "outputs": {
+                "timelapse": "/private/tmp/meteor-rtsp-realtime-20261013/resume-next-process300/rtsp/schedule_products/20261011T1738_20261012T0518/timelapse.mp4"
+              }
+            },
+            {
+              "id": "20261012T1736_20261013T0519",
+              "state": "recording",
+              "outputs": {}
+            },
+            {
+              "id": "20261012T1736_20261013T0500_fresh_20261012T233021184516",
+              "state": "recording",
+              "outputs": {}
+            }
+          ],
+          "failures": [
+            "[自動作成] 再試行予定（元録画は保持）: 比較明合成を中断しました"
+          ],
+          "original_changed_files": [],
+          "original_pending_hashes_unchanged": true,
+          "original_changed_paths": [],
+          "threads_alive": [],
+          "installed_app_started": false,
+          "network_recorder_replaced": true,
+          "profile_enabled": false,
+          "detection_valid": true,
+          "faster_than_video": false,
+          "full_resume_complete": false
+        },
+        "quality_comparison": {
+          "before_count": 26548,
+          "after_count": 26548,
+          "exact_detections": true,
+          "exact_artifact_keys": true,
+          "compared_images": 357,
+          "compared_videos": 229,
+          "compared_video_frames": 17323,
+          "compared_arrays": 0,
+          "compared_info": 55,
+          "media_mismatches": []
+        },
+        "all_fields_comparison": {
+          "input_manifests_identical": true,
+          "all_detection_fields_exact_after_output_root_and_counter_normalization": true
+        }
+      },
+      {
+        "directory": "/private/tmp/meteor-rtsp-realtime-20261013/resume-next-final300",
+        "code_commit": "065dc28",
+        "result": {
+          "seconds": 331.2547357500298,
+          "input_seconds": 300.0,
+          "input_frames": 7500,
+          "detection_seconds": 330.7611491250573,
+          "processing_ratio": 1.1025371637501908,
+          "end_to_end_ratio": 1.1041824525000994,
+          "completion_reason": "selected_pending_recordings_complete",
+          "startup_choices": [
+            {
+              "jobs": 3,
+              "recordings": 7204,
+              "choice": "resume"
+            }
+          ],
+          "sessions": [
+            {
+              "first": ".rtsp_live/20261012/23/30_23_53891da6414d/chunk_000031846.mp4",
+              "seconds": 328.94122983305715,
+              "decoded_frames": 7500,
+              "eof": true
+            }
+          ],
+          "consumed_chunks": 600,
+          "total_chunks": 600,
+          "archived_pending_chunks": 600,
+          "archived_pending_frames": 7500,
+          "all_pending_chunks": 7204,
+          "subset_seconds": 300.0,
+          "jobs": [
+            {
+              "id": "20261011T1738_20261012T0518",
+              "state": "rendering",
+              "outputs": {}
+            },
+            {
+              "id": "20261012T1736_20261013T0519",
+              "state": "recording",
+              "outputs": {}
+            },
+            {
+              "id": "20261012T1736_20261013T0500_fresh_20261012T233021184516",
+              "state": "recording",
+              "outputs": {}
+            }
+          ],
+          "failures": [
+            "[自動作成] 再試行予定（元録画は保持）: 自動作成を中断しました。元録画は保持します"
+          ],
+          "original_changed_files": [],
+          "original_pending_hashes_unchanged": true,
+          "original_changed_paths": [],
+          "threads_alive": [],
+          "installed_app_started": false,
+          "network_recorder_replaced": true,
+          "profile_enabled": false,
+          "prepared_event_counts": null,
+          "rtsp_opencv_threads": [
+            18
+          ],
+          "detection_valid": true,
+          "faster_than_video": false,
+          "full_resume_complete": false
+        }
+      },
+      {
+        "directory": "/private/tmp/meteor-rtsp-realtime-20261013/resume-next-lazy300",
+        "code_commit": "b3c6af3",
+        "result": {
+          "seconds": 330.17187029204797,
+          "input_seconds": 300.0,
+          "input_frames": 7500,
+          "detection_seconds": 329.49468183296267,
+          "processing_ratio": 1.0983156061098756,
+          "end_to_end_ratio": 1.1005729009734933,
+          "completion_reason": "selected_pending_recordings_complete",
+          "startup_choices": [
+            {
+              "jobs": 3,
+              "recordings": 7204,
+              "choice": "resume"
+            }
+          ],
+          "sessions": [
+            {
+              "first": ".rtsp_live/20261012/23/30_23_53891da6414d/chunk_000031846.mp4",
+              "seconds": 327.83846733300015,
+              "decoded_frames": 7500,
+              "eof": true
+            }
+          ],
+          "consumed_chunks": 600,
+          "total_chunks": 600,
+          "archived_pending_chunks": 600,
+          "archived_pending_frames": 7500,
+          "all_pending_chunks": 7204,
+          "subset_seconds": 300.0,
+          "jobs": [
+            {
+              "id": "20261011T1738_20261012T0518",
+              "state": "recording",
+              "outputs": {}
+            },
+            {
+              "id": "20261012T1736_20261013T0519",
+              "state": "recording",
+              "outputs": {}
+            },
+            {
+              "id": "20261012T1736_20261013T0500_fresh_20261012T233021184516",
+              "state": "recording",
+              "outputs": {}
+            }
+          ],
+          "failures": [
+            "[自動作成] 再試行予定（元録画は保持）: 連結キャッシュを中断しました。元録画は保持します"
+          ],
+          "original_changed_files": [],
+          "original_pending_hashes_unchanged": true,
+          "original_changed_paths": [],
+          "threads_alive": [],
+          "installed_app_started": false,
+          "network_recorder_replaced": true,
+          "profile_enabled": false,
+          "prepared_event_counts": null,
+          "rtsp_opencv_threads": [
+            1
+          ],
+          "detection_valid": true,
+          "faster_than_video": false,
+          "full_resume_complete": false
+        }
+      },
+      {
+        "directory": "/private/tmp/meteor-rtsp-realtime-20261013/resume-next-workers300",
+        "code_commit": "b06b656",
+        "result": {
+          "seconds": 338.4160383749986,
+          "input_seconds": 300.0,
+          "input_frames": 7500,
+          "detection_seconds": 337.6498503329931,
+          "processing_ratio": 1.1254995011099769,
+          "end_to_end_ratio": 1.1280534612499953,
+          "completion_reason": "selected_pending_recordings_complete",
+          "startup_choices": [
+            {
+              "jobs": 3,
+              "recordings": 7204,
+              "choice": "resume"
+            }
+          ],
+          "sessions": [
+            {
+              "first": ".rtsp_live/20261012/23/30_23_53891da6414d/chunk_000031846.mp4",
+              "seconds": 335.8712661250029,
+              "decoded_frames": 7500,
+              "eof": true
+            }
+          ],
+          "consumed_chunks": 600,
+          "total_chunks": 600,
+          "archived_pending_chunks": 600,
+          "archived_pending_frames": 7500,
+          "all_pending_chunks": 7204,
+          "subset_seconds": 300.0,
+          "jobs": [
+            {
+              "id": "20261011T1738_20261012T0518",
+              "state": "recording",
+              "outputs": {}
+            },
+            {
+              "id": "20261012T1736_20261013T0519",
+              "state": "recording",
+              "outputs": {}
+            },
+            {
+              "id": "20261012T1736_20261013T0500_fresh_20261012T233021184516",
+              "state": "recording",
+              "outputs": {}
+            }
+          ],
+          "failures": [
+            "[自動作成] 再試行予定（元録画は保持）: 連結キャッシュを中断しました。元録画は保持します"
+          ],
+          "original_changed_files": [],
+          "original_pending_hashes_unchanged": true,
+          "original_changed_paths": [],
+          "threads_alive": [],
+          "installed_app_started": false,
+          "network_recorder_replaced": true,
+          "profile_enabled": false,
+          "prepared_event_counts": null,
+          "rtsp_opencv_threads": [
+            18
+          ],
+          "detection_valid": true,
+          "faster_than_video": false,
+          "full_resume_complete": false
+        }
+      },
+      {
+        "directory": "/private/tmp/meteor-rtsp-realtime-20261013/resume-next-shared300",
+        "code_commit": "eaffaaa",
+        "result": {
+          "seconds": 330.88341995794326,
+          "input_seconds": 300.0,
+          "input_frames": 7500,
+          "detection_seconds": 330.3697669999674,
+          "processing_ratio": 1.101232556666558,
+          "end_to_end_ratio": 1.1029447331931441,
+          "completion_reason": "selected_pending_recordings_complete",
+          "startup_choices": [
+            {
+              "jobs": 3,
+              "recordings": 7204,
+              "choice": "resume"
+            }
+          ],
+          "sessions": [
+            {
+              "first": ".rtsp_live/20261012/23/30_23_53891da6414d/chunk_000031846.mp4",
+              "seconds": 328.4629805830773,
+              "decoded_frames": 7500,
+              "eof": true
+            }
+          ],
+          "consumed_chunks": 600,
+          "total_chunks": 600,
+          "archived_pending_chunks": 600,
+          "archived_pending_frames": 7500,
+          "all_pending_chunks": 7204,
+          "subset_seconds": 300.0,
+          "jobs": [
+            {
+              "id": "20261011T1738_20261012T0518",
+              "state": "recording",
+              "outputs": {}
+            },
+            {
+              "id": "20261012T1736_20261013T0519",
+              "state": "recording",
+              "outputs": {}
+            },
+            {
+              "id": "20261012T1736_20261013T0500_fresh_20261012T233021184516",
+              "state": "recording",
+              "outputs": {}
+            }
+          ],
+          "failures": [
+            "[自動作成] 再試行予定（元録画は保持）: 連結キャッシュを中断しました。元録画は保持します"
+          ],
+          "original_changed_files": [],
+          "original_pending_hashes_unchanged": true,
+          "original_changed_paths": [],
+          "threads_alive": [],
+          "installed_app_started": false,
+          "network_recorder_replaced": true,
+          "profile_enabled": false,
+          "prepared_event_counts": null,
+          "rtsp_opencv_threads": [
+            18
+          ],
+          "detection_valid": true,
+          "faster_than_video": false,
+          "full_resume_complete": false
+        }
+      },
+      {
+        "directory": "/private/tmp/meteor-rtsp-realtime-20261013/resume-next-pipeline300",
+        "code_commit": "cbaab4f",
+        "result": {
+          "seconds": 274.03368325007614,
+          "input_seconds": 300.0,
+          "input_frames": 7500,
+          "detection_seconds": 273.3101534170564,
+          "processing_ratio": 0.9110338447235214,
+          "end_to_end_ratio": 0.9134456108335871,
+          "completion_reason": "selected_pending_recordings_complete",
+          "startup_choices": [
+            {
+              "jobs": 3,
+              "recordings": 7204,
+              "choice": "resume"
+            }
+          ],
+          "sessions": [
+            {
+              "first": ".rtsp_live/20261012/23/30_23_53891da6414d/chunk_000031846.mp4",
+              "seconds": 271.3786368330475,
+              "decoded_frames": 7500,
+              "eof": true
+            }
+          ],
+          "consumed_chunks": 600,
+          "total_chunks": 600,
+          "archived_pending_chunks": 600,
+          "archived_pending_frames": 7500,
+          "all_pending_chunks": 7204,
+          "subset_seconds": 300.0,
+          "jobs": [
+            {
+              "id": "20261011T1738_20261012T0518",
+              "state": "recording",
+              "outputs": {}
+            },
+            {
+              "id": "20261012T1736_20261013T0519",
+              "state": "recording",
+              "outputs": {}
+            },
+            {
+              "id": "20261012T1736_20261013T0500_fresh_20261012T233021184516",
+              "state": "recording",
+              "outputs": {}
+            }
+          ],
+          "failures": [
+            "[自動作成] 再試行予定（元録画は保持）: 連結キャッシュを中断しました。元録画は保持します"
+          ],
+          "original_changed_files": [],
+          "original_pending_hashes_unchanged": true,
+          "original_changed_paths": [],
+          "threads_alive": [],
+          "installed_app_started": false,
+          "network_recorder_replaced": true,
+          "profile_enabled": false,
+          "prepared_event_counts": null,
+          "rtsp_opencv_threads": [
+            18
+          ],
+          "detection_valid": true,
+          "faster_than_video": true,
+          "full_resume_complete": false
+        },
+        "quality_comparison": {
+          "before_count": 26548,
+          "after_count": 26546,
+          "exact_detections": false,
+          "exact_artifact_keys": true,
+          "compared_images": 0,
+          "compared_videos": 0,
+          "compared_video_frames": 0,
+          "compared_arrays": 0,
+          "compared_info": 0,
+          "media_mismatches": []
+        },
+        "accepted": false,
+        "reason": "Artificial ready-future collection order suppressed two background decisions; fixed in 93c211c"
+      },
+      {
+        "directory": "/private/tmp/meteor-rtsp-realtime-20261013/resume-next-completion300",
+        "code_commit": "93c211c",
+        "result": {
+          "seconds": 290.48227616702206,
+          "input_seconds": 300.0,
+          "input_frames": 7500,
+          "detection_seconds": 289.8287057080306,
+          "processing_ratio": 0.9660956856934354,
+          "end_to_end_ratio": 0.9682742538900736,
+          "completion_reason": "selected_pending_recordings_complete",
+          "startup_choices": [
+            {
+              "jobs": 3,
+              "recordings": 7204,
+              "choice": "resume"
+            }
+          ],
+          "sessions": [
+            {
+              "first": ".rtsp_live/20261012/23/30_23_53891da6414d/chunk_000031846.mp4",
+              "seconds": 288.1297418749891,
+              "decoded_frames": 7500,
+              "eof": true
+            }
+          ],
+          "consumed_chunks": 600,
+          "total_chunks": 600,
+          "archived_pending_chunks": 600,
+          "archived_pending_frames": 7500,
+          "all_pending_chunks": 7204,
+          "subset_seconds": 300.0,
+          "jobs": [
+            {
+              "id": "20261011T1738_20261012T0518",
+              "state": "recording",
+              "outputs": {}
+            },
+            {
+              "id": "20261012T1736_20261013T0519",
+              "state": "recording",
+              "outputs": {}
+            },
+            {
+              "id": "20261012T1736_20261013T0500_fresh_20261012T233021184516",
+              "state": "recording",
+              "outputs": {}
+            }
+          ],
+          "failures": [
+            "[自動作成] 再試行予定（元録画は保持）: 連結キャッシュを中断しました。元録画は保持します"
+          ],
+          "original_changed_files": [],
+          "original_pending_hashes_unchanged": true,
+          "original_changed_paths": [],
+          "threads_alive": [],
+          "installed_app_started": false,
+          "network_recorder_replaced": true,
+          "profile_enabled": false,
+          "prepared_event_counts": null,
+          "rtsp_opencv_threads": [
+            18
+          ],
+          "detection_valid": true,
+          "faster_than_video": true,
+          "full_resume_complete": false
+        },
+        "quality_comparison": {
+          "before_count": 26548,
+          "after_count": 26548,
+          "exact_detections": true,
+          "exact_artifact_keys": true,
+          "compared_images": 357,
+          "compared_videos": 229,
+          "compared_video_frames": 17323,
+          "compared_arrays": 0,
+          "compared_info": 55,
+          "media_mismatches": []
+        },
+        "all_fields_comparison": {
+          "exact_all_detection_fields": true,
+          "normalized_fields": [
+            "isolated output roots",
+            "generated detection filename counters"
+          ],
+          "before_only": 0,
+          "after_only": 0,
+          "exact_input_manifest": true
+        }
+      },
+      {
+        "directory": "/private/tmp/meteor-rtsp-realtime-20261013/resume-next-encoder300",
+        "code_commit": "7b3a31b",
+        "result": {
+          "seconds": 294.3039944160264,
+          "input_seconds": 300.0,
+          "input_frames": 7500,
+          "detection_seconds": 293.84839545795694,
+          "processing_ratio": 0.9794946515265232,
+          "end_to_end_ratio": 0.981013314720088,
+          "completion_reason": "selected_pending_recordings_complete",
+          "startup_choices": [
+            {
+              "jobs": 3,
+              "recordings": 7204,
+              "choice": "resume"
+            }
+          ],
+          "sessions": [
+            {
+              "first": ".rtsp_live/20261012/23/30_23_53891da6414d/chunk_000031846.mp4",
+              "seconds": 291.97677491710056,
+              "decoded_frames": 7500,
+              "eof": true
+            }
+          ],
+          "consumed_chunks": 600,
+          "total_chunks": 600,
+          "archived_pending_chunks": 600,
+          "archived_pending_frames": 7500,
+          "all_pending_chunks": 7204,
+          "subset_seconds": 300.0,
+          "jobs": [
+            {
+              "id": "20261011T1738_20261012T0518",
+              "state": "recording",
+              "outputs": {}
+            },
+            {
+              "id": "20261012T1736_20261013T0519",
+              "state": "recording",
+              "outputs": {}
+            },
+            {
+              "id": "20261012T1736_20261013T0500_fresh_20261012T233021184516",
+              "state": "recording",
+              "outputs": {}
+            }
+          ],
+          "failures": [
+            "[自動作成] 再試行予定（元録画は保持）: 連結キャッシュを中断しました。元録画は保持します"
+          ],
+          "original_changed_files": [],
+          "original_pending_hashes_unchanged": true,
+          "original_changed_paths": [],
+          "threads_alive": [],
+          "installed_app_started": false,
+          "network_recorder_replaced": true,
+          "profile_enabled": false,
+          "prepared_event_counts": null,
+          "rtsp_opencv_threads": [
+            18
+          ],
+          "detection_valid": true,
+          "faster_than_video": true,
+          "full_resume_complete": false
+        },
+        "quality_comparison": {
+          "before_count": 26548,
+          "after_count": 26548,
+          "exact_detections": true,
+          "exact_artifact_keys": true,
+          "compared_images": 357,
+          "compared_videos": 229,
+          "compared_video_frames": 17323,
+          "compared_arrays": 0,
+          "compared_info": 55,
+          "media_mismatches": []
+        },
+        "all_fields_comparison": {
+          "exact_all_detection_fields": true,
+          "normalized_fields": [
+            "isolated output roots",
+            "generated detection filename counters"
+          ],
+          "before_only": 0,
+          "after_only": 0,
+          "exact_input_manifest": true
+        }
+      },
+      {
+        "directory": "/private/tmp/meteor-rtsp-realtime-20261013/resume-next-mask300",
+        "code_commit": "79bbe97",
+        "result": {
+          "seconds": 302.37776266690344,
+          "input_seconds": 300.0,
+          "input_frames": 7500,
+          "detection_seconds": 301.46535949991085,
+          "processing_ratio": 1.0048845316663695,
+          "end_to_end_ratio": 1.0079258755563447,
+          "completion_reason": "selected_pending_recordings_complete",
+          "startup_choices": [
+            {
+              "jobs": 3,
+              "recordings": 7204,
+              "choice": "resume"
+            }
+          ],
+          "sessions": [
+            {
+              "first": ".rtsp_live/20261012/23/30_23_53891da6414d/chunk_000031846.mp4",
+              "seconds": 299.36161095800344,
+              "decoded_frames": 7500,
+              "eof": true
+            }
+          ],
+          "consumed_chunks": 600,
+          "total_chunks": 600,
+          "archived_pending_chunks": 600,
+          "archived_pending_frames": 7500,
+          "all_pending_chunks": 7204,
+          "subset_seconds": 300.0,
+          "jobs": [
+            {
+              "id": "20261011T1738_20261012T0518",
+              "state": "recording",
+              "outputs": {}
+            },
+            {
+              "id": "20261012T1736_20261013T0519",
+              "state": "recording",
+              "outputs": {}
+            },
+            {
+              "id": "20261012T1736_20261013T0500_fresh_20261012T233021184516",
+              "state": "recording",
+              "outputs": {}
+            }
+          ],
+          "failures": [
+            "[自動作成] 再試行予定（元録画は保持）: 連結キャッシュを中断しました。元録画は保持します"
+          ],
+          "original_changed_files": [],
+          "original_pending_hashes_unchanged": true,
+          "original_changed_paths": [],
+          "threads_alive": [],
+          "installed_app_started": false,
+          "network_recorder_replaced": true,
+          "profile_enabled": false,
+          "prepared_event_counts": null,
+          "rtsp_opencv_threads": [
+            18
+          ],
+          "detection_valid": true,
+          "faster_than_video": false,
+          "full_resume_complete": false
+        },
+        "quality_comparison": {
+          "before_count": 26548,
+          "after_count": 26548,
+          "exact_detections": true,
+          "exact_artifact_keys": true,
+          "compared_images": 357,
+          "compared_videos": 229,
+          "compared_video_frames": 17323,
+          "compared_arrays": 0,
+          "compared_info": 55,
+          "media_mismatches": []
+        }
+      },
+      {
+        "directory": "/private/tmp/meteor-rtsp-realtime-20261013/resume-next-trace300",
+        "code_commit": "320dfc8",
+        "result": {
+          "seconds": 271.06478575000074,
+          "input_seconds": 300.0,
+          "input_frames": 7500,
+          "detection_seconds": 270.28633925004397,
+          "processing_ratio": 0.9009544641668132,
+          "end_to_end_ratio": 0.9035492858333358,
+          "completion_reason": "selected_pending_recordings_complete",
+          "startup_choices": [
+            {
+              "jobs": 3,
+              "recordings": 7204,
+              "choice": "resume"
+            }
+          ],
+          "sessions": [
+            {
+              "first": ".rtsp_live/20261012/23/30_23_53891da6414d/chunk_000031846.mp4",
+              "seconds": 268.74445320805535,
+              "decoded_frames": 7500,
+              "eof": true
+            }
+          ],
+          "consumed_chunks": 600,
+          "total_chunks": 600,
+          "archived_pending_chunks": 600,
+          "archived_pending_frames": 7500,
+          "all_pending_chunks": 7204,
+          "subset_seconds": 300.0,
+          "jobs": [
+            {
+              "id": "20261011T1738_20261012T0518",
+              "state": "recording",
+              "outputs": {}
+            },
+            {
+              "id": "20261012T1736_20261013T0519",
+              "state": "recording",
+              "outputs": {}
+            },
+            {
+              "id": "20261012T1736_20261013T0500_fresh_20261012T233021184516",
+              "state": "recording",
+              "outputs": {}
+            }
+          ],
+          "failures": [
+            "[自動作成] 再試行予定（元録画は保持）: 連結キャッシュを中断しました。元録画は保持します"
+          ],
+          "original_changed_files": [],
+          "original_pending_hashes_unchanged": true,
+          "original_changed_paths": [],
+          "threads_alive": [],
+          "installed_app_started": false,
+          "network_recorder_replaced": true,
+          "profile_enabled": false,
+          "prepared_event_counts": null,
+          "rtsp_opencv_threads": [
+            18
+          ],
+          "detection_valid": true,
+          "faster_than_video": true,
+          "full_resume_complete": false,
+          "fixed_single_event_trace_active": true
+        },
+        "quality_comparison": {
+          "before_count": 26548,
+          "after_count": 26548,
+          "exact_detections": true,
+          "exact_artifact_keys": true,
+          "compared_images": 357,
+          "compared_videos": 229,
+          "compared_video_frames": 17323,
+          "compared_arrays": 0,
+          "compared_info": 55,
+          "media_mismatches": []
+        },
+        "all_fields_comparison": {
+          "exact_all_detection_fields": true,
+          "normalized_fields": [
+            "isolated output roots",
+            "generated detection filename counters"
+          ],
+          "before_only": 0,
+          "after_only": 0,
+          "exact_input_manifest": true
+        }
+      },
+      {
+        "directory": "/private/tmp/meteor-rtsp-realtime-20261013/resume-next-trace300-repeat",
+        "code_commit": "320dfc8",
+        "result": {
+          "seconds": 274.8190665829461,
+          "input_seconds": 300.0,
+          "input_frames": 7500,
+          "detection_seconds": 274.3000137079507,
+          "processing_ratio": 0.9143333790265024,
+          "end_to_end_ratio": 0.916063555276487,
+          "completion_reason": "selected_pending_recordings_complete",
+          "startup_choices": [
+            {
+              "jobs": 3,
+              "recordings": 7204,
+              "choice": "resume"
+            }
+          ],
+          "sessions": [
+            {
+              "first": ".rtsp_live/20261012/23/30_23_53891da6414d/chunk_000031846.mp4",
+              "seconds": 272.5916592910653,
+              "decoded_frames": 7500,
+              "eof": true
+            }
+          ],
+          "consumed_chunks": 600,
+          "total_chunks": 600,
+          "archived_pending_chunks": 600,
+          "archived_pending_frames": 7500,
+          "all_pending_chunks": 7204,
+          "subset_seconds": 300.0,
+          "jobs": [
+            {
+              "id": "20261011T1738_20261012T0518",
+              "state": "recording",
+              "outputs": {}
+            },
+            {
+              "id": "20261012T1736_20261013T0519",
+              "state": "recording",
+              "outputs": {}
+            },
+            {
+              "id": "20261012T1736_20261013T0500_fresh_20261012T233021184516",
+              "state": "recording",
+              "outputs": {}
+            }
+          ],
+          "failures": [
+            "[自動作成] 再試行予定（元録画は保持）: 連結キャッシュを中断しました。元録画は保持します"
+          ],
+          "original_changed_files": [],
+          "original_pending_hashes_unchanged": true,
+          "original_changed_paths": [],
+          "threads_alive": [],
+          "installed_app_started": false,
+          "network_recorder_replaced": true,
+          "profile_enabled": false,
+          "prepared_event_counts": null,
+          "rtsp_opencv_threads": [
+            18
+          ],
+          "detection_valid": true,
+          "faster_than_video": true,
+          "full_resume_complete": false,
+          "fixed_single_event_trace_active": true
+        },
+        "quality_comparison": {
+          "before_count": 26548,
+          "after_count": 26548,
+          "exact_detections": true,
+          "exact_artifact_keys": true,
+          "compared_images": 357,
+          "compared_videos": 229,
+          "compared_video_frames": 17323,
+          "compared_arrays": 0,
+          "compared_info": 55,
+          "media_mismatches": []
+        },
+        "all_fields_comparison": {
+          "exact_all_detection_fields": true,
+          "normalized_fields": [
+            "isolated output roots",
+            "generated detection filename counters"
+          ],
+          "before_only": 0,
+          "after_only": 0,
+          "exact_input_manifest": true
+        }
+      }
+    ],
+    "final_runtime": {
+      "device": "mps",
+      "torch_threads": 4,
+      "opencv_threads": 18,
+      "concurrency": 1,
+      "model": {
+        "model_path": "/Users/keisukematsumoto/Library/Application Support/MeteorDetector/models/meteor_event_transformer_boost_v5.pth",
+        "mean": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "std": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "input_resize": [
+          160,
+          160
+        ],
+        "class_names": [
+          "not_meteor",
+          "meteor"
+        ],
+        "meteor_class_index": 1,
+        "metadata_path": "/Users/keisukematsumoto/Library/Application Support/MeteorDetector/models/meteor_event_transformer_boost_v5.pth.meta.json",
+        "architecture": "meteor_event_transformer_boost_v1",
+        "decision_threshold": 0.17177035153000328,
+        "target_recall": null,
+        "foreground_gate_audit_only": true,
+        "non_meteor_full_media_probability_min": 0.0,
+        "noise_gate_path": "/Users/keisukematsumoto/Library/Application Support/MeteorDetector/models/auxiliary/meteor_event_noise_gate_v5.pth",
+        "noise_gate_threshold": 0.00840118635499679
+      },
+      "threshold": 0.17177035153000328,
+      "windows": 0,
+      "save_options": {
+        "video": true,
+        "cutout": true,
+        "full": false,
+        "composite": true,
+        "info": true,
+        "summary": true,
+        "full_video": true,
+        "ml_training_export_enabled": true,
+        "ml_training_data_root": "/private/tmp/meteor-rtsp-realtime-20261013/resume-next-trace300/ml_training_data",
+        "ml_training_min_probability": "0.15",
+        "auto_video_mask_enabled": false,
+        "auto_video_mask_cache_dir": "/private/tmp/meteor-rtsp-realtime-20261013/resume-next-trace300/auto_mask_cache",
+        "full_video_timestamp_enabled": true,
+        "full_video_timestamp_position": "右下",
+        "full_video_timestamp_size_percent": 1.8
+      },
+      "mask_revision": "da6e534e6011c7c6b0ca4a73961318014cd07f9a28d8351a7a79dbc97bd44745",
+      "settings_sha256": "851ec1c4d9578c8a5d631b5bf4ac7750906ceae9a0b3bec88aab649ae9a5fefa",
+      "model_sha256": "9653ccb9ea4406d7a7b6ab0f726777af7ce1d93bbd8453ba2b851f673ca0bb7e",
+      "code_sha256": {
+        "detection_preview.py": "7606f79c261a0c6ee190bd4dd33933edd6bf5812ad2046dd516c186e13352e1a",
+        "temporal_statistics.py": "fa24ddd909ad48482b7a4f35459cbc795a2be9834d62798b84d4eea0a6732d27",
+        "ui_state.py": "5c22ad327fefbea5d3f51f815688607987f524293e21e2de4c39e510a3930d5a",
+        "video_processing.py": "9a188d0efe796df2098dc2c148b6b40ac96ec4d3af8453fc304068aed68eeddf",
+        "audit_20260812_20260813_constellation_timelapse.py": "2f09a57d0ad4d0d64e7da83370cb8e55e8683111d54168e358ccbc5ffc667253",
+        "coordinate_manager.py": "de771021dd1864b9924c5b6b6a4f18d83d46a6681df61f64dc05735aeec83d48",
+        "folder_source_discovery.py": "6b728d652dc2e7cf5c85f6c03d19b5e097c75ea731dc95da87a7881c8b839b3c",
+        "gui_source.py": "82a4b695479ed53d132f136028cb087c7536014ca3b2c48523499a9d957c366c",
+        "meteor_vlm_benchmark.py": "b047a56e8be55c3c90a8f779867c93909415f01277e06c6c9c341adb11f14ef0",
+        "gui_tools.py": "727a630475ec8e27ef444fa603c7465003b468e508df1962a8d703bf4ab6a0d6",
+        "create_20260820_constellation_timelapse.py": "6c8f122582195c0b1b1f68945226778b5a1f8c082e87d8fdd1a3549cebd2616e",
+        "qwen3_VL_4B.py": "cb0664fa7a48f2eb1c4388b67b65cfa41491944536a52217aa795ec5369775ea",
+        "gui_synthesis.py": "ef61efcb7807901895138e8fdc1146d2dcd869432302035edf4e518f739d1654",
+        "camera_control.py": "2b04058a93fbb8ad2818862b5b678e881aee06d8db93a183a941c063232fcc97",
+        "moving_point_detector.py": "6ff0af6366d196a07c74b83750b62f6a1bf05d9b8b7f3fe7355ce6931609070e",
+        "local_wideangle_astrometry.py": "20e525e0bf1e68ddb829ae87d6076564e8723495dcc74010292c5164e22f82c0",
+        "gui_preview.py": "a3ad7ff19aeca13ea9fff6cc31200419c339d9e0f88263e6bcd1d07ad9e37c56",
+        "refit_trajectory_candidates.py": "7104e288751500a717455ecdd74d4ce184c9d9550d3c6043c07ec77bf2d5afc8",
+        "video_denoising.py": "dfd179c76a675dd05603b6f16b043c3e52c4e6a5f56a04aae4b127505a02d8b1",
+        "location_utils.py": "d972868da623a1cdd15c2c697142374630b905a2638abf501ef273ef52320ae0",
+        "config.py": "237db583195dc9364b56d438227d907e9d9b228139fadccf90b3941b6e3e7a54",
+        "automatic_video_mask.py": "002397f54aec14af1a13adad9339a6b5e6e5406e0f276e3b491f3de88f278042",
+        "qwen3_VL_4B_local.py": "da212edd035f36d2efa032a756b473aacc9b2bbaaf29de357d220eee17fc6159",
+        "create_20260820_full_night_30s.py": "c8944f9c7b2049569225bba57e7367916c9b45866411e1eddc7a99d6f8911440",
+        "legacy_mask_sync.py": "3ac9ca2983f3e3c6ca5deb8c7b4dbd691aba21623e9f0e523a564baf4e3c5419",
+        "settings_runtime.py": "971ea1792f59812624e39574752317b0ba9761a2c7caf70e4d4aa79fd532ce6b",
+        "debug_hash.py": "d952914be9e1d86840acfd9b1da39aafeff1ec6f0d9d45639f713d13900fd39e",
+        "event_boost_model.py": "ab62d710fc9b378ca1b7141e0938c557f5b500c7d812ffbce3a834f6b2bc45fe",
+        "render_constellation_fix_previews.py": "0cc32f9cfa22b1cf6add8e44b46f58641cf4bbc47053e7485df6343493f8ba62",
+        "short_flash_detector.py": "3410aff43787ae060d308aed36a78f7e85c7a343646463228503220a6f9223e0",
+        "train_universal_meteor.py": "1ca43f756089aca619a4a7fb6a73af52bc21baf33e4c8a428b12f472a9852f9e",
+        "create_20260812_20260813_constellation_timelapse.py": "5384b9f22adac23f2b894383770d7e6827541ba6ae0b03d400102e9ab8901ddc",
+        "rtsp_live.py": "986cc1e82cb81042aaa0163b78e028a7815cc83952dcd027be11e40486fa5afe",
+        "ml_bulk_review_ui.py": "b46ef2bf2ff8f70251678055c9df0a0d3f00d0b2cf0fa0cc4aa568b22281dade",
+        "sun_times.py": "5a0bc507640a76d1562a43c32cd0600faf8b65ff36deb2e2100e2fdded1e5b94",
+        "local_wideangle_worker.py": "2683042a10a8cf6570cddd10d8b16bf3a26af801d2277ec9408910b43ee5575e",
+        "download_pipeline.py": "4befc6db85ef45ca4d06b0917fda33ae73f668a5c483becd06c42c1941ee5b86",
+        "event_transformer.py": "9ecdcff471560bb461f6314e4857c162f7f77446d8bd3fbd85aaec13e60f745e",
+        "meteor_sky_viewer.py": "95d0eb709021ede58a0319cb1a3dcec8e061d88fc5b900459b27ecb80358f561",
+        "meteor_shower_catalog.py": "fb42a58862fde80645363dff901da31ec46f9877e0b3fa0e18e662c9c31059bb",
+        "camera_model_catalog.py": "09ba0dd3e64314a21b3a2c3647032b0bd91588777e0a03adb1071c52802cac08",
+        "cloud_coverage.py": "d3f2be1621124c1a67ea868300eb31a81d063d42465a963c328ffdd496813b5a",
+        "video_processor.py": "4b86a1751134544283f07e83ab49350f242b9da2f4cbb7952b433fab169e9dbb",
+        "benchmark_rtsp_fixed_pattern.py": "282ee71347a69262d63f39241615fe9992df24138c1647b7f7e7e80826817973",
+        "long_exposure_map.py": "1132796d850ed643e70026d106afc8968e51567fa6fd7cfc0a5324326bea413a",
+        "meteor_angle_analysis.py": "04311629f0c61f631977f04f18ad5578eeb0c08afc6855361a3fafc6055718be",
+        "temporal_mean.py": "b3782b766813e456d1490726bb8b5fd8624e663bd64a65ce4ba525c3b612fcc8",
+        "network_copy.py": "752fd4eff763a36a099a7b8cd11637a09c94f3a2230bde06d21e95daaa11f61a",
+        "gui_settings.py": "b01fab8c26ffe8f701f617058e25c6c0dc0a86c6abea3d16c3d88dc804c6b88c",
+        "observation_time_filter.py": "0393a57e9ec89625d926c311c2e53943945953562db0746bc3c8ddfd3d48638d",
+        "gui_common.py": "f9f4c44f293924d2a37da6fe359c7c186b5e6e04b962335e680d8210e5e40676",
+        "rtsp_schedule_products.py": "cf8db963a3c86c16b777f7b28b363a65c67921a719297acf9bdc84729155ee8d",
+        "camera_model_monitor.py": "30d7e18832f4cf9de7264f72a4cba7f6d97a6ea8236031aa31b9df3d3da38b64",
+        "check_tcl.py": "0c5077d9b08cfcc9b62a19538ab1bfbc768a4ee6d73752fb9d9b45461f7353e7",
+        "compare_constellation_models.py": "0becb2fd555504595f4dbd1cad0cb875333778d1e612c59d50bdd28e0f80f5b1",
+        "ml_bulk_review.py": "570dda55c847ea01bb470815b87b7e0c102419cf2279fc487e82f3ba342e841f",
+        "meteor_direction.py": "12a217980585dff2f3387d431b162cd781764162f3b84b59f165ecfa347b2ff0",
+        "event_noise_gate.py": "1da8eca57c726a7014d93b4e191dc154dd04c7427714b53f393f23e3da3a858b",
+        "legacy_settings.py": "de98072ba502a2465c3527299516cf0eb85c3b6886de40d42a094773aca6fa02",
+        "meteor_radiant_analysis.py": "5c5152961e622fd5031f6d3e0a4190b2abda9d0ccc4b5bd8ab0ff8021e847d0b",
+        "tkinter_safety.py": "85a8a40bc2f66b5b221a589749b2e50b84fdad82e8394d064f4927aadc1921a5",
+        "model.py": "2d90c1442e59309738dd71cc7365bc26a13316370dff66fd44989f07198787ec",
+        "distortion_correction.py": "c403dc9234c84c115f8bc1837d162eee4b80107769cf36e833bea4811e1a7bf2",
+        "gui_camera_control.py": "d0db5c4b43770ebde2b5b0a2579641ba4495bd1e73dd1c1e42ecff0418e697ed",
+        "astrometry.py": "64d0d9594c86ea83bcfd2da7a1acfd933fdf0f3c623b00273602c8ac190f41b8",
+        "timelapse_creator.py": "530cac059fbbeb8bcbd09f74b3a11c9746b506d4e06dace62179e42945edadf4",
+        "build_exe.py": "db2f203148a79df96ee9ecd8746420646d559ac328a9bcc9b6680320baadc8fb",
+        "video_io.py": "fdb2c505587fb6183eecbd13a7be0b605a6d929f506bfb7cb58379f1963179b2",
+        "upgrade_trajectory_detection_gate.py": "df698206af7ca8f21b37fec9461bcc71d42184b8ece5476c0a55e5d6e7f4d3bb",
+        "noise_twin_training.py": "8f1db00878b8133a600b8e62efa59aa1a958c5fd1e3a405320b27171f71a039b",
+        "file_utils_temp.py": "f764b78fcf7535d1491e267a41327f91b91caa28d86466ce81cb46b05895397e",
+        "camera_plate_model.py": "6d35a931d1c8bed89dbd733de0b552890280c59feba5736a35702a49330b8071",
+        "lighten_blend_image.py": "8a296a145f32a3721879f5070a2216b8a7c30a956889131f38561fa504ccc192",
+        "universal_meteor_model.py": "8f0b10fc6e117979b5ca20f64fcf66e1161001a1d166ac28868f90dfa1c88d42",
+        "rtsp_annotation_worker.py": "e4fff1fb7c4053dc40798506158c63e440a3b8572b0399bab95fc8872540cf03",
+        "model_catalog.py": "e9caddb40d32b3fda07bf041abd2fef2a4fbc4cd393e64b59f7379986f6a4503",
+        "noise_twin_worker.py": "43849d42ee252d12969ee911194be7afbbd8a614e71f8584fd00b59ecd910044",
+        "lighten_blend_video.py": "8076344025840212ade89e75c79ed6f5fc270d9679f2b6649d4a45c37e76970b",
+        "utils.py": "9166be7100e95dad7ab6fee9e4a9070655739b7271c50ce163afb82cd0eae77c",
+        "event_representation.py": "e64586302d89622bbe86137a67d6d7a9291913ca8ed7d28d0c1eec074af4ba12",
+        "fixed_pattern.py": "90133514a8b483e4f50c9de4398433b096ee2832246bca0e753e046ba8dc5284",
+        "train_event_boost.py": "bfabf0049d2e721c597cd7ea94457e03cad3b362bded2253e4b881d1140c8071",
+        "gui_usage.py": "5a28b161495822dedd2765f22dcbe702c78f3be1c9e06223e54e6b774cc68c22",
+        "media_time.py": "3cabfd283b97b686ac6f7cce86ac34ea70c68c7acc5bbbdf89bdd10b48e5e95a",
+        "gui_processing.py": "77e6dabd8e9db7ff807db9bfd7e9866e9ec100b357f9de4c7ea0870f18c48e9b",
+        "main_gui.py": "1f5943e61b6950ed5323538943dcb44f7abd87f1dbe03707095fe6e28e2d6b2f",
+        "meteor_trail_timelapse.py": "d7a15c7aaa030ee28a9bcfbc8c9d1d858432cf13dcc1c5460a9fa14162de714f",
+        "gui_navigation.py": "f12192374f26cb159d1e7e8527fb067f4d0b8bc3cb3d5feb7eeff4cda14db744",
+        "video_enhancement.py": "2647e0d9691605e893efee6bac30cc725fa2696a1bcb4e76ec2dd10e7c80fbb0",
+        "camera_model_visualization.py": "3df3e56942d5456b9ab9b2ce29e6225fc91cc5e27df55e8efebc3d95ffc03164",
+        "video_encoding.py": "b14237fbc470e3cff47468545c104369efe950b7500056d6e486c090ed998744",
+        "lmstudio_video_describer.py": "7b946d1e45675b0e49fdb8c1dede3ef31391e427aa0b38d78e5c866c09b9aa1b",
+        "rtsp_segments.py": "0307f34b3157075fc02a237d4d48a36b03dc8e05802cba84bcf3a7793fed5345",
+        "recovered_qwen3_VL_4B.py": "77a37df62a69721bf79de614ec2d8707200ad57b784c39911fe238dc34aea0bd",
+        "video_creation.py": "5bd6c612bd7d88993cf6493a0fdf72c1742690203876864414bb197fc9f82d5e",
+        "ml_review.py": "ddb2f2a69ea02182b8515115947f25532cd3565eff771ef8dbbd9e188abc3d2e",
+        "rtsp_dark_capture_worker.py": "351e26d0ded41d8da6d47db9ae0184c5dcf5fe12da86467395dad2f91cbf55e4",
+        "swift_backend.py": "a2de9b4aaa41dfd651b1b8cfed2257f95a77efe91ae51000cef86eeb1330c8b3",
+        "file_utils.py": "c25b7804de67a8dc04ea28ac3fb8508a1b8263f4adb974278794c1bc3550a337",
+        "noise_twin.py": "e545e253f66322633e9b7997d074a6496144811e8dfc97b3d88f9fa2124d1cc5",
+        "analyse_fixed_pattern_drift.py": "8b5e79a6c40c3331c7bb7ab09961f5f08ed3758edf04bb4ff4ec75e5cc4aa93c",
+        "validate_20260812_20260813_constellation_timelapse.py": "48dbb13ba597cd83c61df74a591d7cb2513337600d2085a08932e82cce0d14b3",
+        "noise_twin_pipeline.py": "e727021f04b03e8e46b28dd058c3e4fa439ef0ec11f7a8b2130e4d911e1237fd",
+        "train_labeled_backup0826.py": "f0ca102593df27bd7e805b73ed7fd81a722e6df895b9845196506bd693e05023",
+        "ui_theme.py": "503685dd8bec8b0d39c77c95acbb0daed13bf62240e837859038c12d228ec9aa",
+        "chat_gui.py": "c5198520057420b5ab8aaa7d10765d33952c5a300bd57c986ddfcfb19e63555f",
+        "evaluate_event_boost.py": "46cbeee564a9d09e1d8d7cc2bf61d3082fb9a32e0f1a3db740767d66fbeddaa4",
+        "camera_model_builder.py": "1693aa7360f4d8fc991efde880b36364a8c98405dedff39b73ac45dec419bcdf",
+        "extract_fixed_pattern.py": "01eb5acee6924edf1216472b01e801cc259d8f9340e9e620403ba4332b1944ad",
+        "build_launcher_script.py": "101d6b6af047245f64e103a086339ae246ec076677b545d196f1a3ae403a131a",
+        "bright_area_detector.py": "92cbda54dfafa6d12b0fd65ba46d3ac63576fc92cb5b63f382aad9cb76d4c0b1",
+        "auto_time_updater.py": "f4d65ea3944ec689ceebf1bd1e92a3efe8d55b362ba766ab42420f91c2892c81",
+        "gui_advanced.py": "ee5ef2d80bcb8ec0d6e23cdc9482ea867a0e342dc0c40dcf60923a63bd0f7211",
+        "event_pixels.py": "13eaf747a97df4d3fdd93702889a2bea36260398211708a405a96e5da997626b",
+        "upgrade_trajectory_projection_guard.py": "384bfc34bc2c7a9b7fa04d7f74dc60c6cad8518c1def46713ccbd942406dc865",
+        "trajectory_camera_model.py": "01bbab6a042eb834d405011b8b0b69ff77a28492d5ea9aa13a5478b0c9a08162",
+        "rtsp_startup.py": "f53987431cabc8309f94406978d48f6e593a8b53504a4eca572f298c6b1bb47d",
+        "gui_dialogs.py": "4dfcdb346df0a3c399b1c39de1bf3a8c0a8e2b997f6bc730c691327454e23041",
+        "usage_metrics.py": "ce39d7455f048d720b5aaa0c4122e114615699bd249bd4a2e029440e280ca774",
+        "tracking.py": "cd8ec8122da203e3070b8259e5fd37df57fcecad6d39e77282f765c7da096007",
+        "process_lock.py": "dd934a4c399ec76dd5e6b7ef450ab3e9bda5abc2344bb0518355f192a9b9b688",
+        "meteor_radiant_visualizations.py": "c06930a561638b6e8173d4b06b929d95f843669980bd509d01e4708a5942985f",
+        "ml_training_data.py": "fe2e2354704881845604cf4591f65266b7d191faee8c3f15ad5aacbddd46056a",
+        "gui_app.py": "a183846a4666b3f7b9941810ea02259ed6f8af8dfbb10577793a224748782951",
+        "upgrade_trajectory_constellation_rendering.py": "0c4d90eb9b65f424520b110ed11c24b36963ac3c70ddb39eab24aa2d42679435",
+        "compare_wcs_single_vs_stack.py": "c7dbec548335bdd742292e078c1fbabf8c43e678d74e23fec8bd7d83c69a0101",
+        "gui_live_preview.py": "6b08c6643f77e511c87dc326ab992eb5b643d534c65a1748674d4f01e009450a",
+        "image_processing.py": "7027d834d3a97406d39d38e8fefa137a73c7650e2f3d230a7e18cd29fd212017",
+        "gui_analysis.py": "1419cb0946b071db711877d45f2e4f27cb1d4f1b441987056453de1d2be0c551",
+        "_tmp_create_last_night_timelapses.py": "9a949d49b9be94e2225f391b35b2464ebf9b4d2751d265e9e2cb3af8dc2dcfb9",
+        "gui_masks.py": "72caef1143e9e380391cc60405c5a07c6da1e0bf2abea83516896a68f2278616",
+        "subtract_fixed_pattern.py": "9840022af1d50e3db71545c5befeff76a5a025f27c42e8339eddf1cede40df82",
+        "component_statistics.py": "981a066e15ff112fa3669a76b4c7b86792b434a7e3cf8b6ed77844e08a4dc190",
+        "event_encoder_pixels.py": "df9c23721eaeb22769153cf9e7ac1c25f2bf5c30c27820ea5f04710c090f9233",
+        "status_panel.py": "ec4e9c3b8e5b416f066d3d6d927660c474765d9ac83f543a2035926f0dd08fff",
+        "gui_plate_solve.py": "65e495d4ac478548adccaf06e195ca7b6b0fdad2dd3773f9f5fa2c79191782c9",
+        "rtsp_gate_workers.py": "c5efa15f98baeed5353defde5112df88788c7679a07cc4a5d13d768ce84254a9",
+        "bootstrap_launcher.py": "a792560b34777fa2ca60049a3dd0a1989b67883ab32c1c81dfce6ea8fa45d6c6"
+      },
+      "sources": [],
+      "workflow": "startup_resume"
+    },
+    "native_source_sha256": "137607ea3a7a7573227d6f22efb23ccecc51edbf0c7975087358c13c83fb1b6c",
+    "tests": {
+      "passed": 206,
+      "subtests_passed": 4,
+      "warnings": 6,
+      "warning_scope": "Torch JIT deprecation notices; optional graph failures retain eager inference",
+      "log": "/private/tmp/meteor-rtsp-realtime-20261013/resume-next-trace-final-tests.log"
+    },
+    "optimizations": [
+      "Exact CPU event and encoder preparation in spawned workers without Torch",
+      "Bounded shared input/output slots, at most 8 slots of 32 MiB each",
+      "Exact native small temporal medians up to 64 frames",
+      "Off-process sky annotation for resumed schedule products",
+      "One-pass recording discovery and bounded polling while queued work remains",
+      "Prepare next window finer/gate/event evidence while consumer classifies and saves the previous window",
+      "Retain producer as_completed collection order across lookahead; unchanged history and acknowledgement decisions",
+      "Certified identical raw-frame and resized-mask pixels across independent caches",
+      "Exact uint8 mask equality without image-sized boolean temporaries",
+      "Fixed single-event MPS TorchScript graph with exact probes, owner/shape/dtype/mode guards and eager fallback"
+    ],
+    "limits": [
+      "Only the first contiguous 300 seconds of actual pending data were verified, twice; not all 3601.8 seconds",
+      "The three resumed schedule jobs did not all complete; unselected pending recordings remain",
+      "The existing resume choice starts schedule-product recovery; the harness directly starts the production RTSP analysis worker after that choice, bypassing GUI Start",
+      "No packaged GUI/RTSP camera/installed app launch or update was performed",
+      "Copying and path rebasing invalidate path-dependent cache keys; installed warm-cache timing is unknown",
+      "Startup setup is timed, model loading/warmup and snapshot copy are excluded",
+      "Detection_seconds ends at selected analysis EOF; seconds also includes archive flush and worker shutdown, but not all schedule products completion",
+      "Native kernels and fixed MPS graph are optional; other environments fall back with unmeasured performance"
+    ],
+    "discarded_or_unqualified": [
+      "Interrupted resume-next-exact300 and resume-next-source300 are not completed speed measurements",
+      "30-second annotation run was faster, but cannot establish 300-second performance",
+      "cbaab4f pipeline run was fast but differed by two background decisions; not an accepted quality result",
+      "79bbe97 run took 301.465 seconds; no stable realtime claim from that revision"
+    ],
+    "model_warmup_includes_initial_graph_trace_and_exact_probes": true
   }
 }
