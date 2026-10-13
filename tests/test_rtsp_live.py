@@ -187,6 +187,7 @@ class RtspLiveTests(unittest.TestCase):
             with (
                 mock.patch.object(video_processing.model, "predict_noise_gate", return_value=None),
                 mock.patch.object(video_processing.model, "predict_meteor_event", return_value=.99),
+                mock.patch.object(video_processing.meteor_direction,'estimate_motion',side_effect=AssertionError('info disabled')),
                 mock.patch.object(video_processing.model, "get_meteor_decision_threshold", return_value=.5),
                 mock.patch.object(video_processing.image_processing, "detect_lines", return_value=[]),
                 mock.patch.object(config, "CUTOUT_SIZE", 64),

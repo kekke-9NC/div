@@ -1889,18 +1889,6 @@ def create_line_video_clips(
                                 motion_frame_start = (
                                     actual_start_final if is_rtsp else adjusted_start_frame
                                 )
-                                motion_estimate = meteor_direction.estimate_motion(
-                                    final_frames_for_clip,
-                                    ((x1, y1), (x2, y2)),
-                                    motion_frame_start,
-                                    frame_rate,
-                                )
-                                print(
-                                    "時間順方向推定: "
-                                    f"status={motion_estimate.status}, "
-                                    f"angle={motion_estimate.direction_angle_deg}"
-                                )
-                            
                                 detection_counter += 1
                                 print(f"--- 検出確定 {detection_counter} (並列処理) ---")
                             
@@ -1958,6 +1946,18 @@ def create_line_video_clips(
                             
                                 is_meteor = probability >= model.get_meteor_decision_threshold()
                                 keep_full_media = _keep_full_event_media(is_meteor)
+                                if keep_full_media and save_options.get('info',False):
+                                    motion_estimate = meteor_direction.estimate_motion(
+                                        final_frames_for_clip,
+                                        ((x1, y1), (x2, y2)),
+                                        motion_frame_start,
+                                        frame_rate,
+                                    )
+                                    print(
+                                        "時間順方向推定: "
+                                        f"status={motion_estimate.status}, "
+                                        f"angle={motion_estimate.direction_angle_deg}"
+                                    )
                                 save_dir = meteor_save_path if is_meteor else not_meteor_save_path
                                 detection_label = "meteor" if is_meteor else "not_meteor"
                                 os.makedirs(save_dir, exist_ok=True)
@@ -2508,18 +2508,6 @@ def create_line_video_clips(
                     motion_frame_start = (
                         actual_start_final if is_rtsp else adjusted_start_frame
                     )
-                    motion_estimate = meteor_direction.estimate_motion(
-                        final_frames_for_clip,
-                        ((x1, y1), (x2, y2)),
-                        motion_frame_start,
-                        frame_rate,
-                    )
-                    print(
-                        "時間順方向推定: "
-                        f"status={motion_estimate.status}, "
-                        f"angle={motion_estimate.direction_angle_deg}"
-                    )
-
                     detection_counter += 1
                     print(f"--- 検出確定 {detection_counter} ---")
 
@@ -2577,6 +2565,18 @@ def create_line_video_clips(
 
                     is_meteor = probability >= model.get_meteor_decision_threshold()
                     keep_full_media = _keep_full_event_media(is_meteor)
+                    if keep_full_media and save_options.get('info',False):
+                        motion_estimate = meteor_direction.estimate_motion(
+                            final_frames_for_clip,
+                            ((x1, y1), (x2, y2)),
+                            motion_frame_start,
+                            frame_rate,
+                        )
+                        print(
+                            "時間順方向推定: "
+                            f"status={motion_estimate.status}, "
+                            f"angle={motion_estimate.direction_angle_deg}"
+                        )
                     save_dir = meteor_save_path if is_meteor else not_meteor_save_path
                     detection_label = "meteor" if is_meteor else "not_meteor"
                     os.makedirs(save_dir, exist_ok=True)
