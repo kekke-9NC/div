@@ -182,6 +182,8 @@ def main():
         else:
             from benchmark_realtime_rtsp import run_replay
             result, items = run_replay(args, settings, options, noise, correction, mask_reader.mask)
+        encoder = getattr(model.model,'encoder',None)
+        result['fixed_single_event_trace_active'] = getattr(encoder,'_single_projection',None) is not None
         (args.output / 'detections.json').write_text(json.dumps(items, indent=2,
             default=lambda x: x.item() if hasattr(x, 'item') else str(x)))
         (args.output / 'result.json').write_text(json.dumps(result, indent=2))
