@@ -117,6 +117,9 @@ def run_resume(args, settings, options, noise, correction, mask):
     original_publish = rtsp_live.MinuteArchiver._publish
     original_recorder = file_utils.save_rtsp_video_segments
     original_runner_init = rtsp_live.RealtimeRunner.__init__
+    import model
+    original_predict = model.predict_meteor_event
+    prepared_counts = dict(calls=0,supplied=0,matched=0,mismatched=0)
     detection_done = None
     completion_reason = None
     started = None
@@ -145,6 +148,16 @@ def run_resume(args, settings, options, noise, correction, mask):
 
     def request_stop(_number, _frame):
         stop_requested.set()
+
+    def predict(*values,**kwargs):
+        prepared_counts['calls'] += 1
+        prepared = kwargs.get('prepared')
+        if prepared is not None:
+            prepared_counts['supplied'] += 1
+            architecture = model.get_active_model_info().get('architecture')
+            matched = prepared.matches(kwargs['frames'],kwargs['cutout_rect'],kwargs['detected_line'],kwargs['frame_rate'],architecture)
+            prepared_counts['matched' if matched else 'mismatched'] += 1
+        return original_predict(*values,**kwargs)
 
     def runner_init(runner, save_root, analyze, cancel_flag, status_callback=None, ready=None, **kwargs):
         eligible = lambda path: str(path) in targets and (ready is None or ready(path))
@@ -225,6 +238,7 @@ def run_resume(args, settings, options, noise, correction, mask):
         (rtsp_live.RealtimeRunner,'_consume',consume),
         (rtsp_live.RealtimeRunner,'__init__',runner_init),
         (rtsp_live.MinuteArchiver,'_publish',publish),
+        (model,'predict_meteor_event',predict),
         (file_utils,'save_rtsp_video_segments',recorder)):
         restored.append((owner,name,getattr(owner,name)))
         setattr(owner,name,replacement)
@@ -248,6 +262,7 @@ def run_resume(args, settings, options, noise, correction, mask):
                            (video_processing,'_process_finer_detection_worker'),
                            (model,'prepare_meteor_inputs')):
             instrument(owner,name)
+        instrument(model,'_prepare_meteor_inputs')
     clock = tuple(int(settings.get(key,fallback)) for key,fallback in (
         ('rtsp_start_hour',17),('rtsp_start_minute',0),('rtsp_end_hour',5),('rtsp_end_minute',0)))
     previous_signal = signal.signal(signal.SIGINT,request_stop)
@@ -300,6 +315,7 @@ def run_resume(args, settings, options, noise, correction, mask):
                   original_changed_paths=changed_paths,
                   threads_alive=alive,installed_app_started=False,network_recorder_replaced=True)
     result['profile_enabled'] = args.profile
+    result['prepared_event_counts'] = prepared_counts
     result['detection_valid'] = (detection_done is not None and len(consumed)==len(targets)
                                  and all(row['eof'] for row in sessions) and not alive
                                  and sum(row['decoded_frames'] for row in sessions)==result['input_frames']
