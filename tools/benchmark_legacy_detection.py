@@ -26,17 +26,29 @@ def main():
     parser.add_argument('--concurrency', type=int, default=1)
     parser.add_argument('--realtime', action='store_true',
                         help='Replay through the real continuous RTSP runner, archiver and scheduled products')
+    parser.add_argument('--live', action='store_true',help='Use a real RTSP connection and the original recorder')
+    parser.add_argument('--stream-url',help='Unauthenticated loopback RTSP URL for the equal-speed live test')
+    parser.add_argument('--live-seconds',type=float,default=600)
+    parser.add_argument('--backlog-seconds',type=float,default=60)
     parser.add_argument('--replay-seconds', type=float, default=0,
                         help='Select this many seconds of existing spool input (0 selects all)')
     parser.add_argument('--timeout', type=float, default=1800)
     parser.add_argument('--no-products', action='store_true', help='Diagnostic replay without scheduled products')
     parser.add_argument('--opencv-threads', type=int, default=0, help='Diagnostic OpenCV worker budget override')
-    parser.add_argument('sources', type=Path, nargs='+')
+    parser.add_argument('sources', type=Path, nargs='*')
     args = parser.parse_args()
     if args.windows < 0 or args.concurrency < 1:
         parser.error('Windows must be nonnegative and concurrency must be positive')
     if args.replay_seconds < 0 or args.timeout <= 0 or (args.realtime and args.windows):
         parser.error('Replay seconds must be nonnegative, timeout positive; realtime cannot limit proposal windows')
+    if args.live and (args.realtime or args.sources or args.windows or args.no_save or args.profile):
+        parser.error('Live mode requires full saving and cannot combine with replay, sources, windows or profiles')
+    if not args.live and not args.sources:
+        parser.error('Recorded replay needs input sources')
+    if args.live and not 0 <= args.backlog_seconds < args.live_seconds:
+        parser.error('Live backlog delay must be shorter than capture duration')
+    if args.live and not args.stream_url:
+        parser.error('Live verification needs an explicit loopback RTSP test stream')
     if args.output.exists():
         parser.error('Output must be a new directory')
     args.output = args.output.resolve()
@@ -137,7 +149,7 @@ def main():
                    code_sha256={p.name: hashlib.sha256(p.read_bytes()).hexdigest()
                                 for p in args.code_root.glob('*.py')},
                    sources=[str(p.resolve()) for p in args.sources])
-    runtime['workflow'] = 'continuous_rtsp' if args.realtime else 'archive_files'
+    runtime['workflow'] = 'live_rtsp' if args.live else 'continuous_rtsp' if args.realtime else 'archive_files'
     (args.output / 'runtime.json').write_text(json.dumps(runtime, indent=2))
     def process(source):
         items = video_processing.create_line_video_clips(
@@ -151,9 +163,13 @@ def main():
         for item in items:
             item['source_video'] = str(source.resolve())
         return items
-    if args.realtime:
-        from benchmark_realtime_rtsp import run_replay
-        result, items = run_replay(args, settings, options, noise, correction, mask_reader.mask)
+    if args.realtime or args.live:
+        if args.live:
+            from verify_live_rtsp import run_live
+            result, items = run_live(args,settings,options,noise,correction,mask_reader.mask)
+        else:
+            from benchmark_realtime_rtsp import run_replay
+            result, items = run_replay(args, settings, options, noise, correction, mask_reader.mask)
         (args.output / 'detections.json').write_text(json.dumps(items, indent=2,
             default=lambda x: x.item() if hasattr(x, 'item') else str(x)))
         (args.output / 'result.json').write_text(json.dumps(result, indent=2))
