@@ -29,7 +29,7 @@ def _features(crops, frame_rate):
     return extract_noise_gate_features(list(crops), None, frame_rate)
 
 
-def _event_inputs(crops, motion_crops, rect, line, frame_rate):
+def _event_inputs(crops, motion_crops, rect, line, frame_rate, prepare_encoder=False):
     from event_representation import build_universal_from_crops
     from event_boost_model import extract_event_features, extract_motion_features_from_crops
     image, kymograph, physical = build_universal_from_crops(crops,rect,line,frame_rate)
@@ -37,14 +37,18 @@ def _event_inputs(crops, motion_crops, rect, line, frame_rate):
     kymograph = (np.clip(kymograph,0.,1.)*65535.).astype(np.uint16).astype(np.float32)/65535.
     vector = np.concatenate([extract_event_features(image,kymograph,physical),
                              extract_motion_features_from_crops(motion_crops,frame_rate)])
-    return image,kymograph,physical,vector
+    arrays = (image,kymograph,physical,vector)
+    if prepare_encoder:
+        from event_encoder_pixels import encoder_pixels
+        arrays += (encoder_pixels(image),)
+    return arrays
 
 
 _EVENT_OUTPUT_RESERVE = 2*1024**2
 _EVENT_SLOT_LIMIT = 32*1024**2
 
 
-def _shared_event_inputs(name, crop_shape, motion_shape, rect, line, frame_rate):
+def _shared_event_inputs(name, crop_shape, motion_shape, rect, line, frame_rate, prepare_encoder=False):
     memory = shared_memory.SharedMemory(name=name)
     try:
         crop_bytes,motion_bytes = int(np.prod(crop_shape)),int(np.prod(motion_shape))
@@ -55,7 +59,7 @@ def _shared_event_inputs(name, crop_shape, motion_shape, rect, line, frame_rate)
         crops = np.ndarray(crop_shape,np.uint8,buffer=memory.buf)
         motion = np.ndarray(motion_shape,np.uint8,buffer=memory.buf,offset=crop_bytes)
         result = []
-        for values in _event_inputs(crops,motion,rect,line,frame_rate):
+        for values in _event_inputs(crops,motion,rect,line,frame_rate,prepare_encoder):
             if values.dtype != np.float32 or offset+values.nbytes>limit:
                 raise ValueError('Event output exceeded the bounded shared slot')
             np.copyto(np.ndarray(values.shape,values.dtype,buffer=memory.buf,offset=offset),values)
@@ -293,7 +297,7 @@ class LiveGateFeatures:
         with self.moving_lock:
             return self._moving_tracks(frames, gray_cache, options)
 
-    def prepare_meteor(self, frames, rect, line, frame_rate):
+    def prepare_meteor(self, frames, rect, line, frame_rate, prepare_encoder=False):
         if self._local() or not self.active:
             return None
         from event_pixels import _crop_square
@@ -333,11 +337,14 @@ class LiveGateFeatures:
                     self.event_memories[slot.name] = slot
             np.copyto(np.ndarray(crops.shape,np.uint8,buffer=slot.buf),crops)
             np.copyto(np.ndarray(motion.shape,np.uint8,buffer=slot.buf,offset=crops.nbytes),motion)
-            metadata = self._executor().submit(_shared_event_inputs,slot.name,crops.shape,motion.shape,rect,line,frame_rate).result()
+            extra = (True,) if prepare_encoder else ()
+            metadata = self._executor().submit(_shared_event_inputs,slot.name,crops.shape,motion.shape,rect,line,frame_rate,*extra).result()
             start = (crops.nbytes+motion.nbytes+7)//8*8
             arrays = []
-            if len(metadata)!=4:
+            if len(metadata)!=(5 if prepare_encoder else 4):
                 raise ValueError('Incomplete event outputs')
+            if prepare_encoder and tuple(metadata[4][0])!=(2,3,224,224):
+                raise ValueError('Invalid encoder pixel shape')
             for shape,dtype,offset in metadata:
                 kind = np.dtype(dtype)
                 if (kind!=np.dtype(np.float32) or any(part<=0 for part in shape) or offset!=start or offset%4

@@ -330,6 +330,7 @@ class _PreparedMeteorInputs:
     kymograph: np.ndarray
     features: np.ndarray
     vector: object
+    encoder_pixels: object = None
 
     def matches(self, frames, rect, line, frame_rate, architecture):
         from event_pixels import same_frame_pixels
@@ -353,8 +354,12 @@ def _prepare_meteor_inputs(frames,rect,line,frame_rate,architecture):
         kymograph = (np.clip(kymograph,0.,1.)*65535.).astype(np.uint16).astype(np.float32)/65535.
         vector = np.concatenate([extract_event_features(image,kymograph,features),
                                  extract_motion_features(frames,rect,frame_rate)])
+    encoder_input = None
+    if architecture == EVENT_TRANSFORMER_ARCHITECTURE_NAME:
+        from event_encoder_pixels import encoder_pixels
+        encoder_input = encoder_pixels(image)
     return _PreparedMeteorInputs(architecture,tuple(frames),_geometry_key(rect),_geometry_key(line),
-                                 frame_rate,image,kymograph,features,vector)
+                                 frame_rate,image,kymograph,features,vector,encoder_input)
 
 
 def prepare_meteor_inputs(frames,rect,line,frame_rate,feature_workers=None):
@@ -370,7 +375,8 @@ def prepare_meteor_inputs(frames,rect,line,frame_rate,feature_workers=None):
     if not ready or architecture not in EVENT_ARCHITECTURES:
         return None
     if feature_workers is not None and architecture in (EVENT_BOOST_ARCHITECTURE_NAME,EVENT_TRANSFORMER_ARCHITECTURE_NAME):
-        arrays = feature_workers.prepare_meteor(frames,rect,line,frame_rate)
+        kwargs = {'prepare_encoder':True} if architecture == EVENT_TRANSFORMER_ARCHITECTURE_NAME else {}
+        arrays = feature_workers.prepare_meteor(frames,rect,line,frame_rate,**kwargs)
         if arrays is not None:
             return _PreparedMeteorInputs(architecture,tuple(frames),_geometry_key(rect),_geometry_key(line),
                                          frame_rate,*arrays)
@@ -409,7 +415,10 @@ def predict_meteor_event(
             vector = inputs.vector
             if architecture == EVENT_TRANSFORMER_ARCHITECTURE_NAME:
                 with _model_lock:
-                    encoded = event_model.encoder.encode([image])[0]
+                    if inputs.encoder_pixels is not None and hasattr(event_model.encoder,'encode_prepared'):
+                        encoded = event_model.encoder.encode_prepared([inputs.encoder_pixels])[0]
+                    else:
+                        encoded = event_model.encoder.encode([image])[0]
                 vector = np.concatenate([vector, encoded])
             return float(event_model.predict_proba(vector)[0])
         with _model_lock:

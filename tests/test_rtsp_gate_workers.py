@@ -33,7 +33,7 @@ def test_spawned_main_event_inputs_match_every_value_and_keep_parent_evidence():
                 expected = model.prepare_meteor_inputs(frames,rect,line,25)
                 observed = model.prepare_meteor_inputs(frames,rect,line,25,feature_workers=workers)
                 assert observed.matches(frames,rect,line,25,architecture)
-                for field in ('image','kymograph','features','vector'):
+                for field in ('image','kymograph','features','vector','encoder_pixels'):
                     np.testing.assert_array_equal(getattr(observed,field),getattr(expected,field))
                 np.testing.assert_array_equal(np.stack(frames),before)
         assert not workers.pool.submit(_worker_diagnostics).result()['torch_loaded']

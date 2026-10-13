@@ -434,3 +434,46 @@ def test_mask_pixel_provenance_releases_original_with_its_last_mask_result():
     gc.collect()
     assert source_ref() is None
     assert masked_id not in _frame_origins
+
+
+def test_transformer_encoder_prepared_pixels_use_the_exact_original_normalization():
+    import cv2
+    from event_encoder_pixels import encoder_pixels
+    from event_transformer import EventImageEncoder
+    import torch
+    from types import SimpleNamespace
+    class Network:
+        def __call__(self,pixel_values):
+            return SimpleNamespace(last_hidden_state=pixel_values.flatten(2).transpose(1,2)[:,:5,:])
+    encoder = object.__new__(EventImageEncoder)
+    encoder.device,encoder.network = torch.device('cpu'),Network()
+    for image in (np.zeros((5,160,160),np.float32),
+                  np.random.default_rng(361).random((5,160,160),dtype=np.float32)):
+        maximum = np.asarray(image[0],dtype=np.float32)
+        scale = max(float(np.quantile(maximum,.999)),.05)
+        views = []
+        for view in (np.repeat(maximum[None],3,axis=0),image[1:4]):
+            resized = np.stack([cv2.resize(channel,(224,224),interpolation=cv2.INTER_LINEAR)
+                                for channel in np.clip(view/scale,0.,1.)])
+            views.append((resized-np.array([.485,.456,.406],np.float32)[:,None,None])
+                         /np.array([.229,.224,.225],np.float32)[:,None,None])
+        expected = np.stack(views)
+        actual = encoder_pixels(image)
+        np.testing.assert_array_equal(actual,expected)
+        np.testing.assert_array_equal(encoder.encode([image,image]),encoder.encode_prepared([actual,actual]))
+
+
+def test_transformer_prediction_reuses_certified_cpu_encoder_pixels():
+    frames = [np.zeros((40,40,3),np.uint8)]*4
+    class Encoder:
+        def encode_prepared(self,pixels):
+            assert len(pixels)==1 and pixels[0].shape==(2,3,224,224)
+            return np.zeros((1,4),np.float32)
+        def encode(self,images):
+            raise AssertionError('recomputed encoder pixels')
+    classifier = type('Classifier',(),{'encoder':Encoder(),
+                                       'predict_proba':lambda self,v:np.array([.75])})()
+    with patch.multiple(model,model=classifier,_model_ready=True,
+                        _active_model_info={'architecture':model.EVENT_TRANSFORMER_ARCHITECTURE_NAME}):
+        prepared = model.prepare_meteor_inputs(frames,None,None,25)
+        assert model.predict_meteor_event(frames,None,None,25,prepared=prepared)==.75

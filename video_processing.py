@@ -1208,10 +1208,10 @@ def _rtsp_finer_revision(mask_revision=None):
 
 
 def _finer_publication_order(confirmed):
-    """Retain actual CPU completion order across the lookahead boundary.
+    """Retain the producer's CPU result collection order across lookahead.
 
-    Cached evidence was completed by the producer, before consumer fallback
-    tasks began. Sorting by that recorded completion avoids imposing the
+    Cached evidence was collected by the producer with as_completed, before
+    consumer fallback tasks began. Sorting by that order avoids imposing the
     artificial completion order of futures that only look up ready results.
     Uncached tasks keep their original completion order.
     """
