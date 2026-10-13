@@ -434,6 +434,30 @@ class LocalWideangleAstrometryTests(unittest.TestCase):
         )
         self.assertFalse(np.any(usable))
 
+    def test_overlay_preflight_skips_only_edges_with_no_drawable_samples(self):
+        class ObservedFixedModel(local_astro.FixedCameraPlateModel):
+            def __init__(self):
+                self.inverse_inputs = []
+            def world_to_pixel_values(self, ra, dec):
+                return np.asarray(ra, dtype=float), np.asarray(dec, dtype=float)
+            def pixel_to_world_values(self, x, y):
+                self.inverse_inputs.append((x.copy(), y.copy()))
+                return x, y
+        model = ObservedFixedModel()
+        support = np.full((180, 320), 255, np.uint8)
+        x, y, usable = local_astro._project_constellation_samples(model,
+            np.asarray([-3., 900., 319.8]), np.asarray([10., 10., 179.8]), support)
+        self.assertFalse(np.any(usable))
+        self.assertFalse(model.inverse_inputs)
+        ra, dec = np.asarray([-3., 40., 900.]), np.asarray([10., 20., 10.])
+        local_astro._project_constellation_samples(model, ra, dec, support)
+        # Do not change the inverse solver's whole-array convergence behavior.
+        np.testing.assert_array_equal(model.inverse_inputs[-1][0], ra)
+        np.testing.assert_array_equal(model.inverse_inputs[-1][1], dec)
+        support[:] = 0
+        local_astro._project_constellation_samples(model, ra, dec, support)
+        self.assertEqual(len(model.inverse_inputs), 1)
+
     def test_detected_star_mode_draws_hollow_markers_from_frame_pixels(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
