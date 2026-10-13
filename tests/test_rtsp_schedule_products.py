@@ -850,6 +850,38 @@ class ScheduleProductTests(unittest.TestCase):
             (service.cache.root/key/"frame.png").write_bytes(products.png_bytes(np.full((64, 96, 3), 80, np.uint8)))
             self.assertNotEqual(service._timelapse_key(job), before)
 
+    def test_finish_rechecks_sources_before_and_after_prepared_timelapse_copy(self):
+        for during_copy in (False,True):
+            with self.subTest(during_copy=during_copy), tempfile.TemporaryDirectory() as root:
+                service = self.service(root,timelapse=True)
+                start = datetime(2026,10,12,20)
+                source = self.archive(root,start,count=600)
+                job = service._job(start)
+                service._archives(job)
+                service._prepare_samples(job)
+                service._prepare_timelapse(job)
+                service._prepare_timelapse(job)
+                metadata = rtsp_live.timing(source)
+                def replace_source():
+                    rtsp_live.write_json(str(source)+'.capture.json',dict(metadata,revision='changed'))
+                copy = products.shutil.copyfile
+                def copy_then_replace(*args,**kwargs):
+                    result = copy(*args,**kwargs)
+                    replace_source()
+                    return result
+                if not during_copy:
+                    replace_source()
+                with mock.patch.object(products.shutil,'copyfile',side_effect=copy_then_replace if during_copy else copy):
+                    with self.assertRaises(IOError):
+                        service._finish(job)
+                self.assertFalse(job['samples'])
+                self.assertNotIn('timelapse',job['outputs'])
+                self.assertNotEqual(job['state'],'complete')
+                self.assertTrue(source.exists())
+                service._prepare_samples(job)
+                service._finish(job)
+                self.assertEqual(job['state'],'complete')
+
     def test_replaced_archive_rebuilds_existing_sample_pngs(self):
         with tempfile.TemporaryDirectory() as root:
             service = self.service(root, timelapse=True)

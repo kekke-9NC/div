@@ -993,6 +993,17 @@ class ScheduleProducts:
         indices = set(range(count)) | {int(index) for index in job['samples']}
         self.cache.clear([job['id']+f'_sample_{index:06d}' for index in indices])
 
+    def _assert_sample_sources(self,job):
+        if json.dumps(job.get('sample_source_versions',{}),sort_keys=True) == json.dumps(dict(self._source_revision(job)),sort_keys=True):
+            return
+        count = max(1,round(job['options']['duration']*job['options']['fps']))
+        self._clear_sample_cache(job,count)
+        job['samples'].clear()
+        job['sample_source_versions'] = {}
+        self.sample_gaps.pop(job['id'],None)
+        self._save(job)
+        raise IOError('タイムラプス公開前に録画が変更されました。素材を再作成します')
+
     def _drained(self, job):
         start, end = datetime.fromisoformat(job["start"]), datetime.fromisoformat(job["end"])
         for path in (self.root / ".rtsp_live").rglob("chunk_*.mp4"):
@@ -1384,6 +1395,7 @@ class ScheduleProducts:
             self._concatenate(job, Path(job["outputs"]["concatenate"]))
         else:
             if job["options"]["timelapse"] and "timelapse" not in job["outputs"]:
+                self._assert_sample_sources(job)
                 with tempfile.TemporaryDirectory(prefix=".timelapse_", dir=output) as temporary:
                     path = Path(temporary) / "timelapse.mp4"
                     key = self._timelapse_key(job)
@@ -1397,6 +1409,9 @@ class ScheduleProducts:
                         else:
                             self.status(f"[自動作成] タイムラプス素材更新のため再生成: {key}")
                             self._timelapse(job, path)
+                    self._assert_sample_sources(job)
+                    if self._timelapse_key(job) != key:
+                        raise IOError('タイムラプス公開前に素材が変更されました。再作成します')
                     os.replace(path, output / path.name)
                 job["outputs"]["timelapse"] = str(output / "timelapse.mp4")
                 self._save(job)
