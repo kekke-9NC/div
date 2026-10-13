@@ -44,3 +44,46 @@ def test_cached_target_is_checked_again_after_external_archive_deletion(tmp_path
         archiver.compact(flush=True)
     assert not Path(str(path)+'.archived.json').exists()
     assert path.exists()
+
+
+def test_catalog_checks_completion_metadata_once_and_reuses_csv_inventory(tmp_path):
+    directory = rtsp_live.capture_directory(tmp_path)
+    path = directory/'chunk_000000001.mp4'
+    path.write_bytes(b'raw')
+    marker = Path(str(path)+'.capture.json')
+    rtsp_live.write_json(marker, {'start_time':'2026-10-13T04:00:00','frame_count':12,'fps':25,'size':[96,64]})
+    listing = directory/'segments.csv'
+    listing.write_text('')
+    catalog = rtsp_live.ChunkCatalog(tmp_path)
+    original_stat = Path.stat
+    counted = []
+    def stat(self, *args, **kwargs):
+        counted.append(self)
+        return original_stat(self, *args, **kwargs)
+    with patch.object(Path,'stat',stat), patch.object(rtsp_live.rtsp_segments,'is_finalized_mp4',return_value=True):
+        assert catalog.paths() == [path]
+        counted.clear()
+        assert catalog.paths() == [path]
+        assert counted.count(marker) == 1
+        assert counted.count(listing) == 0
+        assert catalog.present == {path}
+        marker.unlink()
+        assert catalog.paths() == []
+        assert catalog.present == {path}
+        path.unlink()
+        assert catalog.paths() == []
+        assert catalog.present == set()
+
+
+def test_backlog_discovery_uses_buffer_and_retains_live_tail_cadence():
+    import queue, threading
+    runner = rtsp_live.RealtimeRunner('unused', lambda *_:None, threading.Event())
+    with patch.object(rtsp_live.config, 'RTSP_SCAN_INTERVAL', .1):
+        for _ in range(100):runner.queue.put('chunk')
+        assert runner._discovery_interval() == 5.0
+        assert runner._archiving_interval() == 5.0
+        runner.queue.get()
+        assert runner._discovery_interval() == 1.0
+        assert runner._archiving_interval() == 1.0
+        while not runner.queue.empty():runner.queue.get()
+        assert runner._discovery_interval() == .1

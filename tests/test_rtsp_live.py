@@ -487,7 +487,7 @@ class BacklogDiscoveryTests(unittest.TestCase):
         for index in range(100):
             runner.queue.put(index)
         with mock.patch.object(rtsp_live.config, 'RTSP_SCAN_INTERVAL', 2.0):
-            self.assertEqual(runner._discovery_interval(), 2.0)
+            self.assertEqual(runner._discovery_interval(), 5.0)
 
 
 if __name__ == "__main__":

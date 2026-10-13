@@ -78,6 +78,7 @@ class ChunkCatalog:
         self.ready = ready or (lambda _path: True)
         self.csv_offsets = {}
         self.entries = {}
+        self.present = set()
 
     def _stamp_csv(self, listing):
         offset = self.csv_offsets.get(listing, 0)
@@ -109,6 +110,7 @@ class ChunkCatalog:
 
     def paths(self):
         if not self.root.exists():
+            self.present = set()
             return []
         # A restart can leave tens of thousands of video sidecars in a few
         # session directories. Path.rglob's recursive selector builds and
@@ -124,6 +126,8 @@ class ChunkCatalog:
                 elif (matched.startswith('chunk_') and matched.endswith('.mp4')
                       and '_temp_' not in name and '_innovation' not in name):
                     paths.append(folder/name)
+        csv_folders = {listing.parent for listing in listings}
+        self.present = set(paths)
         for listing in listings:
             try:
                 self._stamp_csv(listing)
@@ -138,13 +142,16 @@ class ChunkCatalog:
                 present.add(path)
                 if not self.ready(path):
                     continue
-                # A CSV recorder publishes timing only after closing the file.
-                if (path.parent / "segments.csv").exists() and not Path(
-                        str(path) + ".capture.json").exists():
-                    continue
                 marker = Path(str(path) + '.capture.json')
                 stat = path.stat()
-                stamp = marker.stat() if marker.exists() else None
+                try:
+                    stamp = marker.stat()
+                except FileNotFoundError:
+                    stamp = None
+                # The directory walk already tells us whether a CSV recorder
+                # is present. Check its completion sidecar once, not twice.
+                if path.parent in csv_folders and stamp is None:
+                    continue
                 identity = (stat.st_ino, stat.st_size, stat.st_mtime_ns,
                             (stamp.st_size, stamp.st_mtime_ns) if stamp else None)
                 cached = self.entries.get(path)
@@ -471,14 +478,22 @@ class RealtimeRunner:
         # A queued backlog of at least five seconds already supplies the
         # detector. Avoid repeatedly walking thousands of durable inputs while
         # it catches up. Live discovery resumes its normal cadence near the tail.
-        return max(1.0, config.RTSP_SCAN_INTERVAL) if self.queue.qsize() >= 10 else config.RTSP_SCAN_INTERVAL
+        size = self.queue.qsize()
+        if size >= 100:
+            # About 50 seconds are queued; a five-second discovery pause
+            # does not withhold the next frames from the backlog consumer.
+            return max(5.0, config.RTSP_SCAN_INTERVAL)
+        return max(1.0, config.RTSP_SCAN_INTERVAL) if size >= 10 else config.RTSP_SCAN_INTERVAL
 
     def _scan(self):
         last_status = 0.0
         while not self.cancel.is_set():
+            paths = self.catalog.paths()
             with self.seen_lock:
-                self.seen = {path for path in self.seen if path.exists()}
-            for path in self.catalog.paths():
+                # Use the directory inventory just collected by the catalog.
+                # Avoid a second stat of every queued chunk on each poll.
+                self.seen.intersection_update(self.catalog.present)
+            for path in paths:
                 with self.seen_lock:
                     if path not in self.seen and not Path(str(path) + ".analysis_consumed.json").exists():
                         self.seen.add(path)
@@ -513,6 +528,12 @@ class RealtimeRunner:
                 self.cancel.wait(.5)
             pending = capture.pending
 
+    def _archiving_interval(self):
+        # Minute publication and consumed-spool cleanup can wait five seconds
+        # while dozens of seconds of durable input are already queued. Keep
+        # the original cadence near the live tail; cancellation still wakes it.
+        return 5.0 if self.queue.qsize() >= 100 else 1.0
+
     def _archive(self):
         while not self.cancel.is_set():
             try:
@@ -521,7 +542,7 @@ class RealtimeRunner:
                 self.archiver.compact(flush=flush)
             except Exception as exc:
                 self.status(f"[RTSP保存] 連結再試行予定（元動画は保持）: {exc}")
-            self.cancel.wait(1)
+            self.cancel.wait(self._archiving_interval())
 
     def start(self):
         self.threads = [threading.Thread(target=target, daemon=True, name=name)
