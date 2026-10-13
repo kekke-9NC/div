@@ -764,6 +764,59 @@ class ScheduleProductTests(unittest.TestCase):
             self.assertIsNone(service._source_frame(job, start))
             self.assertIsNotNone(service._source_frame(job, start+timedelta(seconds=10)))
 
+    def test_sampling_checks_whole_source_revision_at_batch_boundaries(self):
+        with tempfile.TemporaryDirectory() as root:
+            service = self.service(root,timelapse=True)
+            start = datetime(2026,10,12,20)
+            source = self.archive(root,start,count=600)
+            job = service._job(start)
+            job['archives'] = [str(source)]
+            with mock.patch.object(service,'_source_revision',wraps=service._source_revision) as revision:
+                service._prepare_samples(job)
+                self.assertEqual(revision.call_count,2)
+            self.assertEqual(len(job['samples']),6)
+
+    def test_sampling_discards_batch_if_source_clock_changes_during_decode(self):
+        with tempfile.TemporaryDirectory() as root:
+            service = self.service(root,timelapse=True)
+            start = datetime(2026,10,12,20)
+            source = self.archive(root,start,count=600)
+            job = service._job(start)
+            job['archives'] = [str(source)]
+            original = service._source_frame
+            changed = False
+            def decode(*args,**kwargs):
+                nonlocal changed
+                frame = original(*args,**kwargs)
+                if not changed:
+                    changed = True
+                    data = rtsp_live.timing(source)
+                    data['start_time'] = (start+timedelta(seconds=1)).isoformat()
+                    rtsp_live.write_json(str(source)+'.capture.json',data)
+                return frame
+            with mock.patch.object(service,'_source_frame',side_effect=decode):
+                with self.assertRaisesRegex(IOError,'録画が変更'):
+                    service._prepare_samples(job)
+            self.assertEqual(job['samples'],{})
+            self.assertEqual(job['sample_source_versions'],{})
+            self.assertFalse(any(service.cache.root.glob(job['id']+'_sample_*')))
+            service._prepare_samples(job)
+            self.assertEqual(len(job['samples']),5)
+
+    def test_sampling_rebuilds_png_left_without_manifest_after_crash(self):
+        with tempfile.TemporaryDirectory() as root:
+            service = self.service(root,timelapse=True)
+            start = datetime(2026,10,12,20)
+            source = self.archive(root,start,count=600)
+            job = service._job(start)
+            job['archives'] = [str(source)]
+            key = job['id']+'_sample_000000'
+            service.cache.put(key,{'frame.png':products.png_bytes(np.full((64,96,3),222,np.uint8))})
+            service._prepare_samples(job)
+            self.assertIn('0',job['samples'])
+            image = products.decode_png(service.cache.read(key,'frame.png'))
+            self.assertLess(int(image.max()),50)
+
     def test_timelapse_preparation_overlaps_backlog_without_early_publication(self):
         with tempfile.TemporaryDirectory() as root:
             service = self.service(root, timelapse=True)

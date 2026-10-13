@@ -695,9 +695,11 @@ class ScheduleProducts:
     def _source_revision(self, job):
         return tuple((source, self._source_stamp(source)) for source in job["archives"])
 
-    def _source_frame(self, job, when, radius=0):
+    def _source_frame(self, job, when, radius=0, source_revision=None):
         sources = job["archives"]
-        revision = self._source_revision(job)
+        # A sampling batch owns a revision and verifies it again before
+        # committing its PNGs. Other callers continue to revalidate here.
+        revision = self._source_revision(job) if source_revision is None else source_revision
         cached = self.source_indexes.get(job["id"])
         if cached is None or cached[0] != revision:
             starts = [datetime.fromisoformat(self._timing(path)["start_time"]) for path in sources]
@@ -936,7 +938,7 @@ class ScheduleProducts:
                 changed = True
                 break
         if changed:
-            self.cache.clear([job["id"] + f"_sample_{int(index):06d}" for index in job["samples"]])
+            self._clear_sample_cache(job,count)
             job["samples"].clear()
             self.sample_gaps.pop(job["id"], None)
             self.status("[自動作成] 録画の差し替えを検知。タイムラプス素材を再作成します")
@@ -955,13 +957,17 @@ class ScheduleProducts:
                 return
             key = job["id"] + f"_sample_{index:06d}"
             if (self.cache.root / key / "frame.png").is_file():
-                continue
+                if str(index) in job['samples']:
+                    continue
+                # A crash between publishing PNG and saving its timestamp can
+                # leave an unregistered image. Rebuild from the current source.
+                self.cache.clear([key])
             if index in gaps:
                 continue
             when = start + (end-start)*(index/max(1, count-1))
             if index == count-1:
                 when = end-timedelta(milliseconds=40)
-            frame = self._source_frame(job, when, options["mean_radius"])
+            frame = self._source_frame(job, when, options["mean_radius"],source_revision=sources)
             if frame is None:
                 gaps.add(index)
                 continue  # Real connection gaps remain gaps, not fabricated frames.
@@ -971,7 +977,21 @@ class ScheduleProducts:
             frame = self._annotate(job, frame, when)
             self.cache.put(key, {"frame.png": png_bytes(frame)})
             job["samples"][str(index)] = when.isoformat()
+        # Metadata or archive replacement during the batch can change the
+        # chronological lookup. Discard those disposable samples and retry;
+        # never finalize a timelapse using the obsolete source index.
+        if self._source_revision(job) != sources:
+            self._clear_sample_cache(job,count)
+            job["samples"].clear()
+            job["sample_source_versions"] = {}
+            self.sample_gaps.pop(job["id"],None)
+            self._save(job)
+            raise IOError("タイムラプス素材の作成中に録画が変更されました。再作成します")
         self._save(job)
+
+    def _clear_sample_cache(self,job,count):
+        indices = set(range(count)) | {int(index) for index in job['samples']}
+        self.cache.clear([job['id']+f'_sample_{index:06d}' for index in indices])
 
     def _drained(self, job):
         start, end = datetime.fromisoformat(job["start"]), datetime.fromisoformat(job["end"])
