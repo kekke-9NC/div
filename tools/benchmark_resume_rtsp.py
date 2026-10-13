@@ -121,6 +121,27 @@ def run_resume(args, settings, options, noise, correction, mask):
     completion_reason = None
     started = None
     stop_requested = threading.Event()
+    profiles = {}
+    profile_local = threading.local()
+
+    def instrument(owner, name):
+        import cProfile
+        original = getattr(owner, name)
+        def wrapped(*values, **kwargs):
+            thread = threading.current_thread()
+            if getattr(profile_local,'depth',0):
+                return original(*values,**kwargs)
+            with lock:
+                profiler = profiles.setdefault((thread.ident,thread.name),cProfile.Profile())
+            profile_local.depth = 1
+            profiler.enable()
+            try:
+                return original(*values,**kwargs)
+            finally:
+                profiler.disable()
+                profile_local.depth = 0
+        restored.append((owner,name,original))
+        setattr(owner,name,wrapped)
 
     def request_stop(_number, _frame):
         stop_requested.set()
@@ -216,6 +237,17 @@ def run_resume(args, settings, options, noise, correction, mask):
         choice_observations.append(dict(jobs=len(jobs),recordings=len(recordings),choice='resume'))
         return 'resume'
     app._prompt_startup_analysis = choose
+    if args.profile:
+        import model
+        for owner,name in ((rtsp_live.RealtimeRunner,'_detect'),
+                           (rtsp_live.RealtimeRunner,'_scan'),
+                           (rtsp_live.RealtimeRunner,'_archive'),
+                           (products.ScheduleProducts,'tick'),
+                           (gui_processing.ProcessingMixin,'_prepare_startup_analysis'),
+                           (video_processing,'_coarse_proposals'),
+                           (video_processing,'_process_finer_detection_worker'),
+                           (model,'prepare_meteor_inputs')):
+            instrument(owner,name)
     clock = tuple(int(settings.get(key,fallback)) for key,fallback in (
         ('rtsp_start_hour',17),('rtsp_start_minute',0),('rtsp_end_hour',5),('rtsp_end_minute',0)))
     previous_signal = signal.signal(signal.SIGINT,request_stop)
@@ -244,6 +276,8 @@ def run_resume(args, settings, options, noise, correction, mask):
         signal.signal(signal.SIGINT,previous_signal)
         for owner,name,original in reversed(restored):
             setattr(owner,name,original)
+        for (ident,name),profiler in profiles.items():
+            profiler.dump_stats(str(args.output/f'profile-{name.replace("/","_")}-{ident}.pstats'))
     seconds = time.perf_counter()-started
     changes = [relative for relative,stamp in originals.items()
                if not (source/relative).exists() or fingerprint(source/relative)!=stamp]
@@ -265,6 +299,7 @@ def run_resume(args, settings, options, noise, correction, mask):
                   failures=failures,original_changed_files=changes,original_pending_hashes_unchanged=hashes_ok,
                   original_changed_paths=changed_paths,
                   threads_alive=alive,installed_app_started=False,network_recorder_replaced=True)
+    result['profile_enabled'] = args.profile
     result['detection_valid'] = (detection_done is not None and len(consumed)==len(targets)
                                  and all(row['eof'] for row in sessions) and not alive
                                  and sum(row['decoded_frames'] for row in sessions)==result['input_frames']

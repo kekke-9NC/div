@@ -44,7 +44,7 @@ def main():
         parser.error('Replay seconds must be nonnegative, timeout positive; realtime cannot limit proposal windows')
     if args.live and (args.realtime or args.sources or args.windows or args.no_save or args.profile):
         parser.error('Live mode requires full saving and cannot combine with replay, sources, windows or profiles')
-    if args.resume_root and (args.live or args.realtime or args.sources or args.windows or args.no_save or args.profile or args.no_products):
+    if args.resume_root and (args.live or args.realtime or args.sources or args.windows or args.no_save or args.no_products):
         parser.error('Resume verification requires the full saved workflow without other input modes')
     if not args.live and not args.resume_root and not args.sources:
         parser.error('Recorded replay needs input sources')
