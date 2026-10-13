@@ -815,7 +815,7 @@ class ScheduleProductTests(unittest.TestCase):
             service._prepare_samples(job)
             self.assertIn('0',job['samples'])
             image = products.decode_png(service.cache.read(key,'frame.png'))
-            self.assertLess(int(image.max()),50)
+            np.testing.assert_array_equal(image,service._source_frame(job,start))
 
     def test_timelapse_preparation_overlaps_backlog_without_early_publication(self):
         with tempfile.TemporaryDirectory() as root:
