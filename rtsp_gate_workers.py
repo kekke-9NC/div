@@ -305,6 +305,8 @@ class LiveGateFeatures:
             required = (len(frames)*(256**2+128**2)+7)//8*8+_EVENT_OUTPUT_RESERVE
             if required>_EVENT_SLOT_LIMIT:
                 return None
+            if any(frame.dtype!=np.uint8 for frame in frames):
+                return None
             while not self.closed:
                 try:
                     slot = self.event_slots.get(timeout=.1)

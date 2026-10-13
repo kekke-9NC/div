@@ -62,6 +62,22 @@ def test_event_slot_capacity_is_checked_before_materializing_crops():
         workers.close()
 
 
+def test_non_uint8_events_keep_exact_local_preparation():
+    workers = LiveGateFeatures(workers=2)
+    workers.activate()
+    frames = [np.full((40,40,3),i*.2,np.float32) for i in range(3)]
+    try:
+        with patch.multiple(model,model=object(),_model_ready=True,
+                            _active_model_info={'architecture':model.EVENT_BOOST_ARCHITECTURE_NAME}):
+            expected = model.prepare_meteor_inputs(frames,None,None,25)
+            actual = model.prepare_meteor_inputs(frames,None,None,25,feature_workers=workers)
+        for name in ('image','kymograph','features','vector'):
+            np.testing.assert_array_equal(getattr(actual,name),getattr(expected,name))
+        assert workers.pool is None and not workers.event_memories
+    finally:
+        workers.close()
+
+
 def test_close_waits_for_parent_event_copy_before_unlinking_the_slot():
     import threading
     from multiprocessing import shared_memory
