@@ -14,7 +14,7 @@ from temporal_statistics import temporal_median
 
 def test_signed_temporal_median_matches_numpy_for_all_short_lengths():
     rng = np.random.default_rng(159)
-    for count in range(1,33):
+    for count in range(1,65):
         values = rng.integers(-32768,32768,size=(count,32,64),dtype=np.int16)
         values[0,0,:2] = [-32768,32767]
         before = values.copy()
@@ -26,7 +26,7 @@ def test_signed_temporal_median_matches_numpy_for_all_short_lengths():
 def test_native_temporal_median_covers_full_event_crops_exactly():
     rng = np.random.default_rng(45)
     for dtype in (np.uint8,np.int16):
-        values = rng.integers(0,256,(32,256,256),dtype=dtype)
+        values = rng.integers(0,256,(64,256,256),dtype=dtype)
         before = values.copy()
         np.testing.assert_array_equal(temporal_median(values),np.median(values,axis=0))
         np.testing.assert_array_equal(values,before)

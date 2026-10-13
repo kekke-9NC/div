@@ -95,6 +95,7 @@ __declspec(dllexport)
 #endif
 int meteor_temporal_median_range(const uint8_t *input, size_t frames, size_t stride,
                                  size_t offset, size_t pixels, double *output) {
+    if (!frames || frames>64) return 0;
     size_t count=1;
     while (count<frames) count*=2;
     uint8_t *work=malloc(count*pixels);
@@ -142,7 +143,7 @@ int meteor_temporal_median(const uint8_t *input, size_t frames, size_t pixels, d
 __declspec(dllexport)
 #endif
 int meteor_temporal_median_i16(const int16_t *input, size_t frames, size_t pixels, double *output) {
-    if (!frames || frames>32) return 0;
+    if (!frames || frames>64) return 0;
     size_t count=1;
     while (count<frames) count*=2;
     int16_t *work=malloc(count*pixels*sizeof(int16_t));
