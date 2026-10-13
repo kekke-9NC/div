@@ -110,15 +110,27 @@ class ChunkCatalog:
     def paths(self):
         if not self.root.exists():
             return []
-        for listing in self.root.rglob("segments.csv"):
+        # A restart can leave tens of thousands of video sidecars in a few
+        # session directories. Path.rglob's recursive selector builds and
+        # hashes paths for every sidecar twice per poll. Walk once, filtering
+        # plain filenames before constructing just the matching paths.
+        listings, paths = [], []
+        for directory, _subdirectories, names in os.walk(self.root):
+            folder = Path(directory)
+            if 'segments.csv' in names:
+                listings.append(folder/'segments.csv')
+            paths.extend(folder/name for name in names
+                         if name.startswith('chunk_') and name.endswith('.mp4')
+                         and '_temp_' not in name and '_innovation' not in name)
+        for listing in listings:
             try:
                 self._stamp_csv(listing)
             except (OSError, ValueError, KeyError):
                 continue
         found = []
         present = set()
-        for path in self.root.rglob("chunk_*.mp4"):
-            if "_temp_" in path.name or "_innovation" in path.name or rtsp_startup.is_deferred_recording(path):
+        for path in paths:
+            if rtsp_startup.is_deferred_recording(path):
                 continue
             try:
                 present.add(path)
