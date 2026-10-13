@@ -30,6 +30,7 @@ def run_replay(args, settings, options, noise, correction, mask):
     import moving_point_detector
     import short_flash_detector
     import model
+    import image_processing
 
     root = args.output / 'rtsp'
     root.mkdir()
@@ -124,7 +125,7 @@ def run_replay(args, settings, options, noise, correction, mask):
             original = getattr(owner, name)
             def wrapped(*values, **kwargs):
                 thread = threading.current_thread()
-                if not thread.name.startswith('rtsp-'):
+                if not (thread.name.startswith('rtsp-') or thread.name == 'RTSPProposalPipeline'):
                     return original(*values, **kwargs)
                 key = (thread.ident, name)
                 with profile_lock:
@@ -138,6 +139,11 @@ def run_replay(args, settings, options, noise, correction, mask):
             setattr(owner, name, wrapped)
         for owner, name in [(moving_point_detector, 'detect_moving_point_tracks'),
                             (short_flash_detector.ShortFlashDetector, 'consume'),
+                            (image_processing, 'detect_lines'),
+                            (video_processing, '_process_finer_detection_worker'),
+                            (video_processing, '_coarse_proposals'),
+                            (image_processing._WindowExtrema, 'reduce'),
+                            (rtsp_live.SegmentCapture, 'read'),
                             (model, 'predict_noise_gate')]:
             install_profile(owner, name)
 

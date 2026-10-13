@@ -29,6 +29,41 @@ import video_processor
 
 
 class RtspLiveTests(unittest.TestCase):
+    def test_pipeline_natural_eof_preserves_final_ack_and_evidence_pixels(self):
+        from concurrent.futures import ThreadPoolExecutor
+        with tempfile.TemporaryDirectory() as root:
+            paths = self.chunks(root, count=10)
+            expected_cap, _ = self.capture(paths)
+            expected = list(image_processing.create_diff_images(expected_cap, interval=.25,
+                duration=1, buffer_duration=4, is_rtsp=True, include_frame_window=True))
+            expected_cap.release()
+            cap, consumed = self.capture(paths)
+            acknowledgements = []
+            acknowledge = cap.acknowledge
+            def observe(index, final=False):
+                acknowledgements.append((index, final))
+                acknowledge(index, final=final)
+            cap.acknowledge = observe
+            generator = image_processing.create_diff_images(cap, interval=.25,
+                duration=1, buffer_duration=4, is_rtsp=True, include_frame_window=True)
+            with ThreadPoolExecutor(max_workers=3) as executor, mock.patch.object(
+                    video_processing, '_coarse_proposals', return_value=([], [])):
+                pipeline = video_processing._LiveProposalPipeline(generator, cap, None, None, cap.cancel, executor)
+                actual = list(pipeline)
+                pipeline.close()
+            self.assertEqual(len(actual), len(expected))
+            for packet, original in zip(actual, expected):
+                self.assertEqual(packet[1], original[1])
+                for index in (0, 2, 3):
+                    np.testing.assert_array_equal(packet[index], original[index])
+                for frame, reference in zip(packet[-1], original[-1]):
+                    np.testing.assert_array_equal(frame, reference)
+            self.assertTrue(acknowledgements[-1][1])
+            self.assertEqual(acknowledgements[-1][0], sum(rtsp_live.timing(p)['frame_count'] for p in paths)-1)
+            self.assertEqual(consumed, paths)
+            self.assertFalse(cap.defer_analysis_ack)
+            cap.release()
+
     def test_pipeline_cancel_never_acknowledges_prefetched_unprocessed_windows(self):
         from concurrent.futures import ThreadPoolExecutor
         with tempfile.TemporaryDirectory() as root:

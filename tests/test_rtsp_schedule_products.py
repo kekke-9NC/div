@@ -680,6 +680,20 @@ class ScheduleProductTests(unittest.TestCase):
                 service._prepare_samples(job)
                 self.assertEqual(read.call_count, 12)
 
+    def test_source_clock_index_refreshes_when_metadata_is_replaced(self):
+        with tempfile.TemporaryDirectory() as root:
+            service = self.service(root, timelapse=True)
+            start = datetime(2026, 10, 12, 20)
+            source = self.archive(root, start)
+            job = service._job(start)
+            job["archives"] = [str(source)]
+            self.assertIsNotNone(service._source_frame(job, start))
+            data = rtsp_live.timing(source)
+            data["start_time"] = (start+timedelta(seconds=10)).isoformat()
+            rtsp_live.write_json(str(source)+".capture.json", data)
+            self.assertIsNone(service._source_frame(job, start))
+            self.assertIsNotNone(service._source_frame(job, start+timedelta(seconds=10)))
+
     def test_concat_validates_then_replaces_and_records_capture_time(self):
         with tempfile.TemporaryDirectory() as root:
             service = self.service(root, concatenate=True)

@@ -342,6 +342,7 @@ class ScheduleProducts:
         self.thread = None
         self.overlay_module = None
         self.source_data = {}
+        self.source_stamps = {}
         self.source_indexes = {}
         self.sample_gaps = {}
         self.ai_unavailable = None
@@ -599,13 +600,29 @@ class ScheduleProducts:
         return paths
 
     def _timing(self, source):
-        if source not in self.source_data:
+        stamp = self._source_stamp(source)
+        if source not in self.source_data or self.source_stamps.get(source) != stamp:
             self.source_data[source] = rtsp_live.timing(source)
+            self.source_stamps[source] = self._source_stamp(source)
         return self.source_data[source]
+
+    @staticmethod
+    def _source_stamp(source):
+        result = []
+        for path in (Path(source), Path(str(source) + ".capture.json")):
+            try:
+                stat = path.stat()
+                result.append((stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns))
+            except FileNotFoundError:
+                result.append(None)
+        return tuple(result)
+
+    def _source_revision(self, job):
+        return tuple((source, self._source_stamp(source)) for source in job["archives"])
 
     def _source_frame(self, job, when, radius=0):
         sources = job["archives"]
-        revision = tuple(sources)
+        revision = self._source_revision(job)
         cached = self.source_indexes.get(job["id"])
         if cached is None or cached[0] != revision:
             starts = [datetime.fromisoformat(self._timing(path)["start_time"]) for path in sources]
@@ -824,7 +841,7 @@ class ScheduleProducts:
             return
         start, end = datetime.fromisoformat(job["start"]), datetime.fromisoformat(job["end"])
         count = max(1, round(options["duration"]*options["fps"]))
-        revision = (tuple(job["archives"]), job["start"], job["end"], count,
+        revision = (self._source_revision(job), job["start"], job["end"], count,
                     options["mean_radius"])
         cached = self.sample_gaps.get(job["id"])
         if cached is None or cached[0] != revision:
@@ -1232,6 +1249,8 @@ class ScheduleProducts:
         self._assert_capture_ready(job)
         job["state"] = "complete"
         self._save(job)
+        self.source_indexes.pop(job["id"], None)
+        self.sample_gaps.pop(job["id"], None)
         self.status(f"[自動作成] スケジュール終了後の作成完了: {output}")
 
     def tick(self, now=None):
