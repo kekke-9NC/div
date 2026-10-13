@@ -82,6 +82,17 @@ for module in sorted((root / "obs_meteor_overlay").rglob("*.py")):
     add_data(module,str(Path("payload") / module.relative_to(root).parent))
 add_data(root / "assets" / "constellations.lines.json", "payload/assets")
 add_data(root / "assets" / "component_statistics.c", "payload/assets")
+# Bootstrap runs the extracted source in its managed Python environment;
+# ship the accelerator there so end users need no C compiler.
+import tempfile
+import subprocess
+from component_statistics import build_library, _library_name
+native_build = tempfile.TemporaryDirectory(prefix="meteor_launcher_native_")
+try:
+    native_library = build_library(Path(native_build.name) / _library_name())
+    add_data(native_library,"payload/assets")
+except (OSError,RuntimeError,subprocess.SubprocessError) as exc:
+    print(f"Optional native accelerator unavailable; reference fallback retained: {exc}")
 add_data(root / "THIRD_PARTY_NOTICES.md", "payload")
 
 

@@ -45,6 +45,7 @@ def video_digest(path):
 
 
 def compare(before, after, media=False, fixture=None):
+    before,after = before.resolve(),after.resolve()
     a = json.loads((before / 'detections.json').read_text())
     b = json.loads((after / 'detections.json').read_text())
     groups = []
@@ -85,9 +86,21 @@ def compare(before, after, media=False, fixture=None):
                             result['compared_video_frames'] += frames
                         elif kind == 'info' and suffix == '.txt':
                             # These lines contain the deliberately isolated output destinations.
-                            normalize = lambda path: [line for line in path.read_text().splitlines()
-                                                       if not line.startswith('Saved ')]
-                            exact = normalize(p) == normalize(q)
+                            def normalize(path,root):
+                                result = []
+                                for line in path.read_text().splitlines():
+                                    if line.startswith('Saved '):
+                                        continue
+                                    if line.startswith('Source: '):
+                                        try:
+                                            source = Path(line[len('Source: '):]).relative_to(root/'rtsp')
+                                        except ValueError:
+                                            pass
+                                        else:
+                                            line = f'Source: rtsp/{source}'
+                                    result.append(line)
+                                return result
+                            exact = normalize(p,before) == normalize(q,after)
                             counter = 'compared_info'
                         else:
                             continue

@@ -33,7 +33,8 @@ def _moving_tracks(name, shape, dtype, options):
     memory = shared_memory.SharedMemory(name=name)
     try:
         gray = np.ndarray(shape, dtype=np.dtype(dtype), buffer=memory.buf)
-        return moving_point_detector.detect_moving_point_tracks(list(gray), _prepared_gray=gray, **options)
+        return moving_point_detector.detect_moving_point_tracks(list(gray), _prepared_gray=gray,
+                                                                 _component_workers=4, **options)
     finally:
         memory.close()
 
@@ -178,6 +179,7 @@ class LiveGateFeatures:
         self.closed = False
         self.moving_lock = threading.Lock()
         self.moving_memory = None
+        self.moving_pool = None
         self.flash_proposers = []
         self.active = False
         self.quiet_windows = 0
@@ -265,7 +267,10 @@ class LiveGateFeatures:
                 self.moving_memory = shared_memory.SharedMemory(create=True, size=gray.nbytes)
             target = np.ndarray(gray.shape, dtype=gray.dtype, buffer=self.moving_memory.buf)
             np.copyto(target, gray)
-            return self._executor().submit(_moving_tracks, self.moving_memory.name,
+            if self.moving_pool is None:
+                self.moving_pool = ProcessPoolExecutor(max_workers=1,
+                    mp_context=multiprocessing.get_context('spawn'),initializer=_initialize_worker)
+            return self.moving_pool.submit(_moving_tracks, self.moving_memory.name,
                                           gray.shape, gray.dtype.str, options).result()
         except Exception as exc:
             self.failed = True
@@ -286,6 +291,9 @@ class LiveGateFeatures:
             for detector in flash_proposers:
                 detector.close()
             with self.moving_lock:
+                if self.moving_pool is not None:
+                    self.moving_pool.shutdown(wait=True,cancel_futures=True)
+                    self.moving_pool = None
                 if self.moving_memory is not None:
                     self.moving_memory.close()
                     self.moving_memory.unlink()

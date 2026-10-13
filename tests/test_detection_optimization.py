@@ -15,6 +15,12 @@ from universal_meteor_model import _crop_square, _gray, _robust_residual_cube
 
 
 class DetectionOptimizationTests(unittest.TestCase):
+    def test_native_crop_batch_larger_than_budget_uses_exact_reference(self):
+        frames = [np.full((200,220),i,np.uint8) for i in range(6)]
+        cache = video_processing._VideoFrameRangeCache(max_bytes=4*1024**2,integral_budget=200*221*4*2)
+        self.assertIsNone(cache._integral_gate_crops(frames,(0,0,160,160)))
+        self.assertEqual(cache.integral_bytes,0)
+
     def test_cached_gate_integrals_preserve_crops_and_total_memory_budget(self):
         rng = np.random.default_rng(328)
         frames = list(rng.integers(0, 256, (6, 520, 600, 3), dtype=np.uint8))

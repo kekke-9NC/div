@@ -57,10 +57,22 @@ for p in (root / "quantized_model").rglob("*"):
 # GUI resources and other assets
 data_files += include(["gui_resources/**/*"], ".")
 
+# Optional native kernels are built for this bundle's host architecture.
+import tempfile
+import subprocess
+from component_statistics import build_library, _library_name
+native_build = tempfile.TemporaryDirectory(prefix="meteor_bundle_native_")
+native_binaries = []
+try:
+    native_library = build_library(Path(native_build.name) / _library_name())
+    native_binaries.append((str(native_library),"assets"))
+except (OSError,RuntimeError,subprocess.SubprocessError) as exc:
+    print(f"Optional native accelerator unavailable; reference fallback retained: {exc}")
+
 a = Analysis(
     ['main_gui.py'],
     pathex=pathex,
-    binaries=[],
+    binaries=native_binaries,
     datas=data_files,
     hiddenimports=[
         'tkinterdnd2', 'PIL', 'cv2', 'numpy', 'astropy', 'torch', 'torchvision',

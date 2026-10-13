@@ -220,6 +220,7 @@ def detect_moving_point_tracks(
     max_candidates: int = 20,
     gray_cache: GrayFrameCache | None = None,
     _prepared_gray: np.ndarray | None = None,
+    _component_workers: int = 1,
 ) -> List[MovingPointTrack]:
     """Return coherent moving bright-point tracks in ``frames``.
 
@@ -246,15 +247,19 @@ def detect_moving_point_tracks(
         background = np.median(gray_frames, axis=0)
     residuals = np.maximum(gray_frames - background[None, :, :], 0.0)
     small_border = max(3, int(round(border * scale)))
-    detections = [
-        _frame_detections(
-            residual,
-            threshold,
-            small_border,
-            max_components_per_frame,
-        )
-        for residual in residuals
-    ]
+    if _component_workers > 1:
+        from short_flash_detector import _component_executor
+        pool = _component_executor(min(4,int(_component_workers)))
+        futures = [pool.submit(_frame_detections,residual,threshold,small_border,max_components_per_frame)
+                   for residual in residuals]
+        try:
+            detections = [future.result() for future in futures]
+        finally:
+            from concurrent.futures import wait
+            wait(futures)
+    else:
+        detections = [_frame_detections(residual,threshold,small_border,max_components_per_frame)
+                      for residual in residuals]
 
     active: List[dict] = []
     finished: List[dict] = []

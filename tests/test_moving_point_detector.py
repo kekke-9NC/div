@@ -8,6 +8,20 @@ from moving_point_detector import detect_moving_point_tracks, _frame_detections
 
 
 class MovingPointDetectorTests(unittest.TestCase):
+    def test_parallel_frame_components_preserve_all_track_fields_and_input_pixels(self):
+        rng = np.random.default_rng(253)
+        for length in (8,25):
+            frames = list(rng.integers(0,90,(length,120,160,3),dtype=np.uint8))
+            for index,frame in enumerate(frames):
+                cv2.circle(frame,(35+index*3,60-index),2,(255,255,255),-1)
+            original = [frame.copy() for frame in frames]
+            for scale in (.5,1.):
+                options = dict(scale=scale,threshold=8.,border=5)
+                self.assertEqual(detect_moving_point_tracks(frames,**options),
+                                 detect_moving_point_tracks(frames,_component_workers=4,**options))
+            for a,b in zip(frames,original):
+                np.testing.assert_array_equal(a,b)
+
     def test_empty_threshold_image_needs_no_components(self):
         with patch('cv2.connectedComponentsWithStats', side_effect=AssertionError('empty image')):
             self.assertEqual(_frame_detections(np.zeros((120, 160), np.float32), 8, 5, 150), [])
