@@ -345,6 +345,8 @@ class ScheduleProducts:
         self.source_stamps = {}
         self.source_indexes = {}
         self.sample_gaps = {}
+        self.timelapse_revisions = {}
+        self.prepared_timelapses = {}
         self.ai_unavailable = None
         self.stream_signatures = {}
         self.source_properties = {}
@@ -841,7 +843,19 @@ class ScheduleProducts:
             return
         start, end = datetime.fromisoformat(job["start"]), datetime.fromisoformat(job["end"])
         count = max(1, round(options["duration"]*options["fps"]))
-        revision = (self._source_revision(job), job["start"], job["end"], count,
+        sources = self._source_revision(job)
+        source_versions = dict(sources)
+        # Persist the identities behind the disposable PNGs. Replacing an
+        # existing archive must rebuild its samples as well as the final MP4.
+        previous = job.get("sample_source_versions", {})
+        if any(source in source_versions and json.dumps(stamp) != json.dumps(source_versions[source])
+               for source, stamp in previous.items()):
+            self.cache.clear([job["id"] + f"_sample_{int(index):06d}" for index in job["samples"]])
+            job["samples"].clear()
+            self.sample_gaps.pop(job["id"], None)
+            self.status("[自動作成] 録画の差し替えを検知。タイムラプス素材を再作成します")
+        job["sample_source_versions"] = source_versions
+        revision = (sources, job["start"], job["end"], count,
                     options["mean_radius"])
         cached = self.sample_gaps.get(job["id"])
         if cached is None or cached[0] != revision:
@@ -966,10 +980,19 @@ class ScheduleProducts:
         if not job["options"]["timelapse"] or not job["samples"] or "timelapse" in job["outputs"]:
             return
         key = self._timelapse_key(job)
+        if self.timelapse_revisions.get(job["id"]) != key:
+            # Observe the same revision on two product ticks before spending
+            # encoding time; archives may still arrive during backlog recovery.
+            self.timelapse_revisions[job["id"]] = key
+            return
         if not (self.cache.root / key / "timelapse.mp4").exists():
             self.status(f"[自動作成] タイムラプスを並行準備: {len(job['archives'])}録画・{len(job['samples'])}素材 ({key})")
         reserve = int(job["options"]["duration"] * 48_000_000 / 8) + 16 * 1024**2
-        self.cache.build(key, reserve, lambda directory: self._timelapse(job, directory / "timelapse.mp4"))
+        if self.cache.build(key, reserve, lambda directory: self._timelapse(job, directory / "timelapse.mp4")):
+            previous = self.prepared_timelapses.get(job["id"])
+            self.prepared_timelapses[job["id"]] = key
+            if previous and previous != key:
+                self.cache.clear([previous])
 
     def _blends(self, job, directory):
         events = job["events"]
@@ -1287,6 +1310,8 @@ class ScheduleProducts:
         self._save(job)
         self.source_indexes.pop(job["id"], None)
         self.sample_gaps.pop(job["id"], None)
+        self.timelapse_revisions.pop(job["id"], None)
+        self.prepared_timelapses.pop(job["id"], None)
         self.status(f"[自動作成] スケジュール終了後の作成完了: {output}")
 
     def tick(self, now=None):

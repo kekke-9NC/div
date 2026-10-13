@@ -54,7 +54,8 @@ def create_summary_video(
         return False
 
     command = [
-        ffmpeg_path, '-hide_banner', '-loglevel', 'error', '-y', '-f', 'rawvideo', '-vcodec', 'rawvideo',
+        ffmpeg_path, '-hide_banner', '-loglevel', 'error', '-y', '-filter_threads', '2',
+        '-f', 'rawvideo', '-vcodec', 'rawvideo',
         '-s', f'{W}x{H}', '-pix_fmt', 'bgr24', '-r', str(frame_rate),
         '-i', '-', '-an', '-c:v', 'libx264', '-preset', 'ultrafast',
         '-tune', 'zerolatency', '-pix_fmt', 'yuv420p', output_video_path

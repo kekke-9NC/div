@@ -96,10 +96,26 @@ def run_replay(args, settings, options, noise, correction, mask):
         raise ValueError('Preprocessed replay requires matching innovation/mean inputs')
 
     product_options = products.processing_options({} if args.no_products else settings.get('rtsp_schedule_products', {}))
+    clock = tuple(int(settings.get(key, fallback)) for key, fallback in (
+        ('rtsp_start_hour', 17), ('rtsp_start_minute', 0),
+        ('rtsp_end_hour', 5), ('rtsp_end_minute', 0)))
+    schedule_window = None
     if products.enabled(product_options):
         start = min(datetime.fromisoformat(item['start_time']) for item in inputs)
         end = max(datetime.fromisoformat(item['start_time']) + timedelta(seconds=item['frame_count']/item['fps'])
                   for item in inputs)
+        # Resume the saved job's full clock, as the actual startup workflow
+        # does. Compressing a whole night into the fixture's short time span
+        # would invent hundreds of extra timelapse samples.
+        saved_windows = []
+        for marker in (args.settings.resolve().parent / 'rtsp/.schedule_jobs').glob('*/job.json'):
+            saved = json.loads(marker.read_text(encoding='utf-8'))
+            low, high = datetime.fromisoformat(saved['start']), datetime.fromisoformat(saved['end'])
+            if low <= start and high >= end:
+                saved_windows.append((low, high))
+        schedule_window = max(saved_windows) if saved_windows else products.schedule_window(start, *clock)
+    if schedule_window is not None:
+        start, end = schedule_window
         job_dir = root / '.schedule_jobs' / 'replay'
         job_dir.mkdir(parents=True)
         job = dict(id='replay', start=start.isoformat(), end=end.isoformat(),
@@ -138,7 +154,7 @@ def run_replay(args, settings, options, noise, correction, mask):
             original = getattr(owner, name)
             def wrapped(*values, **kwargs):
                 thread = threading.current_thread()
-                if not (thread.name.startswith('rtsp-') or thread.name in ('RTSPProposalPipeline', 'RTSPWindowPipeline')):
+                if not (thread.name.startswith('rtsp-') or thread.name in ('RTSPProposalPipeline', 'RTSPWindowPipeline', 'RTSPScheduleProducts')):
                     return original(*values, **kwargs)
                 key = (thread.ident, name)
                 with profile_lock:
@@ -157,6 +173,7 @@ def run_replay(args, settings, options, noise, correction, mask):
                             (video_processing, '_coarse_proposals'),
                             (image_processing._WindowExtrema, 'reduce'),
                             (rtsp_live.SegmentCapture, 'read'),
+                            (products.ScheduleProducts, 'tick'),
                             (model, 'predict_noise_gate')]:
             install_profile(owner, name)
 
@@ -213,7 +230,8 @@ def run_replay(args, settings, options, noise, correction, mask):
                 meteor_save_path=str(args.output/'meteor'), not_meteor_save_path=str(args.output/'not_meteor'),
                 cancel_flag=cancel, save_options=options, interval=float(settings.get('interval', 1)),
                 duration=float(settings.get('duration', 1)), summary_video_config=settings.get('summary_video_config'),
-                time_limit_enabled=True, start_hour=17, start_minute=0, end_hour=5, end_minute=0,
+                time_limit_enabled=bool(settings.get('rtsp_time_limit_enabled', True)),
+                start_hour=clock[0], start_minute=clock[1], end_hour=clock[2], end_minute=clock[3],
                 max_workers=int(settings.get('concurrency', 4)), dark_frame=correction,
                 notify_on_detection=False, noise_twin_options=noise, rtsp_fps=config.RTSP_FPS,
                 schedule_product_options=product_options)
@@ -239,6 +257,7 @@ def run_replay(args, settings, options, noise, correction, mask):
                 profile_enabled=args.profile, media_enabled=not args.no_save,
                 input_frames=sum(item['frame_count'] for item in inputs),
                 detection_interval=config.RTSP_LIVE_DETECT_INTERVAL, scheduled_products=product_options,
+                schedule_window=None if schedule_window is None else [value.isoformat() for value in schedule_window],
                 errors=errors, meteor=sum(item.get('label') == 'meteor' for item in items),
                 background_gate=sum(item.get('classification_stage') == 'foreground_gate' for item in items),
                 peak_rss_bytes=after.ru_maxrss,

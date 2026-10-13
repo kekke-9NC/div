@@ -155,6 +155,7 @@ class FFmpegFrameWriter:
         Path(self.output_path).parent.mkdir(parents=True, exist_ok=True)
         command = [
             ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+            "-filter_threads", "2",
             "-f", "rawvideo", "-pix_fmt", "bgr24",
             "-s:v", f"{self.width}x{self.height}", "-r", f"{self.fps:.8f}",
             "-i", "pipe:0", "-an",
@@ -263,7 +264,10 @@ def write_repeated_images(output_path, frames, fps, cancel, settings=None):
         lines += [f"file '{escaped}'", f"option framerate {fps:.12g}"]
         listing = directory / "frames.ffconcat"
         listing.write_text("\n".join(lines)+"\n", encoding="utf-8")
+        # A CPU-sized scale pool for each repeated PNG can spend more time
+        # synchronizing than converting pixels and contend with RTSP analysis.
         command = [ffmpeg, "-nostdin", "-y", "-hide_banner", "-loglevel", "error",
+                   "-filter_threads", "2", "-threads", "2",
                    "-f", "concat", "-safe", "0", "-i", str(listing), "-an",
                    "-vf", f"fps={fps:.12g},format=bgr24", "-frames:v", str(count),
                    *FFmpegFrameWriter.encoder_arguments(settings),

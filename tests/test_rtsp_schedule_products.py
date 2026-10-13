@@ -704,13 +704,15 @@ class ScheduleProductTests(unittest.TestCase):
             with mock.patch.object(service, "_timelapse", wraps=service._timelapse) as render:
                 with mock.patch.object(service, "_drained", return_value=False):
                     service.tick(start+timedelta(seconds=61))
+                    self.assertEqual(render.call_count, 0)
+                    service.tick(start+timedelta(seconds=62))
                 job = next(iter(service.jobs.values()))
                 self.assertEqual(render.call_count, 1)
                 self.assertEqual(job["state"], "recording")
                 self.assertFalse(job["outputs"])
                 self.assertTrue(source.exists())
                 self.assertTrue((service.cache.root/service._timelapse_key(job)/"timelapse.mp4").exists())
-                service.tick(start+timedelta(seconds=62))
+                service.tick(start+timedelta(seconds=63))
                 self.assertEqual(render.call_count, 1)
                 self.assertEqual(job["state"], "complete")
                 self.assertTrue(Path(job["outputs"]["timelapse"]).exists())
@@ -725,6 +727,29 @@ class ScheduleProductTests(unittest.TestCase):
             before = service._timelapse_key(job)
             (service.cache.root/key/"frame.png").write_bytes(products.png_bytes(np.full((64, 96, 3), 80, np.uint8)))
             self.assertNotEqual(service._timelapse_key(job), before)
+
+    def test_replaced_archive_rebuilds_existing_sample_pngs(self):
+        with tempfile.TemporaryDirectory() as root:
+            service = self.service(root, timelapse=True)
+            start = datetime(2026, 10, 12, 20)
+            source = self.archive(root, start, count=600)
+            job = service._job(start)
+            service._archives(job)
+            service._prepare_samples(job)
+            old_key = service._timelapse_key(job)
+            metadata = rtsp_live.timing(source)
+            # A published replacement can change pixels while keeping timing.
+            writer = cv2.VideoWriter(str(source), cv2.VideoWriter_fourcc(*"mp4v"), 10, (96, 64))
+            for _ in range(600):
+                writer.write(np.full((64, 96, 3), 210, np.uint8))
+            writer.release()
+            rtsp_live.write_json(str(source)+".capture.json", metadata)
+            service._prepare_samples(job)
+            self.assertNotEqual(service._timelapse_key(job), old_key)
+            for index in job["samples"]:
+                key = job["id"] + f"_sample_{int(index):06d}"
+                frame = products.decode_png(service.cache.read(key, "frame.png"))
+                self.assertGreater(frame.mean(), 200)
 
     def test_concat_validates_then_replaces_and_records_capture_time(self):
         with tempfile.TemporaryDirectory() as root:
