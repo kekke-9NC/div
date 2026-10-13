@@ -454,6 +454,23 @@ class RtspLiveTests(unittest.TestCase):
 
 
 class BacklogDiscoveryTests(unittest.TestCase):
+    def test_catalog_walk_filters_sidecars_once_and_keeps_capture_order(self):
+        with tempfile.TemporaryDirectory() as root:
+            directory = rtsp_live.capture_directory(root,datetime(2026,10,13,4))
+            paths = []
+            for sequence in (1,0):
+                path = directory/f'chunk_{sequence:09d}.mp4'
+                path.write_bytes(b'synthetic')
+                rtsp_live.write_json(str(path)+'.capture.json',dict(
+                    start_time=f'2026-10-13T04:00:0{sequence}',fps=25,frame_count=12,size=[96,64]))
+                paths.append(path)
+            (directory/'chunk_000000000_innovation.mp4').write_bytes(b'synthetic')
+            (directory/'chunk_temp_000000000.mp4').write_bytes(b'synthetic')
+            catalog = rtsp_live.ChunkCatalog(root)
+            with (mock.patch.object(Path,'rglob',side_effect=AssertionError('recursive Path selector')),
+                  mock.patch.object(rtsp_live.rtsp_segments,'is_finalized_mp4',return_value=True)):
+                self.assertEqual(catalog.paths(),list(reversed(paths)))
+
     def test_large_backlog_reduces_discovery_walks_and_tail_restores_live_cadence(self):
         runner = rtsp_live.RealtimeRunner('unused', lambda *_args: None, threading.Event())
         with mock.patch.object(rtsp_live.config, 'RTSP_SCAN_INTERVAL', .1):

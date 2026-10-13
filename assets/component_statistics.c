@@ -134,3 +134,43 @@ __declspec(dllexport)
 int meteor_temporal_median(const uint8_t *input, size_t frames, size_t pixels, double *output) {
     return meteor_temporal_median_range(input,frames,pixels,0,pixels,output);
 }
+
+/* MAD histories use exact signed 16-bit differences. The same independent
+ * sorting network preserves NumPy's median, including negative values and
+ * the double-precision mean of the two middle samples. */
+#ifdef _WIN32
+__declspec(dllexport)
+#endif
+int meteor_temporal_median_i16(const int16_t *input, size_t frames, size_t pixels, double *output) {
+    if (!frames || frames>32) return 0;
+    size_t count=1;
+    while (count<frames) count*=2;
+    int16_t *work=malloc(count*pixels*sizeof(int16_t));
+    if (!work) return 0;
+    memcpy(work,input,frames*pixels*sizeof(int16_t));
+    for (size_t i=frames*pixels;i<count*pixels;++i) work[i]=INT16_MAX;
+    for (size_t k=2;k<=count;k*=2) {
+        for (size_t j=k/2;j;j/=2) {
+            for (size_t i=0;i<count;++i) {
+                size_t other=i^j;
+                if (other<=i) continue;
+                int16_t *left=work+i*pixels,*right=work+other*pixels;
+                if (!(i&k)) {
+                    for (size_t p=0;p<pixels;++p) {
+                        int16_t a=left[p],b=right[p];
+                        left[p]=a<b?a:b; right[p]=a>b?a:b;
+                    }
+                } else {
+                    for (size_t p=0;p<pixels;++p) {
+                        int16_t a=left[p],b=right[p];
+                        left[p]=a>b?a:b; right[p]=a<b?a:b;
+                    }
+                }
+            }
+        }
+    }
+    const int16_t *low=work+((frames-1)/2)*pixels,*high=work+(frames/2)*pixels;
+    for (size_t p=0;p<pixels;++p) output[p]=((double)low[p]+high[p])*.5;
+    free(work);
+    return 1;
+}

@@ -117,11 +117,13 @@ class ChunkCatalog:
         listings, paths = [], []
         for directory, _subdirectories, names in os.walk(self.root):
             folder = Path(directory)
-            if 'segments.csv' in names:
-                listings.append(folder/'segments.csv')
-            paths.extend(folder/name for name in names
-                         if name.startswith('chunk_') and name.endswith('.mp4')
-                         and '_temp_' not in name and '_innovation' not in name)
+            for name in names:
+                matched = os.path.normcase(name)
+                if matched == 'segments.csv':
+                    listings.append(folder/name)
+                elif (matched.startswith('chunk_') and matched.endswith('.mp4')
+                      and '_temp_' not in name and '_innovation' not in name):
+                    paths.append(folder/name)
         for listing in listings:
             try:
                 self._stamp_csv(listing)

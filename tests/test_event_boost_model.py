@@ -14,6 +14,29 @@ from event_boost_model import (ARCHITECTURE_NAME, EventBoostClassifier,
 from universal_meteor_model import build_universal_inputs
 
 
+def test_small_stat_quantiles_keep_exact_numpy_arithmetic():
+    from event_boost_model import _stat_quantiles,_STAT_QUANTILES
+    rng = np.random.default_rng(159)
+    for size in range(1,258):
+        for values in (rng.normal(size=size),rng.integers(-5,6,size=size).astype(float),np.zeros(size)):
+            np.testing.assert_array_equal(_stat_quantiles(values),np.quantile(values,_STAT_QUANTILES))
+    for values in (np.array([0.,np.nan,1.]),np.array([-np.inf,0.,np.inf]),np.array([-0.,0.])):
+        with np.errstate(invalid='ignore'):
+            np.testing.assert_array_equal(_stat_quantiles(values),np.quantile(values,_STAT_QUANTILES))
+
+
+def test_event_features_keep_exact_values_with_small_curve_fast_path():
+    from event_boost_model import _STAT_QUANTILES
+    from unittest.mock import patch
+    frames = moving_frames()
+    image,kymo,physical = build_universal_inputs(frames,detected_line=((20,60),(70,60)),frame_rate=25)
+    actual = extract_event_features(image,kymo,physical)
+    motion = extract_motion_features(frames,frame_rate=25)
+    with patch('event_boost_model._stat_quantiles',side_effect=lambda values:np.quantile(values,_STAT_QUANTILES)):
+        np.testing.assert_array_equal(actual,extract_event_features(image,kymo,physical))
+        np.testing.assert_array_equal(motion,extract_motion_features(frames,frame_rate=25))
+
+
 def moving_frames():
     frames = []
     for index in range(12):

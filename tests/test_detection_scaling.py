@@ -10,6 +10,25 @@ import model
 from universal_meteor_model import _robust_residual_cube, _uint8_median
 from video_processing import _SavedEventIndex, _candidate_already_saved
 from temporal_statistics import temporal_median
+
+
+def test_signed_temporal_median_matches_numpy_for_all_short_lengths():
+    rng = np.random.default_rng(159)
+    for count in range(1,33):
+        values = rng.integers(-32768,32768,size=(count,32,64),dtype=np.int16)
+        values[0,0,:2] = [-32768,32767]
+        before = values.copy()
+        np.testing.assert_array_equal(temporal_median(values),np.median(values,axis=0))
+        np.testing.assert_array_equal(values,before)
+        np.testing.assert_array_equal(temporal_median(values[:,::2,::2]),np.median(values[:,::2,::2],axis=0))
+
+
+def test_signed_temporal_median_falls_back_without_new_native_symbol():
+    import component_statistics
+    values = np.arange(120,dtype=np.int16).reshape(6,4,5)
+    component_statistics._load()
+    with patch.object(component_statistics,'_median_i16_function',None):
+        np.testing.assert_array_equal(temporal_median(values),np.median(values,axis=0))
 from short_flash_detector import _track_predictions
 from temporal_statistics import half_integer_percentiles
 

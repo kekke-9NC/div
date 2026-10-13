@@ -20,6 +20,7 @@ _fractional_function = None
 _batch_function = None
 _median_function = None
 _median_range_function = None
+_median_i16_function = None
 
 
 def _library_name():
@@ -43,7 +44,7 @@ def build_library(destination):
 
 
 def _load():
-    global _checked, _function, _area_function, _fractional_function, _batch_function, _median_function, _median_range_function
+    global _checked, _function, _area_function, _fractional_function, _batch_function, _median_function, _median_range_function, _median_i16_function
     with _lock:
         if _checked:
             return _function
@@ -89,6 +90,10 @@ def _load():
             _median_range_function.argtypes = [ctypes.c_void_p,ctypes.c_size_t,ctypes.c_size_t,
                                               ctypes.c_size_t,ctypes.c_size_t,ctypes.c_void_p]
             _median_range_function.restype = ctypes.c_int
+            _median_i16_function = getattr(loaded,'meteor_temporal_median_i16',None)
+            if _median_i16_function is not None:
+                _median_i16_function.argtypes = [ctypes.c_void_p,ctypes.c_size_t,ctypes.c_size_t,ctypes.c_void_p]
+                _median_i16_function.restype = ctypes.c_int
         except (OSError, AttributeError, RuntimeError, subprocess.SubprocessError):
             # Native acceleration is optional. Never alter component scores
             # or detection availability when compilation/loading is absent.
@@ -152,14 +157,15 @@ def area_crops(integrals, x, y, width, height):
 
 
 def small_temporal_median(values):
-    if values.dtype != np.uint8 or not 1 <= values.shape[0] <= 32 or values.size > 1024**2:
+    if values.dtype not in (np.uint8,np.int16) or not 1 <= values.shape[0] <= 32 or values.size > 1024**2:
         return None
     _load()
-    if _median_function is None:
+    function = _median_function if values.dtype == np.uint8 else _median_i16_function
+    if function is None:
         return None
     values = np.ascontiguousarray(values)
     result = np.empty(values.shape[1:],np.float64)
-    if not _median_function(values.ctypes.data,len(values),result.size,result.ctypes.data):
+    if not function(values.ctypes.data,len(values),result.size,result.ctypes.data):
         return None
     return result
 

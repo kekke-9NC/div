@@ -11,6 +11,25 @@ import numpy as np
 
 ARCHITECTURE_NAME = "meteor_event_boost_v1"
 PREPROCESS_VERSION = 2
+_STAT_QUANTILES = np.array([0, .1, .25, .5, .75, .9, .99, 1], dtype=np.float64)
+
+
+def _stat_quantiles(values):
+    # Tiny curves dominate the call count. Sort their private copy once and
+    # retain NumPy's exact linear interpolation arithmetic without constructing
+    # a general axis/NaN/quantile-dispatch stack for each curve.
+    if len(values)>256 or not np.isfinite(values).all():
+        return np.quantile(values,_STAT_QUANTILES)
+    ordered = np.sort(values)
+    positions = (len(values)-1)*_STAT_QUANTILES
+    low = np.floor(positions).astype(np.intp)
+    high = np.minimum(low+1,len(values)-1)
+    weight = positions-low
+    lower,upper = ordered[low],ordered[high]
+    difference = upper-lower
+    result = lower+difference*weight
+    np.subtract(upper,difference*(1.-weight),out=result,where=weight>=.5)
+    return result
 
 
 def _stats(values):
@@ -18,7 +37,7 @@ def _stats(values):
     if not len(values):
         return [0.0] * 10
     return [float(values.mean()), float(values.std()),
-            *np.quantile(values, [0, .1, .25, .5, .75, .9, .99, 1]).tolist()]
+            *_stat_quantiles(values).tolist()]
 
 
 def _curve_features(curve):
