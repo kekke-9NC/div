@@ -27,6 +27,9 @@ def run_replay(args, settings, options, noise, correction, mask):
     import rtsp_schedule_products as products
     import rtsp_segments
     import video_processing
+    import moving_point_detector
+    import short_flash_detector
+    import model
 
     root = args.output / 'rtsp'
     root.mkdir()
@@ -107,6 +110,30 @@ def run_replay(args, settings, options, noise, correction, mask):
     original_index = video_processing._SavedEventIndex
     original_recorder = file_utils.save_rtsp_video_segments
     source_context = {}
+    worker_profiles = {}
+    profile_lock = threading.Lock()
+    restored = []
+    if args.profile:
+        def install_profile(owner, name):
+            original = getattr(owner, name)
+            def wrapped(*values, **kwargs):
+                thread = threading.current_thread()
+                if not thread.name.startswith('rtsp-'):
+                    return original(*values, **kwargs)
+                key = (thread.ident, name)
+                with profile_lock:
+                    profiler = worker_profiles.setdefault(key, cProfile.Profile())
+                profiler.enable()
+                try:
+                    return original(*values, **kwargs)
+                finally:
+                    profiler.disable()
+            restored.append((owner, name, original))
+            setattr(owner, name, wrapped)
+        for owner, name in [(moving_point_detector, 'detect_moving_point_tracks'),
+                            (short_flash_detector.ShortFlashDetector, 'consume'),
+                            (model, 'predict_noise_gate')]:
+            install_profile(owner, name)
 
     class ObservedIndex(original_index):
         def append(self, item):
@@ -173,12 +200,17 @@ def run_replay(args, settings, options, noise, correction, mask):
         video_processing.create_line_video_clips = original_detect
         video_processing._SavedEventIndex = original_index
         file_utils.save_rtsp_video_segments = original_recorder
+        for owner, name, original in restored:
+            setattr(owner, name, original)
+        for index, ((_thread, name), profiler) in enumerate(worker_profiles.items()):
+            profiler.dump_stats(str(args.output / f'worker-{name}-{index:03d}.pstats'))
     seconds = time.perf_counter()-started
     after = resource.getrusage(resource.RUSAGE_SELF)
     items = [dict(row['detection'], source_video=str(Path(row['source']).relative_to(root))) for row in detections]
     return dict(seconds=seconds, input_seconds=duration, processing_ratio=seconds/duration,
                 target_ratio=.25, meets_target=seconds <= duration*.25, faster_than_realtime=seconds < duration,
                 completed=completed, sessions=len(sessions), chunks=len(paths),
+                profile_enabled=args.profile, media_enabled=not args.no_save,
                 input_frames=sum(item['frame_count'] for item in inputs),
                 detection_interval=config.RTSP_LIVE_DETECT_INTERVAL, scheduled_products=product_options,
                 errors=errors, meteor=sum(item.get('label') == 'meteor' for item in items),

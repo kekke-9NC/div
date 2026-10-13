@@ -29,6 +29,55 @@ import video_processor
 
 
 class RtspLiveTests(unittest.TestCase):
+    def test_pipeline_cancel_never_acknowledges_prefetched_unprocessed_windows(self):
+        from concurrent.futures import ThreadPoolExecutor
+        with tempfile.TemporaryDirectory() as root:
+            paths = self.chunks(root, count=25)
+            cap, consumed = self.capture(paths)
+            generator = image_processing.create_diff_images(cap, interval=.25,
+                duration=1, buffer_duration=4, is_rtsp=True, include_frame_window=True)
+            with ThreadPoolExecutor(max_workers=3) as executor, mock.patch.object(
+                    video_processing, '_coarse_proposals', return_value=([], [])):
+                pipeline = video_processing._LiveProposalPipeline(generator, cap, None, None, cap.cancel, executor)
+                stream = iter(pipeline)
+                for _ in range(25):
+                    latest = next(stream)
+                cap.cancel.set()
+                pipeline.close()
+            acknowledged_frames = sum(rtsp_live.timing(path)['frame_count'] for path in consumed)
+            retain = round(25*(config.FINER_DETECT_WINDOW_SECONDS+config.FINER_DETECT_PADDING_SECONDS))
+            self.assertLessEqual(acknowledged_frames, max(0, latest[1][1]-6+1-retain))
+            self.assertLess(len(consumed), len(paths))
+            self.assertFalse(cap.defer_analysis_ack)
+            cap.release()
+
+    def test_overlapping_extrema_preserve_all_pixels_and_irregular_tail(self):
+        rng = np.random.default_rng(344)
+        frames = list(rng.integers(0, 256, (110, 30, 40, 3), dtype=np.uint8))
+        for step in (1, 6, 25):
+            cache = image_processing._WindowExtrema(step)
+            for start, end in [(i, i+25) for i in range(0, 80, step)] + [(82, 103), (91, 110)]:
+                actual = cache.reduce(frames[start:end], start)
+                expected = image_processing._temporal_min_max(frames[start:end])
+                for a, b in zip(actual, expected):
+                    np.testing.assert_array_equal(a, b)
+                self.assertLessEqual(sum(len(v[0]) for v in cache.blocks.values()), end-start)
+
+    def test_missing_archive_is_republished_before_consumed_spool_is_removed(self):
+        with tempfile.TemporaryDirectory() as root:
+            paths = self.chunks(root, count=4)
+            archiver = rtsp_live.MinuteArchiver(root, seconds=2, status=lambda _message: None)
+            archiver.compact(flush=True)
+            archive = Path(root) / json.loads(Path(str(paths[0])+'.archived.json').read_text())['archive']
+            expected = rtsp_segments._properties(archive)
+            archive.unlink()
+            for path in paths:
+                rtsp_live.write_json(str(path)+'.analysis_consumed.json', {'consumed': True})
+            archiver.compact(flush=True)
+            self.assertTrue(archive.exists())
+            self.assertEqual(rtsp_segments._properties(archive), expected)
+            self.assertTrue(all(not path.exists() for path in paths))
+
     def chunks(self, root, count=10, session="aabbccddeeff", gap=0):
         directory = Path(root) / ".rtsp_live/20261012/20" / f"00_00_{session}"
         directory.mkdir(parents=True, exist_ok=True)

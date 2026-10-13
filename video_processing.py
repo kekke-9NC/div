@@ -334,6 +334,7 @@ class _VideoFrameRangeCache:
         self.key = None
         self.frames = []
         self.masked = {}
+        self.gray = {}
         self.mask_snapshot = None
         self.resized_masks = {}
         self.reader = _VideoRangeReader()
@@ -390,6 +391,7 @@ class _VideoFrameRangeCache:
                 or not np.array_equal(mask, self.mask_snapshot)):
             self.mask_snapshot = mask.copy()
             self.masked.clear()
+            self.gray.clear()
             self.resized_masks.clear()
         retained = {id(frame) for frame in self.frames}
         result = []
@@ -422,11 +424,28 @@ class _VideoFrameRangeCache:
         is limited here, never the frames available for inference or saving.
         """
         frames = list(frames)
-        capacity = ((self.max_bytes // 2) // frames[0].nbytes) if frames else 0
+        capacity = (self.max_bytes // (2 * frames[0].nbytes + frames[0].shape[0]*frames[0].shape[1])) if frames else 0
         self.key = None
         self.frames = frames[-capacity:] if capacity else []
         retained = {id(frame) for frame in self.frames}
         self.masked = {key: value for key, value in self.masked.items() if key in retained}
+        retained.update(id(frame) for frame in self.masked.values())
+        self.gray = {key: value for key, value in self.gray.items() if key in retained}
+
+    def gray_frames(self, frames):
+        """Reuse pixel-exact grayscale for spatially different gate crops."""
+        retained = {id(frame) for frame in self.frames}
+        retained.update(id(frame) for frame in self.masked.values())
+        result = []
+        for frame in frames:
+            key = id(frame)
+            value = self.gray.get(key)
+            if value is None:
+                value = frame if frame.ndim == 2 else cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                if key in retained:
+                    self.gray[key] = value
+            result.append(value)
+        return result
 
 
 class _CachedSequentialCapture:
@@ -1030,6 +1049,73 @@ def _coarse_proposals(diff_img, frame_window, first_frame, frame_rate, mask, roi
     return _deduplicate_candidate_lines([c.line for c in flashes] + [c.line for c in moving] + hough_lines), flashes
 
 
+class _LiveProposalPipeline:
+    """Overlap chronological proposals with classification and saving.
+
+    Two resident windows bound read-ahead. Acknowledgements are emitted only
+    after the consumer finishes a window, so cancellation retains unprocessed
+    spool input. The flash detector has one owner for its entire session.
+    """
+    def __init__(self, generator, cap, mask, roi, cancel, executor):
+        self.generator, self.cap = generator, cap
+        self.stop = threading.Event()
+        self.queue = queue.Queue(maxsize=2)
+        self.current_proposals = None
+        self.cap.defer_analysis_ack = True
+        def put(value):
+            while not self.stop.is_set():
+                try:
+                    self.queue.put(value, timeout=.1)
+                    return True
+                except queue.Full:
+                    pass
+            return False
+        def produce():
+            cache = _VideoFrameRangeCache()
+            gray_cache = moving_point_detector.GrayFrameCache()
+            flash = short_flash_detector.ShortFlashDetector(cap.get(cv2.CAP_PROP_FPS), config.BORDER_SIZE)
+            try:
+                for data in generator:
+                    if self.stop.is_set():
+                        break
+                    cache.retain_live_frames(data[4])
+                    final = bool(cap.analysis_final_frame)
+                    proposals = _coarse_proposals(data[0], data[-1], data[1][0],
+                        cap.get(cv2.CAP_PROP_FPS), mask, roi, cancel,
+                        config.RTSP_MIN_LINE_LENGTH, config.RTSP_HOUGH_THRESHOLD,
+                        config.RTSP_CANNY_THRESH1, config.RTSP_CANNY_THRESH2, True,
+                        flash, cache, gray_cache, final, executor)
+                    if not put((data, proposals, final)):
+                        break
+            except BaseException as exc:
+                put(exc)
+            finally:
+                generator.close()
+                cache.close()
+                put(None)
+        self.thread = threading.Thread(target=produce, name='RTSPProposalPipeline', daemon=True)
+        self.thread.start()
+
+    def __iter__(self):
+        while not self.stop.is_set():
+            packet = self.queue.get()
+            if packet is None:
+                return
+            if isinstance(packet, BaseException):
+                raise packet
+            data, self.current_proposals, final = packet
+            yield data
+            # A break/cancel before the next iteration never acknowledges this
+            # window, matching the original generator's publication semantics.
+            if not self.cap.cancel.is_set():
+                self.cap.acknowledge(data[1][1], final=final)
+
+    def close(self):
+        self.stop.set()
+        self.thread.join()
+        self.cap.defer_analysis_ack = False
+
+
 def create_line_video_clips(
     source: str,
     is_rtsp: bool = False,
@@ -1277,6 +1363,7 @@ def create_line_video_clips(
         'finer_detection_workers', config.RTSP_PARALLEL_WORKERS or max(1, cpu_count() // 2)))),
         thread_name_prefix='rtsp-finer') if is_rtsp else None
     moving_gray_cache = moving_point_detector.GrayFrameCache() if is_rtsp else None
+    proposal_pipeline = None
 
     try:
         evidence_cap = save_options.get("_rtsp_live_evidence_capture")
@@ -1287,6 +1374,9 @@ def create_line_video_clips(
             evidence_cap=evidence_cap,
             include_frame_window=True,
         )
+        if is_rtsp and getattr(cap, 'continuous_rtsp', False):
+            proposal_pipeline = _LiveProposalPipeline(diff_generator, cap, mask, roi, cancel_flag, coarse_executor)
+            diff_generator = iter(proposal_pipeline)
 
         last_read_frame_index_by_diff = -1
 
@@ -1343,7 +1433,10 @@ def create_line_video_clips(
                     effective_canny_thresh1 = 50    # デフォルト値
                     effective_canny_thresh2 = 150   # デフォルト値
 
-                lines, flash_candidates = _coarse_proposals(
+                if proposal_pipeline is not None:
+                    lines, flash_candidates = proposal_pipeline.current_proposals
+                else:
+                    lines, flash_candidates = _coarse_proposals(
                     diff_img, frame_window, start_index_diff, frame_rate, mask, roi,
                     cancel_flag, effective_min_length, effective_hough_threshold,
                     effective_canny_thresh1, effective_canny_thresh2, use_rtsp_params,
@@ -1510,7 +1603,8 @@ def create_line_video_clips(
                                     core = _resident_frame_slice(frames_for_finer_detect, actual_start_finer, core_low, core_high)
                                     if core is not None and model.get_active_model_info().get('architecture') in model.EVENT_ARCHITECTURES:
                                         inference_rect = cand['flash'].classifier_rect(img_w, img_h) if cand['flash'] else _noise_gate_cutout_rect(cand['cx'], cand['cy'], img_w, img_h)
-                                        gate = model.predict_noise_gate(core, inference_rect, frame_rate)
+                                        gate_frames = frame_range_cache.gray_frames(core) if is_rtsp else core
+                                        gate = model.predict_noise_gate(gate_frames, inference_rect, frame_rate)
                                 return indices, rect, gate
 
                             if num_workers == 1:
@@ -1625,7 +1719,7 @@ def create_line_video_clips(
                                 inference_rect_for_gate = cand['flash'].classifier_rect(img_w, img_h) if cand['flash'] else _noise_gate_cutout_rect(cx, cy, img_w, img_h)
                                 gate_result = confirmed['gate_result']
                                 if gate_result is None:
-                                    gate_result = model.predict_noise_gate(ml_source_frames, inference_rect_for_gate, frame_rate)
+                                    gate_result = model.predict_noise_gate(frame_range_cache.gray_frames(ml_source_frames) if is_rtsp else ml_source_frames, inference_rect_for_gate, frame_rate)
                                 if gate_result is not None and gate_result[0] < gate_result[1]:
                                     detection_counter += 1
                                     when = base_datetime + timedelta(seconds=((adjusted_start_frame + adjusted_end_frame) // 2) / frame_rate)
@@ -2242,7 +2336,7 @@ def create_line_video_clips(
                         frame_rate,
                     )
                     inference_rect_for_gate = flash.classifier_rect(img_w, img_h) if flash else _noise_gate_cutout_rect(cx, cy, img_w, img_h)
-                    gate_result = model.predict_noise_gate(ml_source_frames, inference_rect_for_gate, frame_rate)
+                    gate_result = model.predict_noise_gate(frame_range_cache.gray_frames(ml_source_frames) if is_rtsp else ml_source_frames, inference_rect_for_gate, frame_rate)
                     if gate_result is not None and gate_result[0] < gate_result[1]:
                         detection_counter += 1
                         when = base_datetime + timedelta(seconds=((adjusted_start_frame + adjusted_end_frame) // 2) / frame_rate)
@@ -2630,6 +2724,8 @@ def create_line_video_clips(
         print(f"動画処理ループ中に予期せぬエラーが発生しました: {e_main_loop}")
         import traceback; traceback.print_exc()
     finally:
+        if proposal_pipeline is not None:
+            proposal_pipeline.close()
         for executor in (coarse_executor, candidate_executor):
             if executor is not None:
                 executor.shutdown(wait=True)

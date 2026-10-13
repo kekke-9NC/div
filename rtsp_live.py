@@ -75,6 +75,7 @@ class ChunkCatalog:
         self.root = Path(root) / ".rtsp_live"
         self.ready = ready or (lambda _path: True)
         self.csv_offsets = {}
+        self.entries = {}
 
     def _stamp_csv(self, listing):
         offset = self.csv_offsets.get(listing, 0)
@@ -113,20 +114,33 @@ class ChunkCatalog:
             except (OSError, ValueError, KeyError):
                 continue
         found = []
+        present = set()
         for path in self.root.rglob("chunk_*.mp4"):
             if "_temp_" in path.name or "_innovation" in path.name or rtsp_startup.is_deferred_recording(path):
                 continue
             try:
-                if not self.ready(path) or not rtsp_segments.is_finalized_mp4(path):
+                present.add(path)
+                if not self.ready(path):
                     continue
                 # A CSV recorder publishes timing only after closing the file.
                 if (path.parent / "segments.csv").exists() and not Path(
                         str(path) + ".capture.json").exists():
                     continue
-                data = timing(path)
-                found.append((datetime.fromisoformat(data["start_time"]), path))
+                marker = Path(str(path) + '.capture.json')
+                stat = path.stat()
+                stamp = marker.stat() if marker.exists() else None
+                identity = (stat.st_ino, stat.st_size, stat.st_mtime_ns,
+                            (stamp.st_size, stamp.st_mtime_ns) if stamp else None)
+                cached = self.entries.get(path)
+                if cached is None or cached[0] != identity:
+                    if not rtsp_segments.is_finalized_mp4(path):
+                        continue
+                    data = timing(path)
+                    self.entries[path] = (identity, datetime.fromisoformat(data['start_time']))
+                found.append((self.entries[path][1], path))
             except (OSError, ValueError, cv2.error):
                 continue
+        self.entries = {path: entry for path, entry in self.entries.items() if path in present}
         return [path for _, path in sorted(found)]
 
 
@@ -356,9 +370,17 @@ class MinuteArchiver:
         paths = self.catalog.paths()
         groups = {}
         for path in paths:
-            if Path(str(path) + ".archived.json").exists():
-                self._cleanup(path)
-                continue
+            archived = Path(str(path) + ".archived.json")
+            if archived.exists():
+                target = self.root / json.loads(archived.read_text(encoding='utf-8'))['archive']
+                if target.exists():
+                    self._cleanup(path)
+                    continue
+                # A stale publication marker is not proof that pixels survive.
+                # Remove only that marker, then republish the retained originals
+                # and validate all frames before normal consumed cleanup.
+                archived.unlink()
+                self.status(f"[RTSP保存] 欠落した連結先を元区間から復旧: {target.name}")
             groups.setdefault(path.parent, []).append(path)
         for session_paths in groups.values():
             batch, duration = [], 0.0

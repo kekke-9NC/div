@@ -25,7 +25,7 @@ class DetectionOptimizationTests(unittest.TestCase):
         repeated = cache.mask_frames(frames[3:6], mask)
         self.assertTrue(all(a is b for a, b in zip(first[1:], repeated)))
         cache.retain_live_frames(frames[3:9])
-        self.assertEqual(len(cache.frames), 4)
+        self.assertLessEqual(len(cache.frames), 4)
         self.assertLessEqual(sum(f.nbytes for f in cache.frames) + sum(f.nbytes for f in cache.masked.values()), cache.max_bytes)
         mask[:, :8] = 0
         resized = cv2.resize(mask, (40, 30)).astype(np.uint8)
@@ -33,6 +33,21 @@ class DetectionOptimizationTests(unittest.TestCase):
         for raw, got in zip(frames[3:9], actual):
             np.testing.assert_array_equal(got, cv2.bitwise_and(raw, raw, mask=resized))
         self.assertTrue(set(cache.masked).issubset({id(f) for f in cache.frames}))
+
+    def test_live_gate_gray_reuse_preserves_every_crop_pixel_and_budget(self):
+        from universal_meteor_model import _crop_square
+        rng = np.random.default_rng(661)
+        frames = list(rng.integers(0, 256, (6, 100, 120, 3), dtype=np.uint8))
+        cache = video_processing._VideoFrameRangeCache(max_bytes=frames[0].nbytes*10)
+        cache.retain_live_frames(frames)
+        mask = rng.integers(0, 2, (100, 120), dtype=np.uint8)*255
+        masked = cache.mask_frames(cache.frames, mask)
+        gray = cache.gray_frames(masked)
+        for original, actual in zip(masked, gray):
+            for rect in [(0, 0, 100, 100), (87, 13, 160, 119), (-10, -20, 70, 80)]:
+                np.testing.assert_array_equal(_crop_square(original, rect, 64), _crop_square(actual, rect, 64))
+        self.assertLessEqual(sum(f.nbytes for f in cache.frames)+sum(f.nbytes for f in cache.masked.values())
+                             +sum(f.nbytes for f in cache.gray.values()),cache.max_bytes)
 
     def test_run_comparison_requires_exact_probabilities(self):
         from tools.compare_detection_runs import compare
