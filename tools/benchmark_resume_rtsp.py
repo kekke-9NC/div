@@ -150,13 +150,16 @@ def run_resume(args, settings, options, noise, correction, mask):
         stop_requested.set()
 
     def predict(*values,**kwargs):
-        prepared_counts['calls'] += 1
         prepared = kwargs.get('prepared')
+        matched = None
         if prepared is not None:
-            prepared_counts['supplied'] += 1
             architecture = model.get_active_model_info().get('architecture')
             matched = prepared.matches(kwargs['frames'],kwargs['cutout_rect'],kwargs['detected_line'],kwargs['frame_rate'],architecture)
-            prepared_counts['matched' if matched else 'mismatched'] += 1
+        with lock:
+            prepared_counts['calls'] += 1
+            if prepared is not None:
+                prepared_counts['supplied'] += 1
+                prepared_counts['matched' if matched else 'mismatched'] += 1
         return original_predict(*values,**kwargs)
 
     def runner_init(runner, save_root, analyze, cancel_flag, status_callback=None, ready=None, **kwargs):
@@ -238,7 +241,7 @@ def run_resume(args, settings, options, noise, correction, mask):
         (rtsp_live.RealtimeRunner,'_consume',consume),
         (rtsp_live.RealtimeRunner,'__init__',runner_init),
         (rtsp_live.MinuteArchiver,'_publish',publish),
-        (model,'predict_meteor_event',predict),
+        *([(model,'predict_meteor_event',predict)] if args.profile else []),
         (file_utils,'save_rtsp_video_segments',recorder)):
         restored.append((owner,name,getattr(owner,name)))
         setattr(owner,name,replacement)
@@ -315,7 +318,7 @@ def run_resume(args, settings, options, noise, correction, mask):
                   original_changed_paths=changed_paths,
                   threads_alive=alive,installed_app_started=False,network_recorder_replaced=True)
     result['profile_enabled'] = args.profile
-    result['prepared_event_counts'] = prepared_counts
+    result['prepared_event_counts'] = prepared_counts if args.profile else None
     result['detection_valid'] = (detection_done is not None and len(consumed)==len(targets)
                                  and all(row['eof'] for row in sessions) and not alive
                                  and sum(row['decoded_frames'] for row in sessions)==result['input_frames']
