@@ -11,12 +11,16 @@ _original_threads = None
 
 @contextmanager
 def rtsp_opencv_budget():
-    """Share a four-thread ceiling across overlapping continuous RTSP runs."""
+    """Use RTSP processes for parallelism and disable inner OpenCV regions.
+
+    Positive thread ceilings are not exposed by macOS GCD; zero explicitly
+    disables inner parallel regions across supported OpenCV backends.
+    """
     global _budget_users, _original_threads
     with _budget_lock:
         if not _budget_users:
             _original_threads = cv2.getNumThreads()
-            cv2.setNumThreads(min(4,max(1,_original_threads)))
+            cv2.setNumThreads(0)
         _budget_users += 1
     try:
         yield
