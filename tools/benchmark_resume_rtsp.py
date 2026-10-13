@@ -40,6 +40,7 @@ def run_resume(args, settings, options, noise, correction, mask):
     import rtsp_segments
     import video_processing
     import torch
+    import cv2
 
     source = args.resume_root.resolve()
     root = args.output / 'rtsp'
@@ -120,6 +121,7 @@ def run_resume(args, settings, options, noise, correction, mask):
     import model
     original_predict = model.predict_meteor_event
     prepared_counts = dict(calls=0,supplied=0,matched=0,mismatched=0)
+    live_opencv_threads = []
     detection_done = None
     completion_reason = None
     started = None
@@ -163,6 +165,7 @@ def run_resume(args, settings, options, noise, correction, mask):
         return original_predict(*values,**kwargs)
 
     def runner_init(runner, save_root, analyze, cancel_flag, status_callback=None, ready=None, **kwargs):
+        live_opencv_threads.append(cv2.getNumThreads())
         eligible = lambda path: str(path) in targets and (ready is None or ready(path))
         return original_runner_init(runner,save_root,analyze,cancel_flag,status_callback,
                                     eligible if args.replay_seconds else ready,**kwargs)
@@ -319,6 +322,7 @@ def run_resume(args, settings, options, noise, correction, mask):
                   threads_alive=alive,installed_app_started=False,network_recorder_replaced=True)
     result['profile_enabled'] = args.profile
     result['prepared_event_counts'] = prepared_counts if args.profile else None
+    result['rtsp_opencv_threads'] = live_opencv_threads
     result['detection_valid'] = (detection_done is not None and len(consumed)==len(targets)
                                  and all(row['eof'] for row in sessions) and not alive
                                  and sum(row['decoded_frames'] for row in sessions)==result['input_frames']

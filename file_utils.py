@@ -17,6 +17,7 @@ import temporal_mean
 import rtsp_segments
 import rtsp_live
 import media_time
+from video_io import bounded_rtsp_opencv
 
 rtsp_processed_files: Set[str] = set()
 
@@ -1135,6 +1136,7 @@ def process_new_rtsp_files(
                 processed_files_set.add(file_path)
 
 
+@bounded_rtsp_opencv
 def _run_realtime_rtsp(
     rtsp_url, save_root, segment_duration, progress_callback, mask, global_wcs_info,
     plate_solve_mask, meteor_save_path, not_meteor_save_path, cancel_flag,

@@ -1,5 +1,39 @@
 """Bounded FFmpeg decoder pools shared by detection and saved-video readers."""
 import cv2
+from contextlib import contextmanager
+from functools import wraps
+import threading
+
+_budget_lock = threading.Lock()
+_budget_users = 0
+_original_threads = None
+
+
+@contextmanager
+def rtsp_opencv_budget():
+    """Share a four-thread ceiling across overlapping continuous RTSP runs."""
+    global _budget_users, _original_threads
+    with _budget_lock:
+        if not _budget_users:
+            _original_threads = cv2.getNumThreads()
+            cv2.setNumThreads(min(4,max(1,_original_threads)))
+        _budget_users += 1
+    try:
+        yield
+    finally:
+        with _budget_lock:
+            _budget_users -= 1
+            if not _budget_users:
+                cv2.setNumThreads(_original_threads)
+                _original_threads = None
+
+
+def bounded_rtsp_opencv(function):
+    @wraps(function)
+    def run(*args,**kwargs):
+        with rtsp_opencv_budget():
+            return function(*args,**kwargs)
+    return run
 
 
 def open_video_capture(source: str, decoder_threads: int = 2) -> cv2.VideoCapture:
