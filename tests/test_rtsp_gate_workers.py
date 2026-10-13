@@ -9,6 +9,49 @@ import model
 from rtsp_gate_workers import LiveGateFeatures, _worker_diagnostics
 
 
+def test_spawned_main_event_inputs_match_every_value_and_keep_parent_evidence():
+    rng = np.random.default_rng(613)
+    workers = LiveGateFeatures(workers=2)
+    workers.activate()
+    architecture = model.EVENT_TRANSFORMER_ARCHITECTURE_NAME
+    try:
+        with patch.multiple(model,model=object(),_model_ready=True,
+                            _active_model_info={'architecture':architecture}):
+            for length,rect in ((1,None),(2,(-4,3,90,85)),(7,(5,6,62,72)),
+                                (32,(5,6,62,72)),(40,(500,500,520,520))):
+                frames = list(rng.integers(0,256,(length,80,96,3),dtype=np.uint8))
+                before = np.stack(frames)
+                line = ((15,30),(35,50))
+                expected = model.prepare_meteor_inputs(frames,rect,line,25)
+                observed = model.prepare_meteor_inputs(frames,rect,line,25,feature_workers=workers)
+                assert observed.matches(frames,rect,line,25,architecture)
+                for field in ('image','kymograph','features','vector'):
+                    np.testing.assert_array_equal(getattr(observed,field),getattr(expected,field))
+                np.testing.assert_array_equal(np.stack(frames),before)
+        assert not workers.pool.submit(_worker_diagnostics).result()['torch_loaded']
+    finally:
+        workers.close()
+
+
+def test_cpu_event_worker_failure_returns_to_identical_local_preparation():
+    workers = LiveGateFeatures(workers=2)
+    workers.activate()
+    frames = [np.full((40,40,3),i,np.uint8) for i in range(7)]
+    failed = Future()
+    failed.set_exception(RuntimeError('worker unavailable'))
+    pool = Mock()
+    pool.submit.return_value = failed
+    with patch.multiple(model,model=object(),_model_ready=True,
+                        _active_model_info={'architecture':model.EVENT_BOOST_ARCHITECTURE_NAME}), \
+         patch('rtsp_gate_workers.ProcessPoolExecutor',return_value=pool):
+        expected = model.prepare_meteor_inputs(frames,None,None,25)
+        for _ in range(2):
+            observed = model.prepare_meteor_inputs(frames,None,None,25,feature_workers=workers)
+            np.testing.assert_array_equal(observed.vector,expected.vector)
+        assert pool.submit.call_count == 1 and workers.failed
+    workers.close()
+
+
 def test_spawned_cpu_features_match_in_process_every_value():
     rng = np.random.default_rng(4141)
     workers = LiveGateFeatures(workers=2)

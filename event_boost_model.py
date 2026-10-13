@@ -154,10 +154,15 @@ def extract_event_features(image, kymograph, physical):
 
 def extract_motion_features(frames, rect=None, frame_rate=15.):
     """Measure the actual frame sequence, retaining speed and component shape."""
-    from universal_meteor_model import _crop_square, _robust_residual_cube
+    from event_representation import _crop_square
     if not frames:
         raise ValueError("EventBoost requires at least one frame")
     stack = np.stack([_crop_square(frame, rect, 128) for frame in frames])
+    return extract_motion_features_from_crops(stack,frame_rate)
+
+
+def extract_motion_features_from_crops(stack,frame_rate):
+    from event_representation import _robust_residual_cube
     response, _ = _robust_residual_cube(stack)
     curves = [[] for _ in range(8)]
     positions = []
@@ -184,13 +189,13 @@ def extract_motion_features(frames, rect=None, frame_rate=15.):
         for curve, value in zip(curves, values):
             curve.append(value)
         positions.append(position)
-    result = [len(frames) / max(float(frame_rate), 1.), float(len(frames))]
+    result = [len(stack) / max(float(frame_rate), 1.), float(len(stack))]
     for curve in curves:
         result += _curve_features(np.array(curve))
     positions = np.array(positions)
     valid = np.array(curves[4]) > 0.
     if valid.sum() >= 3:
-        times = np.arange(len(frames))[valid] / max(float(frame_rate), 1.)
+        times = np.arange(len(stack))[valid] / max(float(frame_rate), 1.)
         p = positions[valid]
         coefficients = np.polyfit(times, p, 1)
         residual = p - (times[:, None] * coefficients[0] + coefficients[1])

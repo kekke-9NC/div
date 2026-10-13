@@ -1,0 +1,272 @@
+"""CPU event representation shared by the classifier and spawn workers.
+
+The model deliberately never receives a camera name, date, source path, or a
+prediction made by an older model.  It operates on robust temporal residuals,
+a track-aligned space-time representation, and dimensionless event features.
+"""
+
+from __future__ import annotations
+
+import math
+from typing import Optional, Sequence, Tuple
+
+import cv2
+import numpy as np
+from temporal_statistics import temporal_median
+from event_pixels import _gray, _crop_square, _uint8_median
+
+
+ARCHITECTURE_NAME = "meteor_fusion_universal_v1"
+PREPROCESS_VERSION = 1
+IMAGE_SIZE = 160
+KYMO_HEIGHT = 96
+KYMO_WIDTH = 128
+FEATURE_COUNT = 12
+
+
+
+
+
+
+def _line_in_crop(
+    detected_line: Optional[Sequence[Sequence[float]]],
+    rect: Optional[Sequence[int]],
+    source_size: int,
+) -> Tuple[Tuple[float, float], Tuple[float, float]]:
+    if not detected_line or len(detected_line) != 2:
+        return (source_size * 0.3, source_size * 0.5), (
+            source_size * 0.7,
+            source_size * 0.5,
+        )
+    p1 = detected_line[0]
+    p2 = detected_line[1]
+    offset_x = float(rect[0]) if rect is not None else 0.0
+    offset_y = float(rect[1]) if rect is not None else 0.0
+    rect_w = max(1.0, float(rect[2] - rect[0])) if rect is not None else source_size
+    rect_h = max(1.0, float(rect[3] - rect[1])) if rect is not None else source_size
+    sx = source_size / rect_w
+    sy = source_size / rect_h
+    return (
+        ((float(p1[0]) - offset_x) * sx, (float(p1[1]) - offset_y) * sy),
+        ((float(p2[0]) - offset_x) * sx, (float(p2[1]) - offset_y) * sy),
+    )
+
+
+
+
+def _robust_residual_cube(stack: np.ndarray) -> Tuple[np.ndarray, float]:
+    """Return positive temporal residuals in local noise-sigma units."""
+    values = stack.astype(np.float32)
+    # uint8 medians are exact integers/half-integers in float32, including
+    # even-length clips. Partition one-byte pixels rather than a float cube.
+    background = (temporal_median(stack).astype(np.float32)
+                  if stack.dtype == np.uint8 else np.median(values, axis=0))
+    if stack.dtype == np.uint8:
+        # Twice a uint8 deviation is an integer in [0, 510], even when
+        # the background is a half-integer. Its median / 2 is exactly the
+        # original float32 MAD (including quarter-integer even medians).
+        integers = stack.astype(np.int16)
+        deviations = np.abs(integers * 2 - (background * 2).astype(np.int16))
+        mad = temporal_median(deviations).astype(np.float32) * .5
+        temporal_sigma = 1.4826 * mad
+        if len(values) > 1:
+            delta = np.abs(np.diff(integers, axis=0)).astype(np.uint8)
+            global_sigma = _uint8_median(delta) / 0.954
+        else:
+            global_sigma = 0.0  # A single frame equals its own background.
+    else:
+        abs_deviation = np.abs(values - background)
+        temporal_sigma = 1.4826 * np.median(abs_deviation, axis=0)
+        if len(values) > 1:
+            global_sigma = float(np.median(np.abs(np.diff(values, axis=0)))) / 0.954
+        else:
+            global_sigma = float(np.median(abs_deviation)) * 1.4826
+    global_sigma = max(1.0, global_sigma)
+    sigma = np.maximum(temporal_sigma, global_sigma)
+    positive = np.maximum(values - background, 0.0)
+    residual_z = np.clip(positive / sigma[None, :, :], 0.0, 30.0)
+    return residual_z.astype(np.float32), global_sigma
+
+
+def _compress_response(residual_z: np.ndarray) -> np.ndarray:
+    scale = math.asinh(6.0)
+    return np.clip(np.arcsinh(residual_z / 2.0) / scale, 0.0, 1.0)
+
+
+def _track_aligned_cube(
+    response: np.ndarray,
+    p1: Tuple[float, float],
+    p2: Tuple[float, float],
+) -> np.ndarray:
+    dx, dy = p2[0] - p1[0], p2[1] - p1[1]
+    line_length = max(8.0, math.hypot(dx, dy))
+    center = ((p1[0] + p2[0]) * 0.5, (p1[1] + p2[1]) * 0.5)
+    angle = math.degrees(math.atan2(dy, dx))
+    scale = float(np.clip(84.0 / line_length, 0.45, 2.5))
+    matrix = cv2.getRotationMatrix2D(center, angle, scale)
+    matrix[0, 2] += KYMO_WIDTH * 0.5 - center[0]
+    matrix[1, 2] += 64.0 * 0.5 - center[1]
+    aligned = [
+        cv2.warpAffine(
+            frame,
+            matrix,
+            (KYMO_WIDTH, 64),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+        )
+        for frame in response
+    ]
+    return np.stack(aligned).astype(np.float32)
+
+
+def _centroid_track(response: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    xs, ys, weights = [], [], []
+    height, width = response.shape[1:]
+    xx = np.arange(width, dtype=np.float32)[None, :]
+    yy = np.arange(height, dtype=np.float32)[:, None]
+    for frame in response:
+        signal = np.maximum(frame - 0.08, 0.0)
+        weight = float(signal.sum())
+        weights.append(weight)
+        if weight > 1e-5:
+            xs.append(float((signal * xx).sum() / weight))
+            ys.append(float((signal * yy).sum() / weight))
+        else:
+            xs.append(float("nan"))
+            ys.append(float("nan"))
+    return (
+        np.asarray(xs, dtype=np.float32),
+        np.asarray(ys, dtype=np.float32),
+        np.asarray(weights, dtype=np.float32),
+    )
+
+
+def _physical_features(
+    response: np.ndarray,
+    residual_z: np.ndarray,
+    line_length: float,
+    fps: float,
+) -> np.ndarray:
+    frame_count, height, width = response.shape
+    duration = frame_count / max(1.0, float(fps))
+    xs, ys, weights = _centroid_track(response)
+    valid = np.isfinite(xs) & (weights > np.percentile(weights, 40))
+
+    travel = 0.0
+    linearity = 0.0
+    speed_cv = 0.0
+    if valid.sum() >= 3:
+        vx, vy = xs[valid], ys[valid]
+        travel = math.hypot(float(vx[-1] - vx[0]), float(vy[-1] - vy[0]))
+        points = np.column_stack([vx, vy])
+        centered = points - points.mean(axis=0, keepdims=True)
+        singular = np.linalg.svd(centered, compute_uv=False)
+        linearity = float(singular[0] / max(1e-6, singular.sum()))
+        steps = np.hypot(np.diff(vx), np.diff(vy))
+        if steps.size and float(steps.mean()) > 1e-5:
+            speed_cv = float(steps.std() / steps.mean())
+
+    active_by_frame = (residual_z > 3.0).mean(axis=(1, 2))
+    active_time_fraction = float((active_by_frame > 0.0005).mean())
+    active_area = float((residual_z.max(axis=0) > 3.0).mean())
+    peak_weights = weights / max(1e-6, float(weights.sum()))
+    temporal_peakiness = float(peak_weights.max()) if peak_weights.size else 0.0
+
+    periodicity = 0.0
+    if len(weights) >= 8 and float(weights.std()) > 1e-5:
+        normalized = (weights - weights.mean()) / weights.std()
+        autocorr = np.correlate(normalized, normalized, mode="full")[len(weights) - 1 :]
+        autocorr /= max(1.0, float(autocorr[0]))
+        upper = min(len(autocorr), max(3, int(float(fps) * 1.5)))
+        if upper > 2:
+            periodicity = float(np.max(autocorr[2:upper]))
+
+    features = np.asarray(
+        [
+            np.clip(duration / 6.0, 0.0, 2.0),
+            np.clip(line_length / 256.0, 0.0, 2.0),
+            np.clip(float(residual_z.max()) / 20.0, 0.0, 2.0),
+            np.clip(float(np.percentile(residual_z, 99.5)) / 10.0, 0.0, 2.0),
+            np.clip(active_area * 20.0, 0.0, 2.0),
+            active_time_fraction,
+            np.clip(temporal_peakiness * 5.0, 0.0, 2.0),
+            np.clip(travel / max(8.0, line_length), 0.0, 2.0),
+            linearity,
+            np.clip(speed_cv / 2.0, 0.0, 2.0),
+            np.clip((periodicity + 1.0) * 0.5, 0.0, 1.0),
+            np.clip(valid.mean(), 0.0, 1.0),
+        ],
+        dtype=np.float32,
+    )
+    return features
+
+
+def build_universal_inputs(
+    frames: Sequence[np.ndarray],
+    rect: Optional[Sequence[int]] = None,
+    detected_line: Optional[Sequence[Sequence[float]]] = None,
+    frame_rate: float = 15.0,
+    source_size: int = 256,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Create image, track-time, and physical inputs from an event clip."""
+    if not frames:
+        raise ValueError("At least one frame is required")
+    crops = np.stack([_crop_square(frame, rect, source_size) for frame in frames])
+    return build_universal_from_crops(crops, rect, detected_line, frame_rate, source_size)
+
+
+def build_universal_from_crops(crops, rect=None, detected_line=None, frame_rate=15., source_size=256):
+    """Use exact, already cropped pixels without transporting resident video."""
+    residual_z, _global_sigma = _robust_residual_cube(crops)
+    response = _compress_response(residual_z)
+
+    groups = np.array_split(np.arange(len(response)), 3)
+    temporal = [
+        response[group].max(axis=0) if len(group) else np.zeros_like(response[0])
+        for group in groups
+    ]
+    maximum = response.max(axis=0)
+    peak_index = residual_z.argmax(axis=0).astype(np.float32)
+    time_peak = peak_index / max(1, len(response) - 1)
+    time_peak[residual_z.max(axis=0) < 3.0] = 0.0
+    image = np.stack([maximum, temporal[0], temporal[1], temporal[2], time_peak])
+    image = np.stack(
+        [
+            cv2.resize(channel, (IMAGE_SIZE, IMAGE_SIZE), interpolation=cv2.INTER_AREA)
+            for channel in image
+        ]
+    ).astype(np.float32)
+
+    p1, p2 = _line_in_crop(detected_line, rect, source_size)
+    line_length = max(8.0, math.hypot(p2[0] - p1[0], p2[1] - p1[1]))
+    aligned = _track_aligned_cube(response, p1, p2)
+    longitudinal = aligned.max(axis=1)
+    transverse = aligned.max(axis=2)
+    transverse = np.stack(
+        [
+            cv2.resize(row[None, :], (KYMO_WIDTH, 1), interpolation=cv2.INTER_LINEAR)[0]
+            for row in transverse
+        ]
+    )
+    energy = np.percentile(aligned, 99.0, axis=(1, 2))
+    energy_map = np.repeat(energy[:, None], KYMO_WIDTH, axis=1)
+    kymograph = np.stack([longitudinal, transverse, energy_map])
+    kymograph = np.stack(
+        [
+            cv2.resize(
+                channel,
+                (KYMO_WIDTH, KYMO_HEIGHT),
+                interpolation=cv2.INTER_LINEAR,
+            )
+            for channel in kymograph
+        ]
+    ).astype(np.float32)
+
+    features = _physical_features(
+        response=response,
+        residual_z=residual_z,
+        line_length=line_length,
+        fps=frame_rate,
+    )
+    return image, kymograph, features
+

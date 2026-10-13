@@ -1737,7 +1737,8 @@ def create_line_video_clips(
                                             feature_workers=save_options.get('_rtsp_gate_features') if is_rtsp else None)
                                         if is_rtsp and (gate is None or gate[0] >= gate[1]) and not (cancel_flag is not None and cancel_flag.is_set()):
                                             try:
-                                                prepared_event = model.prepare_meteor_inputs(core,inference_rect,cand['line'],frame_rate)
+                                                prepared_event = model.prepare_meteor_inputs(core,inference_rect,cand['line'],frame_rate,
+                                                    feature_workers=save_options.get('_rtsp_gate_features'))
                                             except Exception as exc:
                                                 print(f"分類前処理を通常経路で再試行します: {exc}")
                                 return indices, rect, gate, prepared_event

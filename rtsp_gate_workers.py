@@ -28,6 +28,17 @@ def _features(crops, frame_rate):
     return extract_noise_gate_features(list(crops), None, frame_rate)
 
 
+def _event_inputs(crops, motion_crops, rect, line, frame_rate):
+    from event_representation import build_universal_from_crops
+    from event_boost_model import extract_event_features, extract_motion_features_from_crops
+    image, kymograph, physical = build_universal_from_crops(crops,rect,line,frame_rate)
+    image = (np.clip(image,0.,1.)*65535.).astype(np.uint16).astype(np.float32)/65535.
+    kymograph = (np.clip(kymograph,0.,1.)*65535.).astype(np.uint16).astype(np.float32)/65535.
+    vector = np.concatenate([extract_event_features(image,kymograph,physical),
+                             extract_motion_features_from_crops(motion_crops,frame_rate)])
+    return image,kymograph,physical,vector
+
+
 def _moving_tracks(name, shape, dtype, options):
     import moving_point_detector
     memory = shared_memory.SharedMemory(name=name)
@@ -247,6 +258,21 @@ class LiveGateFeatures:
     def moving_tracks(self, frames, gray_cache=None, **options):
         with self.moving_lock:
             return self._moving_tracks(frames, gray_cache, options)
+
+    def prepare_meteor(self, frames, rect, line, frame_rate):
+        if self._local() or not self.active:
+            return None
+        from event_pixels import _crop_square
+        try:
+            # Only exact grayscale model crops cross the process boundary;
+            # frame identity and inference ownership remain in the parent.
+            crops = np.stack([_crop_square(frame,rect,256) for frame in frames])
+            motion = np.stack([_crop_square(frame,rect,128) for frame in frames])
+            return self._executor().submit(_event_inputs,crops,motion,rect,line,frame_rate).result()
+        except Exception as exc:
+            self.failed = True
+            print(f"[RTSP解析] CPU主分類前処理を通常経路へ戻します: {exc}")
+            return None
 
     def _moving_tracks(self, frames, gray_cache, options):
         import moving_point_detector

@@ -356,7 +356,7 @@ def _prepare_meteor_inputs(frames,rect,line,frame_rate,architecture):
                                  frame_rate,image,kymograph,features,vector)
 
 
-def prepare_meteor_inputs(frames,rect,line,frame_rate):
+def prepare_meteor_inputs(frames,rect,line,frame_rate,feature_workers=None):
     """Prepare immutable resident-frame inputs on CPU; inference pins its own model.
 
     The caller owns the frame lifetime and must not mutate these pixels before
@@ -368,6 +368,11 @@ def prepare_meteor_inputs(frames,rect,line,frame_rate):
         ready = _model_ready and model is not None
     if not ready or architecture not in EVENT_ARCHITECTURES:
         return None
+    if feature_workers is not None and architecture in (EVENT_BOOST_ARCHITECTURE_NAME,EVENT_TRANSFORMER_ARCHITECTURE_NAME):
+        arrays = feature_workers.prepare_meteor(frames,rect,line,frame_rate)
+        if arrays is not None:
+            return _PreparedMeteorInputs(architecture,tuple(frames),_geometry_key(rect),_geometry_key(line),
+                                         frame_rate,*arrays)
     return _prepare_meteor_inputs(frames,rect,line,frame_rate,architecture)
 
 
