@@ -27,6 +27,7 @@ def main():
     parser.add_argument('--realtime', action='store_true',
                         help='Replay through the real continuous RTSP runner, archiver and scheduled products')
     parser.add_argument('--live', action='store_true',help='Use a real RTSP connection and the original recorder')
+    parser.add_argument('--resume-root', type=Path, help='Copy an existing RTSP root and invoke the actual startup resume handler')
     parser.add_argument('--stream-url',help='Unauthenticated loopback RTSP URL for the equal-speed live test')
     parser.add_argument('--live-seconds',type=float,default=600)
     parser.add_argument('--backlog-seconds',type=float,default=60)
@@ -43,7 +44,9 @@ def main():
         parser.error('Replay seconds must be nonnegative, timeout positive; realtime cannot limit proposal windows')
     if args.live and (args.realtime or args.sources or args.windows or args.no_save or args.profile):
         parser.error('Live mode requires full saving and cannot combine with replay, sources, windows or profiles')
-    if not args.live and not args.sources:
+    if args.resume_root and (args.live or args.realtime or args.sources or args.windows or args.no_save or args.profile or args.no_products):
+        parser.error('Resume verification requires the full saved workflow without other input modes')
+    if not args.live and not args.resume_root and not args.sources:
         parser.error('Recorded replay needs input sources')
     if args.live and not 0 <= args.backlog_seconds < args.live_seconds:
         parser.error('Live backlog delay must be shorter than capture duration')
@@ -149,7 +152,8 @@ def main():
                    code_sha256={p.name: hashlib.sha256(p.read_bytes()).hexdigest()
                                 for p in args.code_root.glob('*.py')},
                    sources=[str(p.resolve()) for p in args.sources])
-    runtime['workflow'] = 'live_rtsp' if args.live else 'continuous_rtsp' if args.realtime else 'archive_files'
+    runtime['workflow'] = ('startup_resume' if args.resume_root else 'live_rtsp' if args.live
+                           else 'continuous_rtsp' if args.realtime else 'archive_files')
     (args.output / 'runtime.json').write_text(json.dumps(runtime, indent=2))
     def process(source):
         items = video_processing.create_line_video_clips(
@@ -163,8 +167,11 @@ def main():
         for item in items:
             item['source_video'] = str(source.resolve())
         return items
-    if args.realtime or args.live:
-        if args.live:
+    if args.realtime or args.live or args.resume_root:
+        if args.resume_root:
+            from benchmark_resume_rtsp import run_resume
+            result, items = run_resume(args,settings,options,noise,correction,mask_reader.mask)
+        elif args.live:
             from verify_live_rtsp import run_live
             result, items = run_live(args,settings,options,noise,correction,mask_reader.mask)
         else:
