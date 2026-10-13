@@ -124,6 +124,8 @@ class ProcessingMixin:
 
     def _check_rtsp_schedule_autostart(self):
         """Start the configured RTSP capture when its scheduled window opens."""
+        if getattr(self, "_shutdown_in_progress", False):
+            return
         try:
             if not getattr(self, "_startup_analysis_ready", True):
                 return
@@ -486,6 +488,10 @@ class ProcessingMixin:
         self._update_live_preview_button_state()
 
     def update_progress(self):
+        if (getattr(self, "_shutdown_requested", False)
+                or getattr(self, "_shutdown_in_progress", False)):
+            self._begin_graceful_shutdown()
+            return
         if self.start_time_gui:
             elapsed_str = time.strftime("%H:%M:%S", time.gmtime(time.time() - self.start_time_gui))
             text = f"経過: {elapsed_str}"

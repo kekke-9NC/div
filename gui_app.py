@@ -926,30 +926,49 @@ class App(
 
     def on_closing(self):
         if messagebox.askokcancel("終了", "アプリケーションを終了しますか？"):
-            # Stop FFmpeg before destroying Tk.  The concat worker is a daemon
-            # thread, so destroying the app first could otherwise orphan it.
-            self.stop_video_concat()
-            import rtsp_schedule_products
-            rtsp_schedule_products.stop_background_products()
-            if self.noise_twin_training_process is not None:
-                try:
-                    self.noise_twin_training_process.terminate()
-                except Exception:
-                    pass
-            self.append_log("設定を保存しています...")
-            self._hide_summary_preview()
-            self._hide_camera_model_hover()
-            self._hide_camera_model_visualization()
-            self.close_rtsp_live_preview()
-            self.close_camera_control()
-            monitor = getattr(self, "camera_model_monitor", None)
-            if monitor is not None:
-                monitor.stop()
-            self.save_settings()
-            # 自動更新を停止
-            if self.auto_updater:
-                self.auto_updater.stop()
-            self.destroy()
+            self._begin_graceful_shutdown()
+
+    def _begin_graceful_shutdown(self):
+        if getattr(self, "_shutdown_in_progress", False):
+            return
+        self._shutdown_in_progress = True
+        self.cancel_processing()
+        self._wait_for_recording_shutdown()
+
+    def _wait_for_recording_shutdown(self):
+        # Let the recorder finalize its partial MP4 and the analysis consumer
+        # finish its current acknowledgement before destroying their owner.
+        workers = (self.rtsp_thread, self.worker_thread, self.periodic_scan_thread)
+        if any(worker is not None and worker.is_alive() for worker in workers):
+            self.after(100, self._wait_for_recording_shutdown)
+            return
+        self._finish_closing()
+
+    def _finish_closing(self):
+        # Stop FFmpeg before destroying Tk.  The concat worker is a daemon
+        # thread, so destroying the app first could otherwise orphan it.
+        self.stop_video_concat()
+        import rtsp_schedule_products
+        rtsp_schedule_products.stop_background_products()
+        if self.noise_twin_training_process is not None:
+            try:
+                self.noise_twin_training_process.terminate()
+            except Exception:
+                pass
+        self.append_log("設定を保存しています...")
+        self._hide_summary_preview()
+        self._hide_camera_model_hover()
+        self._hide_camera_model_visualization()
+        self.close_rtsp_live_preview()
+        self.close_camera_control()
+        monitor = getattr(self, "camera_model_monitor", None)
+        if monitor is not None:
+            monitor.stop()
+        self.save_settings()
+        # 自動更新を停止
+        if self.auto_updater:
+            self.auto_updater.stop()
+        self.destroy()
 
 
 def main():
@@ -968,6 +987,13 @@ def main():
             raise SystemExit("Meteor Detector is already running.")
         try:
             app = App()
+            import signal
+            def request_shutdown(_number, _frame):
+                # Only set Python state in the signal handler. Tk work happens
+                # in the app's normal main-thread progress timer.
+                app._shutdown_requested = True
+            signal.signal(signal.SIGINT, request_shutdown)
+            signal.signal(signal.SIGTERM, request_shutdown)
             app.mainloop()
         finally:
             process_lock.release()
