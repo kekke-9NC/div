@@ -149,7 +149,7 @@ def test_stateful_flash_process_matches_all_windows_and_recovers_from_failure():
             assert actual.state['last_frame'] == expected.last_frame
         failed = Future()
         failed.set_exception(RuntimeError('worker lost after a valid checkpoint'))
-        with patch.object(workers.pool, 'submit', return_value=failed):
+        with patch.object(actual.pool, 'submit', return_value=failed):
             assert actual.consume(frames[78:103], 78, mask=mask) == expected.consume(frames[78:103], 78, mask=mask)
         assert actual.local_mode
         assert actual.consume(frames[84:109], 84, mask=mask, final=True) == expected.consume(frames[84:109], 84, mask=mask, final=True)

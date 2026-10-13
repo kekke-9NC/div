@@ -1,6 +1,8 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <math.h>
+#include <stdlib.h>
+#include <string.h>
 
 /* One exact integer pass over connected-component labels. The background
  * and ineligible labels contribute nothing, matching the NumPy reference. */
@@ -83,4 +85,52 @@ void meteor_area_crops(const int32_t **integrals, size_t count, size_t stride,
         else
             meteor_area_crop_i32(integrals[frame],stride,x,y,width/64,height/64,64,output+frame*4096);
     }
+}
+
+/* Sort independent uint8 temporal histories with a fixed compare-exchange
+ * network. Plane-contiguous comparisons vectorize without changing values.
+ * Pad with 255, so both middle samples of the original history stay exact. */
+#ifdef _WIN32
+__declspec(dllexport)
+#endif
+int meteor_temporal_median_range(const uint8_t *input, size_t frames, size_t stride,
+                                 size_t offset, size_t pixels, double *output) {
+    size_t count=1;
+    while (count<frames) count*=2;
+    uint8_t *work=malloc(count*pixels);
+    if (!work) return 0;
+    for (size_t frame=0;frame<frames;++frame)
+        memcpy(work+frame*pixels,input+frame*stride+offset,pixels);
+    memset(work+frames*pixels,255,(count-frames)*pixels);
+    for (size_t k=2;k<=count;k*=2) {
+        for (size_t j=k/2;j;j/=2) {
+            for (size_t i=0;i<count;++i) {
+                size_t other=i^j;
+                if (other<=i) continue;
+                uint8_t *left=work+i*pixels, *right=work+other*pixels;
+                if (!(i&k)) {
+                    for (size_t p=0;p<pixels;++p) {
+                        uint8_t a=left[p],b=right[p];
+                        left[p]=a<b?a:b; right[p]=a>b?a:b;
+                    }
+                } else {
+                    for (size_t p=0;p<pixels;++p) {
+                        uint8_t a=left[p],b=right[p];
+                        left[p]=a>b?a:b; right[p]=a<b?a:b;
+                    }
+                }
+            }
+        }
+    }
+    const uint8_t *low=work+((frames-1)/2)*pixels,*high=work+(frames/2)*pixels;
+    for (size_t p=0;p<pixels;++p) output[p]=((double)low[p]+high[p])*.5;
+    free(work);
+    return 1;
+}
+
+#ifdef _WIN32
+__declspec(dllexport)
+#endif
+int meteor_temporal_median(const uint8_t *input, size_t frames, size_t pixels, double *output) {
+    return meteor_temporal_median_range(input,frames,pixels,0,pixels,output);
 }

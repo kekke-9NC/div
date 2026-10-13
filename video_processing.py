@@ -520,6 +520,9 @@ class _VideoFrameRangeCache:
         if not width == height == 160 and (min(width,height) < 64 or width%64 or height%64):
             return None
         from component_statistics import area_crops
+        size = (frame.shape[0]+1)*(frame.shape[1]+1)*4
+        if len({id(value) for value in frames})*size > self.integral_budget:
+            return None
         integrals = []
         with self.crop_lock:
             for frame in frames:
@@ -538,7 +541,10 @@ class _VideoFrameRangeCache:
                 else:
                     self.integrals.move_to_end(key)
                 integrals.append(integral)
-        return area_crops(integrals,x1,y1,width,height)
+            # Keep this bounded batch pinned until the synchronous native
+            # call returns. Concurrent callers cannot evict its allocations
+            # and retain another full budget of arrays at the same time.
+            return area_crops(integrals,x1,y1,width,height)
 
 
 class _CachedSequentialCapture:

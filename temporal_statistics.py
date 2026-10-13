@@ -10,6 +10,15 @@ _median_executor_lock = threading.Lock()
 _median_workers = max(1, min(8, (os.cpu_count() or 1) // 2))
 
 
+def _executor():
+    global _median_executor
+    with _median_executor_lock:
+        if _median_executor is None:
+            _median_executor = ThreadPoolExecutor(max_workers=_median_workers,
+                                                  thread_name_prefix='temporal-median')
+    return _median_executor
+
+
 def temporal_median(values):
     """Keep each pixel's time samples adjacent while partitioning a private copy.
 
@@ -17,6 +26,22 @@ def temporal_median(values):
     time last once reduces that work, with the same middle samples, dtype and
     even-length mean. The caller's chronological cube is never reordered.
     """
+    if values.dtype == np.uint8 and 1 <= values.shape[0] <= 32 and values.size <= 1024**2:
+        from component_statistics import small_temporal_median
+        native = small_temporal_median(values)
+        if native is not None:
+            return native
+    if (values.dtype == np.uint8 and 1 <= values.shape[0] <= 32
+            and 8*1024**2 <= values.size <= 64*1024**2 and _median_workers > 1):
+        from component_statistics import temporal_median_range
+        contiguous = np.ascontiguousarray(values)
+        pixels = contiguous[0].size
+        step = (pixels+_median_workers-1)//_median_workers
+        futures = [_executor().submit(temporal_median_range,contiguous,start,min(pixels,start+step))
+                   for start in range(0,pixels,step)]
+        native = [future.result() for future in futures]
+        if all(value is not None for value in native):
+            return np.concatenate(native).reshape(values.shape[1:])
     histories = np.ascontiguousarray(np.moveaxis(values, 0, -1))
     # ascontiguousarray can return the input for one-frame/one-pixel cases.
     if np.shares_memory(histories, values):
@@ -27,14 +52,9 @@ def temporal_median(values):
     # histories. Partition disjoint rows on one bounded shared pool; each row
     # keeps exactly the same samples and NumPy median arithmetic. Small model
     # and gate crops stay on their calling worker to avoid nested pool overhead.
-    global _median_executor
-    with _median_executor_lock:
-        if _median_executor is None:
-            _median_executor = ThreadPoolExecutor(max_workers=_median_workers,
-                                                  thread_name_prefix='temporal-median')
     flat = histories.reshape(-1, histories.shape[-1])
     step = (len(flat) + _median_workers - 1) // _median_workers
-    futures = [_median_executor.submit(np.median, flat[start:start+step],
+    futures = [_executor().submit(np.median, flat[start:start+step],
                                       axis=-1, overwrite_input=True)
                for start in range(0, len(flat), step)]
     return np.concatenate([future.result() for future in futures]).reshape(histories.shape[:-1])

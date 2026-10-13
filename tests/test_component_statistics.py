@@ -74,3 +74,25 @@ def test_batched_native_crops_match_every_frame_and_own_each_cached_image():
             np.testing.assert_array_equal(crop,cv2.resize(frame[7:7+height,3:3+width],(64,64),interpolation=cv2.INTER_AREA))
             assert crop.flags.owndata
     assert component_statistics.area_crops(integrals,3,7,163,160) is None
+
+
+def test_native_small_temporal_median_matches_numpy_every_length_and_ties():
+    rng = np.random.default_rng(3225)
+    for length in range(1,33):
+        for maximum in (1,255):
+            values = rng.integers(0,maximum+1,(length,64,64),dtype=np.uint8)
+            original = values.copy()
+            actual = component_statistics.small_temporal_median(values)
+            assert actual.dtype == np.float64
+            np.testing.assert_array_equal(actual,np.median(values,axis=0))
+            np.testing.assert_array_equal(original,values)
+
+
+def test_parallel_native_median_matches_large_numpy_even_and_odd_histories():
+    from temporal_statistics import temporal_median
+    rng = np.random.default_rng(964540)
+    for length in (24,25):
+        values = rng.integers(0,256,(length,540,960),dtype=np.uint8)
+        original = values.copy()
+        np.testing.assert_array_equal(temporal_median(values),np.median(values,axis=0))
+        np.testing.assert_array_equal(values,original)

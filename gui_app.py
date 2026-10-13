@@ -23,7 +23,7 @@ class App(
 ):
     def __init__(self):
         super().__init__()
-        
+
         if sys.platform == 'win32':
             try:
                 import ctypes
@@ -35,7 +35,7 @@ class App(
         self.title(config.GUI_WINDOW_TITLE)
         self.geometry("1480x900")
         self.minsize(1180, 720)
-        
+
         self.setup_icon()
         self.setup_style()
 
@@ -130,15 +130,15 @@ class App(
         password = simpledialog.askstring("管理者認証", "この操作を実行するには管理者パスワードを入力してください:", show='*')
         if not password:
             return False
-            
+
         # SHA-256でハッシュ化して比較 (パスワード: 141421)
         pw_hash = hashlib.sha256(password.encode()).hexdigest()
         admin_hash = "cfb24c91a9b83d9967f5b6a177037f5803abf3c8a8471a62c4fa48ab076434f0"
-        
+
         if pw_hash != admin_hash:
             messagebox.showerror("アクセス拒否", "パスワードが正しくありません。")
             return False
-            
+
         return True
 
     def setup_icon(self):
@@ -147,7 +147,7 @@ class App(
                 base_path = sys._MEIPASS
             else:
                 base_path = os.path.dirname(os.path.abspath(__file__))
-            
+
             icon_path = os.path.join(base_path, "icon.ico")
 
             if sys.platform == "darwin":
@@ -572,7 +572,7 @@ class App(
         self.video_concat_bitrate_var = tk.StringVar(value="Auto")
         self.video_concat_codec_var = tk.StringVar(value="h264")
         self.video_concat_fps_var = tk.StringVar(value="Auto")
-        self.video_concat_safe_mode_var = tk.BooleanVar(value=True) 
+        self.video_concat_safe_mode_var = tk.BooleanVar(value=True)
         self.video_concat_enhancement_var = tk.BooleanVar(value=False)
         self.video_concat_timestamp_enabled_var = tk.BooleanVar(value=config.VIDEO_CONCAT_TIMESTAMP_ENABLED)
         self.video_concat_timestamp_position_var = tk.StringVar(value="右下")
@@ -586,7 +586,7 @@ class App(
         self.cfg_border_size_var = tk.StringVar(value=str(config.BORDER_SIZE))
         self.cfg_duplicate_thresh_var = tk.StringVar(value=str(config.DUPLICATE_DETECTION_THRESHOLD))
         self.cfg_meteor_prob_var = tk.StringVar(value=str(config.METEOR_PROBABILITY_THRESHOLD))
-        
+
         # 詳細検出関連
         self.cfg_finer_window_sec_var = tk.StringVar(value=str(config.FINER_DETECT_WINDOW_SECONDS))
         self.cfg_finer_comp_step_var = tk.StringVar(value=str(config.FINER_COMPOSITE_STEP))
@@ -595,12 +595,12 @@ class App(
         self.cfg_finer_cutout_size_var = tk.StringVar(value=str(config.FINER_CUTOUT_SIZE))
         self.cfg_rtsp_scale_lower_var = tk.StringVar(value=str(config.RTSP_SCALE_LOWER))
         self.cfg_rtsp_scale_upper_var = tk.StringVar(value=str(config.RTSP_SCALE_UPPER))
-        
+
         # 飛行機判定関連
         self.cfg_airplane_dur_thresh_var = tk.StringVar(value=str(config.AIRPLANE_DURATION_THRESHOLD))
         self.cfg_airplane_frame_thresh_var = tk.StringVar(value=str(config.AIRPLANE_FRAME_THRESHOLD))
         self.cfg_tracking_dist_thresh_var = tk.StringVar(value=str(config.TRACKING_DISTANCE_THRESHOLD))
-        
+
         # 動画クリップ関連
         self.cfg_max_clip_dur_var = tk.StringVar(value=str(config.MAX_CLIP_DURATION))
         self.cfg_clip_dur_sec_var = tk.StringVar(value=str(config.CLIP_DURATION_SECONDS))

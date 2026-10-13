@@ -47,14 +47,23 @@ def _state_views(memory, shape, slot):
     return background, threshold, threshold_u8
 
 
+_flash_cache = None
+
+
 def _flash_tracks(raw_name, shape, dtype, state_name, state, first, final, mask, roi, fps, border):
+    global _flash_cache
     from short_flash_detector import ShortFlashDetector
     raw = shared_memory.SharedMemory(name=raw_name)
     checkpoint = shared_memory.SharedMemory(name=state_name)
     try:
         frames = np.ndarray(shape, np.dtype(dtype), buffer=raw.buf)
-        detector = ShortFlashDetector(fps, border, component_workers=4)
-        if state is not None:
+        cached, _flash_cache = _flash_cache, None
+        revision = None if state is None else (state['last_frame'],state['slot'])
+        if cached is not None and cached[:2] == (state_name,revision):
+            detector = cached[2]
+        else:
+            detector = ShortFlashDetector(fps, border, component_workers=4)
+        if state is not None and (cached is None or cached[:2] != (state_name,revision)):
             background, threshold, threshold_u8 = _state_views(checkpoint, shape[1:3], state['slot'])
             detector.background = background.copy()
             detector.threshold = threshold.copy()
@@ -66,6 +75,9 @@ def _flash_tracks(raw_name, shape, dtype, state_name, state, first, final, mask,
         views = _state_views(checkpoint, shape[1:3], slot)
         for destination, source in zip(views, (detector.background, detector.threshold, detector.threshold_u8)):
             np.copyto(destination, source)
+        # Dedicated single-process ownership avoids restoring unchanged
+        # arrays each window. Never reuse state after an incomplete task.
+        _flash_cache = (state_name,(detector.last_frame,slot),detector)
         return result, dict(slot=slot, active=detector.active, last_frame=detector.last_frame)
     finally:
         raw.close()
@@ -82,6 +94,7 @@ class LiveFlashDetector:
         self.shape = None
         self.lock = threading.Lock()
         self.local_mode = self.closed = False
+        self.pool = None
 
     def _restore(self, permanent=True):
         if self.state is not None and not self.local_mode:
@@ -125,7 +138,10 @@ class LiveFlashDetector:
                     self.state = dict(slot=0, active=self.local.active, last_frame=self.local.last_frame)
                 target = np.ndarray(stack.shape, stack.dtype, buffer=self.raw.buf)
                 np.copyto(target, stack)
-                result, state = self.owner._executor().submit(_flash_tracks,
+                if self.pool is None:
+                    self.pool = ProcessPoolExecutor(max_workers=1,
+                        mp_context=multiprocessing.get_context('spawn'),initializer=_initialize_worker)
+                result, state = self.pool.submit(_flash_tracks,
                     self.raw.name, stack.shape, stack.dtype.str, self.checkpoint.name,
                     self.state, first_frame + offset, final, mask, roi, self.fps, self.border).result()
                 self.state = state  # Publish only a fully written checkpoint.
@@ -141,6 +157,9 @@ class LiveFlashDetector:
                 return
             self._restore()
             self.closed = True
+            if self.pool is not None:
+                self.pool.shutdown(wait=True,cancel_futures=True)
+                self.pool = None
             for memory in (self.raw, self.checkpoint):
                 if memory is not None:
                     memory.close()

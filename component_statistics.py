@@ -18,6 +18,8 @@ _function = None
 _area_function = None
 _fractional_function = None
 _batch_function = None
+_median_function = None
+_median_range_function = None
 
 
 def _library_name():
@@ -41,7 +43,7 @@ def build_library(destination):
 
 
 def _load():
-    global _checked, _function, _area_function, _fractional_function, _batch_function
+    global _checked, _function, _area_function, _fractional_function, _batch_function, _median_function, _median_range_function
     with _lock:
         if _checked:
             return _function
@@ -80,6 +82,13 @@ def _load():
             _batch_function.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_size_t,
                                        ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
             _batch_function.restype = None
+            _median_function = loaded.meteor_temporal_median
+            _median_function.argtypes = [ctypes.c_void_p,ctypes.c_size_t,ctypes.c_size_t,ctypes.c_void_p]
+            _median_function.restype = ctypes.c_int
+            _median_range_function = loaded.meteor_temporal_median_range
+            _median_range_function.argtypes = [ctypes.c_void_p,ctypes.c_size_t,ctypes.c_size_t,
+                                              ctypes.c_size_t,ctypes.c_size_t,ctypes.c_void_p]
+            _median_range_function.restype = ctypes.c_int
         except (OSError, AttributeError, RuntimeError, subprocess.SubprocessError):
             # Native acceleration is optional. Never alter component scores
             # or detection availability when compilation/loading is absent.
@@ -140,3 +149,29 @@ def area_crops(integrals, x, y, width, height):
     output = np.empty((len(integrals),64,64),np.uint8)
     _batch_function(pointers,len(integrals),shape[1],x,y,width,height,output.ctypes.data)
     return [image.copy() for image in output]
+
+
+def small_temporal_median(values):
+    if values.dtype != np.uint8 or not 1 <= values.shape[0] <= 32 or values.size > 1024**2:
+        return None
+    _load()
+    if _median_function is None:
+        return None
+    values = np.ascontiguousarray(values)
+    result = np.empty(values.shape[1:],np.float64)
+    if not _median_function(values.ctypes.data,len(values),result.size,result.ctypes.data):
+        return None
+    return result
+
+
+def temporal_median_range(values,start,end):
+    if (values.dtype != np.uint8 or not values.flags.c_contiguous or not 1 <= len(values) <= 32
+            or not 0 <= start < end <= values[0].size):
+        return None
+    _load()
+    if _median_range_function is None:
+        return None
+    result = np.empty(end-start,np.float64)
+    if not _median_range_function(values.ctypes.data,len(values),values[0].size,start,end-start,result.ctypes.data):
+        return None
+    return result
