@@ -6721,5 +6721,335 @@
       "final_and_baseline_snapshots_retained": true,
       "detection_media_and_measurement_logs_retained": true
     }
+  },
+  "actual_running_throughput_optimization_20261014": {
+    "installed_version": "0.10.14.4",
+    "installed_processing_commit": "323cfef",
+    "running_pid": 65405,
+    "branch": "codex/rtsp-realtime-throughput",
+    "deployment": {
+      "commit": "323cfefe5457f1986d17efcab9e9471adf8ddab7",
+      "backup": "/Users/keisukematsumoto/Library/Application Support/MeteorDetector/backups/rtsp-gil-throughput-20261014-034551",
+      "files": [
+        {
+          "relative": "gui_preview.py",
+          "sha256": "aa7bc83d9d6298d0405e3bc837ca49fdb9679e48d94b2a777d3b318c6ee025d4"
+        },
+        {
+          "relative": "gui_processing.py",
+          "sha256": "5adbf15b84d683e5c57628b8f2daeb02309a292ffb466193d78f768d5565c015"
+        },
+        {
+          "relative": "status_panel.py",
+          "sha256": "e6ef92158a5832391bfaf9f1579b2ee6f7ab5101e5ae2414b25d19b732eb974c"
+        },
+        {
+          "relative": "rtsp_live.py",
+          "sha256": "f347de504430b2524112641033fa548cf086dc1529177d5fc16e135f2708810f"
+        },
+        {
+          "relative": "legacy_resume.py",
+          "sha256": "ced12f1680481b1f6433e406f884123fb46c0e2a919aa1e858423b2a8a888f2a"
+        },
+        {
+          "relative": "gui_common.py",
+          "sha256": "7a710bf6297337de87a8e3bd4cf4d463d1d89ef7e811a7e3f32da136fed8dc82"
+        },
+        {
+          "relative": "gui_app.py",
+          "sha256": "2717b354e0a60a25b63006603fb6cecf40ebdc41161cb55f5521f810b9a8bd5b"
+        },
+        {
+          "relative": "gui_settings.py",
+          "sha256": "ea48e556471a195e72d35117af260a3faaa2f29e64b079b0e5c72db4b73e91dd"
+        },
+        {
+          "relative": "config.py",
+          "sha256": "c7809ef3a399820a7cbdffeed5fa7a77a59006495fd4030344e0483d19ea7170"
+        },
+        {
+          "relative": "bootstrap_launcher.py",
+          "sha256": "89aa2550097080488471eb2e05c0982a911f55b3d0f3f4c491d7e378c6e4279e"
+        },
+        {
+          "relative": "main_gui.py",
+          "sha256": "c85889fcadc395205e02d2c6223bfc058925186a64bc0f7fddc038082e7bab1d"
+        },
+        {
+          "relative": "runtime_scheduling.py",
+          "sha256": "e4b7643b309c8c7e99371e0fe8d2d110d4dab2831c5932e6ad8dd37f218d5750"
+        }
+      ],
+      "installed_at": 1791917681.355718,
+      "installed_root": "/Users/keisukematsumoto/Library/Application Support/MeteorDetector",
+      "bundle_root": "/Users/keisukematsumoto/Desktop/other/div/流星app-Mac-20260813/流星app.app/Contents/Resources/MeteorDetector",
+      "version": "0.10.14.4"
+    },
+    "initial_running_observation": {
+      "start": "2026-10-14T03:08:20.830487",
+      "end": "2026-10-14T03:13:16.131133",
+      "wall_seconds": 296.7083987920778,
+      "scan_seconds": [
+        3.194473125040531,
+        0.3758196249837056
+      ],
+      "acknowledged_chunks": 556,
+      "acknowledged_media_seconds": 277.9999999999998,
+      "processing_speed": 0.9369468512915667,
+      "processing_ratio": 1.0672963985326547,
+      "faster_than_realtime": false,
+      "by_session": {
+        ".rtsp_live/20261012/23/30_23_53891da6414d": {
+          "consumed_chunks": 556,
+          "consumed_media_seconds": 277.9999999999998
+        }
+      },
+      "newly_recorded_closed_chunks": 594,
+      "newly_recorded_media_seconds": 297.00000000000017,
+      "pending_seconds_before": 3711.8000000000006,
+      "pending_seconds_after": 3730.800000000001,
+      "pending_seconds_change": 19.000000000000455,
+      "unknown_disappeared_inputs": [],
+      "retained_archives_examined": 415,
+      "new_session_ack_count": 0,
+      "acknowledgement_source": "Consumer completed detection/save window, retaining recent finer-detection tail; not decoder read-ahead",
+      "limitations": [
+        "Read-only chunk acknowledgement observation, not full backlog completion",
+        "A fixed recent tail and queued window boundaries make short interval rates fluctuate",
+        "A disappeared chunk is counted only if its retained archive source mapping exists; assumes no external deletion"
+      ]
+    },
+    "intermediate_v3_running_observation": {
+      "start": "2026-10-14T03:34:51.465480",
+      "end": "2026-10-14T03:40:24.293225",
+      "wall_seconds": 332.8448828330729,
+      "scan_seconds": [
+        0.5177867090096697,
+        0.48004212498199195
+      ],
+      "snapshot_wall_bounds": [
+        332.3459684160771,
+        333.34379725006875
+      ],
+      "incomplete_counts": [
+        2,
+        5
+      ],
+      "active_session": ".rtsp_live/20261014/03/33_36_2ce813fe50ae",
+      "acknowledged_chunks": 1214,
+      "acknowledged_media_seconds": 607.0000000000001,
+      "processing_speed": 1.8236723209724706,
+      "processing_ratio": 0.5483441232834808,
+      "faster_than_realtime": true,
+      "by_session": {
+        ".rtsp_live/20261013/04/29_06_58d7cf0e5670": {
+          "consumed_chunks": 1214,
+          "consumed_media_seconds": 607.0000000000001
+        }
+      },
+      "newly_recorded_closed_chunks": 662,
+      "newly_recorded_media_seconds": 331.00000000000006,
+      "pending_seconds_before": 3772.24,
+      "pending_seconds_after": 3496.2399999999993,
+      "pending_seconds_change": -276.00000000000045,
+      "unknown_disappeared_inputs": [],
+      "retained_archives_examined": 778,
+      "new_session_ack_count": 0,
+      "acknowledgement_source": "Consumer completed detection/save window, retaining recent finer-detection tail; not decoder read-ahead",
+      "limitations": [
+        "Read-only chunk acknowledgement observation, not full backlog completion",
+        "A fixed recent tail and queued window boundaries make short interval rates fluctuate",
+        "A disappeared chunk is counted only if its retained archive source mapping exists; assumes no external deletion"
+      ]
+    },
+    "intermediate_v3_recent_interval": {
+      "wall_seconds": 180.9823855415452,
+      "media_seconds": 162.52,
+      "speed": 0.8979879423828951
+    },
+    "actual_running_observation": {
+      "start": "2026-10-14T03:56:03.991359",
+      "end": "2026-10-14T04:02:37.017735",
+      "wall_seconds": 393.09953718748875,
+      "scan_seconds": [
+        0.4111727080307901,
+        0.2602179170353338
+      ],
+      "snapshot_wall_bounds": [
+        392.7638418749557,
+        393.4352325000218
+      ],
+      "incomplete_counts": [
+        8,
+        5
+      ],
+      "active_session": ".rtsp_live/20261014/03/54_52_5b381bfccd87",
+      "acknowledged_chunks": 2718,
+      "acknowledged_media_seconds": 1359.0,
+      "processing_speed": 3.4571396591388637,
+      "processing_ratio": 0.2892564659216253,
+      "faster_than_realtime": true,
+      "by_session": {
+        ".rtsp_live/20261013/04/29_06_58d7cf0e5670": {
+          "consumed_chunks": 94,
+          "consumed_media_seconds": 46.99999999999997
+        },
+        ".rtsp_live/20261014/02/57_41_86ce18ef6b39": {
+          "consumed_chunks": 2624,
+          "consumed_media_seconds": 1311.9999999999998
+        }
+      },
+      "newly_recorded_closed_chunks": 788,
+      "newly_recorded_media_seconds": 394.0000000000005,
+      "pending_seconds_before": 3740.6400000000003,
+      "pending_seconds_after": 2775.640000000001,
+      "pending_seconds_change": -964.9999999999995,
+      "unknown_disappeared_inputs": [],
+      "retained_archives_examined": 930,
+      "new_session_ack_count": 0,
+      "acknowledgement_source": "Consumer completed detection/save window, retaining recent finer-detection tail; not decoder read-ahead",
+      "limitations": [
+        "Read-only chunk acknowledgement observation, not full backlog completion",
+        "A fixed recent tail and queued window boundaries make short interval rates fluctuate",
+        "A disappeared chunk is counted only if its retained archive source mapping exists; assumes no external deletion"
+      ]
+    },
+    "latest_subinterval": {
+      "wall_seconds": 110.16064039594494,
+      "media_seconds": 226.00000000000045,
+      "processing_speed": 2.0515494389620454
+    },
+    "media_interval_validation": {
+      ".rtsp_live/20261013/04/29_06_58d7cf0e5670": {
+        "chunks": 94,
+        "media_interval_union_seconds": 47.0,
+        "overlap_seconds": 0.0
+      },
+      ".rtsp_live/20261014/02/57_41_86ce18ef6b39": {
+        "chunks": 2624,
+        "media_interval_union_seconds": 1312.0,
+        "overlap_seconds": 0.0
+      }
+    },
+    "measurement_method": "Read-only metadata snapshots. ACK after detection/save consumer; deleted inputs require retained finalized archive source mappings. No inference or decoding by the observer.",
+    "configured_mac_owner_gil_switch_seconds": 0.001,
+    "explicit_interval_environment_override": null,
+    "changes": [
+      "Batch GUI log insert/scroll; retain content and summary references",
+      "Coalesce progress/status and avoid identical redraws",
+      "Cache archive sidecar JSON with inode/size/mtime/ctime invalidation and check target existence each compact",
+      "Use catalog directory inventory and one capture sidecar stat per path",
+      "Use 5-second discovery and archive polls with >=100 queued chunks; restore previous cadence near live tail",
+      "Reduce Mac legacy owner GIL interval from default 5ms to 1ms; spawned CPU workers retain their original policy",
+      "Explicit one-shot --resume-rtsp update startup and cancel/finalize workers before shutdown"
+    ],
+    "quality": {
+      "targeted_unique_tests_passed": 41,
+      "related_subtests_passed": 2,
+      "real_tk_multiline_and_summary_tag_check": "passed",
+      "scheduler_diagnostic_input_seconds": 12,
+      "scheduler_diagnostic_input_frames": 300,
+      "scheduler_diagnostic_full_fields": {
+        "counts": [
+          886,
+          886
+        ],
+        "all_detection_fields_exact_after_only_root_and_filename_counter_normalization": true,
+        "input_manifest_frames": [
+          300,
+          300
+        ]
+      },
+      "scheduler_diagnostic_media": {
+        "before_count": 886,
+        "after_count": 886,
+        "exact_detections": true,
+        "exact_artifact_keys": true,
+        "compared_images": 6,
+        "compared_videos": 4,
+        "compared_video_frames": 269,
+        "compared_arrays": 0,
+        "compared_info": 1,
+        "media_mismatches": []
+      },
+      "scheduler_diagnostic_scope": "Isolated real continuous runner, clear preset, v5, full detection media saving; scheduled products disabled. This is not five-minute GUI/full-products equivalence. Concurrent production app load means diagnostic timings are not production throughput or a clean speed A/B."
+    },
+    "auditors": "GPT-6 Luna only",
+    "recording_bridges": [
+      {
+        "bridge_state": {
+          "pid": 97710,
+          "root": "/private/tmp/meteor-rtsp-realtime-20261013/update-bridge-recordings",
+          "started": 1791915738.3462489
+        },
+        "bridge_finished": {
+          "stopped": 1791915840.163054,
+          "chunks": 195
+        },
+        "sessions": [
+          "/Users/keisukematsumoto/Library/Application Support/MeteorDetector/rtsp/.rtsp_live/20261014/03/22_22_9fa5c0366d32"
+        ],
+        "files_copied_and_hash_matched": 391,
+        "old_active_temps_retained": [
+          {
+            "path": "/Users/keisukematsumoto/Library/Application Support/MeteorDetector/rtsp/.rtsp_live/20261014/02/57_41_86ce18ef6b39/chunk_000003063_temp_1791915795065363000.mp4",
+            "size": 1310764
+          }
+        ],
+        "overlapping_camera_recordings_retained": true,
+        "clock_continuity_claim": "Separate camera clients and their filesystem capture clocks; wall-time coverage only, no source PTS/frame continuity guarantee"
+      },
+      {
+        "bridge_state": {
+          "pid": 17010,
+          "root": "/private/tmp/meteor-rtsp-realtime-20261013/second-update/update-bridge-recordings",
+          "started": 1791916339.133547
+        },
+        "bridge_finished": {
+          "stopped": 1791916442.73901,
+          "chunks": 197
+        },
+        "sessions": [
+          "/Users/keisukematsumoto/Library/Application Support/MeteorDetector/rtsp/.rtsp_live/20261014/03/32_22_aec620a7923e"
+        ],
+        "media_seconds": 98.44,
+        "first_clock": "2026-10-14T03:32:22.941325",
+        "last_clock_end": "2026-10-14T03:34:01.381325",
+        "copy_hashes_matched": true,
+        "overlapping_camera_recordings_retained": true,
+        "source_pts_continuity_not_verified": true
+      },
+      {
+        "bridge_state": {
+          "pid": 64447,
+          "root": "/private/tmp/meteor-rtsp-realtime-20261013/fourth-update/update-bridge-recordings",
+          "started": 1791917629.853428
+        },
+        "bridge_finished": {
+          "stopped": 1791917734.749891,
+          "chunks": 203
+        },
+        "sessions": [
+          "/Users/keisukematsumoto/Library/Application Support/MeteorDetector/rtsp/.rtsp_live/20261014/03/53_53_77dc5b1f7745"
+        ],
+        "media_seconds": 101.4,
+        "first_clock": "2026-10-14T03:53:53.255461",
+        "last_clock_end": "2026-10-14T03:55:34.655461",
+        "copy_hashes_matched": true,
+        "overlapping_camera_recordings_retained": true,
+        "source_pts_continuity_not_verified": true
+      }
+    ],
+    "limits": [
+      "Different video intervals and changing backlog; do not infer a pure code speedup multiplier from before/after production rates",
+      "Current active camera session has not been acknowledged; old backlog is still being consumed",
+      "Only observed intervals support faster-than-realtime; worst-case all-weather throughput is not guaranteed",
+      "Long final observation takes 28.9256% of media duration, so 25% target remains unmet",
+      "Non-atomic directory snapshots and post-snapshot archive-source checks leave small endpoint uncertainty; incomplete capture metadata can lag polls by up to about five seconds",
+      "Interruption bridges use separate RTSP clients with capture clocks; source PTS/frame-perfect continuity was not verified. Overlap retained and old unfinalized temp recordings preserved",
+      "v1/v2 had no signal cancellation handler; bridge-backed SIGINT cutovers retained their active temp files. v3 shutdown for the final update was graceful",
+      "CUA AX queries still time out; app/process, file, decoder and ACK evidence establish recording/analysis, not GUI responsiveness"
+    ],
+    "artifacts_root": "/private/tmp/meteor-rtsp-realtime-20261013"
   }
 }
