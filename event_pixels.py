@@ -2,6 +2,32 @@
 from typing import Optional, Sequence
 import cv2
 import numpy as np
+import threading
+import weakref
+
+_frame_origins = {}
+_origin_lock = threading.RLock()
+
+
+def register_mask_pixels(masked, source, mask_revision):
+    """Certify only an immutable bitwise-mask result; views/copies inherit none."""
+    key = id(masked)
+    def discard(reference):
+        with _origin_lock:
+            current = _frame_origins.get(key)
+            if current is not None and current[0] is reference:
+                _frame_origins.pop(key,None)
+    with _origin_lock:
+        _frame_origins[key] = (weakref.ref(masked,discard),source,mask_revision)
+
+
+def same_frame_pixels(before, after):
+    if before is after:
+        return True
+    with _origin_lock:
+        left,right = _frame_origins.get(id(before)),_frame_origins.get(id(after))
+        return (left is not None and right is not None and left[0]() is before and right[0]() is after
+                and left[1] is right[1] and left[2] == right[2])
 
 
 def _gray(frame: np.ndarray) -> np.ndarray:

@@ -388,3 +388,49 @@ def test_prepared_event_model_reload_uses_new_weights_and_rechecks_architecture(
         with patch.object(model,'_prepare_meteor_inputs',wraps=model._prepare_meteor_inputs) as prepare:
             assert model.predict_meteor_event(frames,None,None,25,prepared=prepared) == .25
             assert prepare.call_count == 1
+
+
+def test_distinct_mask_results_reuse_only_certified_identical_raw_pixels():
+    from video_processing import _VideoFrameRangeCache
+    from event_pixels import same_frame_pixels
+    frames = list(np.random.default_rng(73).integers(0,256,(4,64,96,3),dtype=np.uint8))
+    mask = np.full((64,96),255,np.uint8)
+    mask[:8] = 0
+    caches = [_VideoFrameRangeCache(),_VideoFrameRangeCache()]
+    for cache in caches:
+        cache.retain_live_frames(frames)
+    a,b = [cache.mask_frames(frames,mask) for cache in caches]
+    assert all(x is not y and same_frame_pixels(x,y) for x,y in zip(a,b))
+    np.testing.assert_array_equal(a,b)
+    with patch.multiple(model,model=object(),_model_ready=True,
+                        _active_model_info={'architecture':model.EVENT_BOOST_ARCHITECTURE_NAME}):
+        prepared = model.prepare_meteor_inputs(a,None,None,25)
+        assert prepared.matches(b,None,None,25,model.EVENT_BOOST_ARCHITECTURE_NAME)
+        assert not prepared.matches([frame.copy() for frame in b],None,None,25,model.EVENT_BOOST_ARCHITECTURE_NAME)
+        changed = mask.copy()
+        changed[9,9] = 0
+        c = caches[1].mask_frames(frames,changed)
+        assert not prepared.matches(c,None,None,25,model.EVENT_BOOST_ARCHITECTURE_NAME)
+        copied_source = [frame.copy() for frame in frames]
+        caches[1].retain_live_frames(copied_source)
+        d = caches[1].mask_frames(copied_source,mask)
+        assert not prepared.matches(d,None,None,25,model.EVENT_BOOST_ARCHITECTURE_NAME)
+    for cache in caches:
+        cache.close()
+
+
+def test_mask_pixel_provenance_releases_original_with_its_last_mask_result():
+    import gc
+    import weakref
+    from event_pixels import register_mask_pixels, _frame_origins
+    source = np.ones((8,8,3),np.uint8)
+    masked = source.copy()
+    source_ref, masked_id = weakref.ref(source),id(masked)
+    register_mask_pixels(masked,source,('mask',1))
+    del source
+    gc.collect()
+    assert source_ref() is not None
+    del masked
+    gc.collect()
+    assert source_ref() is None
+    assert masked_id not in _frame_origins

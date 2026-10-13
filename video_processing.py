@@ -1,5 +1,6 @@
 import os
 import math
+import hashlib
 import cv2
 import numpy as np
 from pathlib import Path
@@ -345,6 +346,7 @@ class _VideoFrameRangeCache:
         self.integral_bytes = 0
         self.mask_snapshot = None
         self.resized_masks = {}
+        self.resized_mask_revisions = {}
         self.reader = _VideoRangeReader()
 
     def close(self):
@@ -406,6 +408,7 @@ class _VideoFrameRangeCache:
                 self.integrals.clear()
                 self.integral_bytes = 0
             self.resized_masks.clear()
+            self.resized_mask_revisions.clear()
         retained = {id(frame) for frame in self.frames}
         result = []
         for frame in frames:
@@ -419,7 +422,12 @@ class _VideoFrameRangeCache:
                     self.resized_masks[shape] = cv2.resize(
                         mask, (shape[1], shape[0])
                     ).astype(np.uint8)
+                    resized = self.resized_masks[shape]
+                    self.resized_mask_revisions[shape] = ('bitwise-mask-v1',resized.shape,resized.dtype.str,
+                        hashlib.sha256(memoryview(resized)).hexdigest())
                 masked = cv2.bitwise_and(frame, frame, mask=self.resized_masks[shape])
+                from event_pixels import register_mask_pixels
+                register_mask_pixels(masked,frame,self.resized_mask_revisions[shape])
                 if key in retained:
                     self.masked[key] = masked
                 result.append(masked)
@@ -1149,6 +1157,109 @@ def _coarse_proposals(diff_img, frame_window, first_frame, frame_rate, mask, roi
     return _deduplicate_candidate_lines([c.line for c in flashes] + [c.line for c in moving] + hough_lines), flashes
 
 
+def _refine_and_gate_candidate(cand, worker_kwargs, frames_for_finer_detect, actual_start_finer, total_frames, frame_rate,
+                               is_rtsp, buffer_start_frame_finer_parallel, buffer_end_frame_finer_parallel,
+                               img_w, img_h, frame_range_cache, save_options, cancel_flag):
+    indices, rect = _process_finer_detection_worker(
+        cx=cand['cx'], cy=cand['cy'], candidate_line=cand['line'],
+        temporal_bounds=(cand['flash'].start_frame, cand['flash'].end_frame) if cand['flash'] else None,
+        **worker_kwargs,
+    )
+    gate = prepared_event = None
+    if indices:
+        low, high = min(indices), max(indices)
+        pad = int(config.FINER_DETECT_PADDING_SECONDS * frame_rate)
+        clip_low, clip_high = max(0, low-pad), high+pad
+        if total_frames > 0:
+            clip_high = min(total_frames-1, clip_high)
+            clip_low = max(0, clip_high-((high-low)+2*pad)+1)
+        if is_rtsp:
+            # Match the final RTSP clip's available
+            # future tail. Unusual truncated heads
+            # keep the established fallback below.
+            clip_high = min(clip_high, buffer_end_frame_finer_parallel)
+            if clip_low < buffer_start_frame_finer_parallel:
+                return indices, rect, None, None
+        model_pad = max(0, int(round(config.MODEL_EVENT_PADDING_SECONDS * frame_rate)))
+        core_low, core_high = max(clip_low, low-model_pad), min(clip_high, high+model_pad)
+        core = _resident_frame_slice(frames_for_finer_detect, actual_start_finer, core_low, core_high)
+        if core is not None and model.get_active_model_info().get('architecture') in model.EVENT_ARCHITECTURES:
+            inference_rect = cand['flash'].classifier_rect(img_w, img_h) if cand['flash'] else _noise_gate_cutout_rect(cand['cx'], cand['cy'], img_w, img_h)
+            gate_frames = frame_range_cache.noise_gate_frames(core, inference_rect) if is_rtsp else core
+            gate = model.predict_noise_gate(gate_frames, None if is_rtsp else inference_rect, frame_rate,
+                feature_workers=save_options.get('_rtsp_gate_features') if is_rtsp else None)
+            if is_rtsp and (gate is None or gate[0] >= gate[1]) and not (cancel_flag is not None and cancel_flag.is_set()):
+                try:
+                    prepared_event = model.prepare_meteor_inputs(core,inference_rect,cand['line'],frame_rate,
+                        feature_workers=save_options.get('_rtsp_gate_features'))
+                except Exception as exc:
+                    print(f"分類前処理を通常経路で再試行します: {exc}")
+    return indices, rect, gate, prepared_event
+
+
+def _rtsp_finer_revision(mask_revision=None):
+    with model._model_lock:
+        return (config.RTSP_PARALLEL_ENABLED,config.DUPLICATE_DETECTION_THRESHOLD,
+                config.FINER_DETECT_WINDOW_SECONDS,config.FINER_DETECT_PADDING_SECONDS,
+                config.MODEL_EVENT_PADDING_SECONDS,config.FINER_CUTOUT_SIZE,config.CUTOUT_SIZE,
+                config.BORDER_SIZE,config.FINER_DETECT_MIN_LENGTH,
+                model._active_noise_gate,model.get_active_model_info().get('architecture'),mask_revision,
+                getattr(model._active_noise_gate,'threshold',None),getattr(model._active_noise_gate,'brightness_min',None))
+
+
+def _prepare_live_finer_packet(data, proposals, frame_rate, mask, cancel, frame_cache, cpu_features, executor):
+    """Prepare independent candidate evidence; history decisions stay with the consumer."""
+    lines,flashes = proposals
+    if not config.RTSP_PARALLEL_ENABLED or len(lines)<2 or (cancel is not None and cancel.is_set()):
+        return None
+    flash_by_line = {flash.line:flash for flash in flashes}
+    candidates = []
+    for line in lines:
+        (x1,y1),(x2,y2) = line
+        cx,cy = int((x1+x2)/2),int((y1+y2)/2)
+        if any(np.sqrt((cx-old['cx'])**2+(cy-old['cy'])**2)<config.DUPLICATE_DETECTION_THRESHOLD for old in candidates):
+            continue
+        candidates.append(dict(line=line,cx=cx,cy=cy,x1=x1,y1=y1,x2=x2,y2=y2,
+                               length=int(np.sqrt((x2-x1)**2+(y2-y1)**2)),flash=flash_by_line.get(line)))
+        if len(candidates)>64:
+            return None  # Bound additional retained prepared arrays per queued window.
+    center = sum(data[1])//2
+    half = int(config.FINER_DETECT_WINDOW_SECONDS/2*frame_rate)
+    buffer_end = data[5]
+    buffer_start = buffer_end-len(data[4])+1
+    first = max(0,center-half,buffer_start)
+    last = min(center+half,buffer_end)
+    if first>last:
+        return None
+    frames = list(data[4])[first-buffer_start:last-buffer_start+1]
+    if mask is not None:
+        frames = frame_cache.mask_frames(frames,mask)
+    height,width = data[0].shape[:2]
+    mask_revision = frame_cache.resized_mask_revisions.get((height,width)) if mask is not None else None
+    revision = _rtsp_finer_revision(mask_revision)
+    kwargs = dict(frames_data=frames,img_h=height,img_w=width,actual_start_frame_index=first,
+                  composite_step=max(1,int(frame_rate/5)),cut_size=config.FINER_CUTOUT_SIZE,
+                  border_margin=config.BORDER_SIZE,finer_min_length=config.FINER_DETECT_MIN_LENGTH)
+    futures = {executor.submit(_refine_and_gate_candidate,cand,kwargs,frames,first,0,frame_rate,True,
+                    buffer_start,buffer_end,width,height,frame_cache,{'_rtsp_gate_features':cpu_features},cancel):cand['line']
+               for cand in candidates}
+    results = {}
+    for future in as_completed(futures):
+        if cancel is not None and cancel.is_set():
+            for pending in futures:
+                pending.cancel()
+            # Running tasks still reference this cache. Finish before closing it.
+            wait(futures)
+            return None
+        try:
+            results[futures[future]] = future.result()
+        except Exception as exc:
+            print(f'先行候補前処理を通常経路で再試行します: {exc}')
+    if revision != _rtsp_finer_revision(mask_revision):
+        return None
+    return revision,results,data,frame_rate
+
+
 class _LiveProposalPipeline:
     """Overlap chronological proposals with classification and saving.
 
@@ -1156,12 +1267,13 @@ class _LiveProposalPipeline:
     after the consumer finishes a window, so cancellation retains unprocessed
     spool input. The flash detector has one owner for its entire session.
     """
-    def __init__(self, generator, cap, mask, roi, cancel, executor, cpu_features=None):
+    def __init__(self, generator, cap, mask, roi, cancel, executor, cpu_features=None, finer_executor=None):
         self.generator, self.cap = generator, cap
         self.stop = threading.Event()
         self.queue = queue.Queue(maxsize=2)
         self.windows = queue.Queue(maxsize=2)
         self.current_proposals = None
+        self.current_finer = None
         if cpu_features is not None:
             cpu_features.reset_activity()
         self.cap.defer_analysis_ack = True
@@ -1184,7 +1296,7 @@ class _LiveProposalPipeline:
                 generator.close()
                 put(self.windows, None)
         def produce():
-            cache = _VideoFrameRangeCache()
+            cache = _VideoFrameRangeCache(max_bytes=2048*1024**2,integral_budget=512*1024**2)
             gray_cache = moving_point_detector.GrayFrameCache()
             flash = (cpu_features.flash_detector(cap.get(cv2.CAP_PROP_FPS), config.BORDER_SIZE) if cpu_features is not None
                      else short_flash_detector.ShortFlashDetector(cap.get(cv2.CAP_PROP_FPS), config.BORDER_SIZE))
@@ -1207,7 +1319,14 @@ class _LiveProposalPipeline:
                         flash, cache, gray_cache, final, executor, cpu_features)
                     if cpu_features is not None:
                         cpu_features.observe(len(proposals[0]))
-                    if not put(self.queue, (data, proposals, final)):
+                    finer = None
+                    if finer_executor is not None:
+                        try:
+                            finer = _prepare_live_finer_packet(data,proposals,cap.get(cv2.CAP_PROP_FPS),mask,cancel,
+                                                               cache,cpu_features,finer_executor)
+                        except Exception as exc:
+                            print(f'先行詳細検出を通常経路で再試行します: {exc}')
+                    if not put(self.queue, (data, proposals, final, finer)):
                         break
             except BaseException as exc:
                 put(self.queue, exc)
@@ -1228,7 +1347,7 @@ class _LiveProposalPipeline:
                 return
             if isinstance(packet, BaseException):
                 raise packet
-            data, self.current_proposals, final = packet
+            data, self.current_proposals, final, self.current_finer = packet
             yield data
             # A break/cancel before the next iteration never acknowledges this
             # window, matching the original generator's publication semantics.
@@ -1240,6 +1359,7 @@ class _LiveProposalPipeline:
         self.decoder.join()
         self.thread.join()
         self.cap.defer_analysis_ack = False
+        self.current_finer = None
 
 
 def create_line_video_clips(
@@ -1503,7 +1623,7 @@ def create_line_video_clips(
         )
         if is_rtsp and getattr(cap, 'continuous_rtsp', False):
             proposal_pipeline = _LiveProposalPipeline(diff_generator, cap, mask, roi, cancel_flag, coarse_executor,
-                                                       save_options.get('_rtsp_gate_features'))
+                                                       save_options.get('_rtsp_gate_features'),candidate_executor)
             diff_generator = iter(proposal_pipeline)
 
         last_read_frame_index_by_diff = -1
@@ -1707,41 +1827,16 @@ def create_line_video_clips(
                                 'finer_min_length': config.FINER_DETECT_MIN_LENGTH,
                             }
                             def refine_and_gate(cand):
-                                indices, rect = _process_finer_detection_worker(
-                                    cx=cand['cx'], cy=cand['cy'], candidate_line=cand['line'],
-                                    temporal_bounds=(cand['flash'].start_frame, cand['flash'].end_frame) if cand['flash'] else None,
-                                    **worker_kwargs,
-                                )
-                                gate = prepared_event = None
-                                if indices:
-                                    low, high = min(indices), max(indices)
-                                    pad = int(config.FINER_DETECT_PADDING_SECONDS * frame_rate)
-                                    clip_low, clip_high = max(0, low-pad), high+pad
-                                    if total_frames > 0:
-                                        clip_high = min(total_frames-1, clip_high)
-                                        clip_low = max(0, clip_high-((high-low)+2*pad)+1)
-                                    if is_rtsp:
-                                        # Match the final RTSP clip's available
-                                        # future tail. Unusual truncated heads
-                                        # keep the established fallback below.
-                                        clip_high = min(clip_high, buffer_end_frame_finer_parallel)
-                                        if clip_low < buffer_start_frame_finer_parallel:
-                                            return indices, rect, None, None
-                                    model_pad = max(0, int(round(config.MODEL_EVENT_PADDING_SECONDS * frame_rate)))
-                                    core_low, core_high = max(clip_low, low-model_pad), min(clip_high, high+model_pad)
-                                    core = _resident_frame_slice(frames_for_finer_detect, actual_start_finer, core_low, core_high)
-                                    if core is not None and model.get_active_model_info().get('architecture') in model.EVENT_ARCHITECTURES:
-                                        inference_rect = cand['flash'].classifier_rect(img_w, img_h) if cand['flash'] else _noise_gate_cutout_rect(cand['cx'], cand['cy'], img_w, img_h)
-                                        gate_frames = frame_range_cache.noise_gate_frames(core, inference_rect) if is_rtsp else core
-                                        gate = model.predict_noise_gate(gate_frames, None if is_rtsp else inference_rect, frame_rate,
-                                            feature_workers=save_options.get('_rtsp_gate_features') if is_rtsp else None)
-                                        if is_rtsp and (gate is None or gate[0] >= gate[1]) and not (cancel_flag is not None and cancel_flag.is_set()):
-                                            try:
-                                                prepared_event = model.prepare_meteor_inputs(core,inference_rect,cand['line'],frame_rate,
-                                                    feature_workers=save_options.get('_rtsp_gate_features'))
-                                            except Exception as exc:
-                                                print(f"分類前処理を通常経路で再試行します: {exc}")
-                                return indices, rect, gate, prepared_event
+                                cached = proposal_pipeline.current_finer if proposal_pipeline is not None else None
+                                mask_revision = frame_range_cache.resized_mask_revisions.get((img_h,img_w)) if mask is not None else None
+                                if (cached is not None and cached[2] is diff_data and cached[3] == frame_rate
+                                        and cached[0] == _rtsp_finer_revision(mask_revision)):
+                                    result = cached[1].get(cand['line'])
+                                    if result is not None:
+                                        return result
+                                return _refine_and_gate_candidate(cand,worker_kwargs,frames_for_finer_detect,actual_start_finer,
+                                    total_frames,frame_rate,is_rtsp,buffer_start_frame_finer_parallel,
+                                    buffer_end_frame_finer_parallel,img_w,img_h,frame_range_cache,save_options,cancel_flag)
 
                             if num_workers == 1:
                                 for cand in valid_candidates:

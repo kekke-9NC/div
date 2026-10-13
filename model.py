@@ -332,10 +332,11 @@ class _PreparedMeteorInputs:
     vector: object
 
     def matches(self, frames, rect, line, frame_rate, architecture):
+        from event_pixels import same_frame_pixels
         return (self.architecture == architecture and self.rect == _geometry_key(rect)
                 and self.line == _geometry_key(line) and self.frame_rate == frame_rate
                 and len(self.frames) == len(frames)
-                and all(before is after for before,after in zip(self.frames,frames)))
+                and all(same_frame_pixels(before,after) for before,after in zip(self.frames,frames)))
 
 
 def _geometry_key(value):
