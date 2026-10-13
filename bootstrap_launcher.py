@@ -25,7 +25,7 @@ from typing import Dict, List, Optional, Tuple
 
 
 APP_NAME = "MeteorDetector"
-APP_VERSION = "2026.10.13.1"
+APP_VERSION = "2026.10.14.1"
 
 DEFAULT_ROOT = Path(os.getenv("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))) / APP_NAME
 INSTALL_MARKER = "install_state.json"
