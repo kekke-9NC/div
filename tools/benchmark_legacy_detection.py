@@ -24,10 +24,18 @@ def main():
     parser.add_argument('--profile', action='store_true')
     parser.add_argument('--model', type=Path, help='Override the selected model without editing UI settings')
     parser.add_argument('--concurrency', type=int, default=1)
+    parser.add_argument('--realtime', action='store_true',
+                        help='Replay through the real continuous RTSP runner, archiver and scheduled products')
+    parser.add_argument('--replay-seconds', type=float, default=0,
+                        help='Select this many seconds of existing spool input (0 selects all)')
+    parser.add_argument('--timeout', type=float, default=1800)
+    parser.add_argument('--no-products', action='store_true', help='Diagnostic replay without scheduled products')
     parser.add_argument('sources', type=Path, nargs='+')
     args = parser.parse_args()
     if args.windows < 0 or args.concurrency < 1:
         parser.error('Windows must be nonnegative and concurrency must be positive')
+    if args.replay_seconds < 0 or args.timeout <= 0 or (args.realtime and args.windows):
+        parser.error('Replay seconds must be nonnegative, timeout positive; realtime cannot limit proposal windows')
     if args.output.exists():
         parser.error('Output must be a new directory')
     args.output = args.output.resolve()
@@ -126,6 +134,7 @@ def main():
                    code_sha256={p.name: hashlib.sha256(p.read_bytes()).hexdigest()
                                 for p in args.code_root.glob('*.py')},
                    sources=[str(p.resolve()) for p in args.sources])
+    runtime['workflow'] = 'continuous_rtsp' if args.realtime else 'archive_files'
     (args.output / 'runtime.json').write_text(json.dumps(runtime, indent=2))
     def process(source):
         items = video_processing.create_line_video_clips(
@@ -139,6 +148,14 @@ def main():
         for item in items:
             item['source_video'] = str(source.resolve())
         return items
+    if args.realtime:
+        from benchmark_realtime_rtsp import run_replay
+        result, items = run_replay(args, settings, options, noise, correction, mask_reader.mask)
+        (args.output / 'detections.json').write_text(json.dumps(items, indent=2,
+            default=lambda x: x.item() if hasattr(x, 'item') else str(x)))
+        (args.output / 'result.json').write_text(json.dumps(result, indent=2))
+        print(json.dumps(result))
+        return
     import cProfile
     profiler = cProfile.Profile()
     cpu_before = resource.getrusage(resource.RUSAGE_SELF)
