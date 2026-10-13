@@ -15,6 +15,25 @@ from universal_meteor_model import _crop_square, _gray, _robust_residual_cube
 
 
 class DetectionOptimizationTests(unittest.TestCase):
+    def test_live_mask_reuse_is_pixel_exact_bounded_and_invalidates(self):
+        rng = np.random.default_rng(629)
+        frames = list(rng.integers(0, 256, (12, 30, 40, 3), dtype=np.uint8))
+        cache = video_processing._VideoFrameRangeCache(max_bytes=frames[0].nbytes * 8)
+        mask = rng.integers(0, 2, (15, 20), dtype=np.uint8) * 255
+        cache.retain_live_frames(frames[:6])
+        first = cache.mask_frames(frames[2:6], mask)
+        repeated = cache.mask_frames(frames[3:6], mask)
+        self.assertTrue(all(a is b for a, b in zip(first[1:], repeated)))
+        cache.retain_live_frames(frames[3:9])
+        self.assertEqual(len(cache.frames), 4)
+        self.assertLessEqual(sum(f.nbytes for f in cache.frames) + sum(f.nbytes for f in cache.masked.values()), cache.max_bytes)
+        mask[:, :8] = 0
+        resized = cv2.resize(mask, (40, 30)).astype(np.uint8)
+        actual = cache.mask_frames(frames[3:9], mask)
+        for raw, got in zip(frames[3:9], actual):
+            np.testing.assert_array_equal(got, cv2.bitwise_and(raw, raw, mask=resized))
+        self.assertTrue(set(cache.masked).issubset({id(f) for f in cache.frames}))
+
     def test_run_comparison_requires_exact_probabilities(self):
         from tools.compare_detection_runs import compare
         with tempfile.TemporaryDirectory() as directory:

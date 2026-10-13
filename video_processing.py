@@ -412,6 +412,21 @@ class _VideoFrameRangeCache:
                 result.append(frame)
         return result
 
+    def retain_live_frames(self, frames):
+        """Bound identity-based mask reuse to the resident RTSP tail.
+
+        Keep strong references to raw frames so an evicted object's ID cannot
+        alias a later frame. Half the budget is reserved for masked pixels.
+        The detector still receives its entire original buffer; only caching
+        is limited here, never the frames available for inference or saving.
+        """
+        frames = list(frames)
+        capacity = ((self.max_bytes // 2) // frames[0].nbytes) if frames else 0
+        self.key = None
+        self.frames = frames[-capacity:] if capacity else []
+        retained = {id(frame) for frame in self.frames}
+        self.masked = {key: value for key, value in self.masked.items() if key in retained}
+
 
 class _CachedSequentialCapture:
     """Reuse decoded lookahead frames while preserving the detector's cursor."""
@@ -1262,6 +1277,8 @@ def create_line_video_clips(
                     last_read_frame_index_by_diff = max(last_read_frame_index_by_diff, current_frame_index)
 
                 start_index_diff, end_index_diff = frame_idx_tuple
+                if is_rtsp and rtsp_buffer is not None:
+                    frame_range_cache.retain_live_frames(rtsp_buffer)
                 if getattr(cap, "continuous_rtsp", False):
                     # Duplicate checks need only recent tracks, not an entire
                     # night's events retained in memory.
@@ -1466,13 +1483,20 @@ def create_line_video_clips(
                                     **worker_kwargs,
                                 )
                                 gate = None
-                                if indices and not is_rtsp:
+                                if indices:
                                     low, high = min(indices), max(indices)
                                     pad = int(config.FINER_DETECT_PADDING_SECONDS * frame_rate)
                                     clip_low, clip_high = max(0, low-pad), high+pad
                                     if total_frames > 0:
                                         clip_high = min(total_frames-1, clip_high)
                                         clip_low = max(0, clip_high-((high-low)+2*pad)+1)
+                                    if is_rtsp:
+                                        # Match the final RTSP clip's available
+                                        # future tail. Unusual truncated heads
+                                        # keep the established fallback below.
+                                        clip_high = min(clip_high, buffer_end_frame_finer_parallel)
+                                        if clip_low < buffer_start_frame_finer_parallel:
+                                            return indices, rect, None
                                     model_pad = max(0, int(round(config.MODEL_EVENT_PADDING_SECONDS * frame_rate)))
                                     core_low, core_high = max(clip_low, low-model_pad), min(clip_high, high+model_pad)
                                     core = _resident_frame_slice(frames_for_finer_detect, actual_start_finer, core_low, core_high)
