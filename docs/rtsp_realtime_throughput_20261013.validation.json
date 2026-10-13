@@ -7048,8 +7048,72 @@
       "Non-atomic directory snapshots and post-snapshot archive-source checks leave small endpoint uncertainty; incomplete capture metadata can lag polls by up to about five seconds",
       "Interruption bridges use separate RTSP clients with capture clocks; source PTS/frame-perfect continuity was not verified. Overlap retained and old unfinalized temp recordings preserved",
       "v1/v2 had no signal cancellation handler; bridge-backed SIGINT cutovers retained their active temp files. v3 shutdown for the final update was graceful",
-      "CUA AX queries still time out; app/process, file, decoder and ACK evidence establish recording/analysis, not GUI responsiveness"
+      "CUA AX queries still time out; app/process, file, decoder and ACK evidence establish recording/analysis, not GUI responsiveness",
+      "Extended observation includes a 97.32-second interruption bridge recording. Cross-client duplicate time is retained and counted as processing work; not a unique-source-PTS timeline speed metric. Latest observed interval is 1.4365x, with 69.61% wall/media ratio. Combined saved-work ratio is 44.18%, not 25%."
     ],
-    "artifacts_root": "/private/tmp/meteor-rtsp-realtime-20261013"
+    "artifacts_root": "/private/tmp/meteor-rtsp-realtime-20261013",
+    "extended_running_observation": {
+      "start": "2026-10-14T04:02:37.017735",
+      "end": "2026-10-14T04:12:04.254543",
+      "wall_seconds": 567.2091818749905,
+      "scan_seconds": [
+        0.2602179170353338,
+        0.30878341698553413
+      ],
+      "snapshot_wall_bounds": [
+        566.92468120798,
+        567.4936825420009
+      ],
+      "incomplete_counts": [
+        5,
+        3
+      ],
+      "active_session": ".rtsp_live/20261014/03/54_52_5b381bfccd87",
+      "acknowledged_chunks": 1630,
+      "acknowledged_media_seconds": 814.8000000000004,
+      "processing_speed": 1.436507070119287,
+      "processing_ratio": 0.6961330165377886,
+      "faster_than_realtime": true,
+      "by_session": {
+        ".rtsp_live/20261014/03/23_45_352f1d184a6a": {
+          "consumed_chunks": 995,
+          "consumed_media_seconds": 497.48000000000036
+        },
+        ".rtsp_live/20261014/03/22_22_9fa5c0366d32": {
+          "consumed_chunks": 195,
+          "consumed_media_seconds": 97.31999999999998
+        },
+        ".rtsp_live/20261014/02/57_41_86ce18ef6b39": {
+          "consumed_chunks": 440,
+          "consumed_media_seconds": 220.0
+        }
+      },
+      "newly_recorded_closed_chunks": 1135,
+      "newly_recorded_media_seconds": 567.4800000000002,
+      "pending_seconds_before": 2775.640000000001,
+      "pending_seconds_after": 2528.32,
+      "pending_seconds_change": -247.32000000000062,
+      "unknown_disappeared_inputs": [],
+      "retained_archives_examined": 940,
+      "new_session_ack_count": 0,
+      "acknowledgement_source": "Consumer completed detection/save window, retaining recent finer-detection tail; not decoder read-ahead",
+      "limitations": [
+        "Read-only chunk acknowledgement observation, not full backlog completion",
+        "A fixed recent tail and queued window boundaries make short interval rates fluctuate",
+        "A disappeared chunk is counted only if its retained archive source mapping exists; assumes no external deletion"
+      ]
+    },
+    "aggregate_two_consecutive_observations": {
+      "start": "2026-10-14T03:56:03.991359",
+      "end": "2026-10-14T04:12:04.254543",
+      "wall_seconds": 960.3087190624792,
+      "processed_saved_media_seconds": 2173.8,
+      "processing_speed": 2.263647051046476,
+      "processing_ratio": 0.44176498254783286,
+      "pending_seconds_before": 3740.6400000000003,
+      "pending_seconds_after": 2528.32,
+      "pending_seconds_change": -1212.3200000000002,
+      "distinct_camera_client_overlap_is_retained_and_counted_as_saved_processing_work": true
+    }
   }
 }
