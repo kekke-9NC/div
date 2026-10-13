@@ -6914,11 +6914,6 @@
         "A disappeared chunk is counted only if its retained archive source mapping exists; assumes no external deletion"
       ]
     },
-    "latest_subinterval": {
-      "wall_seconds": 110.16064039594494,
-      "media_seconds": 226.00000000000045,
-      "processing_speed": 2.0515494389620454
-    },
     "media_interval_validation": {
       ".rtsp_live/20261013/04/29_06_58d7cf0e5670": {
         "chunks": 94,
@@ -7044,7 +7039,7 @@
       "Different video intervals and changing backlog; do not infer a pure code speedup multiplier from before/after production rates",
       "Current active camera session has not been acknowledged; old backlog is still being consumed",
       "Only observed intervals support faster-than-realtime; worst-case all-weather throughput is not guaranteed",
-      "Long final observation takes 28.9256% of media duration, so 25% target remains unmet",
+      "Initial six-minute observation takes 28.9256% of media duration, so 25% target remains unmet",
       "Non-atomic directory snapshots and post-snapshot archive-source checks leave small endpoint uncertainty; incomplete capture metadata can lag polls by up to about five seconds",
       "Interruption bridges use separate RTSP clients with capture clocks; source PTS/frame-perfect continuity was not verified. Overlap retained and old unfinalized temp recordings preserved",
       "v1/v2 had no signal cancellation handler; bridge-backed SIGINT cutovers retained their active temp files. v3 shutdown for the final update was graceful",
@@ -7114,6 +7109,19 @@
       "pending_seconds_after": 2528.32,
       "pending_seconds_change": -1212.3200000000002,
       "distinct_camera_client_overlap_is_retained_and_counted_as_saved_processing_work": true
+    },
+    "preceding_observation_latest_subinterval": {
+      "wall_seconds": 110.16064039594494,
+      "media_seconds": 226.00000000000045,
+      "processing_speed": 2.0515494389620454
+    },
+    "latest_subinterval": {
+      "start": "2026-10-14T04:02:37.017735",
+      "end": "2026-10-14T04:12:04.254543",
+      "wall_seconds": 567.2091818749905,
+      "acknowledged_media_seconds": 814.8000000000004,
+      "processing_speed": 1.436507070119287,
+      "processing_ratio": 0.6961330165377886
     }
   }
 }
