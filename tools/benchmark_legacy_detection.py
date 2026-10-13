@@ -55,6 +55,11 @@ def main():
     if args.output.exists():
         parser.error('Output must be a new directory')
     args.output = args.output.resolve()
+    if args.resume_root:
+        resume_source = args.resume_root.resolve()
+        if (args.output == resume_source or resume_source in args.output.parents
+                or args.output in resume_source.parents):
+            parser.error('Output must be separate from the original resume root')
     args.output.mkdir(parents=True)
     sys.path.insert(0, str(args.code_root.resolve()))
     for key in ('METEOR_NATIVE_THREADS', 'OMP_NUM_THREADS', 'MKL_NUM_THREADS',

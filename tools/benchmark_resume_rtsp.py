@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 import queue
 import shutil
+import signal
 import threading
 import time
 
@@ -44,7 +45,17 @@ def run_resume(args, settings, options, noise, correction, mask):
     root = args.output / 'rtsp'
     if source == root or source in root.parents or root in source.parents:
         raise ValueError('Snapshot output must be separate from saved recordings')
-    pending = rtsp_startup.pending_recordings(source)
+    all_pending = rtsp_startup.pending_recordings(source)
+    pending = all_pending
+    if args.replay_seconds:
+        pending = []
+        selected_seconds = 0
+        for path in all_pending:
+            if selected_seconds >= args.replay_seconds:
+                break
+            data = json.loads(Path(str(path)+'.capture.json').read_text())
+            pending.append(path)
+            selected_seconds += data['frame_count']/data['fps']
     if not pending or any(not path.name.startswith('chunk_') for path in pending):
         raise ValueError('This verification requires pending raw continuous RTSP chunks')
     if noise.get('enabled') or noise.get('temporal_mean_frames'):
@@ -53,6 +64,7 @@ def run_resume(args, settings, options, noise, correction, mask):
     if any(path.is_symlink() for path in source.rglob('*')):
         raise ValueError('Saved state must not contain symlinks')
     originals = {str(path.relative_to(source)): fingerprint(path) for path in files}
+    original_paths = {str(path.relative_to(source)) for path in source.rglob('*')}
     inputs = []
     for path in pending:
         data = json.loads(Path(str(path)+'.capture.json').read_text())
@@ -104,9 +116,19 @@ def run_resume(args, settings, options, noise, correction, mask):
     original_consume = rtsp_live.RealtimeRunner._consume
     original_publish = rtsp_live.MinuteArchiver._publish
     original_recorder = file_utils.save_rtsp_video_segments
+    original_runner_init = rtsp_live.RealtimeRunner.__init__
     detection_done = None
     completion_reason = None
     started = None
+    stop_requested = threading.Event()
+
+    def request_stop(_number, _frame):
+        stop_requested.set()
+
+    def runner_init(runner, save_root, analyze, cancel_flag, status_callback=None, ready=None, **kwargs):
+        eligible = lambda path: str(path) in targets and (ready is None or ready(path))
+        return original_runner_init(runner,save_root,analyze,cancel_flag,status_callback,
+                                    eligible if args.replay_seconds else ready,**kwargs)
 
     def consume(runner, path):
         original_consume(runner, path)
@@ -163,6 +185,12 @@ def run_resume(args, settings, options, noise, correction, mask):
             if complete and len(archived)==len(targets) and all(value=='complete' for value in job_states.values()):
                 completion_reason = 'all_detection_and_products_complete'
                 return
+            if complete and args.replay_seconds:
+                completion_reason = 'selected_pending_recordings_complete'
+                return
+            if stop_requested.is_set():
+                completion_reason = 'verification_interrupted'
+                return
             if detection_done is not None and elapsed-detection_done>120:
                 completion_reason = 'products_not_complete_after_detection_plus_120s'
                 return
@@ -174,6 +202,7 @@ def run_resume(args, settings, options, noise, correction, mask):
         (video_processing,'create_line_video_clips',detect),
         (video_processing,'_SavedEventIndex',ObservedIndex),
         (rtsp_live.RealtimeRunner,'_consume',consume),
+        (rtsp_live.RealtimeRunner,'__init__',runner_init),
         (rtsp_live.MinuteArchiver,'_publish',publish),
         (file_utils,'save_rtsp_video_segments',recorder)):
         restored.append((owner,name,getattr(owner,name)))
@@ -189,6 +218,7 @@ def run_resume(args, settings, options, noise, correction, mask):
     app._prompt_startup_analysis = choose
     clock = tuple(int(settings.get(key,fallback)) for key,fallback in (
         ('rtsp_start_hour',17),('rtsp_start_minute',0),('rtsp_end_hour',5),('rtsp_end_minute',0)))
+    previous_signal = signal.signal(signal.SIGINT,request_stop)
     try:
         with (args.output/'pipeline.log').open('w') as log, contextlib.redirect_stdout(log):
             started = time.perf_counter()
@@ -211,11 +241,14 @@ def run_resume(args, settings, options, noise, correction, mask):
     finally:
         cancel.set()
         products.stop_background_products()
+        signal.signal(signal.SIGINT,previous_signal)
         for owner,name,original in reversed(restored):
             setattr(owner,name,original)
     seconds = time.perf_counter()-started
     changes = [relative for relative,stamp in originals.items()
                if not (source/relative).exists() or fingerprint(source/relative)!=stamp]
+    changed_paths = sorted(original_paths.symmetric_difference(
+        str(path.relative_to(source)) for path in source.rglob('*')))
     hashes_ok = all(hashlib.sha256((source/item['relative']).read_bytes()).hexdigest()==item['sha256'] for item in inputs)
     archived = {path:data for path,data in publications if path in targets}
     published_frames = sum(data['frame_count'] for data in archived.values())
@@ -227,12 +260,15 @@ def run_resume(args, settings, options, noise, correction, mask):
                   end_to_end_ratio=seconds/duration,completion_reason=completion_reason,
                   startup_choices=choice_observations,sessions=sessions,consumed_chunks=len(consumed),
                   total_chunks=len(targets),archived_pending_chunks=len(archived),archived_pending_frames=published_frames,
+                  all_pending_chunks=len(all_pending),subset_seconds=args.replay_seconds,
                   jobs=[dict(id=job['id'],state=job['state'],outputs=job['outputs']) for job in final_jobs],
                   failures=failures,original_changed_files=changes,original_pending_hashes_unchanged=hashes_ok,
+                  original_changed_paths=changed_paths,
                   threads_alive=alive,installed_app_started=False,network_recorder_replaced=True)
     result['detection_valid'] = (detection_done is not None and len(consumed)==len(targets)
                                  and all(row['eof'] for row in sessions) and not alive
-                                 and not changes and hashes_ok and published_frames==result['input_frames'])
+                                 and sum(row['decoded_frames'] for row in sessions)==result['input_frames']
+                                 and not changes and not changed_paths and hashes_ok and published_frames==result['input_frames'])
     result['faster_than_video'] = result['detection_valid'] and detection_done < duration
     result['full_resume_complete'] = (result['detection_valid'] and all(job['state']=='complete' for job in final_jobs))
     (args.output/'publications.json').write_text(json.dumps(publications,indent=2))
