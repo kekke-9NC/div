@@ -521,6 +521,8 @@ class TrainingDataReviewWindow(tk.Toplevel):
             return
         else:
             self._preview_busy = False
+            # A decoder error must not leave the previous event's video visible.
+            self.video_label.configure(image="", text="動画を読み込めません")
             self._set_confirmation_ready(self._preview_valid_metadata and not self._load_busy
                                          and not self._load_failed)
             if not self._preview_valid_metadata:
