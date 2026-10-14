@@ -1338,27 +1338,15 @@ class SettingsMixin:
         if not root_dir:
             messagebox.showerror("設定エラー", "機械学習向けデータの保存先を指定してください。")
             return
-        os.makedirs(root_dir, exist_ok=True)
         media_directories = {
             "meteor": self.meteor_save_path_var.get(),
             "not_meteor": self.not_meteor_save_path_var.get(),
         }
-        try:
-            moved_count = ml_training_data.sync_reviewed_media(root_dir, media_directories)
-        except Exception as exc:
-            messagebox.showerror("検出メディアの分類更新エラー", str(exc), parent=self)
-            moved_count = 0
         ml_review.open_review_window(
             self,
             root_dir,
             media_directories,
         )
-        if moved_count:
-            messagebox.showinfo(
-                "検出メディアの分類更新",
-                f"既に確定済みの分類に合わせて、動画・画像 {moved_count}件を保存フォルダ間で移動しました。",
-                parent=self,
-            )
 
     def fetch_archive_observation_location(self):
         def worker():

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import math
+import queue
+import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -43,8 +45,15 @@ class TrainingDataReviewWindow(tk.Toplevel):
         self.minsize(1000, 650)
         self.events: List[Path] = []
         self.index = 0
-        self.undo_stack: List[Dict[str, Any]] = ml_training_data.undoable_reviews(root_dir)
-        self.skip_stack: List[Dict[str, Any]] = ml_training_data.undoable_skips(root_dir)
+        self.undo_stack: List[Dict[str, Any]] = []
+        self.skip_stack: List[Dict[str, Any]] = []
+        self._load_busy = False
+        self._closing = False
+        self._closed = False
+        self._load_cancel = threading.Event()
+        self._load_results = queue.Queue()
+        self._load_after_id = None
+        self._pending_media_directories = None
         self.cap: Optional[cv2.VideoCapture] = None
         self.video_after_id = None
         self.video_frame_index = 0
@@ -57,14 +66,22 @@ class TrainingDataReviewWindow(tk.Toplevel):
         self.skip_status_var = tk.StringVar()
         self.bulk_dialog = None
         self._build_ui()
+        self._review_controls = []
+        def collect_controls(widget):
+            for child in widget.winfo_children():
+                if isinstance(child, (ttk.Button, ttk.Spinbox)):
+                    self._review_controls.append(child)
+                collect_controls(child)
+        collect_controls(self)
         self.protocol("WM_DELETE_WINDOW", self._close)
+        self.bind("<Destroy>", self._on_destroy, add="+")
         self.bind("<Left>", lambda _e: self._previous())
         self.bind("<Right>", lambda _e: self._next())
         self.bind("<Key-m>", lambda _e: self._classify("meteor"))
         self.bind("<Key-n>", lambda _e: self._classify("not_meteor"))
         self.bind("<Key-s>", lambda _e: self._skip_current())
         self.bind("<BackSpace>", lambda _e: self._undo())
-        self.refresh()
+        self.refresh(synchronize_media=True)
 
     def _build_ui(self) -> None:
         style = ttk.Style(self)
@@ -149,9 +166,76 @@ class TrainingDataReviewWindow(tk.Toplevel):
             padding=(10, 0, 10, 6),
         ).pack(fill=tk.X)
 
-    def refresh(self) -> None:
+    def refresh(self, *, synchronize_media=False) -> None:
+        if self._load_busy or self._closing or self._closed:
+            return
+        if self.bulk_dialog is not None and self.bulk_dialog.winfo_exists() and self.bulk_dialog.busy:
+            return
         current_name = self.current_event.name if self.current_event else None
-        self.events = ml_training_data.pending_events(self.root_dir)
+        self._stop_video()
+        self._load_busy = True
+        self._load_cancel.clear()
+        self.status_var.set("未確認データを読み込み中…")
+        self.detail_var.set("一覧と判定履歴を読み込んでいます。")
+        for control in self._review_controls:
+            control.state(["disabled"])
+        root_dir, directories = self.root_dir, dict(self.media_directories)
+        results, cancel = self._load_results, self._load_cancel
+
+        def worker():
+            moved_count, sync_error = 0, None
+            try:
+                Path(root_dir).mkdir(parents=True, exist_ok=True)
+                if synchronize_media and not cancel.is_set():
+                    try:
+                        moved_count = ml_training_data.sync_reviewed_media(
+                            root_dir, directories, cancel=cancel)
+                    except Exception as exc:
+                        sync_error = str(exc)
+                if cancel.is_set():
+                    raise InterruptedError()
+                events = ml_training_data.pending_events(root_dir, cancel=cancel)
+                reviews, skips = ml_training_data.undoable_history(root_dir, cancel=cancel)
+                if cancel.is_set():
+                    raise InterruptedError()
+                results.put(("ready", (events, reviews, skips, current_name, moved_count, sync_error)))
+            except InterruptedError:
+                results.put(("cancelled", None))
+            except Exception as exc:
+                results.put(("error", str(exc)))
+
+        # Non-daemon: finish/roll back the current media move if the app closes.
+        # Workers only communicate through a queue; even Tk.after stays on Tk.
+        threading.Thread(target=worker, name="MLReviewLoad", daemon=False).start()
+        self._load_after_id = self.after(50, self._poll_load)
+
+    def _poll_load(self) -> None:
+        self._load_after_id = None
+        if self._closed:
+            return
+        try:
+            kind, value = self._load_results.get_nowait()
+        except queue.Empty:
+            self._load_after_id = self.after(50, self._poll_load)
+            return
+        self._load_busy = False
+        if self._closing:
+            self.destroy()
+            return
+        for control in self._review_controls:
+            control.state(["!disabled"])
+        if self._pending_media_directories is not None:
+            self.media_directories = self._pending_media_directories
+            self._pending_media_directories = None
+            self.refresh(synchronize_media=True)
+            return
+        if kind != "ready":
+            self.status_var.set("読み込みに失敗しました。再読み込みしてください。")
+            self._notify_bulk_loaded()
+            if kind == "error":
+                messagebox.showerror("レビュー読み込みエラー", value, parent=self)
+            return
+        self.events, self.undo_stack, self.skip_stack, current_name, moved_count, sync_error = value
         if current_name:
             for i, event in enumerate(self.events):
                 if event.name == current_name:
@@ -161,12 +245,38 @@ class TrainingDataReviewWindow(tk.Toplevel):
                 self.index = min(self.index, max(0, len(self.events) - 1))
         else:
             self.index = min(self.index, max(0, len(self.events) - 1))
-        self.skip_stack = ml_training_data.undoable_skips(self.root_dir)
-        self.undo_stack = ml_training_data.undoable_reviews(self.root_dir)
         self.skip_status_var.set(f"スキップ中: {len(self.skip_stack)}件")
         self._show_current()
+        self._notify_bulk_loaded()
+        if sync_error:
+            messagebox.showerror("検出メディアの分類更新エラー", sync_error, parent=self)
+        elif moved_count:
+            messagebox.showinfo(
+                "検出メディアの分類更新",
+                f"既に確定済みの分類に合わせて、動画・画像 {moved_count}件を保存フォルダ間で移動しました。",
+                parent=self,
+            )
+
+    def _notify_bulk_loaded(self) -> None:
+        if self.bulk_dialog is not None and self.bulk_dialog.winfo_exists():
+            self.bulk_dialog.reviewer_loaded()
+
+    def _on_destroy(self, event) -> None:
+        if event.widget is not self:
+            return
+        self._closed = True
+        self._load_cancel.set()
+        if self._load_after_id is not None:
+            try:
+                self.after_cancel(self._load_after_id)
+            except tk.TclError:
+                pass
+            self._load_after_id = None
+        self._stop_video()
 
     def _open_bulk_review(self) -> None:
+        if self._load_busy or self._closing:
+            return
         if self.bulk_dialog is not None and self.bulk_dialog.winfo_exists():
             self.bulk_dialog.lift()
             return
@@ -279,16 +389,22 @@ class TrainingDataReviewWindow(tk.Toplevel):
             self.cap = None
 
     def _previous(self) -> None:
+        if self._load_busy or self._closing:
+            return
         if self.events:
             self.index = (self.index - 1) % len(self.events)
             self._show_current()
 
     def _next(self) -> None:
+        if self._load_busy or self._closing:
+            return
         if self.events:
             self.index = (self.index + 1) % len(self.events)
             self._show_current()
 
     def _classify(self, label: str) -> None:
+        if self._load_busy or self._closing:
+            return
         event = self.current_event
         if event is None:
             return
@@ -306,6 +422,8 @@ class TrainingDataReviewWindow(tk.Toplevel):
             self.refresh()
 
     def _skip_events(self, events: List[Path], reason: str) -> None:
+        if self._load_busy or self._closing:
+            return
         if not events:
             return
         self._stop_video()
@@ -339,6 +457,8 @@ class TrainingDataReviewWindow(tk.Toplevel):
         self._skip_events(selected, f"from_here:{len(selected)}")
 
     def _skip_same_day(self) -> None:
+        if self._load_busy or self._closing:
+            return
         event = self.current_event
         if event is None:
             return
@@ -359,6 +479,8 @@ class TrainingDataReviewWindow(tk.Toplevel):
         self._skip_events(selected, f"same_date:{target_date}")
 
     def _undo_skip(self) -> None:
+        if self._load_busy or self._closing:
+            return
         try:
             count = max(1, int(self.undo_skip_count_var.get()))
         except (TypeError, ValueError, tk.TclError):
@@ -377,6 +499,8 @@ class TrainingDataReviewWindow(tk.Toplevel):
         self.refresh()
 
     def _undo(self) -> None:
+        if self._load_busy or self._closing:
+            return
         try:
             count = max(1, int(self.undo_count_var.get()))
         except (TypeError, ValueError):
@@ -404,6 +528,11 @@ class TrainingDataReviewWindow(tk.Toplevel):
                 return
             self.bulk_dialog.destroy()
         self._stop_video()
+        if self._load_busy:
+            self._closing = True
+            self._load_cancel.set()
+            self.status_var.set("閉じています…")
+            return
         self.destroy()
 
 
@@ -412,4 +541,41 @@ def open_review_window(
     root_dir: str,
     media_directories: Optional[Dict[str, str]] = None,
 ) -> TrainingDataReviewWindow:
-    return TrainingDataReviewWindow(parent, root_dir, media_directories)
+    existing = getattr(parent, "_ml_training_review_window", None)
+    if existing is not None and existing.winfo_exists():
+        requested_root = str(Path(root_dir).expanduser().absolute())
+        if existing._closing or str(Path(existing.root_dir).absolute()) != requested_root:
+            existing._close()
+            if existing.winfo_exists():
+                # Let the old window finish its current media transaction first.
+                parent._ml_training_review_request = (root_dir, dict(media_directories or {}))
+                if getattr(parent, "_ml_training_review_reopen_after", None) is None:
+                    def reopen():
+                        parent._ml_training_review_reopen_after = None
+                        request = parent._ml_training_review_request
+                        open_review_window(parent, *request)
+                    parent._ml_training_review_reopen_after = parent.after(50, reopen)
+                return existing
+        else:
+            _cancel_pending_reopen(parent)
+            existing.deiconify()
+            existing.lift()
+            directories = dict(media_directories or {})
+            if existing._load_busy:
+                if directories != existing.media_directories:
+                    existing._pending_media_directories = directories
+            else:
+                existing.media_directories = directories
+                existing.refresh(synchronize_media=True)
+            return existing
+    _cancel_pending_reopen(parent)
+    window = TrainingDataReviewWindow(parent, root_dir, media_directories)
+    parent._ml_training_review_window = window
+    return window
+
+
+def _cancel_pending_reopen(parent):
+    after_id = getattr(parent, "_ml_training_review_reopen_after", None)
+    if after_id is not None:
+        parent.after_cancel(after_id)
+        parent._ml_training_review_reopen_after = None

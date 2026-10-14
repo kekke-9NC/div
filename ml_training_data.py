@@ -202,13 +202,18 @@ def export_training_event(
         raise
 
 
-def pending_events(root_dir: str) -> List[Path]:
+def pending_events(root_dir: str, *, cancel: Optional[threading.Event] = None) -> List[Path]:
     root = Path(root_dir).expanduser().resolve()
     events: List[Path] = []
     for label in ("meteor", "not_meteor"):
         folder = root / "pending" / label
         if folder.exists():
-            events.extend(p for p in folder.iterdir() if p.is_dir() and not p.name.startswith("."))
+            with os.scandir(folder) as entries:
+                for entry in entries:
+                    if cancel is not None and cancel.is_set():
+                        raise InterruptedError("レビュー読み込みを中断しました")
+                    if not entry.name.startswith(".") and entry.is_dir():
+                        events.append(Path(entry.path))
     return sorted(events, key=lambda p: p.name)
 
 
@@ -384,7 +389,8 @@ def review_event(
     return record
 
 
-def sync_reviewed_media(root_dir: str, media_directories: Dict[str, str]) -> int:
+def sync_reviewed_media(root_dir: str, media_directories: Dict[str, str], *,
+                        cancel: Optional[threading.Event] = None) -> int:
     """Move saved detection files for already-reviewed misclassifications."""
     root = Path(root_dir).expanduser().resolve()
     moved_count = 0
@@ -393,6 +399,9 @@ def sync_reviewed_media(root_dir: str, media_directories: Dict[str, str]) -> int
         if not reviewed_dir.is_dir():
             continue
         for event_dir in sorted(reviewed_dir.iterdir()):
+            # Never interrupt a move/metadata/log transaction midway through.
+            if cancel is not None and cancel.is_set():
+                return moved_count
             if not event_dir.is_dir() or event_dir.name.startswith("."):
                 continue
             metadata = load_metadata(event_dir)
@@ -587,53 +596,56 @@ def undo_review(record: Dict[str, Any], root_dir: str) -> Optional[Path]:
     return destination
 
 
-def undoable_reviews(root_dir: str) -> List[Dict[str, Any]]:
-    """Return still-active review records, including reviews from earlier app sessions."""
+def undoable_history(root_dir: str, *, cancel: Optional[threading.Event] = None
+                     ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Read both undo histories in one pass, retaining their original ordering."""
     log_path = Path(root_dir).expanduser() / "review_log.jsonl"
     if not log_path.exists():
-        return []
-    active: List[Dict[str, Any]] = []
+        return [], []
+    reviews: List[Dict[str, Any]] = []
+    skips: List[Dict[str, Any]] = []
     try:
         with log_path.open("r", encoding="utf-8") as handle:
             for line in handle:
+                if cancel is not None and cancel.is_set():
+                    raise InterruptedError("レビュー読み込みを中断しました")
                 try:
                     record = json.loads(line)
                 except (json.JSONDecodeError, TypeError):
                     continue
-                if record.get("action") == "review":
-                    active.append(record)
-                elif record.get("action") == "undo":
-                    reverted = record.get("reverts_review_timestamp")
+                if not isinstance(record, dict):
+                    continue
+                action = record.get("action")
+                if action in ("review", "skip"):
+                    (reviews if action == "review" else skips).append(record)
+                elif action in ("undo", "undo_skip"):
+                    active = reviews if action == "undo" else skips
+                    reverted = record.get("reverts_review_timestamp" if action == "undo"
+                                          else "reverts_skip_timestamp")
                     for index in range(len(active) - 1, -1, -1):
                         if active[index].get("timestamp") == reverted:
                             active.pop(index)
                             break
+    except InterruptedError:
+        raise
     except OSError:
-        return []
-    return [record for record in active if Path(record.get("to", "")).exists()]
+        return [], []
+    def surviving(records):
+        result = []
+        for record in records:
+            if cancel is not None and cancel.is_set():
+                raise InterruptedError("レビュー読み込みを中断しました")
+            if Path(record.get("to", "")).exists():
+                result.append(record)
+        return result
+    return surviving(reviews), surviving(skips)
+
+
+def undoable_reviews(root_dir: str) -> List[Dict[str, Any]]:
+    """Return active review records, including earlier app sessions."""
+    return undoable_history(root_dir)[0]
 
 
 def undoable_skips(root_dir: str) -> List[Dict[str, Any]]:
-    """Return active skip records, including skips made in earlier sessions."""
-    log_path = Path(root_dir).expanduser() / "review_log.jsonl"
-    if not log_path.exists():
-        return []
-    active: List[Dict[str, Any]] = []
-    try:
-        with log_path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                try:
-                    record = json.loads(line)
-                except (json.JSONDecodeError, TypeError):
-                    continue
-                if record.get("action") == "skip":
-                    active.append(record)
-                elif record.get("action") == "undo_skip":
-                    reverted = record.get("reverts_skip_timestamp")
-                    for index in range(len(active) - 1, -1, -1):
-                        if active[index].get("timestamp") == reverted:
-                            active.pop(index)
-                            break
-    except OSError:
-        return []
-    return [record for record in active if Path(record.get("to", "")).exists()]
+    """Return active skip records, including earlier app sessions."""
+    return undoable_history(root_dir)[1]
