@@ -120,15 +120,18 @@ class BulkReviewDialog(tk.Toplevel):
             return
         self.busy = True
         self.cancel.clear()
+        preview_closed = None
         if operation == "scan":
             self.reviewer._pause_video()
         else:
-            self.reviewer._stop_video()
+            preview_closed = self.reviewer._stop_video()
         self._update_buttons()
         self.status.set("対象を検索中…" if operation == "scan" else "処理中…（中断すると処理済みの分は保持します）")
 
         def worker():
             try:
+                if preview_closed is not None:
+                    preview_closed.wait()
                 self.messages.put((operation, function()))
             except Exception as exc:
                 self.messages.put(("error", str(exc)))

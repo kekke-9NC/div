@@ -6,15 +6,16 @@ import json
 import math
 import queue
 import threading
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import cv2
 import tkinter as tk
 from tkinter import messagebox, ttk
-from PIL import Image, ImageTk
+from PIL import ImageTk
 
 import ml_training_data
+import ml_review_preview
 
 
 DEFAULT_CONFIRM_STYLE = "TButton"
@@ -55,8 +56,18 @@ class TrainingDataReviewWindow(tk.Toplevel):
         self._load_results = queue.Queue()
         self._load_after_id = None
         self._pending_media_directories = None
-        self.cap: Optional[cv2.VideoCapture] = None
+        self.cap = None  # Decoder ownership belongs entirely to PreviewStream.
+        self._preview_stream = None
+        self._preview_generation = 0
+        self._preview_busy = False
+        self._preview_valid_metadata = False
+        self._preview_paused = False
+        self._preview_fps = 15.
+        self._pending_preview_message = None
+        self._action_sequence = 0
+        self._transition = None
         self.video_after_id = None
+        self.video_idle_id = None
         self.video_frame_index = 0
         self._photo_refs: List[ImageTk.PhotoImage] = []
         self.status_var = tk.StringVar()
@@ -174,7 +185,7 @@ class TrainingDataReviewWindow(tk.Toplevel):
         if self.bulk_dialog is not None and self.bulk_dialog.winfo_exists() and self.bulk_dialog.busy:
             return
         current_name = self.current_event.name if self.current_event else None
-        self._stop_video()
+        preview_closed = self._stop_video()
         self._load_busy = True
         self._load_cancel.clear()
         self.status_var.set("未確認データを読み込み中…")
@@ -187,6 +198,8 @@ class TrainingDataReviewWindow(tk.Toplevel):
         def worker():
             moved_count, sync_error = 0, None
             try:
+                if preview_closed is not None:
+                    preview_closed.wait()
                 Path(root_dir).mkdir(parents=True, exist_ok=True)
                 if synchronize_media and not cancel.is_set():
                     try:
@@ -297,23 +310,39 @@ class TrainingDataReviewWindow(tk.Toplevel):
             return
         if self.bulk_dialog is not None and self.bulk_dialog.winfo_exists() and self.bulk_dialog.busy:
             return
-        self._stop_video()
+        self._action_sequence += 1
+        action_id = f"{id(self):x}-{self._action_sequence}"
+        started = time.perf_counter()
+        self._transition = dict(action_id=action_id, operation=operation, started=started)
+        ml_review_preview.record_latency(dict(stage="action_started", **self._transition))
+        preview_closed = self._stop_video()
         self._load_busy = True
         self._load_cancel.clear()
         self.status_var.set("保存しています…")
-        for control in self._review_controls:
-            control.state(["disabled"])
+        self._set_confirmation_ready(False)
         results, cancel = self._load_results, self._load_cancel
         def worker():
+            # Windows cannot move a directory with an open video handle.
+            # Wait for decoder release here, never on the Tk thread.
+            if preview_closed is not None:
+                preview_closed.wait()
+            worker_started = time.perf_counter()
             try:
                 result = function(cancel)
             except Exception as exc:
                 result = dict(records=[], error=str(exc))
+            worker_finished = time.perf_counter()
+            result["_timing"] = dict(action_id=action_id, started=started,
+                                     worker_started=worker_started, worker_finished=worker_finished)
+            ml_review_preview.record_latency(dict(stage="save_finished", **result["_timing"]))
             results.put(("action", (operation, result)))
         threading.Thread(target=worker, name="MLReviewSave", daemon=False).start()
         self._load_after_id = self.after(50, self._poll_load)
 
     def _finish_action(self, operation, result):
+        timing = result.get("_timing", {})
+        if timing:
+            ml_review_preview.record_latency(dict(stage="save_received", received=time.perf_counter(), **timing))
         if operation == "prepare_skip_day":
             for control in self._review_controls:
                 control.state(["!disabled"])
@@ -344,8 +373,6 @@ class TrainingDataReviewWindow(tk.Toplevel):
                 self._pending_media_directories = None
                 self.refresh(synchronize_media=True)
                 return
-            for control in self._review_controls:
-                control.state(["!disabled"])
             self._show_current()
             self._notify_bulk_loaded()
             return
@@ -384,117 +411,179 @@ class TrainingDataReviewWindow(tk.Toplevel):
             return None
         return self.events[self.index]
 
-    def _fit_photo(self, path: Path, max_size=(400, 420)) -> Optional[ImageTk.PhotoImage]:
-        try:
-            image = Image.open(path).convert("RGB")
-            image.thumbnail(max_size, Image.Resampling.LANCZOS)
-            return ImageTk.PhotoImage(image)
-        except Exception:
-            return None
+    def _set_confirmation_ready(self, ready):
+        for button in (self.meteor_confirm_button, self.not_meteor_confirm_button):
+            button.state(["!disabled" if ready else "disabled"])
 
     def _show_current(self) -> None:
         self._stop_video()
         event = self.current_event
         if event is None:
+            self._preview_busy = False
+            self._preview_valid_metadata = False
             self._highlight_predicted_confirmation(None)
             self.status_var.set("未確認データはありません")
             self.detail_var.set("すべて目視確認済みです。")
             for label in (self.diff_label, self.temporal_label, self.video_label):
                 label.configure(image="", text="")
             self._photo_refs = []
+            self._set_confirmation_ready(False)
+            self._finish_transition()
             return
-
-        try:
-            meta = ml_training_data.load_metadata(event)
-            if not isinstance(meta, dict):
-                raise ValueError("メタデータの形式が不正です。")
-        except Exception as exc:
-            self._highlight_predicted_confirmation(None)
-            self.detail_var.set(f"メタデータを読み込めません: {exc}")
-            return
-        predicted_label = meta.get("predicted_label")
-        self._highlight_predicted_confirmation(predicted_label)
+        self._preview_busy = True
+        self._preview_valid_metadata = False
+        self._preview_paused = False
+        self._set_confirmation_ready(False)
         self.status_var.set(f"未確認 {self.index + 1} / {len(self.events)}")
-        try:
-            raw_probability = meta["meteor_probability"]
-            if isinstance(raw_probability, bool):
-                raise ValueError("Invalid probability")
-            probability = float(raw_probability)
-            probability_text = f"{probability:.3f}" if math.isfinite(probability) and 0 <= probability <= 1 else "不明"
-        except (KeyError, TypeError, ValueError, OverflowError):
-            probability_text = "不明"
-        self.detail_var.set(
-            f"予測: {predicted_label}　流星確率: {probability_text}\n"
-            f"日時: {meta.get('detection_time', '')}　元動画: {meta.get('source', '')}"
-        )
+        self.detail_var.set("プレビューを読み込み中…")
+        stream = ml_review_preview.PreviewStream(event)
+        self._preview_stream = stream
+        self._pump_preview(stream, self._preview_generation)
 
-        diff = self._fit_photo(event / "diff.png")
-        temporal = self._fit_photo(event / "temporal_rgb.png")
-        self._photo_refs = [p for p in (diff, temporal) if p is not None]
-        self.diff_label.configure(image=diff or "", text="通常差分" if diff is None else "")
-        self.temporal_label.configure(image=temporal or "", text="時間画像" if temporal is None else "")
-        thread_property = getattr(cv2, "CAP_PROP_N_THREADS", None)
-        if thread_property is not None:
+    def _pump_preview(self, stream, generation):
+        self.video_after_id = None
+        if (self._closed or self._preview_paused or self._preview_stream is not stream
+                or generation != self._preview_generation):
+            return
+        try:
+            pending = self._pending_preview_message
+            if pending is not None and pending[:2] == (stream, generation):
+                message = pending[2]
+            else:
+                message = stream.messages.get_nowait()
+                self._pending_preview_message = (stream, generation, message)
+        except queue.Empty:
+            self.video_after_id = self.after(10, lambda: self._pump_preview(stream, generation))
+            return
+        # Upload images only at idle priority. A video callback must never
+        # continuously preempt button events and the save-result poll.
+        self.video_idle_id = self.after_idle(
+            lambda: self._render_preview(stream, generation, *message))
+
+    def _render_preview(self, stream, generation, kind, value):
+        self.video_idle_id = None
+        if (self._closed or self._preview_paused or self._preview_stream is not stream
+                or generation != self._preview_generation):
+            return
+        self._pending_preview_message = None
+        if kind == "ready":
+            meta, diff, temporal = value
+            self._preview_valid_metadata = True
+            self._highlight_predicted_confirmation(meta.get("predicted_label"))
             try:
-                self.cap = cv2.VideoCapture(
-                    str(event / "clip.mp4"), cv2.CAP_FFMPEG,
-                    [int(thread_property), 1],
-                )
-            except (cv2.error, TypeError, ValueError):
-                self.cap = cv2.VideoCapture(str(event / "clip.mp4"))
+                raw = meta["meteor_probability"]
+                if isinstance(raw, bool):
+                    raise ValueError()
+                probability = float(raw)
+                probability_text = f"{probability:.3f}" if math.isfinite(probability) and 0 <= probability <= 1 else "不明"
+            except (KeyError, TypeError, ValueError, OverflowError):
+                probability_text = "不明"
+            self.detail_var.set(
+                f"予測: {meta.get('predicted_label')}　流星確率: {probability_text}\n"
+                f"日時: {meta.get('detection_time', '')}　元動画: {meta.get('source', '')}")
+            old_photos = self._photo_refs
+            photos = []
+            for i, (label, image, fallback) in enumerate((
+                    (self.diff_label, diff, "通常差分"),
+                    (self.temporal_label, temporal, "時間画像"))):
+                old = old_photos[i] if len(old_photos) > i else None
+                if image is None:
+                    label.configure(image="", text=fallback)
+                    photos.append(None)
+                elif old is not None and (old.width(), old.height()) == image.size:
+                    old.paste(image)
+                    photos.append(old)
+                else:
+                    photo = ImageTk.PhotoImage(image)
+                    label.configure(image=photo, text="")
+                    photos.append(photo)
+            self._photo_refs = photos
+            self._video_photo_size = None
+            delay = 0
+        elif kind == "frame":
+            self.video_frame_index, image, self._preview_fps = value
+            if getattr(self, "_video_photo_size", None) == image.size:
+                self._video_photo.paste(image)
+            else:
+                self._video_photo = ImageTk.PhotoImage(image)
+                self._video_photo_size = image.size
+                self.video_label.configure(image=self._video_photo, text="")
+            if self._preview_busy:
+                self._preview_busy = False
+                self._set_confirmation_ready(not self._load_busy and not self._load_failed)
+                self._finish_transition()
+            delay = max(30, int(1000 / self._preview_fps))
+        elif kind == "video_missing":
+            self.video_label.configure(text="動画なし", image="")
+            self._preview_busy = False
+            self._set_confirmation_ready(not self._load_busy and not self._load_failed)
+            self._finish_transition()
+            return
         else:
-            self.cap = cv2.VideoCapture(str(event / "clip.mp4"))
-        self.video_frame_index = 0
-        self._video_photo_size = None
-        self._play_next_frame()
+            self._preview_busy = False
+            self._set_confirmation_ready(self._preview_valid_metadata and not self._load_busy
+                                         and not self._load_failed)
+            if not self._preview_valid_metadata:
+                self._highlight_predicted_confirmation(None)
+            self.detail_var.set(f"プレビューを読み込めません: {value}")
+            self._finish_transition(error=str(value))
+            return
+        # Let the pending Tk draw complete before arming another frame timer.
+        self.video_idle_id = self.after_idle(
+            lambda: self._arm_preview(stream, generation, delay))
+
+    def _arm_preview(self, stream, generation, delay):
+        self.video_idle_id = None
+        if (not self._closed and not self._preview_paused and self._preview_stream is stream
+                and generation == self._preview_generation):
+            self.video_after_id = self.after(delay, lambda: self._pump_preview(stream, generation))
+
+    def _finish_transition(self, error=""):
+        if self._transition is None:
+            return
+        transition, self._transition = self._transition, None
+        ready = time.perf_counter()
+        def record():
+            ml_review_preview.record_latency(dict(
+                stage="next_preview_ready", preview_ready=ready,
+                following_turn=time.perf_counter(), error=error, **transition))
+        self.after(1, record)
 
     def _highlight_predicted_confirmation(self, predicted_label: object) -> None:
         meteor_style, not_meteor_style = confirmation_button_styles(predicted_label)
         self.meteor_confirm_button.configure(style=meteor_style)
         self.not_meteor_confirm_button.configure(style=not_meteor_style)
 
-    def _play_next_frame(self) -> None:
-        self.video_after_id = None
-        if self.cap is None or not self.cap.isOpened():
-            self.video_label.configure(text="動画なし", image="")
-            return
-        ok, frame = self.cap.read()
-        if not ok:
-            self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-            ok, frame = self.cap.read()
-        if not ok:
-            return
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        image = Image.fromarray(rgb)
-        image.thumbnail((420, 420), Image.Resampling.LANCZOS)
-        if getattr(self, "_video_photo_size", None) == image.size:
-            # Reuse the displayed Tk image; avoid widget relayout and image
-            # allocation/destruction on every frame (costly on macOS/Tk).
-            self._video_photo.paste(image)
-        else:
-            self._video_photo = ImageTk.PhotoImage(image)
-            self._video_photo_size = image.size
-            self.video_label.configure(image=self._video_photo, text="")
-        fps = self.cap.get(cv2.CAP_PROP_FPS) or 15.0
-        self.video_after_id = self.after(max(30, int(1000 / fps)), self._play_next_frame)
-
     def _pause_video(self) -> None:
-        if self.video_after_id is not None:
-            try:
-                self.after_cancel(self.video_after_id)
-            except Exception:
-                pass
-            self.video_after_id = None
+        self._preview_paused = True
+        if self._preview_stream is not None:
+            self._preview_stream.playing.clear()
+        for attribute in ("video_after_id", "video_idle_id"):
+            after_id = getattr(self, attribute, None)
+            if after_id is not None:
+                try:
+                    self.after_cancel(after_id)
+                except tk.TclError:
+                    pass
+                setattr(self, attribute, None)
 
     def _resume_video(self) -> None:
-        if self.video_after_id is None and self.cap is not None:
-            self._play_next_frame()
+        self._preview_paused = False
+        stream = self._preview_stream
+        if stream is not None:
+            stream.playing.set()
+            if self.video_after_id is None and self.video_idle_id is None:
+                self._pump_preview(stream, self._preview_generation)
 
-    def _stop_video(self) -> None:
+    def _stop_video(self) -> Optional[threading.Event]:
         self._pause_video()
-        if self.cap is not None:
-            self.cap.release()
-            self.cap = None
+        self._preview_generation += 1
+        self._pending_preview_message = None
+        stream, self._preview_stream = self._preview_stream, None
+        if stream is not None:
+            stream.stop()  # Native decoder release runs on its owner worker.
+            return stream.closed
+        return None
 
     def _previous(self) -> None:
         if self._load_busy or self._closing or self._load_failed:
@@ -511,7 +600,8 @@ class TrainingDataReviewWindow(tk.Toplevel):
             self._show_current()
 
     def _classify(self, label: str) -> None:
-        if self._load_busy or self._closing or self._load_failed:
+        if (self._load_busy or self._closing or self._load_failed or self._preview_busy
+                or not self._preview_valid_metadata):
             return
         event = self.current_event
         if event is None:
