@@ -168,7 +168,7 @@ class TrainingDataReviewWindow(tk.Toplevel):
             padding=(10, 0, 10, 6),
         ).pack(fill=tk.X)
 
-    def refresh(self, *, synchronize_media=False) -> None:
+    def refresh(self, *, synchronize_media=False, include_history=True) -> None:
         if self._load_busy or self._closing or self._closed:
             return
         if self.bulk_dialog is not None and self.bulk_dialog.winfo_exists() and self.bulk_dialog.busy:
@@ -197,7 +197,8 @@ class TrainingDataReviewWindow(tk.Toplevel):
                 if cancel.is_set():
                     raise InterruptedError()
                 events = ml_training_data.pending_events(root_dir, cancel=cancel)
-                reviews, skips = ml_training_data.undoable_history(root_dir, cancel=cancel, strict=True)
+                reviews, skips = (ml_training_data.undoable_history(root_dir, cancel=cancel, strict=True)
+                                  if include_history else (None, None))
                 if cancel.is_set():
                     raise InterruptedError()
                 results.put(("ready", (events, reviews, skips, current_name, moved_count, sync_error)))
@@ -224,6 +225,9 @@ class TrainingDataReviewWindow(tk.Toplevel):
         if self._closing:
             self.destroy()
             return
+        if kind == "action":
+            self._finish_action(*value)
+            return
         for control in self._review_controls:
             control.state(["!disabled"])
         if self._pending_media_directories is not None:
@@ -242,7 +246,9 @@ class TrainingDataReviewWindow(tk.Toplevel):
                 messagebox.showerror("レビュー読み込みエラー", value, parent=self)
             return
         self._load_failed = False
-        self.events, self.undo_stack, self.skip_stack, current_name, moved_count, sync_error = value
+        self.events, reviews, skips, current_name, moved_count, sync_error = value
+        if reviews is not None:
+            self.undo_stack, self.skip_stack = reviews, skips
         if current_name:
             for i, event in enumerate(self.events):
                 if event.name == current_name:
@@ -263,6 +269,72 @@ class TrainingDataReviewWindow(tk.Toplevel):
                 f"既に確定済みの分類に合わせて、動画・画像 {moved_count}件を保存フォルダ間で移動しました。",
                 parent=self,
             )
+
+    @staticmethod
+    def _record_key(record):
+        return record.get("action"), record.get("timestamp"), record.get("to")
+
+    def _update_history_records(self, operation, records):
+        keys = {self._record_key(record) for record in records}
+        if operation in ("undo", "undo_review", "undo_skip"):
+            self.undo_stack = [record for record in self.undo_stack if self._record_key(record) not in keys]
+            self.skip_stack = [record for record in self.skip_stack if self._record_key(record) not in keys]
+        else:
+            existing = {self._record_key(record) for record in self.undo_stack + self.skip_stack}
+            for record in records:
+                if self._record_key(record) not in existing:
+                    (self.undo_stack if record["action"] == "review" else self.skip_stack).append(record)
+                    existing.add(self._record_key(record))
+
+    def apply_batch_result(self, operation, result):
+        self._update_history_records(operation, result.records)
+        # The transaction already returned its exact committed records. Only
+        # rescan the small pending inventory, not the full historical log.
+        self.refresh(include_history=False)
+
+    def _start_action(self, operation, function):
+        if self._load_busy or self._closing or self._load_failed:
+            return
+        if self.bulk_dialog is not None and self.bulk_dialog.winfo_exists() and self.bulk_dialog.busy:
+            return
+        self._stop_video()
+        self._load_busy = True
+        self._load_cancel.clear()
+        self.status_var.set("保存しています…")
+        for control in self._review_controls:
+            control.state(["disabled"])
+        results, cancel = self._load_results, self._load_cancel
+        def worker():
+            try:
+                result = function(cancel)
+            except Exception as exc:
+                result = dict(records=[], error=str(exc))
+            results.put(("action", (operation, result)))
+        threading.Thread(target=worker, name="MLReviewSave", daemon=False).start()
+        self._load_after_id = self.after(50, self._poll_load)
+
+    def _finish_action(self, operation, result):
+        if operation == "prepare_skip_day":
+            for control in self._review_controls:
+                control.state(["!disabled"])
+            selected = result.get("selected", [])
+            if result.get("error"):
+                messagebox.showerror("日付検索エラー", result["error"], parent=self)
+            elif selected and messagebox.askyesno(
+                "同一日をスキップ",
+                f"{result['day']} の未確認 {len(selected)}件をスキップしますか？\n"
+                "後から「スキップを戻す」で復元できます。", parent=self,
+            ):
+                self._skip_events(selected, f"same_date:{result['day']}")
+                return
+            self._show_current()
+            return
+        self._update_history_records(operation, result.get("records", []))
+        if result.get("error"):
+            messagebox.showerror("レビュー保存エラー", result["error"], parent=self)
+        elif operation.startswith("undo_") and not result.get("restored"):
+            messagebox.showinfo("判定を戻す", "戻せる判定はありません。", parent=self)
+        self.refresh(include_history=bool(result.get("error")))
 
     def _notify_bulk_loaded(self) -> None:
         if self.bulk_dialog is not None and self.bulk_dialog.winfo_exists():
@@ -358,6 +430,7 @@ class TrainingDataReviewWindow(tk.Toplevel):
         else:
             self.cap = cv2.VideoCapture(str(event / "clip.mp4"))
         self.video_frame_index = 0
+        self._video_photo_size = None
         self._play_next_frame()
 
     def _highlight_predicted_confirmation(self, predicted_label: object) -> None:
@@ -366,6 +439,7 @@ class TrainingDataReviewWindow(tk.Toplevel):
         self.not_meteor_confirm_button.configure(style=not_meteor_style)
 
     def _play_next_frame(self) -> None:
+        self.video_after_id = None
         if self.cap is None or not self.cap.isOpened():
             self.video_label.configure(text="動画なし", image="")
             return
@@ -378,19 +452,31 @@ class TrainingDataReviewWindow(tk.Toplevel):
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         image = Image.fromarray(rgb)
         image.thumbnail((420, 420), Image.Resampling.LANCZOS)
-        photo = ImageTk.PhotoImage(image)
-        self._video_photo = photo
-        self.video_label.configure(image=photo, text="")
+        if getattr(self, "_video_photo_size", None) == image.size:
+            # Reuse the displayed Tk image; avoid widget relayout and image
+            # allocation/destruction on every frame (costly on macOS/Tk).
+            self._video_photo.paste(image)
+        else:
+            self._video_photo = ImageTk.PhotoImage(image)
+            self._video_photo_size = image.size
+            self.video_label.configure(image=self._video_photo, text="")
         fps = self.cap.get(cv2.CAP_PROP_FPS) or 15.0
         self.video_after_id = self.after(max(30, int(1000 / fps)), self._play_next_frame)
 
-    def _stop_video(self) -> None:
+    def _pause_video(self) -> None:
         if self.video_after_id is not None:
             try:
                 self.after_cancel(self.video_after_id)
             except Exception:
                 pass
             self.video_after_id = None
+
+    def _resume_video(self) -> None:
+        if self.video_after_id is None and self.cap is not None:
+            self._play_next_frame()
+
+    def _stop_video(self) -> None:
+        self._pause_video()
         if self.cap is not None:
             self.cap.release()
             self.cap = None
@@ -415,38 +501,27 @@ class TrainingDataReviewWindow(tk.Toplevel):
         event = self.current_event
         if event is None:
             return
-        self._stop_video()
-        try:
-            record = ml_training_data.review_event(
-                event, self.root_dir, label, self.media_directories
-            )
-            self.undo_stack.append(record)
-            self.events.pop(self.index)
-            self.index = min(self.index, max(0, len(self.events) - 1))
-            self._show_current()
-        except Exception as exc:
-            messagebox.showerror("レビュー保存エラー", str(exc), parent=self)
-            self.refresh()
+        root, directories = self.root_dir, dict(self.media_directories)
+        def classify(_cancel):
+            return dict(records=[ml_training_data.review_event(event, root, label, directories)])
+        self._start_action("review", classify)
 
     def _skip_events(self, events: List[Path], reason: str) -> None:
-        if self._load_busy or self._closing or self._load_failed:
-            return
         if not events:
             return
-        self._stop_video()
-        skipped = 0
-        for event in events:
-            try:
-                record = ml_training_data.skip_event(event, self.root_dir, reason)
-                self.skip_stack.append(record)
-                skipped += 1
-            except Exception as exc:
-                messagebox.showerror("スキップ保存エラー", str(exc), parent=self)
-                break
-        self.events = [event for event in self.events if event.exists()]
-        self.index = min(self.index, max(0, len(self.events) - 1))
-        self.skip_status_var.set(f"スキップ中: {len(self.skip_stack)}件（今回 {skipped}件）")
-        self._show_current()
+        selected, root = list(events), self.root_dir
+        def skip(cancel):
+            result = dict(records=[], error="")
+            for event in selected:
+                if cancel.is_set():
+                    break
+                try:
+                    result["records"].append(ml_training_data.skip_event(event, root, reason))
+                except Exception as exc:
+                    result["error"] = str(exc)
+                    break
+            return result
+        self._start_action("skip", skip)
 
     def _skip_current(self) -> None:
         event = self.current_event
@@ -464,68 +539,54 @@ class TrainingDataReviewWindow(tk.Toplevel):
         self._skip_events(selected, f"from_here:{len(selected)}")
 
     def _skip_same_day(self) -> None:
-        if self._load_busy or self._closing or self._load_failed:
-            return
         event = self.current_event
         if event is None:
             return
-        target_date = ml_training_data.detection_date(event)
-        if not target_date:
-            messagebox.showwarning("日付不明", "この検出の日付を読み取れません。", parent=self)
-            return
-        selected = [item for item in self.events if ml_training_data.detection_date(item) == target_date]
-        if not selected:
-            return
-        if not messagebox.askyesno(
-            "同一日をスキップ",
-            f"{target_date} の未確認 {len(selected)}件をスキップしますか？\n"
-            "後から「スキップを戻す」で復元できます。",
-            parent=self,
-        ):
-            return
-        self._skip_events(selected, f"same_date:{target_date}")
+        events = list(self.events)
+        def select_day(cancel):
+            day = ml_training_data.detection_date(event)
+            if not day:
+                raise ValueError("この検出の日付を読み取れません。")
+            selected = []
+            for item in events:
+                if cancel.is_set():
+                    break
+                if ml_training_data.detection_date(item) == day:
+                    selected.append(item)
+            return dict(selected=selected, day=day)
+        self._start_action("prepare_skip_day", select_day)
+
+    def _start_undo(self, operation, stack, count):
+        records, root = list(reversed(stack)), self.root_dir
+        undo = ml_training_data.undo_skip if operation == "undo_skip" else ml_training_data.undo_review
+        def restore(cancel):
+            result = dict(records=[], restored=0, error="")
+            for record in records:
+                if cancel.is_set() or result["restored"] >= count:
+                    break
+                try:
+                    restored = undo(record, root)
+                    result["records"].append(record)
+                    result["restored"] += restored is not None
+                except Exception as exc:
+                    result["error"] = str(exc)
+                    break
+            return result
+        self._start_action(operation, restore)
 
     def _undo_skip(self) -> None:
-        if self._load_busy or self._closing or self._load_failed:
-            return
         try:
             count = max(1, int(self.undo_skip_count_var.get()))
         except (TypeError, ValueError, tk.TclError):
             count = 1
-        restored = 0
-        while restored < count and self.skip_stack:
-            record = self.skip_stack.pop()
-            try:
-                if ml_training_data.undo_skip(record, self.root_dir) is not None:
-                    restored += 1
-            except Exception as exc:
-                messagebox.showerror("スキップを戻せません", str(exc), parent=self)
-                break
-        if restored == 0:
-            messagebox.showinfo("スキップを戻す", "戻せるスキップはありません。", parent=self)
-        self.refresh()
+        self._start_undo("undo_skip", self.skip_stack, count)
 
     def _undo(self) -> None:
-        if self._load_busy or self._closing or self._load_failed:
-            return
         try:
             count = max(1, int(self.undo_count_var.get()))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, tk.TclError):
             count = 1
-        restored = 0
-        while restored < count and self.undo_stack:
-            record = self.undo_stack.pop()
-            try:
-                if ml_training_data.undo_review(record, self.root_dir) is not None:
-                    restored += 1
-            except Exception as exc:
-                messagebox.showerror("判定を戻せません", str(exc), parent=self)
-                break
-        if restored == 0:
-            messagebox.showinfo(
-                "判定を戻す", "戻せる確定済み判定はありません。", parent=self
-            )
-        self.refresh()
+        self._start_undo("undo_review", self.undo_stack, count)
 
     def _close(self) -> None:
         if self.bulk_dialog is not None and self.bulk_dialog.winfo_exists():
@@ -571,7 +632,7 @@ def open_review_window(
             if existing._load_busy:
                 if directories != existing.media_directories:
                     existing._pending_media_directories = directories
-            else:
+            elif directories != existing.media_directories or existing._load_failed:
                 existing.media_directories = directories
                 existing.refresh(synchronize_media=True)
             return existing
