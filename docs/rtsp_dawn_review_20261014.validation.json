@@ -1,0 +1,114 @@
+{
+  "reviewed_at": "2026-10-14T15:46:31.664239",
+  "timezone": "Asia/Tokyo",
+  "installed_version": "0.10.14.4",
+  "pid": 65405,
+  "evidence": {
+    "snapshot": "/private/tmp/meteor-rtsp-realtime-20261013/scheduler-running-late.json",
+    "job": "/Users/keisukematsumoto/Library/Application Support/MeteorDetector/rtsp/.schedule_jobs/20261013T1736_20261014T0500/job.json",
+    "job_sha256": "948f2e55cc1e42ba9e3da8fdbcca688f68b93f856b29a536bd4861dfac384e23",
+    "job_state": "complete",
+    "job_last_write": "2026-10-14T05:04:01.100650",
+    "job_ctime": "2026-10-14T05:04:01.100859",
+    "final_by_session": {
+      "86ce18ef6b39": {
+        "frames": 38300,
+        "archives": 211,
+        "media_seconds": 1532.0
+      },
+      "9fa5c0366d32": {
+        "frames": 2433,
+        "archives": 2,
+        "media_seconds": 97.32
+      },
+      "352f1d184a6a": {
+        "frames": 14150,
+        "archives": 158,
+        "media_seconds": 566.0
+      },
+      "aec620a7923e": {
+        "frames": 2461,
+        "archives": 2,
+        "media_seconds": 98.44
+      },
+      "2ce813fe50ae": {
+        "frames": 30787,
+        "archives": 194,
+        "media_seconds": 1231.48
+      },
+      "77dc5b1f7745": {
+        "frames": 2535,
+        "archives": 2,
+        "media_seconds": 101.4
+      },
+      "5b381bfccd87": {
+        "frames": 97547,
+        "archives": 74,
+        "media_seconds": 3901.88
+      }
+    },
+    "concat_total_frames": 188213,
+    "ffprobe_verified_frames": 188213,
+    "ffprobe_verified_fps": 25,
+    "active_snapshot": {
+      "chunks": 2057,
+      "first_sequence": 0,
+      "last_sequence": 2056,
+      "continuous_from_zero": true,
+      "acknowledged_chunks": 0,
+      "frames": 25712
+    },
+    "output_times": {
+      "lighten.mp4": {
+        "birth": "2026-10-14T05:03:52.692671",
+        "mtime": "2026-10-14T05:03:53.430522",
+        "size": 6903334
+      },
+      "recording.mp4": {
+        "birth": "2026-10-14T05:03:57.970523",
+        "mtime": "2026-10-14T05:04:00.512068",
+        "size": 6605093826
+      },
+      "timelapse.mp4": {
+        "birth": "2026-10-14T05:01:13.755463",
+        "mtime": "2026-10-14T05:01:13.759958",
+        "size": 28264642
+      },
+      "lighten.png": {
+        "birth": "2026-10-14T05:03:52.589355",
+        "mtime": "2026-10-14T05:03:52.589484",
+        "size": 1547695
+      },
+      "recording.mp4.capture.json": {
+        "birth": "2026-10-14T05:04:00.668019",
+        "mtime": "2026-10-14T05:04:00.668364",
+        "size": 81776
+      }
+    }
+  },
+  "conservative_active_session_bound": {
+    "start": "2026-10-14T04:12:04.254543",
+    "end": "2026-10-14T05:04:01.100650",
+    "wall_seconds": 3116.846107,
+    "media_seconds": 3901.88,
+    "minimum_processing_speed": 1.2518680313528872,
+    "maximum_wall_to_media_ratio": 0.7988062439131906,
+    "interpretation": "Retrospective inferred window-average lower bound; includes receipt waiting and product creation, excludes older backlog and bridge recordings"
+  },
+  "broader_saved_work_bound": {
+    "previous_pending_seconds": 2528.32,
+    "new_active_media_seconds": 2873.4000000000005,
+    "total_media_seconds": 5401.720000000001,
+    "minimum_processing_speed": 1.733072411842373,
+    "interpretation": "Saved processing workload including separate bridge clients, not unique camera PTS time"
+  },
+  "caveats": [
+    "Assumes normal app cleanup, no external deletion, and unchanged filesystem timestamps; no precise persistent ACK chronology remains.",
+    "GUI log is a bounded in-memory Tk widget; CUA access timed out; process stdout/stderr are /dev/null.",
+    "Raw chunks and minute archives were replaced by validated final concatenation. Current empty-spool comparison cannot produce a valid processing speed.",
+    "Does not establish rates of individual final dawn windows or any-weather minimum performance.",
+    "This lower bound neither proves nor disproves the 25% / four-times speed target."
+  ],
+  "auditor": "gpt-6-luna",
+  "app_actions": "Read only; no stop, restart, setting change, or analysis run"
+}
