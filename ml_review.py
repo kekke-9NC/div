@@ -63,11 +63,12 @@ class TrainingDataReviewWindow(tk.Toplevel):
         self._preview_valid_metadata = False
         self._preview_paused = False
         self._preview_fps = 15.
-        self._pending_preview_message = None
         self._action_sequence = 0
         self._transition = None
         self.video_after_id = None
-        self.video_idle_id = None
+        self._preview_trace_id = None
+        self._preview_frames_shown = 0
+        self._preview_last_progress = 0.
         self.video_frame_index = 0
         self._photo_refs: List[ImageTk.PhotoImage] = []
         self.status_var = tk.StringVar()
@@ -436,9 +437,15 @@ class TrainingDataReviewWindow(tk.Toplevel):
         self._set_confirmation_ready(False)
         self.status_var.set(f"未確認 {self.index + 1} / {len(self.events)}")
         self.detail_var.set("プレビューを読み込み中…")
-        stream = ml_review_preview.PreviewStream(event)
+        self.video_label.configure(image="", text="動画を読み込み中…")
+        self._preview_trace_id = f"{id(self):x}-preview-{self._preview_generation}"
+        self._preview_frames_shown = 0
+        self._preview_last_progress = time.perf_counter()
+        ml_review_preview.record_latency(dict(stage="preview_started", preview_id=self._preview_trace_id,
+                                             started=time.perf_counter()))
+        stream = ml_review_preview.PreviewStream(event, trace_id=self._preview_trace_id)
         self._preview_stream = stream
-        self._pump_preview(stream, self._preview_generation)
+        self._arm_preview(stream, self._preview_generation, 5)
 
     def _pump_preview(self, stream, generation):
         self.video_after_id = None
@@ -446,26 +453,31 @@ class TrainingDataReviewWindow(tk.Toplevel):
                 or generation != self._preview_generation):
             return
         try:
-            pending = self._pending_preview_message
-            if pending is not None and pending[:2] == (stream, generation):
-                message = pending[2]
-            else:
-                message = stream.messages.get_nowait()
-                self._pending_preview_message = (stream, generation, message)
+            message = stream.messages.get_nowait()
         except queue.Empty:
-            self.video_after_id = self.after(10, lambda: self._pump_preview(stream, generation))
+            self._arm_preview(stream, generation, 10)
             return
-        # Upload images only at idle priority. A video callback must never
-        # continuously preempt button events and the save-result poll.
-        self.video_idle_id = self.after_idle(
-            lambda: self._render_preview(stream, generation, *message))
+        # Consume at most one message per ordinary timer callback. Idle events
+        # can starve indefinitely while the recorder/main window is active.
+        try:
+            self._render_preview(stream, generation, *message)
+        except Exception as exc:
+            ml_review_preview.record_latency(dict(stage="preview_render_error",
+                                                 preview_id=self._preview_trace_id,
+                                                 error_type=type(exc).__name__, at=time.perf_counter()))
+            self._stop_video()
+            self._preview_busy = False
+            self._preview_valid_metadata = False
+            self._set_confirmation_ready(False)
+            self.video_label.configure(image="", text="表示に失敗しました")
+            self.detail_var.set(f"表示に失敗しました。再読み込みしてください: {exc}")
 
     def _render_preview(self, stream, generation, kind, value):
-        self.video_idle_id = None
         if (self._closed or self._preview_paused or self._preview_stream is not stream
                 or generation != self._preview_generation):
             return
-        self._pending_preview_message = None
+        render_started = time.perf_counter()
+        first_frame = kind == "frame" and self._preview_busy
         if kind == "ready":
             meta, diff, temporal = value
             self._preview_valid_metadata = True
@@ -481,38 +493,34 @@ class TrainingDataReviewWindow(tk.Toplevel):
             self.detail_var.set(
                 f"予測: {meta.get('predicted_label')}　流星確率: {probability_text}\n"
                 f"日時: {meta.get('detection_time', '')}　元動画: {meta.get('source', '')}")
-            old_photos = self._photo_refs
             photos = []
-            for i, (label, image, fallback) in enumerate((
+            for label, image, fallback in (
                     (self.diff_label, diff, "通常差分"),
-                    (self.temporal_label, temporal, "時間画像"))):
-                old = old_photos[i] if len(old_photos) > i else None
+                    (self.temporal_label, temporal, "時間画像")):
                 if image is None:
                     label.configure(image="", text=fallback)
                     photos.append(None)
-                elif old is not None and (old.width(), old.height()) == image.size:
-                    old.paste(image)
-                    photos.append(old)
                 else:
-                    photo = ImageTk.PhotoImage(image)
+                    # Fill an undisplayed image, then swap it into the label.
+                    # Pillow documents displayed PhotoImage.paste as very slow.
+                    photo = ImageTk.PhotoImage(image, master=self)
                     label.configure(image=photo, text="")
                     photos.append(photo)
             self._photo_refs = photos
-            self._video_photo_size = None
-            delay = 0
+            delay = 5
         elif kind == "frame":
             self.video_frame_index, image, self._preview_fps = value
-            if getattr(self, "_video_photo_size", None) == image.size:
-                self._video_photo.paste(image)
-            else:
-                self._video_photo = ImageTk.PhotoImage(image)
-                self._video_photo_size = image.size
-                self.video_label.configure(image=self._video_photo, text="")
+            photo = ImageTk.PhotoImage(image, master=self)
+            self.video_label.configure(image=photo, text="")
+            # Keep the old image alive until the widget references the new one.
+            self._video_photo = photo
+            self._preview_frames_shown += 1
             if self._preview_busy:
                 self._preview_busy = False
                 self._set_confirmation_ready(not self._load_busy and not self._load_failed)
                 self._finish_transition()
-            delay = max(30, int(1000 / self._preview_fps))
+            elapsed_ms = (time.perf_counter() - render_started) * 1000
+            delay = max(5, math.ceil(1000 / self._preview_fps - elapsed_ms))
         elif kind == "video_missing":
             self.video_label.configure(text="動画なし", image="")
             self._preview_busy = False
@@ -530,12 +538,20 @@ class TrainingDataReviewWindow(tk.Toplevel):
             self.detail_var.set(f"プレビューを読み込めません: {value}")
             self._finish_transition(error=str(value))
             return
-        # Let the pending Tk draw complete before arming another frame timer.
-        self.video_idle_id = self.after_idle(
-            lambda: self._arm_preview(stream, generation, delay))
+        if kind == "ready" or first_frame:
+            ml_review_preview.record_latency(dict(
+                stage="preview_metadata_shown" if kind == "ready" else "preview_first_frame_shown",
+                preview_id=self._preview_trace_id, render_started=render_started,
+                render_finished=time.perf_counter()))
+        if kind == "frame" and time.perf_counter() - self._preview_last_progress >= 5:
+            now = time.perf_counter()
+            ml_review_preview.record_latency(dict(stage="preview_playback_progress",
+                                                 preview_id=self._preview_trace_id,
+                                                 at=now, frames_shown=self._preview_frames_shown))
+            self._preview_last_progress = now
+        self._arm_preview(stream, generation, delay)
 
     def _arm_preview(self, stream, generation, delay):
-        self.video_idle_id = None
         if (not self._closed and not self._preview_paused and self._preview_stream is stream
                 and generation == self._preview_generation):
             self.video_after_id = self.after(delay, lambda: self._pump_preview(stream, generation))
@@ -560,7 +576,7 @@ class TrainingDataReviewWindow(tk.Toplevel):
         self._preview_paused = True
         if self._preview_stream is not None:
             self._preview_stream.playing.clear()
-        for attribute in ("video_after_id", "video_idle_id"):
+        for attribute in ("video_after_id",):
             after_id = getattr(self, attribute, None)
             if after_id is not None:
                 try:
@@ -574,13 +590,12 @@ class TrainingDataReviewWindow(tk.Toplevel):
         stream = self._preview_stream
         if stream is not None:
             stream.playing.set()
-            if self.video_after_id is None and self.video_idle_id is None:
+            if self.video_after_id is None:
                 self._pump_preview(stream, self._preview_generation)
 
     def _stop_video(self) -> Optional[threading.Event]:
         self._pause_video()
         self._preview_generation += 1
-        self._pending_preview_message = None
         stream, self._preview_stream = self._preview_stream, None
         if stream is not None:
             stream.stop()  # Native decoder release runs on its owner worker.

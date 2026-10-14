@@ -15,8 +15,9 @@ from PIL import Image
 
 
 class PreviewStream:
-    def __init__(self, event):
+    def __init__(self, event, *, trace_id=None):
         self.event = Path(event)
+        self.trace_id = trace_id
         self.messages = queue.Queue(maxsize=2)
         self.cancel = threading.Event()
         self.closed = threading.Event()
@@ -37,6 +38,11 @@ class PreviewStream:
             except queue.Full:
                 pass
         return False
+
+    def _trace(self, stage, **values):
+        if self.trace_id is not None:
+            record_latency(dict(stage=stage, preview_id=self.trace_id,
+                                at=time.perf_counter(), **values))
 
     @staticmethod
     def _photo(path):
@@ -61,6 +67,8 @@ class PreviewStream:
                 return
             if not self._put(("ready", (metadata, diff, temporal))):
                 return
+            self._trace("preview_metadata_queued")
+            open_started = time.perf_counter()
             threads = getattr(cv2, "CAP_PROP_N_THREADS", None)
             if threads is not None:
                 try:
@@ -70,6 +78,7 @@ class PreviewStream:
                     cap = cv2.VideoCapture(str(self.event / "clip.mp4"))
             else:
                 cap = cv2.VideoCapture(str(self.event / "clip.mp4"))
+            self._trace("preview_video_opened", open_started=open_started)
             fps = float(cap.get(cv2.CAP_PROP_FPS)) if cap.isOpened() else 15.
             if not math.isfinite(fps) or fps <= 0:
                 fps = 15.
@@ -92,6 +101,8 @@ class PreviewStream:
                     return
                 image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
                 image.thumbnail((420, 420), Image.Resampling.LANCZOS)
+                if index == 0:
+                    self._trace("preview_loop_first_frame_decoded")
                 if not self._put(("frame", (index, image, fps))):
                     break
                 index += 1
