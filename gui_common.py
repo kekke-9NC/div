@@ -26,6 +26,7 @@ from astropy.io import fits
 from astropy.wcs import WCS
 import concurrent.futures
 from typing import List, Dict, Any, Optional
+import legacy_resume
 import status_panel
 import ui_state
 import network_copy

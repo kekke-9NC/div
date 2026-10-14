@@ -29,6 +29,105 @@ import video_processor
 
 
 class RtspLiveTests(unittest.TestCase):
+    def test_atomic_json_encoder_keeps_identical_bytes_and_prior_document_on_failure(self):
+        import io
+        value = dict(sky='流星', values=[0,.125,None,True,dict(x=3)])
+        expected = io.StringIO()
+        json.dump(value,expected,ensure_ascii=False)
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root)/'state.json'
+            rtsp_live.write_json(path,value)
+            self.assertEqual(path.read_text(),expected.getvalue())
+            with mock.patch('rtsp_live.json.dumps',side_effect=ValueError('invalid sky model')):
+                with self.assertRaises(ValueError):
+                    rtsp_live.write_json(path,value)
+            self.assertEqual(path.read_text(),expected.getvalue())
+            self.assertEqual(list(Path(root).iterdir()),[path])
+
+    def test_pipeline_natural_eof_preserves_final_ack_and_evidence_pixels(self):
+        from concurrent.futures import ThreadPoolExecutor
+        with tempfile.TemporaryDirectory() as root:
+            paths = self.chunks(root, count=10)
+            expected_cap, _ = self.capture(paths)
+            expected = list(image_processing.create_diff_images(expected_cap, interval=.25,
+                duration=1, buffer_duration=4, is_rtsp=True, include_frame_window=True))
+            expected_cap.release()
+            cap, consumed = self.capture(paths)
+            acknowledgements = []
+            acknowledge = cap.acknowledge
+            def observe(index, final=False):
+                acknowledgements.append((index, final))
+                acknowledge(index, final=final)
+            cap.acknowledge = observe
+            generator = image_processing.create_diff_images(cap, interval=.25,
+                duration=1, buffer_duration=4, is_rtsp=True, include_frame_window=True)
+            with ThreadPoolExecutor(max_workers=3) as executor, mock.patch.object(
+                    video_processing, '_coarse_proposals', return_value=([], [])):
+                pipeline = video_processing._LiveProposalPipeline(generator, cap, None, None, cap.cancel, executor)
+                actual = list(pipeline)
+                pipeline.close()
+            self.assertEqual(len(actual), len(expected))
+            for packet, original in zip(actual, expected):
+                self.assertEqual(packet[1], original[1])
+                for index in (0, 2, 3):
+                    np.testing.assert_array_equal(packet[index], original[index])
+                for frame, reference in zip(packet[-1], original[-1]):
+                    np.testing.assert_array_equal(frame, reference)
+            self.assertTrue(acknowledgements[-1][1])
+            self.assertEqual(acknowledgements[-1][0], sum(rtsp_live.timing(p)['frame_count'] for p in paths)-1)
+            self.assertEqual(consumed, paths)
+            self.assertFalse(cap.defer_analysis_ack)
+            cap.release()
+
+    def test_pipeline_cancel_never_acknowledges_prefetched_unprocessed_windows(self):
+        from concurrent.futures import ThreadPoolExecutor
+        with tempfile.TemporaryDirectory() as root:
+            paths = self.chunks(root, count=25)
+            cap, consumed = self.capture(paths)
+            generator = image_processing.create_diff_images(cap, interval=.25,
+                duration=1, buffer_duration=4, is_rtsp=True, include_frame_window=True)
+            with ThreadPoolExecutor(max_workers=3) as executor, mock.patch.object(
+                    video_processing, '_coarse_proposals', return_value=([], [])):
+                pipeline = video_processing._LiveProposalPipeline(generator, cap, None, None, cap.cancel, executor)
+                stream = iter(pipeline)
+                for _ in range(25):
+                    latest = next(stream)
+                cap.cancel.set()
+                pipeline.close()
+            acknowledged_frames = sum(rtsp_live.timing(path)['frame_count'] for path in consumed)
+            retain = round(25*(config.FINER_DETECT_WINDOW_SECONDS+config.FINER_DETECT_PADDING_SECONDS))
+            self.assertLessEqual(acknowledged_frames, max(0, latest[1][1]-6+1-retain))
+            self.assertLess(len(consumed), len(paths))
+            self.assertFalse(cap.defer_analysis_ack)
+            cap.release()
+
+    def test_overlapping_extrema_preserve_all_pixels_and_irregular_tail(self):
+        rng = np.random.default_rng(344)
+        frames = list(rng.integers(0, 256, (110, 30, 40, 3), dtype=np.uint8))
+        for step in (1, 6, 25):
+            cache = image_processing._WindowExtrema(step)
+            for start, end in [(i, i+25) for i in range(0, 80, step)] + [(82, 103), (91, 110)]:
+                actual = cache.reduce(frames[start:end], start)
+                expected = image_processing._temporal_min_max(frames[start:end])
+                for a, b in zip(actual, expected):
+                    np.testing.assert_array_equal(a, b)
+                self.assertLessEqual(sum(len(v[0]) for v in cache.blocks.values()), end-start)
+
+    def test_missing_archive_is_republished_before_consumed_spool_is_removed(self):
+        with tempfile.TemporaryDirectory() as root:
+            paths = self.chunks(root, count=4)
+            archiver = rtsp_live.MinuteArchiver(root, seconds=2, status=lambda _message: None)
+            archiver.compact(flush=True)
+            archive = Path(root) / json.loads(Path(str(paths[0])+'.archived.json').read_text())['archive']
+            expected = rtsp_segments._properties(archive)
+            archive.unlink()
+            for path in paths:
+                rtsp_live.write_json(str(path)+'.analysis_consumed.json', {'consumed': True})
+            archiver.compact(flush=True)
+            self.assertTrue(archive.exists())
+            self.assertEqual(rtsp_segments._properties(archive), expected)
+            self.assertTrue(all(not path.exists() for path in paths))
+
     def chunks(self, root, count=10, session="aabbccddeeff", gap=0):
         directory = Path(root) / ".rtsp_live/20261012/20" / f"00_00_{session}"
         directory.mkdir(parents=True, exist_ok=True)
@@ -88,6 +187,7 @@ class RtspLiveTests(unittest.TestCase):
             with (
                 mock.patch.object(video_processing.model, "predict_noise_gate", return_value=None),
                 mock.patch.object(video_processing.model, "predict_meteor_event", return_value=.99),
+                mock.patch.object(video_processing.meteor_direction,'estimate_motion',side_effect=AssertionError('info disabled')),
                 mock.patch.object(video_processing.model, "get_meteor_decision_threshold", return_value=.5),
                 mock.patch.object(video_processing.image_processing, "detect_lines", return_value=[]),
                 mock.patch.object(config, "CUTOUT_SIZE", 64),
@@ -352,6 +452,42 @@ class RtspLiveTests(unittest.TestCase):
                     self.assertEqual(len(decoded), len(expected))
                     self.assertLess(max(np.abs(a.astype(float) - b.astype(float)).mean()
                                         for a, b in zip(decoded, expected)), 1.5)
+
+
+class BacklogDiscoveryTests(unittest.TestCase):
+    def test_catalog_walk_filters_sidecars_once_and_keeps_capture_order(self):
+        with tempfile.TemporaryDirectory() as root:
+            directory = rtsp_live.capture_directory(root,datetime(2026,10,13,4))
+            paths = []
+            for sequence in (1,0):
+                path = directory/f'chunk_{sequence:09d}.mp4'
+                path.write_bytes(b'synthetic')
+                rtsp_live.write_json(str(path)+'.capture.json',dict(
+                    start_time=f'2026-10-13T04:00:0{sequence}',fps=25,frame_count=12,size=[96,64]))
+                paths.append(path)
+            (directory/'chunk_000000000_innovation.mp4').write_bytes(b'synthetic')
+            (directory/'chunk_temp_000000000.mp4').write_bytes(b'synthetic')
+            catalog = rtsp_live.ChunkCatalog(root)
+            with (mock.patch.object(Path,'rglob',side_effect=AssertionError('recursive Path selector')),
+                  mock.patch.object(rtsp_live.rtsp_segments,'is_finalized_mp4',return_value=True)):
+                self.assertEqual(catalog.paths(),list(reversed(paths)))
+
+    def test_large_backlog_reduces_discovery_walks_and_tail_restores_live_cadence(self):
+        runner = rtsp_live.RealtimeRunner('unused', lambda *_args: None, threading.Event())
+        with mock.patch.object(rtsp_live.config, 'RTSP_SCAN_INTERVAL', .1):
+            self.assertEqual(runner._discovery_interval(), .1)
+            for index in range(10):
+                runner.queue.put(index)
+            self.assertEqual(runner._discovery_interval(), 1.0)
+            runner.queue.get_nowait()
+            self.assertEqual(runner._discovery_interval(), .1)
+
+    def test_discovery_does_not_reduce_a_long_configured_interval(self):
+        runner = rtsp_live.RealtimeRunner('unused', lambda *_args: None, threading.Event())
+        for index in range(100):
+            runner.queue.put(index)
+        with mock.patch.object(rtsp_live.config, 'RTSP_SCAN_INTERVAL', 2.0):
+            self.assertEqual(runner._discovery_interval(), 5.0)
 
 
 if __name__ == "__main__":

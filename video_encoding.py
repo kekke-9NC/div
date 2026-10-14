@@ -8,6 +8,8 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import tempfile
+import time
 from typing import Any, Mapping, Optional
 
 import numpy as np
@@ -118,7 +120,10 @@ class FFmpegFrameWriter:
         self._open()
 
     def _encoder_args(self) -> list[str]:
-        settings = self.settings
+        return self.encoder_arguments(self.settings)
+
+    @staticmethod
+    def encoder_arguments(settings: EncodingSettings) -> list[str]:
         if settings.is_lossless:
             if settings.codec == "h264":
                 return ["-c:v", "libx264", "-preset", "fast", "-crf", "0"]
@@ -150,6 +155,7 @@ class FFmpegFrameWriter:
         Path(self.output_path).parent.mkdir(parents=True, exist_ok=True)
         command = [
             ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+            "-filter_threads", "2",
             "-f", "rawvideo", "-pix_fmt", "bgr24",
             "-s:v", f"{self.width}x{self.height}", "-r", f"{self.fps:.8f}",
             "-i", "pipe:0", "-an",
@@ -209,6 +215,86 @@ class FFmpegFrameWriter:
             except OSError:
                 pass
             raise VideoEncodingError(f"FFmpeg保存に失敗しました: {detail or return_code}")
+
+
+def write_repeated_images(output_path, frames, fps, cancel, settings=None):
+    """Encode the complete frame sequence without repeating Python raw copies.
+
+    Adjacent identical array objects are encoded as one lossless PNG plus an
+    exact frame count. FFmpeg expands their durations on the output frame
+    clock. Arrays with different identities remain separate, even if equal.
+    Temporary images belong to this operation, so cache eviction is harmless.
+    """
+    import cv2
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise VideoEncodingError("FFmpegが見つかりません。")
+    settings = EncodingSettings.from_value(settings)
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".timelapse_frames_", dir=output_path.parent) as temporary:
+        directory = Path(temporary)
+        runs, previous, count, size = [], None, 0, None
+        for frame in frames:
+            if cancel.is_set():
+                raise InterruptedError("自動作成を中断しました。元録画は保持します")
+            if size is None:
+                size = frame.shape
+            if frame.shape != size:
+                raise VideoEncodingError("タイムラプス素材の解像度が途中で変わっています")
+            if frame is previous:
+                runs[-1][1] += 1
+            else:
+                image = directory / f"{len(runs):06d}.png"
+                if not cv2.imwrite(str(image), frame):
+                    raise VideoEncodingError("タイムラプス素材を一時保存できません")
+                runs.append([image, 1])
+                previous = frame
+            count += 1
+        if not count:
+            raise VideoEncodingError("タイムラプス素材がありません")
+        lines = ["ffconcat version 1.0"]
+        for image, repeat in runs:
+            if cancel.is_set():
+                raise InterruptedError("自動作成を中断しました。元録画は保持します")
+            escaped = str(image.resolve()).replace("'", "'\\''")
+            lines += [f"file '{escaped}'", f"option framerate {fps:.12g}",
+                      f"duration {repeat / fps:.12f}"]
+        # The final image supplies the end timestamp for the last duration.
+        lines += [f"file '{escaped}'", f"option framerate {fps:.12g}"]
+        listing = directory / "frames.ffconcat"
+        listing.write_text("\n".join(lines)+"\n", encoding="utf-8")
+        # A CPU-sized scale pool for each repeated PNG can spend more time
+        # synchronizing than converting pixels and contend with RTSP analysis.
+        command = [ffmpeg, "-nostdin", "-y", "-hide_banner", "-loglevel", "error",
+                   "-filter_threads", "2", "-threads", "2",
+                   "-f", "concat", "-safe", "0", "-i", str(listing), "-an",
+                   "-vf", f"fps={fps:.12g},format=bgr24", "-frames:v", str(count),
+                   *FFmpegFrameWriter.encoder_arguments(settings),
+                   "-pix_fmt", "yuv444p" if settings.is_lossless else "yuv420p",
+                   "-movflags", "+faststart", str(output_path)]
+        with (directory / "encoder.log").open("w+b") as errors:
+            if cancel.is_set():
+                raise InterruptedError("自動作成を中断しました。元録画は保持します")
+            process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=errors)
+            deadline = time.monotonic() + max(120., count / fps * 4.)
+            try:
+                while process.poll() is None:
+                    if cancel.wait(.1):
+                        raise InterruptedError("自動作成を中断しました。元録画は保持します")
+                    if time.monotonic() > deadline:
+                        raise VideoEncodingError("タイムラプスのエンコードが時間制限を超えました")
+                if process.returncode:
+                    errors.seek(0)
+                    detail = errors.read().decode("utf-8", errors="replace")[-2000:]
+                    raise VideoEncodingError(f"FFmpeg保存に失敗しました: {detail}")
+            except BaseException:
+                if process.poll() is None:
+                    process.kill()
+                process.wait()
+                output_path.unlink(missing_ok=True)
+                raise
+        return count
 
 
 def estimated_megabytes_per_minute(settings: EncodingSettings | Mapping[str, Any]) -> Optional[float]:

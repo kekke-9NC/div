@@ -10,8 +10,70 @@ import model
 from universal_meteor_model import _robust_residual_cube, _uint8_median
 from video_processing import _SavedEventIndex, _candidate_already_saved
 from temporal_statistics import temporal_median
+
+
+def test_signed_temporal_median_matches_numpy_for_all_short_lengths():
+    rng = np.random.default_rng(159)
+    for count in range(1,65):
+        values = rng.integers(-32768,32768,size=(count,32,64),dtype=np.int16)
+        values[0,0,:2] = [-32768,32767]
+        before = values.copy()
+        np.testing.assert_array_equal(temporal_median(values),np.median(values,axis=0))
+        np.testing.assert_array_equal(values,before)
+        np.testing.assert_array_equal(temporal_median(values[:,::2,::2]),np.median(values[:,::2,::2],axis=0))
+
+
+def test_native_temporal_median_covers_full_event_crops_exactly():
+    rng = np.random.default_rng(45)
+    for dtype in (np.uint8,np.int16):
+        values = rng.integers(0,256,(64,256,256),dtype=dtype)
+        before = values.copy()
+        np.testing.assert_array_equal(temporal_median(values),np.median(values,axis=0))
+        np.testing.assert_array_equal(values,before)
+
+
+def test_signed_temporal_median_falls_back_without_new_native_symbol():
+    import component_statistics
+    values = np.arange(120,dtype=np.int16).reshape(6,4,5)
+    component_statistics._load()
+    with patch.object(component_statistics,'_median_i16_function',None):
+        np.testing.assert_array_equal(temporal_median(values),np.median(values,axis=0))
 from short_flash_detector import _track_predictions
 from temporal_statistics import half_integer_percentiles
+
+
+def test_dense_component_ranking_matches_scalar_peaks_including_low_peak_ties():
+    import cv2
+    from short_flash_detector import _component_detections
+    residual = np.zeros((160, 320), np.uint8)
+    for index in range(1000):
+        y, x = divmod(index, 64)
+        residual[y*8:y*8+3, x*5:x*5+3] = 4 + index % 11
+    _, labels, stats, centers = cv2.connectedComponentsWithStats((residual > 0).astype(np.uint8), 8)
+    expected = []
+    for k in range(1, len(stats)):
+        x, y, w, h, area = stats[k]
+        if not 3 <= area <= 1000 or w > 350 or h > 350:
+            continue
+        values = residual[y:y+h, x:x+w][labels[y:y+h, x:x+w] == k]
+        peak, score = int(values.max()), int(values.sum())
+        if peak >= 5 and score >= 20:
+            expected.append([*centers[k], score, w, h, peak])
+    expected.sort(key=lambda value: value[2], reverse=True)
+    assert _component_detections(residual, labels, stats, centers) == expected[:400]
+
+
+def test_live_gray_cache_preserves_pixels_scale_and_window_eviction():
+    import moving_point_detector as moving
+    rng = np.random.default_rng(556)
+    frames = list(rng.integers(0, 256, (10, 100, 120, 3), dtype=np.uint8))
+    cache = moving.GrayFrameCache()
+    for scale in (.5, .5, 1.):
+        actual = cache.convert(frames[2:8], scale)
+        for raw, gray in zip(frames[2:8], actual):
+            np.testing.assert_array_equal(gray, moving._gray_small(raw, scale))
+    cache.convert(frames[5:10], .5)
+    assert set(cache.entries) == {id(frame) for frame in frames[5:10]}
 
 
 def test_histogram_percentiles_match_numpy_linear_interpolation_exactly():
@@ -280,3 +342,138 @@ def test_model_reload_during_preprocessing_keeps_one_revision_per_event():
                         extract_event_features=lambda *args: np.zeros(2),
                         extract_motion_features=lambda *args: np.zeros(2)):
         assert model.predict_meteor_event([object()], None, None, 25) == .75
+
+
+def test_prepared_event_keeps_exact_vectors_and_requires_identical_evidence():
+    rng = np.random.default_rng(985)
+    frames = list(rng.integers(0,256,(8,80,96,3),dtype=np.uint8))
+    rect,line = (3,5,72,75),((25,30),(45,50))
+    vectors = []
+    class Classifier:
+        def predict_proba(self, vector):
+            vectors.append(vector.copy())
+            return np.array([.75])
+    architecture = model.EVENT_BOOST_ARCHITECTURE_NAME
+    with patch.multiple(model,model=Classifier(),_model_ready=True,
+                        _active_model_info={'architecture':architecture}):
+        prepared = model.prepare_meteor_inputs(frames,rect,line,25)
+        assert prepared.matches(frames,rect,line,25,architecture)
+        assert not prepared.matches([frame.copy() for frame in frames],rect,line,25,architecture)
+        assert not prepared.matches(frames,rect,line,24,architecture)
+        assert not prepared.matches(frames,rect,((26,30),(45,50)),25,architecture)
+        assert not prepared.matches(frames,(4,5,72,75),line,25,architecture)
+        assert not prepared.matches(frames,rect,line,25,model.UNIVERSAL_ARCHITECTURE_NAME)
+        assert model.predict_meteor_event(frames,rect,line,25) == .75
+        with patch.object(model,'_prepare_meteor_inputs',side_effect=AssertionError('recomputed')):
+            assert model.predict_meteor_event(frames,rect,line,25,prepared=prepared) == .75
+        np.testing.assert_array_equal(vectors[0],vectors[1])
+        with patch.object(model,'_prepare_meteor_inputs',wraps=model._prepare_meteor_inputs) as prepare:
+            assert model.predict_meteor_event([frame.copy() for frame in frames],rect,line,25,prepared=prepared) == .75
+            assert prepare.call_count == 1
+
+
+def test_prepared_event_model_reload_uses_new_weights_and_rechecks_architecture():
+    frames = [np.zeros((40,40,3),np.uint8)]*3
+    old = type('Classifier',(),{'predict_proba':lambda self,v:np.array([.75])})()
+    new = type('Classifier',(),{'predict_proba':lambda self,v:np.array([.25])})()
+    with patch.multiple(model,model=old,_model_ready=True,
+                        _active_model_info={'architecture':model.EVENT_BOOST_ARCHITECTURE_NAME}):
+        prepared = model.prepare_meteor_inputs(frames,None,None,25)
+        with model._model_lock:
+            model.model = new
+        assert model.predict_meteor_event(frames,None,None,25,prepared=prepared) == .25
+        model._active_model_info = {'architecture':model.EVENT_TRANSFORMER_ARCHITECTURE_NAME}
+        image,kymo,features = prepared.image,prepared.kymograph,prepared.features
+        new.encoder = type('Encoder',(),{'encode':lambda self,images:np.zeros((1,4),np.float32)})()
+        with patch.object(model,'_prepare_meteor_inputs',wraps=model._prepare_meteor_inputs) as prepare:
+            assert model.predict_meteor_event(frames,None,None,25,prepared=prepared) == .25
+            assert prepare.call_count == 1
+
+
+def test_distinct_mask_results_reuse_only_certified_identical_raw_pixels():
+    from video_processing import _VideoFrameRangeCache
+    from event_pixels import same_frame_pixels
+    frames = list(np.random.default_rng(73).integers(0,256,(4,64,96,3),dtype=np.uint8))
+    mask = np.full((64,96),255,np.uint8)
+    mask[:8] = 0
+    caches = [_VideoFrameRangeCache(),_VideoFrameRangeCache()]
+    for cache in caches:
+        cache.retain_live_frames(frames)
+    a,b = [cache.mask_frames(frames,mask) for cache in caches]
+    assert all(x is not y and same_frame_pixels(x,y) for x,y in zip(a,b))
+    np.testing.assert_array_equal(a,b)
+    with patch.multiple(model,model=object(),_model_ready=True,
+                        _active_model_info={'architecture':model.EVENT_BOOST_ARCHITECTURE_NAME}):
+        prepared = model.prepare_meteor_inputs(a,None,None,25)
+        assert prepared.matches(b,None,None,25,model.EVENT_BOOST_ARCHITECTURE_NAME)
+        assert not prepared.matches([frame.copy() for frame in b],None,None,25,model.EVENT_BOOST_ARCHITECTURE_NAME)
+        changed = mask.copy()
+        changed[9,9] = 0
+        c = caches[1].mask_frames(frames,changed)
+        assert not prepared.matches(c,None,None,25,model.EVENT_BOOST_ARCHITECTURE_NAME)
+        copied_source = [frame.copy() for frame in frames]
+        caches[1].retain_live_frames(copied_source)
+        d = caches[1].mask_frames(copied_source,mask)
+        assert not prepared.matches(d,None,None,25,model.EVENT_BOOST_ARCHITECTURE_NAME)
+    for cache in caches:
+        cache.close()
+
+
+def test_mask_pixel_provenance_releases_original_with_its_last_mask_result():
+    import gc
+    import weakref
+    from event_pixels import register_mask_pixels, _frame_origins
+    source = np.ones((8,8,3),np.uint8)
+    masked = source.copy()
+    source_ref, masked_id = weakref.ref(source),id(masked)
+    register_mask_pixels(masked,source,('mask',1))
+    del source
+    gc.collect()
+    assert source_ref() is not None
+    del masked
+    gc.collect()
+    assert source_ref() is None
+    assert masked_id not in _frame_origins
+
+
+def test_transformer_encoder_prepared_pixels_use_the_exact_original_normalization():
+    import cv2
+    from event_encoder_pixels import encoder_pixels
+    from event_transformer import EventImageEncoder
+    import torch
+    from types import SimpleNamespace
+    class Network:
+        def __call__(self,pixel_values):
+            return SimpleNamespace(last_hidden_state=pixel_values.flatten(2).transpose(1,2)[:,:5,:])
+    encoder = object.__new__(EventImageEncoder)
+    encoder.device,encoder.network = torch.device('cpu'),Network()
+    for image in (np.zeros((5,160,160),np.float32),
+                  np.random.default_rng(361).random((5,160,160),dtype=np.float32)):
+        maximum = np.asarray(image[0],dtype=np.float32)
+        scale = max(float(np.quantile(maximum,.999)),.05)
+        views = []
+        for view in (np.repeat(maximum[None],3,axis=0),image[1:4]):
+            resized = np.stack([cv2.resize(channel,(224,224),interpolation=cv2.INTER_LINEAR)
+                                for channel in np.clip(view/scale,0.,1.)])
+            views.append((resized-np.array([.485,.456,.406],np.float32)[:,None,None])
+                         /np.array([.229,.224,.225],np.float32)[:,None,None])
+        expected = np.stack(views)
+        actual = encoder_pixels(image)
+        np.testing.assert_array_equal(actual,expected)
+        np.testing.assert_array_equal(encoder.encode([image,image]),encoder.encode_prepared([actual,actual]))
+
+
+def test_transformer_prediction_reuses_certified_cpu_encoder_pixels():
+    frames = [np.zeros((40,40,3),np.uint8)]*4
+    class Encoder:
+        def encode_prepared(self,pixels):
+            assert len(pixels)==1 and pixels[0].shape==(2,3,224,224)
+            return np.zeros((1,4),np.float32)
+        def encode(self,images):
+            raise AssertionError('recomputed encoder pixels')
+    classifier = type('Classifier',(),{'encoder':Encoder(),
+                                       'predict_proba':lambda self,v:np.array([.75])})()
+    with patch.multiple(model,model=classifier,_model_ready=True,
+                        _active_model_info={'architecture':model.EVENT_TRANSFORMER_ARCHITECTURE_NAME}):
+        prepared = model.prepare_meteor_inputs(frames,None,None,25)
+        assert model.predict_meteor_event(frames,None,None,25,prepared=prepared)==.75

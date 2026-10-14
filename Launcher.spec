@@ -11,6 +11,10 @@ pathex = [str(root)]
 # Files required by runtime app (main_gui + local module deps).
 PAYLOAD_FILES = [
     "main_gui.py",
+    "gui_app.py",
+    "rtsp_gate_workers.py",
+    "event_pixels.py",
+    "component_statistics.py",
     "astrometry.py",
     "auto_time_updater.py",
     "bright_area_detector.py",
@@ -69,7 +73,26 @@ add_data(root / "bootstrap_requirements.txt", ".")
 for rel in PAYLOAD_FILES:
     rel_path = Path(rel)
     add_data(root / rel_path, str(Path("payload") / rel_path.parent))
+# GUI and detector modules are split over multiple source files. Include the
+# complete local Python dependency set, including additions after this list.
+for module in sorted(root.glob("*.py")):
+    if module.name not in PAYLOAD_FILES:
+        add_data(module,"payload")
+for module in sorted((root / "obs_meteor_overlay").rglob("*.py")):
+    add_data(module,str(Path("payload") / module.relative_to(root).parent))
 add_data(root / "assets" / "constellations.lines.json", "payload/assets")
+add_data(root / "assets" / "component_statistics.c", "payload/assets")
+# Bootstrap runs the extracted source in its managed Python environment;
+# ship the accelerator there so end users need no C compiler.
+import tempfile
+import subprocess
+from component_statistics import build_library, _library_name
+native_build = tempfile.TemporaryDirectory(prefix="meteor_launcher_native_")
+try:
+    native_library = build_library(Path(native_build.name) / _library_name())
+    add_data(native_library,"payload/assets")
+except (OSError,RuntimeError,subprocess.SubprocessError) as exc:
+    print(f"Optional native accelerator unavailable; reference fallback retained: {exc}")
 add_data(root / "THIRD_PARTY_NOTICES.md", "payload")
 
 

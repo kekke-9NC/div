@@ -118,6 +118,35 @@ def detect_lines(
 detect_lines_with_endpoints = detect_lines
 
 
+class _WindowExtrema:
+    """Reuse extrema of immutable frame blocks in overlapping live windows."""
+    def __init__(self, block_size):
+        self.block_size = max(1, int(block_size))
+        self.blocks = {}
+
+    def reduce(self, frames, start):
+        used, maximum, minimum = {}, None, None
+        offset = 0
+        while offset < len(frames):
+            first = start + offset
+            length = min(self.block_size - first % self.block_size, len(frames)-offset)
+            block = frames[offset:offset+length]
+            key = (first, length)
+            cached = self.blocks.get(key)
+            if cached is None or any(a is not b for a, b in zip(cached[0], block)):
+                high, low = _temporal_min_max(block)
+                cached = (list(block), high, low)
+            used[key] = cached
+            if maximum is None:
+                maximum, minimum = cached[1].copy(), cached[2].copy()
+            else:
+                cv2.max(maximum, cached[1], dst=maximum)
+                cv2.min(minimum, cached[2], dst=minimum)
+            offset += length
+        self.blocks = used
+        return maximum, minimum
+
+
 def _continuous_rtsp_differences(cap, interval, duration, buffer_duration,
                                  cancel_flag, evidence_cap, include_frame_window):
     """Keep one detector clock and a bounded future tail across spool files."""
@@ -133,15 +162,17 @@ def _continuous_rtsp_differences(cap, interval, duration, buffer_duration,
     frame_index = -1
     next_end = required - 1
     last_end = -1
+    extrema = _WindowExtrema(step)
+    evidence_extrema = _WindowExtrema(step) if evidence is not None else None
 
     def emit(end, final=False):
         cap.analysis_final_frame = final
         first = frame_index - len(frames) + 1
         start = max(first, 0, end - required + 1)
         window = list(frames)[start - first:end - first + 1]
-        maximum, minimum = _temporal_min_max(window)
+        maximum, minimum = extrema.reduce(window, start)
         if evidence is not None:
-            diff, _ = _temporal_min_max(list(evidence)[start - first:end - first + 1])
+            diff, _ = evidence_extrema.reduce(list(evidence)[start - first:end - first + 1], start)
         else:
             diff = cv2.absdiff(maximum, minimum)
         result = (diff, (start, end), maximum, minimum, frames.copy(), frame_index)
@@ -158,7 +189,8 @@ def _continuous_rtsp_differences(cap, interval, duration, buffer_duration,
             evidence.append(evidence_frame if ok_evidence else frame)
         if frame_index >= next_end + future:
             yield emit(next_end)
-            cap.acknowledge(next_end)
+            if not getattr(cap, 'defer_analysis_ack', False):
+                cap.acknowledge(next_end)
             last_end = next_end
             next_end += step
     if frames and (cancel_flag is None or not cancel_flag.is_set()):
@@ -166,12 +198,14 @@ def _continuous_rtsp_differences(cap, interval, duration, buffer_duration,
         # very last one flushes the short-flash detector's active tracks.
         while next_end < frame_index:
             yield emit(next_end)
-            cap.acknowledge(next_end)
+            if not getattr(cap, 'defer_analysis_ack', False):
+                cap.acknowledge(next_end)
             last_end = next_end
             next_end += step
         if last_end != frame_index:
             yield emit(frame_index, final=True)
-            cap.acknowledge(frame_index, final=True)
+            if not getattr(cap, 'defer_analysis_ack', False):
+                cap.acknowledge(frame_index, final=True)
 
 
 def create_diff_images(

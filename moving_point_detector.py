@@ -70,12 +70,24 @@ def _frame_detections(
     """Extract small bright components from one residual frame."""
     smoothed = cv2.GaussianBlur(residual, (3, 3), 0)
     binary = (smoothed >= float(threshold)).astype(np.uint8)
+    if not cv2.countNonZero(binary):
+        return []
     component_count, labels, stats, centroids = cv2.connectedComponentsWithStats(
         binary, connectivity=8
     )
     height, width = residual.shape[:2]
     detections = []
-    for index in range(1, component_count):
+    eligible = np.flatnonzero(
+        (stats[1:, cv2.CC_STAT_AREA] >= 2)
+        & (stats[1:, cv2.CC_STAT_AREA] <= 120)
+        & (stats[1:, cv2.CC_STAT_WIDTH] <= 30)
+        & (stats[1:, cv2.CC_STAT_HEIGHT] <= 30)
+        & (stats[1:, cv2.CC_STAT_LEFT] >= border)
+        & (stats[1:, cv2.CC_STAT_TOP] >= border)
+        & (stats[1:, cv2.CC_STAT_LEFT] + stats[1:, cv2.CC_STAT_WIDTH] < width - border)
+        & (stats[1:, cv2.CC_STAT_TOP] + stats[1:, cv2.CC_STAT_HEIGHT] < height - border)
+    ) + 1
+    for index in eligible:
         x, y, component_width, component_height, area = stats[index]
         if area < 2 or area > 120:
             continue
@@ -107,6 +119,27 @@ def _frame_detections(
         )
     detections.sort(key=lambda item: item["score"], reverse=True)
     return detections[:max_components]
+
+
+class GrayFrameCache:
+    """Reuse exact grayscale/resize results across overlapping live windows."""
+    def __init__(self):
+        self.entries = {}
+        self.scale = None
+
+    def convert(self, frames, scale):
+        if scale != self.scale:
+            self.entries.clear()
+            self.scale = scale
+        current = {}
+        values = []
+        for frame in frames:
+            entry = self.entries.get(id(frame))
+            gray = entry[1] if entry is not None and entry[0] is frame else _gray_small(frame, scale)
+            current[id(frame)] = (frame, gray)
+            values.append(gray)
+        self.entries = current
+        return values
 
 
 def _finish_track(track: dict, scale: float) -> MovingPointTrack | None:
@@ -185,6 +218,9 @@ def detect_moving_point_tracks(
     border: int = 15,
     max_components_per_frame: int = 150,
     max_candidates: int = 20,
+    gray_cache: GrayFrameCache | None = None,
+    _prepared_gray: np.ndarray | None = None,
+    _component_workers: int = 1,
 ) -> List[MovingPointTrack]:
     """Return coherent moving bright-point tracks in ``frames``.
 
@@ -199,7 +235,9 @@ def detect_moving_point_tracks(
     if not 0.25 <= scale <= 1.0:
         raise ValueError("scale must be between 0.25 and 1.0")
 
-    gray_frames = np.stack([_gray_small(frame, scale) for frame in frames])
+    gray_frames = (_prepared_gray if _prepared_gray is not None else
+                   np.stack(gray_cache.convert(frames, scale) if gray_cache is not None
+                            else [_gray_small(frame, scale) for frame in frames]))
     if gray_frames.dtype == np.uint8:
         # Integer medians (including the mean of two middle values) are exact
         # half-integers in float32. Partition the smaller uint8 cube first.
@@ -209,15 +247,19 @@ def detect_moving_point_tracks(
         background = np.median(gray_frames, axis=0)
     residuals = np.maximum(gray_frames - background[None, :, :], 0.0)
     small_border = max(3, int(round(border * scale)))
-    detections = [
-        _frame_detections(
-            residual,
-            threshold,
-            small_border,
-            max_components_per_frame,
-        )
-        for residual in residuals
-    ]
+    if _component_workers > 1:
+        from short_flash_detector import _component_executor
+        pool = _component_executor(min(4,int(_component_workers)))
+        futures = [pool.submit(_frame_detections,residual,threshold,small_border,max_components_per_frame)
+                   for residual in residuals]
+        try:
+            detections = [future.result() for future in futures]
+        finally:
+            from concurrent.futures import wait
+            wait(futures)
+    else:
+        detections = [_frame_detections(residual,threshold,small_border,max_components_per_frame)
+                      for residual in residuals]
 
     active: List[dict] = []
     finished: List[dict] = []

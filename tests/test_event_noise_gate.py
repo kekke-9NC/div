@@ -32,6 +32,28 @@ def test_component_scores_and_stable_ties_match_original_dense_loop():
     assert short_flash_detector._component_detections(residual, labels, stats, centers) == expected[:400]
 
 
+def test_component_aggregation_matches_sparse_reference_on_both_sides_of_switch():
+    rng = np.random.default_rng(232)
+    for number in (1, 31, 32, 33, 100, 399, 400, 401):
+        binary, residual = np.zeros((160, 240), np.uint8), np.zeros((160, 240), np.uint8)
+        for index in range(number):
+            y, x = (index//40)*5, (index%40)*6
+            binary[y, x:x+3] = 1
+            residual[y, x:x+3] = rng.choice([4, 5, 7, 10, 15], size=3)
+        _, labels, stats, centers = cv2.connectedComponentsWithStats(binary, 8)
+        expected = []
+        for k in range(1, len(stats)):
+            x, y, w, h, area = map(int, stats[k])
+            if area < 3 or area > 1000 or w > 350 or h > 350:
+                continue
+            values = residual[y:y+h, x:x+w][labels[y:y+h, x:x+w] == k]
+            score, peak = int(values.sum()), int(values.max())
+            if score >= 20 and peak >= 5:
+                expected.append([*centers[k], score, w, h, peak])
+        expected.sort(key=lambda d: d[2], reverse=True)
+        assert short_flash_detector._component_detections(residual, labels, stats, centers) == expected[:400]
+
+
 def test_native_gate_crop_and_standalone_crop_have_identical_features():
     rng = np.random.default_rng(23)
     frames = [rng.integers(0, 256, (90, 110, 3), np.uint8) for _ in range(6)]

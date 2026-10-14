@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import bisect
 import math
 import os
 import shutil
@@ -19,6 +20,43 @@ from temporal_statistics import temporal_median
 
 SCHEMA_VERSION = 1
 _log_lock = threading.Lock()
+_history_cache_lock = threading.Lock()
+_history_cache = {}
+_media_names_cache = {}
+_sync_skip_cache = {}
+
+
+def _file_identity(path):
+    stat = Path(path).stat()
+    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
+
+
+def _matching_media(source_dir, prefix):
+    """Index directory names; only stat names belonging to this event."""
+    identity = _file_identity(source_dir)
+    cached = _media_names_cache.get(source_dir)
+    if cached is None or cached[0] != identity:
+        with os.scandir(source_dir) as entries:
+            names = sorted(entry.name for entry in entries)
+        if _file_identity(source_dir) == identity:
+            if len(_media_names_cache) >= 16:
+                _media_names_cache.clear()
+            _media_names_cache[source_dir] = (identity, names)
+    else:
+        names = cached[1]
+    candidates = set()
+    exact = bisect.bisect_left(names, prefix)
+    if exact < len(names) and names[exact] == prefix:
+        candidates.add(prefix)
+    for start in (prefix + "_", prefix + "."):
+        index = bisect.bisect_left(names, start)
+        while index < len(names) and names[index].startswith(start):
+            name = names[index]
+            if start.endswith("_") or Path(name).stem == prefix:
+                candidates.add(name)
+            index += 1
+    return [source_dir / name for name in sorted(candidates)
+            if (source_dir / name).is_file()]
 
 
 def _utc_now() -> str:
@@ -202,13 +240,18 @@ def export_training_event(
         raise
 
 
-def pending_events(root_dir: str) -> List[Path]:
+def pending_events(root_dir: str, *, cancel: Optional[threading.Event] = None) -> List[Path]:
     root = Path(root_dir).expanduser().resolve()
     events: List[Path] = []
     for label in ("meteor", "not_meteor"):
         folder = root / "pending" / label
         if folder.exists():
-            events.extend(p for p in folder.iterdir() if p.is_dir() and not p.name.startswith("."))
+            with os.scandir(folder) as entries:
+                for entry in entries:
+                    if cancel is not None and cancel.is_set():
+                        raise InterruptedError("レビュー読み込みを中断しました")
+                    if not entry.name.startswith(".") and entry.is_dir():
+                        events.append(Path(entry.path))
     return sorted(events, key=lambda p: p.name)
 
 
@@ -311,12 +354,7 @@ def _move_detected_media(
     if source_dir.resolve() == destination_dir.resolve() or not source_dir.is_dir():
         return []
 
-    matching_files = []
-    for path in source_dir.iterdir():
-        if not path.is_file():
-            continue
-        if path.name == prefix or path.stem == prefix or path.name.startswith(f"{prefix}_"):
-            matching_files.append(path)
+    matching_files = _matching_media(source_dir, prefix)
     return _apply_media_moves(
         ((path, destination_dir / path.name) for path in sorted(matching_files)),
         rename_conflicts=True,
@@ -384,27 +422,41 @@ def review_event(
     return record
 
 
-def sync_reviewed_media(root_dir: str, media_directories: Dict[str, str]) -> int:
+def sync_reviewed_media(root_dir: str, media_directories: Dict[str, str], *,
+                        cancel: Optional[threading.Event] = None) -> int:
     """Move saved detection files for already-reviewed misclassifications."""
     root = Path(root_dir).expanduser().resolve()
     moved_count = 0
+    if root not in _sync_skip_cache and len(_sync_skip_cache) >= 4:
+        _sync_skip_cache.clear()
+    skip_cache = _sync_skip_cache.setdefault(root, {})
     for reviewed_folder_label in ("meteor", "not_meteor"):
         reviewed_dir = root / "reviewed" / reviewed_folder_label
         if not reviewed_dir.is_dir():
             continue
         for event_dir in sorted(reviewed_dir.iterdir()):
+            # Never interrupt a move/metadata/log transaction midway through.
+            if cancel is not None and cancel.is_set():
+                return moved_count
             if not event_dir.is_dir() or event_dir.name.startswith("."):
+                continue
+            marker = event_dir / "metadata.json"
+            identity = _file_identity(marker)
+            if skip_cache.get(marker) == identity:
                 continue
             metadata = load_metadata(event_dir)
             if metadata.get("review_status") != "reviewed":
+                skip_cache[marker] = identity
                 continue
             predicted_raw = metadata.get("predicted_label")
             reviewed_raw = metadata.get("reviewed_label", reviewed_folder_label)
             if predicted_raw not in ("meteor", "not_meteor") or reviewed_raw not in (
                 "meteor", "not_meteor"
             ):
+                skip_cache[marker] = identity
                 continue
             if predicted_raw == reviewed_raw or "detected_media_moves" in metadata:
+                skip_cache[marker] = identity
                 continue
 
             detected_media = metadata.get("detected_media")
@@ -439,6 +491,7 @@ def sync_reviewed_media(root_dir: str, media_directories: Dict[str, str]) -> int
                 )
                 raise
             moved_count += len(media_moves)
+            skip_cache[marker] = _file_identity(marker)
     return moved_count
 
 
@@ -587,53 +640,109 @@ def undo_review(record: Dict[str, Any], root_dir: str) -> Optional[Path]:
     return destination
 
 
-def undoable_reviews(root_dir: str) -> List[Dict[str, Any]]:
-    """Return still-active review records, including reviews from earlier app sessions."""
-    log_path = Path(root_dir).expanduser() / "review_log.jsonl"
-    if not log_path.exists():
-        return []
-    active: List[Dict[str, Any]] = []
-    try:
-        with log_path.open("r", encoding="utf-8") as handle:
-            for line in handle:
+def _read_history(log_path, cancel):
+    records = {"review": [], "skip": []}
+    timestamps = {"review": {}, "skip": {}}
+    with log_path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            if cancel is not None and cancel.is_set():
+                raise InterruptedError("レビュー読み込みを中断しました")
+            try:
+                record = json.loads(line)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(record, dict):
+                continue
+            action = record.get("action")
+            if not isinstance(action, str):
+                continue
+            if action in records:
+                active = records[action]
+                index = len(active)
+                active.append(record)
                 try:
-                    record = json.loads(line)
-                except (json.JSONDecodeError, TypeError):
-                    continue
-                if record.get("action") == "review":
-                    active.append(record)
-                elif record.get("action") == "undo":
-                    reverted = record.get("reverts_review_timestamp")
+                    timestamps[action].setdefault(record.get("timestamp"), []).append(index)
+                except TypeError:
+                    pass  # Legacy malformed timestamps retain last-match semantics.
+            elif action in ("undo", "undo_skip"):
+                kind = "review" if action == "undo" else "skip"
+                reverted = record.get("reverts_review_timestamp" if kind == "review"
+                                      else "reverts_skip_timestamp")
+                active = records[kind]
+                try:
+                    bucket = timestamps[kind].get(reverted, [])
+                    if bucket:
+                        active[bucket.pop()] = None
+                except TypeError:
                     for index in range(len(active) - 1, -1, -1):
-                        if active[index].get("timestamp") == reverted:
-                            active.pop(index)
+                        if active[index] is not None and active[index].get("timestamp") == reverted:
+                            active[index] = None
                             break
+    return tuple([(record, Path(record.get("to", ""))) for record in records[kind]
+                  if record is not None] for kind in ("review", "skip"))
+
+
+def _surviving_history(records, cancel):
+    # Historical logs contain many deleted/moved samples. Scan each parent
+    # directory once instead of issuing one stat per historical record.
+    names = {}
+    result = []
+    for record, path in records:
+        if cancel is not None and cancel.is_set():
+            raise InterruptedError("レビュー読み込みを中断しました")
+        parent = path.parent
+        if not path.name:
+            exists = path.exists()
+        else:
+            if parent not in names:
+                try:
+                    with os.scandir(parent) as entries:
+                        names[parent] = {entry.name for entry in entries
+                                         if not entry.is_symlink() or Path(entry.path).exists()}
+                except FileNotFoundError:
+                    names[parent] = set()
+                except OSError:
+                    names[parent] = None
+            inventory = names[parent]
+            exists = path.exists() if inventory is None else path.name in inventory
+        if exists:
+            result.append(record)
+    return result
+
+
+def undoable_history(root_dir: str, *, cancel: Optional[threading.Event] = None,
+                     strict: bool = False
+                     ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Reuse an unchanged log, while rechecking actual directory inventories."""
+    log_path = Path(root_dir).expanduser().resolve() / "review_log.jsonl"
+    try:
+        identity = _file_identity(log_path)
+        with _history_cache_lock:
+            cached = _history_cache.get(log_path)
+            if cached is not None and cached[0] == identity:
+                records = cached[1]
+            else:
+                records = _read_history(log_path, cancel)
+                if _file_identity(log_path) == identity:
+                    if len(_history_cache) >= 4:
+                        _history_cache.clear()
+                    _history_cache[log_path] = (identity, records)
+        return tuple(_surviving_history(group, cancel) for group in records)
+    except FileNotFoundError:
+        return [], []
+    except InterruptedError:
+        raise
     except OSError:
-        return []
-    return [record for record in active if Path(record.get("to", "")).exists()]
+        if strict:
+            raise
+        return [], []
+
+
+def undoable_reviews(root_dir: str) -> List[Dict[str, Any]]:
+    """Return active review records, including earlier app sessions."""
+    return undoable_history(root_dir)[0]
 
 
 def undoable_skips(root_dir: str) -> List[Dict[str, Any]]:
-    """Return active skip records, including skips made in earlier sessions."""
-    log_path = Path(root_dir).expanduser() / "review_log.jsonl"
-    if not log_path.exists():
-        return []
-    active: List[Dict[str, Any]] = []
-    try:
-        with log_path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                try:
-                    record = json.loads(line)
-                except (json.JSONDecodeError, TypeError):
-                    continue
-                if record.get("action") == "skip":
-                    active.append(record)
-                elif record.get("action") == "undo_skip":
-                    reverted = record.get("reverts_skip_timestamp")
-                    for index in range(len(active) - 1, -1, -1):
-                        if active[index].get("timestamp") == reverted:
-                            active.pop(index)
-                            break
-    except OSError:
-        return []
-    return [record for record in active if Path(record.get("to", "")).exists()]
+    """Return active skip records, including earlier app sessions."""
+    return undoable_history(root_dir)[1]

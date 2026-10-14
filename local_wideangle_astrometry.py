@@ -1757,6 +1757,8 @@ def _project_constellation_samples(
     wcs: Any,
     ra: np.ndarray,
     dec: np.ndarray,
+    support_mask: Optional[np.ndarray] = None,
+    pixel_offset: Tuple[float, float] = (0.0, 0.0),
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Project dense safety samples without broadening the endpoint mask."""
     if isinstance(wcs, FixedCameraPlateModel):
@@ -1766,6 +1768,26 @@ def _project_constellation_samples(
             return np.zeros_like(ra), np.zeros_like(dec), np.zeros_like(ra, dtype=bool)
         x, y = np.asarray(x, dtype=float), np.asarray(y, dtype=float)
         usable = np.isfinite(x) & np.isfinite(y)
+        if support_mask is not None:
+            # The drawing caller discards these same off-frame/masked samples
+            # after the sky roundtrip. If none can enter a drawable run, avoid
+            # the expensive inverse polynomial for this whole edge. Whenever
+            # any sample can be drawn, validate the original complete array so
+            # even the inverse solver's shared stopping rule stays unchanged.
+            height, width = support_mask.shape[:2]
+            points = np.column_stack((x, y)) + np.asarray(pixel_offset, dtype=float)
+            visible = usable & np.isfinite(points).all(axis=1)
+            visible &= ((points[:, 0] >= 0) & (points[:, 0] < width)
+                        & (points[:, 1] >= 0) & (points[:, 1] < height))
+            rounded = np.zeros(points.shape, dtype=np.int32)
+            indices = np.flatnonzero(visible)
+            if len(indices):
+                rounded[indices] = np.rint(points[indices]).astype(np.int32)
+            visible &= ((rounded[:, 0] >= 0) & (rounded[:, 0] < width)
+                        & (rounded[:, 1] >= 0) & (rounded[:, 1] < height))
+            indices = np.flatnonzero(visible)
+            if not len(indices) or not np.any(support_mask[rounded[indices, 1], rounded[indices, 0]] > 0):
+                return x, y, np.zeros_like(usable)
         # Validate the direction that matters for an overlay: requested sky
         # coordinate -> detector -> recovered sky coordinate.  Pixel->sky->
         # pixel alone cannot detect a polynomial fold because it starts on a
@@ -1950,7 +1972,7 @@ def _draw_constellation_lines(
             sampled = _sample_constellation_line(line[index:index + 2])
             segment_ra = (sampled[:, 0] - delta_ra) % 360.0
             sample_x, sample_y, sample_usable = _project_constellation_samples(
-                wcs, segment_ra, sampled[:, 1]
+                wcs, segment_ra, sampled[:, 1], support_mask, tuple(pixel_shift)
             )
             sample_points = np.column_stack((sample_x, sample_y))
             sample_points += pixel_shift

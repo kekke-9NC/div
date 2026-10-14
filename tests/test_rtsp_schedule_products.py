@@ -220,6 +220,75 @@ class ScheduleProductTests(unittest.TestCase):
             self.assertTrue(cache.put("new", {"a": b"1234"}))
             self.assertLessEqual(cache.size(), 9)
 
+    def test_cache_publishing_reuses_shared_inventory_without_file_walks(self):
+        with tempfile.TemporaryDirectory() as root:
+            cache = products.ProductCache(root, 20)
+            cache.put('old', {'frame.png': b'1234'})
+            with mock.patch.object(Path, 'rglob', side_effect=AssertionError('repeated full inventory')):
+                manager = products.ProductCache(root, 20)
+                self.assertTrue(manager.put('new', {'frame.png': b'5678'}))
+                self.assertEqual(cache.entry_sizes(), [('old', 4), ('new', 4)])
+                cache.clear(['old'])
+                self.assertEqual(manager.entry_sizes(), [('new', 4)])
+            self.assertEqual(cache.size(), 4)
+
+    def test_cache_pending_clear_cannot_report_successful_publication(self):
+        with tempfile.TemporaryDirectory() as root:
+            cache = products.ProductCache(root, 20)
+            cache.put('input', {'frame.png': b'1234'})
+            with cache.pin(['input']):
+                cache.clear(['input'])
+                self.assertFalse(cache.put('input', {'frame.png': b'5678'}))
+                self.assertFalse(cache.build('input', 4, lambda directory: None))
+            self.assertEqual(cache.entry_sizes(), [])
+            self.assertTrue(cache.put('input', {'frame.png': b'5678'}))
+            self.assertEqual(cache.size(), 4)
+
+    def test_cache_external_entries_and_explicit_size_reconcile(self):
+        with tempfile.TemporaryDirectory() as root:
+            cache = products.ProductCache(root, 10)
+            external = Path(root)/'external'
+            external.mkdir()
+            (external/'frame.png').write_bytes(b'1234')
+            self.assertEqual(cache.entry_sizes(), [('external', 4)])
+            (external/'frame.png').write_bytes(b'12345678')
+            self.assertEqual(cache.size(), 8)
+            self.assertTrue(cache.put('new', {'frame.png': b'1234'}))
+            self.assertEqual(cache.entry_sizes(), [('new', 4)])
+
+    def test_cache_root_replacement_invalidates_inventory(self):
+        with tempfile.TemporaryDirectory() as parent:
+            root = Path(parent)/'cache'
+            cache = products.ProductCache(root, 20)
+            cache.put('old', {'frame.png': b'1234'})
+            root.rename(Path(parent)/'previous')
+            root.mkdir()
+            self.assertEqual(cache.entry_sizes(), [])
+            self.assertTrue(cache.put('new', {'frame.png': b'5678'}))
+            self.assertEqual(cache.size(), 4)
+
+    def test_cache_clear_during_build_rejects_same_key_put(self):
+        with tempfile.TemporaryDirectory() as root:
+            cache = products.ProductCache(root, 20)
+            def writer(directory):
+                (directory/'recording.mp4').write_bytes(b'1234')
+                cache.clear(['video'])
+                self.assertFalse(cache.put('video', {'frame.png': b'5678'}))
+                self.assertFalse(cache.build('video', 4, lambda target: None))
+            self.assertFalse(cache.build('video', 8, writer))
+            self.assertEqual(cache.size(), 0)
+
+    def test_cache_active_writer_overshoot_and_unmanaged_bytes_count_for_quota(self):
+        with tempfile.TemporaryDirectory() as root:
+            cache = products.ProductCache(root, 20)
+            (Path(root)/'unmanaged').write_bytes(b'1234')
+            def writer(directory):
+                (directory/'recording.mp4').write_bytes(b'0'*17)
+                self.assertFalse(cache.put('event', {'frame.png': b'x'}))
+            with self.assertRaisesRegex(IOError, '予約容量'):
+                cache.build('video', 8, writer)
+            self.assertEqual(cache.size(), 4)
+
     def test_video_build_reservation_does_not_block_delivery_or_get_removed(self):
         with tempfile.TemporaryDirectory() as root:
             cache = products.ProductCache(root, 20)
@@ -647,6 +716,231 @@ class ScheduleProductTests(unittest.TestCase):
             self.assertTrue(ok)
             self.assertLess(float(frame[:, :12].mean()), 3)
             self.assertTrue(source.exists())
+
+    def test_timelapse_repeated_slots_decode_once_with_exact_frames(self):
+        with tempfile.TemporaryDirectory() as root:
+            service = self.service(root, timelapse=True)
+            job = service._job(datetime(2026, 10, 12, 20))
+            originals = [np.full((64, 96, 3), value, np.uint8) for value in (17, 73)]
+            job["samples"] = {"0": job["start"], "5": job["end"]}
+            for index, frame in zip((0, 5), originals):
+                service.cache.put(job["id"] + f"_sample_{index:06d}",
+                                  {"frame.png": products.png_bytes(frame)})
+            emitted = []
+            with mock.patch.object(products, "decode_png", wraps=products.decode_png) as decode, \
+                 mock.patch("video_encoding.write_repeated_images", side_effect=lambda _path, frames, *_args:
+                            (emitted.extend(frame.copy() for frame in frames), 6)[1]), \
+                 mock.patch.object(rtsp_segments, "_properties", return_value=(6, 6, (96, 64))):
+                service._timelapse(job, Path(root)/"timelapse.mp4")
+            self.assertEqual(decode.call_count, 2)
+            self.assertEqual(len(emitted), 6)
+            for actual, expected in zip(emitted, [originals[0]]*3 + [originals[1]]*3):
+                np.testing.assert_array_equal(actual, expected)
+
+    def test_missing_sample_slots_retry_when_archives_change(self):
+        with tempfile.TemporaryDirectory() as root:
+            service = self.service(root, timelapse=True)
+            job = service._job(datetime(2026, 10, 12, 20))
+            with mock.patch.object(service, "_source_frame", return_value=None) as read:
+                service._prepare_samples(job)
+                self.assertEqual(read.call_count, 6)
+                service._prepare_samples(job)
+                self.assertEqual(read.call_count, 6)
+                job["archives"].append("new-minute.mp4")
+                service._prepare_samples(job)
+                self.assertEqual(read.call_count, 12)
+
+    def test_source_clock_index_refreshes_when_metadata_is_replaced(self):
+        with tempfile.TemporaryDirectory() as root:
+            service = self.service(root, timelapse=True)
+            start = datetime(2026, 10, 12, 20)
+            source = self.archive(root, start)
+            job = service._job(start)
+            job["archives"] = [str(source)]
+            self.assertIsNotNone(service._source_frame(job, start))
+            data = rtsp_live.timing(source)
+            data["start_time"] = (start+timedelta(seconds=10)).isoformat()
+            rtsp_live.write_json(str(source)+".capture.json", data)
+            self.assertIsNone(service._source_frame(job, start))
+            self.assertIsNotNone(service._source_frame(job, start+timedelta(seconds=10)))
+
+    def test_sampling_checks_whole_source_revision_at_batch_boundaries(self):
+        with tempfile.TemporaryDirectory() as root:
+            service = self.service(root,timelapse=True)
+            start = datetime(2026,10,12,20)
+            source = self.archive(root,start,count=600)
+            job = service._job(start)
+            job['archives'] = [str(source)]
+            with mock.patch.object(service,'_source_revision',wraps=service._source_revision) as revision:
+                service._prepare_samples(job)
+                self.assertEqual(revision.call_count,2)
+            self.assertEqual(len(job['samples']),6)
+
+    def test_sampling_discards_batch_if_source_clock_changes_during_decode(self):
+        with tempfile.TemporaryDirectory() as root:
+            service = self.service(root,timelapse=True)
+            start = datetime(2026,10,12,20)
+            source = self.archive(root,start,count=600)
+            job = service._job(start)
+            job['archives'] = [str(source)]
+            original = service._source_frame
+            changed = False
+            def decode(*args,**kwargs):
+                nonlocal changed
+                frame = original(*args,**kwargs)
+                if not changed:
+                    changed = True
+                    data = rtsp_live.timing(source)
+                    data['start_time'] = (start+timedelta(seconds=1)).isoformat()
+                    rtsp_live.write_json(str(source)+'.capture.json',data)
+                return frame
+            with mock.patch.object(service,'_source_frame',side_effect=decode):
+                with self.assertRaisesRegex(IOError,'録画が変更'):
+                    service._prepare_samples(job)
+            self.assertEqual(job['samples'],{})
+            self.assertEqual(job['sample_source_versions'],{})
+            self.assertFalse(any(service.cache.root.glob(job['id']+'_sample_*')))
+            service._prepare_samples(job)
+            self.assertEqual(len(job['samples']),5)
+
+    def test_sampling_rebuilds_png_left_without_manifest_after_crash(self):
+        with tempfile.TemporaryDirectory() as root:
+            service = self.service(root,timelapse=True)
+            start = datetime(2026,10,12,20)
+            source = self.archive(root,start,count=600)
+            job = service._job(start)
+            job['archives'] = [str(source)]
+            key = job['id']+'_sample_000000'
+            service.cache.put(key,{'frame.png':products.png_bytes(np.full((64,96,3),222,np.uint8))})
+            service._prepare_samples(job)
+            self.assertIn('0',job['samples'])
+            image = products.decode_png(service.cache.read(key,'frame.png'))
+            np.testing.assert_array_equal(image,service._source_frame(job,start))
+
+    def test_timelapse_preparation_overlaps_backlog_without_early_publication(self):
+        with tempfile.TemporaryDirectory() as root:
+            service = self.service(root, timelapse=True)
+            start = datetime(2026, 10, 12, 20)
+            source = self.archive(root, start, count=600)
+            service._job(start)
+            with mock.patch.object(service, "_timelapse", wraps=service._timelapse) as render:
+                with mock.patch.object(service, "_drained", return_value=False):
+                    service.tick(start+timedelta(seconds=61))
+                    self.assertEqual(render.call_count, 0)
+                    service.tick(start+timedelta(seconds=62))
+                job = next(iter(service.jobs.values()))
+                self.assertEqual(render.call_count, 1)
+                self.assertEqual(job["state"], "recording")
+                self.assertFalse(job["outputs"])
+                self.assertTrue(source.exists())
+                self.assertTrue((service.cache.root/service._timelapse_key(job)/"timelapse.mp4").exists())
+                service.tick(start+timedelta(seconds=63))
+                self.assertEqual(render.call_count, 1)
+                self.assertEqual(job["state"], "complete")
+                self.assertTrue(Path(job["outputs"]["timelapse"]).exists())
+
+    def test_prepared_timelapse_key_changes_when_sample_pixels_are_replaced(self):
+        with tempfile.TemporaryDirectory() as root:
+            service = self.service(root, timelapse=True)
+            job = service._job(datetime(2026, 10, 12, 20))
+            job["samples"] = {"0": job["start"]}
+            key = job["id"] + "_sample_000000"
+            service.cache.put(key, {"frame.png": products.png_bytes(np.zeros((64, 96, 3), np.uint8))})
+            before = service._timelapse_key(job)
+            (service.cache.root/key/"frame.png").write_bytes(products.png_bytes(np.full((64, 96, 3), 80, np.uint8)))
+            self.assertNotEqual(service._timelapse_key(job), before)
+
+    def test_finish_rechecks_sources_before_and_after_prepared_timelapse_copy(self):
+        for during_copy in (False,True):
+            with self.subTest(during_copy=during_copy), tempfile.TemporaryDirectory() as root:
+                service = self.service(root,timelapse=True)
+                start = datetime(2026,10,12,20)
+                source = self.archive(root,start,count=600)
+                job = service._job(start)
+                service._archives(job)
+                service._prepare_samples(job)
+                service._prepare_timelapse(job)
+                service._prepare_timelapse(job)
+                metadata = rtsp_live.timing(source)
+                def replace_source():
+                    rtsp_live.write_json(str(source)+'.capture.json',dict(metadata,revision='changed'))
+                copy = products.shutil.copyfile
+                def copy_then_replace(*args,**kwargs):
+                    result = copy(*args,**kwargs)
+                    replace_source()
+                    return result
+                if not during_copy:
+                    replace_source()
+                with mock.patch.object(products.shutil,'copyfile',side_effect=copy_then_replace if during_copy else copy):
+                    with self.assertRaises(IOError):
+                        service._finish(job)
+                self.assertFalse(job['samples'])
+                self.assertNotIn('timelapse',job['outputs'])
+                self.assertNotEqual(job['state'],'complete')
+                self.assertTrue(source.exists())
+                service._prepare_samples(job)
+                service._finish(job)
+                self.assertEqual(job['state'],'complete')
+
+    def test_replaced_archive_rebuilds_existing_sample_pngs(self):
+        with tempfile.TemporaryDirectory() as root:
+            service = self.service(root, timelapse=True)
+            start = datetime(2026, 10, 12, 20)
+            source = self.archive(root, start, count=600)
+            job = service._job(start)
+            service._archives(job)
+            service._prepare_samples(job)
+            old_key = service._timelapse_key(job)
+            metadata = rtsp_live.timing(source)
+            # A published replacement can change pixels while keeping timing.
+            writer = cv2.VideoWriter(str(source), cv2.VideoWriter_fourcc(*"mp4v"), 10, (96, 64))
+            for _ in range(600):
+                writer.write(np.full((64, 96, 3), 210, np.uint8))
+            writer.release()
+            rtsp_live.write_json(str(source)+".capture.json", metadata)
+            service._prepare_samples(job)
+            self.assertNotEqual(service._timelapse_key(job), old_key)
+            for index in job["samples"]:
+                key = job["id"] + f"_sample_{int(index):06d}"
+                frame = products.decode_png(service.cache.read(key, "frame.png"))
+                self.assertGreater(frame.mean(), 200)
+
+    def test_replaced_archive_invalidates_timelapse_published_before_later_failure(self):
+        with tempfile.TemporaryDirectory() as root:
+            service = self.service(root,timelapse=True)
+            start = datetime(2026,10,12,20)
+            source = self.archive(root,start,count=600)
+            job = service._job(start)
+            service._archives(job)
+            service._prepare_samples(job)
+            service._finish(job)
+            output = Path(job['outputs']['timelapse'])
+            job['state'] = 'rendering'  # A later blend/concat step failed.
+            rtsp_live.write_json(str(source)+'.capture.json',dict(rtsp_live.timing(source),revision='replaced'))
+            service._prepare_samples(job)
+            self.assertNotIn('timelapse',job['outputs'])
+            self.assertTrue(output.exists(),'keep the previous file until atomic replacement')
+            service._finish(job)
+            self.assertEqual(job['state'],'complete')
+            self.assertTrue(Path(job['outputs']['timelapse']).exists())
+
+    def test_new_overlapping_archive_invalidates_old_sample_pixels(self):
+        with tempfile.TemporaryDirectory() as root:
+            service = self.service(root, timelapse=True)
+            start = datetime(2026, 10, 12, 20)
+            source = self.archive(root, start, count=600)
+            job = service._job(start)
+            service._archives(job)
+            service._prepare_samples(job)
+            original = service._timelapse_key(job)
+            overlapping = self.archive(root, start+timedelta(seconds=30), count=300,
+                                       name="00_30_aabbccddeeff_minute_000000001.mp4")
+            job["archives"].append(str(overlapping))
+            with mock.patch.object(service, "_source_frame", wraps=service._source_frame) as read:
+                service._prepare_samples(job)
+                self.assertEqual(read.call_count, 6)
+            self.assertNotEqual(service._timelapse_key(job), original)
+            self.assertTrue(source.exists() and overlapping.exists())
 
     def test_concat_validates_then_replaces_and_records_capture_time(self):
         with tempfile.TemporaryDirectory() as root:

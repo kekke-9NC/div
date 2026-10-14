@@ -1,6 +1,7 @@
 import os
 import hashlib
 from pathlib import Path
+from dataclasses import dataclass
 from event_noise_gate import EventNoiseGate
 import multiprocessing
 import threading
@@ -318,12 +319,77 @@ def predict_meteor_probability(image_path: str) -> float:
             return 0.0
 
 
+@dataclass(frozen=True)
+class _PreparedMeteorInputs:
+    architecture: str
+    frames: tuple
+    rect: object
+    line: object
+    frame_rate: float
+    image: np.ndarray
+    kymograph: np.ndarray
+    features: np.ndarray
+    vector: object
+    encoder_pixels: object = None
+
+    def matches(self, frames, rect, line, frame_rate, architecture):
+        from event_pixels import same_frame_pixels
+        return (self.architecture == architecture and self.rect == _geometry_key(rect)
+                and self.line == _geometry_key(line) and self.frame_rate == frame_rate
+                and len(self.frames) == len(frames)
+                and all(same_frame_pixels(before,after) for before,after in zip(self.frames,frames)))
+
+
+def _geometry_key(value):
+    if value is None:
+        return None
+    return tuple(tuple(part) if isinstance(part,(tuple,list,np.ndarray)) else part for part in value)
+
+
+def _prepare_meteor_inputs(frames,rect,line,frame_rate,architecture):
+    image,kymograph,features = build_universal_inputs(frames=frames,rect=rect,detected_line=line,frame_rate=frame_rate)
+    vector = None
+    if architecture in (EVENT_BOOST_ARCHITECTURE_NAME,EVENT_TRANSFORMER_ARCHITECTURE_NAME):
+        image = (np.clip(image,0.,1.)*65535.).astype(np.uint16).astype(np.float32)/65535.
+        kymograph = (np.clip(kymograph,0.,1.)*65535.).astype(np.uint16).astype(np.float32)/65535.
+        vector = np.concatenate([extract_event_features(image,kymograph,features),
+                                 extract_motion_features(frames,rect,frame_rate)])
+    encoder_input = None
+    if architecture == EVENT_TRANSFORMER_ARCHITECTURE_NAME:
+        from event_encoder_pixels import encoder_pixels
+        encoder_input = encoder_pixels(image)
+    return _PreparedMeteorInputs(architecture,tuple(frames),_geometry_key(rect),_geometry_key(line),
+                                 frame_rate,image,kymograph,features,vector,encoder_input)
+
+
+def prepare_meteor_inputs(frames,rect,line,frame_rate,feature_workers=None):
+    """Prepare immutable resident-frame inputs on CPU; inference pins its own model.
+
+    The caller owns the frame lifetime and must not mutate these pixels before
+    inference. Geometry, frame identity and architecture are rechecked there.
+    No model weights or accelerator work are used during this preparation.
+    """
+    with _model_lock:
+        architecture = _active_model_info.get('architecture')
+        ready = _model_ready and model is not None
+    if not ready or architecture not in EVENT_ARCHITECTURES:
+        return None
+    if feature_workers is not None and architecture in (EVENT_BOOST_ARCHITECTURE_NAME,EVENT_TRANSFORMER_ARCHITECTURE_NAME):
+        kwargs = {'prepare_encoder':True} if architecture == EVENT_TRANSFORMER_ARCHITECTURE_NAME else {}
+        arrays = feature_workers.prepare_meteor(frames,rect,line,frame_rate,**kwargs)
+        if arrays is not None:
+            return _PreparedMeteorInputs(architecture,tuple(frames),_geometry_key(rect),_geometry_key(line),
+                                         frame_rate,*arrays)
+    return _prepare_meteor_inputs(frames,rect,line,frame_rate,architecture)
+
+
 def predict_meteor_event(
     frames: Sequence,
     cutout_rect,
     detected_line,
     frame_rate: float,
     fallback_image_path: Optional[str] = None,
+    prepared=None,
 ) -> float:
     """Classify a complete event when supported, with legacy-image fallback."""
     with _model_lock:
@@ -342,23 +408,17 @@ def predict_meteor_event(
         event_model = model
         architecture = _active_model_info.get("architecture")
     try:
-        image, kymograph, features = build_universal_inputs(
-            frames=frames,
-            rect=cutout_rect,
-            detected_line=detected_line,
-            frame_rate=frame_rate,
-        )
+        inputs = (prepared if prepared is not None and prepared.matches(frames,cutout_rect,detected_line,frame_rate,architecture)
+                  else _prepare_meteor_inputs(frames,cutout_rect,detected_line,frame_rate,architecture))
+        image,kymograph,features = inputs.image,inputs.kymograph,inputs.features
         if architecture in (EVENT_BOOST_ARCHITECTURE_NAME, EVENT_TRANSFORMER_ARCHITECTURE_NAME):
-            # Match the 16-bit training representation exactly.
-            image = (np.clip(image, 0., 1.) * 65535.).astype(np.uint16).astype(np.float32) / 65535.
-            kymograph = (np.clip(kymograph, 0., 1.) * 65535.).astype(np.uint16).astype(np.float32) / 65535.
-            vector = np.concatenate([
-                extract_event_features(image, kymograph, features),
-                extract_motion_features(frames, cutout_rect, frame_rate),
-            ])
+            vector = inputs.vector
             if architecture == EVENT_TRANSFORMER_ARCHITECTURE_NAME:
                 with _model_lock:
-                    encoded = event_model.encoder.encode([image])[0]
+                    if inputs.encoder_pixels is not None and hasattr(event_model.encoder,'encode_prepared'):
+                        encoded = event_model.encoder.encode_prepared([inputs.encoder_pixels])[0]
+                    else:
+                        encoded = event_model.encoder.encode([image])[0]
                 vector = np.concatenate([vector, encoded])
             return float(event_model.predict_proba(vector)[0])
         with _model_lock:
@@ -373,13 +433,15 @@ def predict_meteor_event(
         return 0.0
 
 
-def predict_noise_gate(frames, cutout_rect, frame_rate):
+def predict_noise_gate(frames, cutout_rect, frame_rate, feature_workers=None):
     """Return None for models without a gate, or if optional gating fails."""
     with _model_lock:
         gate = _active_noise_gate
     if gate is None:
         return None
     try:
+        if feature_workers is not None:
+            return gate.evaluate_features(feature_workers.extract(frames, cutout_rect, frame_rate))
         return gate.evaluate(frames, cutout_rect, frame_rate)
     except Exception as exc:
         # Never lose a meteor because an optional optimization failed.

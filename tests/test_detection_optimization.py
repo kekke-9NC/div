@@ -15,6 +15,150 @@ from universal_meteor_model import _crop_square, _gray, _robust_residual_cube
 
 
 class DetectionOptimizationTests(unittest.TestCase):
+    def test_finer_publication_restores_actual_producer_completion_order(self):
+        events = [dict(id='prepared-later',preparation_order=4),dict(id='fallback-a'),
+                  dict(id='prepared-first',preparation_order=0),dict(id='fallback-b'),
+                  dict(id='prepared-middle',preparation_order=2)]
+        ordered = video_processing._finer_publication_order(events)
+        self.assertEqual([event['id'] for event in ordered],
+                         ['prepared-first','prepared-middle','prepared-later','fallback-a','fallback-b'])
+        self.assertEqual([event['id'] for event in events],
+                         ['prepared-later','fallback-a','prepared-first','fallback-b','prepared-middle'])
+
+    def test_lookahead_finer_evidence_matches_consumer_with_independent_mask_cache(self):
+        from concurrent.futures import ThreadPoolExecutor
+        import model
+        from short_flash_detector import FlashCandidate
+        frames = list(np.random.default_rng(773).integers(0,256,(61,180,320,3),dtype=np.uint8))
+        mask = np.full((180,320),255,np.uint8)
+        mask[:9] = 0
+        flashes = [FlashCandidate(43,48,(35,55),(55,65),60,.99),
+                   FlashCandidate(45,49,(230,125),(245,130),60,.99)]
+        data = (frames[60],(36,60),None,None,frames,60,None)
+        producer,consumer = [video_processing._VideoFrameRangeCache() for _ in range(2)]
+        for cache in (producer,consumer):
+            cache.retain_live_frames(frames)
+        with patch.multiple(video_processing.config,RTSP_PARALLEL_ENABLED=True,
+                            DUPLICATE_DETECTION_THRESHOLD=10,FINER_DETECT_WINDOW_SECONDS=4), \
+             patch.multiple(model,model=object(),_model_ready=True,
+                            _active_model_info={'architecture':model.EVENT_BOOST_ARCHITECTURE_NAME}), \
+             patch.object(model,'predict_noise_gate',return_value=(1.,.5)), \
+             ThreadPoolExecutor(max_workers=2) as executor:
+            packet = video_processing._prepare_live_finer_packet(data,([f.line for f in flashes],flashes),
+                                                                 25,mask,None,producer,None,executor)
+            masked = consumer.mask_frames(frames,mask)
+            kwargs = dict(frames_data=masked,img_h=180,img_w=320,actual_start_frame_index=0,
+                          composite_step=5,cut_size=video_processing.config.FINER_CUTOUT_SIZE,
+                          border_margin=video_processing.config.BORDER_SIZE,
+                          finer_min_length=video_processing.config.FINER_DETECT_MIN_LENGTH)
+            self.assertIs(packet[2],data)
+            self.assertEqual(packet[3],25)
+            self.assertEqual(packet[0],video_processing._rtsp_finer_revision(consumer.resized_mask_revisions[(180,320)]))
+            for flash in flashes:
+                (x1,y1),(x2,y2) = flash.line
+                cand = dict(line=flash.line,cx=(x1+x2)//2,cy=(y1+y2)//2,flash=flash)
+                expected = video_processing._refine_and_gate_candidate(cand,kwargs,masked,0,0,25,True,
+                                                                       0,60,320,180,consumer,{},None)
+                actual = packet[1][flash.line]
+                self.assertEqual(actual[:3],expected[:3])
+                for field in ('image','kymograph','features','vector'):
+                    np.testing.assert_array_equal(getattr(actual[3],field),getattr(expected[3],field))
+                self.assertTrue(actual[3].matches(expected[3].frames,expected[3].rect,flash.line,25,
+                                                 model.EVENT_BOOST_ARCHITECTURE_NAME))
+        for cache in (producer,consumer):
+            cache.close()
+
+    def test_lookahead_cache_revision_tracks_gate_thresholds_and_mask(self):
+        import model
+        gate = type('Gate',(),{'threshold':.5,'brightness_min':12})()
+        with patch.object(model,'_active_noise_gate',gate):
+            before = video_processing._rtsp_finer_revision(('mask',1))
+            self.assertNotEqual(before,video_processing._rtsp_finer_revision(('mask',2)))
+            gate.threshold = .6
+            self.assertNotEqual(before,video_processing._rtsp_finer_revision(('mask',1)))
+            gate.threshold = .5
+            gate.brightness_min = 13
+            self.assertNotEqual(before,video_processing._rtsp_finer_revision(('mask',1)))
+
+    def test_native_crop_batch_larger_than_budget_uses_exact_reference(self):
+        frames = [np.full((200,220),i,np.uint8) for i in range(6)]
+        cache = video_processing._VideoFrameRangeCache(max_bytes=4*1024**2,integral_budget=200*221*4*2)
+        self.assertIsNone(cache._integral_gate_crops(frames,(0,0,160,160)))
+        self.assertEqual(cache.integral_bytes,0)
+
+    def test_cached_gate_integrals_preserve_crops_and_total_memory_budget(self):
+        rng = np.random.default_rng(328)
+        frames = list(rng.integers(0, 256, (6, 520, 600, 3), dtype=np.uint8))
+        cache = video_processing._VideoFrameRangeCache(max_bytes=32*1024**2, integral_budget=8*1024**2)
+        cache.retain_live_frames(frames)
+        for rect in ((3, 7, 259, 263), (5, 9, 389, 393), (0, 0, 128, 128),
+                     (-4, -8, 384, 384), (0, 0, -88, -8), (7, 9, 167, 169)):
+            actual = cache.noise_gate_frames(frames, rect)
+            for frame, crop in zip(frames, actual):
+                np.testing.assert_array_equal(crop, _crop_square(frame, rect, 64))
+        total = (sum(f.nbytes for f in cache.frames)+sum(f.nbytes for f in cache.masked.values())
+                 +sum(f.nbytes for f in cache.gray.values())+cache.crop_bytes+cache.integral_bytes)
+        self.assertLessEqual(total, cache.max_bytes)
+        self.assertLessEqual(cache.integral_bytes, cache.integral_budget)
+        cache.retain_live_frames([frame.copy() for frame in frames])
+        self.assertFalse(cache.integrals)
+    def test_live_noise_gate_crop_reuse_is_feature_exact_and_bounded(self):
+        from event_noise_gate import extract_noise_gate_features
+        from concurrent.futures import ThreadPoolExecutor
+        rng = np.random.default_rng(417)
+        frames = list(rng.integers(0, 256, (6, 90, 120, 3), dtype=np.uint8))
+        cache = video_processing._VideoFrameRangeCache(max_bytes=8*1024**2)
+        cache.retain_live_frames(frames)
+        rect = (11, 23, 89, 80)
+        expected = extract_noise_gate_features(frames, rect, 25)
+        actual = cache.noise_gate_frames(frames, rect)
+        np.testing.assert_array_equal(extract_noise_gate_features(actual, None, 25), expected)
+        again = cache.noise_gate_frames(frames, rect)
+        self.assertTrue(all(a is b for a, b in zip(actual, again)))
+        self.assertEqual(cache.crop_hits, len(frames))
+        with ThreadPoolExecutor(max_workers=9) as workers:
+            results = list(workers.map(lambda x: cache.noise_gate_frames(frames, (x, 0, x+70, 80)), range(80)))
+        for index, crops in enumerate(results):
+            for frame, cropped in zip(frames, crops):
+                np.testing.assert_array_equal(cropped, _crop_square(frame, (index, 0, index+70, 80), 64))
+        self.assertLessEqual(cache.crop_bytes, cache.crop_budget)
+        self.assertEqual(cache.crop_bytes, sum(f.nbytes for f in cache.gate_crops.values()))
+        cache.retain_live_frames([frame.copy() for frame in frames])
+        self.assertFalse(cache.gate_crops)
+    def test_live_mask_reuse_is_pixel_exact_bounded_and_invalidates(self):
+        rng = np.random.default_rng(629)
+        frames = list(rng.integers(0, 256, (12, 30, 40, 3), dtype=np.uint8))
+        cache = video_processing._VideoFrameRangeCache(max_bytes=frames[0].nbytes * 8)
+        mask = rng.integers(0, 2, (15, 20), dtype=np.uint8) * 255
+        cache.retain_live_frames(frames[:6])
+        first = cache.mask_frames(frames[2:6], mask)
+        repeated = cache.mask_frames(frames[3:6], mask)
+        self.assertTrue(all(a is b for a, b in zip(first[1:], repeated)))
+        cache.retain_live_frames(frames[3:9])
+        self.assertLessEqual(len(cache.frames), 4)
+        self.assertLessEqual(sum(f.nbytes for f in cache.frames) + sum(f.nbytes for f in cache.masked.values()), cache.max_bytes)
+        mask[:, :8] = 0
+        resized = cv2.resize(mask, (40, 30)).astype(np.uint8)
+        actual = cache.mask_frames(frames[3:9], mask)
+        for raw, got in zip(frames[3:9], actual):
+            np.testing.assert_array_equal(got, cv2.bitwise_and(raw, raw, mask=resized))
+        self.assertTrue(set(cache.masked).issubset({id(f) for f in cache.frames}))
+
+    def test_live_gate_gray_reuse_preserves_every_crop_pixel_and_budget(self):
+        from universal_meteor_model import _crop_square
+        rng = np.random.default_rng(661)
+        frames = list(rng.integers(0, 256, (6, 100, 120, 3), dtype=np.uint8))
+        cache = video_processing._VideoFrameRangeCache(max_bytes=frames[0].nbytes*10)
+        cache.retain_live_frames(frames)
+        mask = rng.integers(0, 2, (100, 120), dtype=np.uint8)*255
+        masked = cache.mask_frames(cache.frames, mask)
+        gray = cache.gray_frames(masked)
+        for original, actual in zip(masked, gray):
+            for rect in [(0, 0, 100, 100), (87, 13, 160, 119), (-10, -20, 70, 80)]:
+                np.testing.assert_array_equal(_crop_square(original, rect, 64), _crop_square(actual, rect, 64))
+        self.assertLessEqual(sum(f.nbytes for f in cache.frames)+sum(f.nbytes for f in cache.masked.values())
+                             +sum(f.nbytes for f in cache.gray.values()),cache.max_bytes)
+
     def test_run_comparison_requires_exact_probabilities(self):
         from tools.compare_detection_runs import compare
         with tempfile.TemporaryDirectory() as directory:

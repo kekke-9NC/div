@@ -34,6 +34,7 @@ class BulkReviewDialog(tk.Toplevel):
         for variable in (self.threshold, self.comparison, self.day, self.predicted):
             variable.trace_add("write", self._invalidate_selection)
         self.protocol("WM_DELETE_WINDOW", self._close)
+        self.bind("<Destroy>", self._on_destroy, add="+")
         self._update_buttons()
 
     def _build_ui(self):
@@ -104,20 +105,25 @@ class BulkReviewDialog(tk.Toplevel):
             messagebox.showinfo("対象日", "表示中の検出日を読み取れません。", parent=self)
 
     def _update_buttons(self):
+        loading = self.reviewer._load_busy or self.reviewer._closing or self.reviewer._load_failed
+        unavailable = self.busy or loading
         for widget in self.inputs + [self.scan_button]:
-            widget.state(["disabled" if self.busy else "!disabled"])
-        allowed = not self.busy and self.selection is not None and bool(self.selection.candidates)
+            widget.state(["disabled" if unavailable else "!disabled"])
+        allowed = not unavailable and self.selection is not None and bool(self.selection.candidates)
         for button in self.actions:
             button.state(["!disabled" if allowed else "disabled"])
-        self.undo_button.state(["!disabled" if not self.busy and self.batch_records else "disabled"])
+        self.undo_button.state(["!disabled" if not unavailable and self.batch_records else "disabled"])
         self.cancel_button.state(["!disabled" if self.busy else "disabled"])
 
     def _start(self, operation, function):
-        if self.busy:
+        if self.busy or self.reviewer._load_busy or self.reviewer._closing or self.reviewer._load_failed:
             return
         self.busy = True
         self.cancel.clear()
-        self.reviewer._stop_video()
+        if operation == "scan":
+            self.reviewer._pause_video()
+        else:
+            self.reviewer._stop_video()
         self._update_buttons()
         self.status.set("対象を検索中…" if operation == "scan" else "処理中…（中断すると処理済みの分は保持します）")
 
@@ -126,7 +132,8 @@ class BulkReviewDialog(tk.Toplevel):
                 self.messages.put((operation, function()))
             except Exception as exc:
                 self.messages.put(("error", str(exc)))
-        threading.Thread(target=worker, daemon=True).start()
+        # Finish the current reversible transaction if the application closes.
+        threading.Thread(target=worker, name="MLBulkReview", daemon=False).start()
         self.after(50, self._poll)
 
     def _progress(self, done, total):
@@ -168,13 +175,14 @@ class BulkReviewDialog(tk.Toplevel):
 
     def _poll(self):
         finished = False
+        latest_progress = None
         while True:
             try:
                 operation, value = self.messages.get_nowait()
             except queue.Empty:
                 break
             if operation == "progress":
-                self.status.set(f"処理中: {value[0]:,} / {value[1]:,}件")
+                latest_progress = value
                 continue
             finished = True
             self.busy = False
@@ -191,13 +199,31 @@ class BulkReviewDialog(tk.Toplevel):
             else:
                 self.selection = None
                 messagebox.showerror("一括処理エラー", value, parent=self)
-            self.reviewer.refresh()
-            self.batch_records = bulk.latest_batch_records(self.reviewer.undo_stack + self.reviewer.skip_stack)
+            if operation in ("apply", "undo"):
+                self.reviewer.apply_batch_result(operation, value)
+            elif operation == "scan":
+                # A metadata search changes neither the dataset nor history.
+                self.reviewer._resume_video()
+            else:
+                self.reviewer.refresh()
             self._update_buttons()
+        if latest_progress is not None and not finished:
+            self.status.set(f"処理中: {latest_progress[0]:,} / {latest_progress[1]:,}件")
         if self.closing and finished:
             self.destroy()
         elif self.busy:
             self.after(50, self._poll)
+
+    def reviewer_loaded(self):
+        if self.reviewer._load_failed:
+            self.selection = None
+            self.status.set("一覧を読み込めません。一括画面を閉じて再読み込みしてください。")
+        self.batch_records = bulk.latest_batch_records(self.reviewer.undo_stack + self.reviewer.skip_stack)
+        self._update_buttons()
+
+    def _on_destroy(self, event):
+        if event.widget is self:
+            self.cancel.set()
 
     def _close(self):
         if self.busy:

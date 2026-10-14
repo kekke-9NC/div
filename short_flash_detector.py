@@ -6,11 +6,32 @@ not lost. Stationary stars, fading trails and long lived moving points are
 filtered using the original frame times, rather than a maximum composite.
 """
 from dataclasses import dataclass
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor, wait
+import threading
 from typing import Sequence
 
 import cv2
 import numpy as np
 from scipy.spatial import cKDTree
+import component_statistics
+
+_component_pools = {}
+_component_pool_lock = threading.Lock()
+
+
+def _component_executor(workers):
+    with _component_pool_lock:
+        if workers not in _component_pools:
+            _component_pools[workers] = ThreadPoolExecutor(max_workers=workers, thread_name_prefix='flash-components')
+        return _component_pools[workers]
+
+
+def _frame_components(residual, binary):
+    if not cv2.countNonZero(binary):
+        return []
+    _, labels, stats, centers = cv2.connectedComponentsWithStats(binary, 8)
+    return _component_detections(residual, labels, stats, centers)
 
 
 @dataclass(frozen=True)
@@ -41,6 +62,16 @@ class FlashCandidate:
 def candidate_from_points(points, frame_rate=25.0):
     """Validate a component track, keeping its luminous head, not its decay."""
     if len(points) < 2:
+        return None
+    # These existing rejection conditions depend only on the original scalar
+    # observations. Check them before allocating a matrix for noise tracks.
+    if points[-1][0] - points[0][0] > frame_rate * 3:
+        return None
+    peak_value = max(point[6] for point in points)
+    if peak_value < 12:
+        return None
+    selected = [point for point in points if point[6] >= max(8.0, peak_value * .20)]
+    if len(selected) < 2 or max(max(point[4:6]) for point in selected) < 8:
         return None
     pts = np.asarray(points, dtype=np.float64)
     if pts[-1, 0] - pts[0, 0] > frame_rate * 3:
@@ -81,16 +112,21 @@ def _component_detections(residual, labels, stats, centers):
     ) + 1
     if len(eligible) > 400:
         # Aggregate exact integer sums in one image pass. The old loop
-        # visited thousands of cloud/noise components only to discard
-        # all but 400. Weighted bincount is exact for these uint8 sums.
-        keep = np.zeros(count, dtype=bool)
-        keep[eligible] = True
-        pixels = keep[labels.ravel()]
-        flat_labels = labels.ravel()[pixels]
-        flat_values = residual.ravel()[pixels]
-        scores = np.bincount(flat_labels, weights=flat_values, minlength=count)
-        peaks = np.zeros(count, dtype=residual.dtype)
-        np.maximum.at(peaks, flat_labels, flat_values)
+        # visited each cloud/noise component in Python. The same aggregation
+        # is also cheaper for moderately dense frames; retain the small-loop
+        # path for sparse images. Bincount is exact for these uint8 sums.
+        aggregated = component_statistics.aggregate(labels, residual, eligible, count)
+        if aggregated is None:
+            keep = np.zeros(count, dtype=bool)
+            keep[eligible] = True
+            pixels = keep[labels.ravel()]
+            flat_labels = labels.ravel()[pixels]
+            flat_values = residual.ravel()[pixels]
+            scores = np.bincount(flat_labels, weights=flat_values, minlength=count)
+            peaks = np.zeros(count, dtype=residual.dtype)
+            np.maximum.at(peaks, flat_labels, flat_values)
+        else:
+            scores, peaks = aggregated
         eligible = eligible[(scores[eligible] >= 20) & (peaks[eligible] >= 5)]
         eligible = eligible[np.argsort(-scores[eligible], kind='stable')[:400]]
         # All component peaks are now known from that same sparse pixel pass.
@@ -116,7 +152,8 @@ def _component_detections(residual, labels, stats, centers):
 
 
 class ShortFlashDetector:
-    def __init__(self, frame_rate=25.0, border=30):
+    def __init__(self, frame_rate=25.0, border=30, component_workers=1):
+        self.component_workers = max(1, min(4, int(component_workers)))
         self.frame_rate = max(1., float(frame_rate))
         self.border = max(0, int(border))
         self.background = None
@@ -128,16 +165,41 @@ class ShortFlashDetector:
     def consume(self, frames: Sequence[np.ndarray], first_frame: int, mask=None, roi=None,
                 final=False):
         result = []
-        allowed = permitted = None
-        excluded = binary = None
+        pending = deque()
+        executor = _component_executor(self.component_workers) if self.component_workers > 1 else None
+        try:
+            for index, residual, binary, reset in self._foreground_frames(frames, first_frame, mask, roi):
+                if executor is None:
+                    self._update_tracks(_frame_components(residual, binary), index, reset, result)
+                else:
+                    # Components depend only on these pixels. Background and
+                    # track state still advance in the original frame order.
+                    future = executor.submit(_frame_components, residual, binary.copy())
+                    pending.append((future, index, reset))
+                    if len(pending) >= self.component_workers:
+                        task, at, clear = pending.popleft()
+                        self._update_tracks(task.result(), at, clear, result)
+            while pending:
+                task, at, clear = pending.popleft()
+                self._update_tracks(task.result(), at, clear, result)
+        finally:
+            wait([packet[0] for packet in pending])
+        if final:
+            result.extend(c for tr in self.active
+                          if (c := candidate_from_points(tr, self.frame_rate)) is not None)
+            self.active = []
+        return result
+
+    def _foreground_frames(self, frames, first_frame, mask, roi):
+        allowed = permitted = excluded = binary = None
         permitted_shape = None
+        last_read = self.last_frame
         for offset, frame in enumerate(frames):
             index = first_frame + offset
-            if index <= self.last_frame:
+            if index <= last_read:
                 continue
-            if self.last_frame >= 0 and index != self.last_frame + 1:
-                # Discontinuous samples cannot establish motion or duration.
-                self.active = []
+            reset = last_read >= 0 and index != last_read + 1
+            if reset:
                 self.background = None
             gray = frame if frame.ndim == 2 else cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             smooth = cv2.GaussianBlur(gray, (3, 3), 0)
@@ -145,16 +207,13 @@ class ShortFlashDetector:
             if self.background is None or self.background.shape != gray.shape:
                 self.background = smooth.astype(np.float32)
                 self.threshold = None
-                self.active = []
+                reset = True
             residual = cv2.subtract(smooth, cv2.convertScaleAbs(self.background))
             if self.threshold is None or index % 100 == 0:
                 base = cv2.convertScaleAbs(self.background)
                 contrast = cv2.subtract(base, cv2.GaussianBlur(base, (0, 0), 3))
                 contrast = cv2.dilate(contrast, np.ones((9, 9), np.uint8))
                 self.threshold = np.minimum(25., 3.5 + contrast.astype(np.float32) * .18)
-                # Residual pixels are uint8 integers. r >= t is exactly
-                # r >= ceil(t); thresholds stay in [3.5, 25]. Compare uint8
-                # arrays without promoting every full frame to float32.
                 self.threshold_u8 = np.ceil(self.threshold).astype(np.uint8)
             if binary is None or binary.shape != gray.shape:
                 binary = np.empty_like(residual)
@@ -175,57 +234,56 @@ class ShortFlashDetector:
                     permitted[max(0, y1):min(height, y2), max(0, x1):min(width, x2)] = 1
                     permitted_shape = gray.shape
                 binary &= permitted
-            count, labels, stats, centers = cv2.connectedComponentsWithStats(binary, 8)
-            detections = _component_detections(residual, labels, stats, centers)
-            if detections:
-                tree = cKDTree(np.asarray(detections)[:, :2])
-                choices = []
-                positions, gates = _track_predictions(self.active, index)
-                if len(positions):
-                    # Exact nearest-neighbour queries, with the same tree,
-                    # arithmetic, and greedy tie ordering as individual calls.
-                    distances, indices = tree.query(np.asarray(positions))
-                    # A batched two-component dot can round differently from
-                    # scalar BLAS norm. Recheck every boundary-near comparison
-                    # with the original arithmetic; greedy choices stay exact.
-                    for tid in np.flatnonzero(np.abs(distances - gates) <= 1e-10):
-                        tr = self.active[tid]
-                        if len(tr) >= 2:
-                            last, previous = tr[-1], tr[-2]
-                            velocity = (np.asarray(last[1:3]) - previous[1:3]) / max(1, last[0] - previous[0])
-                            gates[tid] = max(12, min(90, np.linalg.norm(velocity) * (index-last[0]) * .7 + 12))
-                    for tid in np.flatnonzero(distances < gates):
-                        choices.append((float(distances[tid]), int(tid), int(indices[tid])))
-                used_tracks, used_detections = set(), set()
-                for _, tid, di in sorted(choices):
-                    if tid in used_tracks or di in used_detections:
-                        continue
-                    used_tracks.add(tid)
-                    used_detections.add(di)
-                    self.active[tid].append([index, *detections[di]])
-                for di, detection in enumerate(detections):
-                    if di not in used_detections:
-                        self.active.append([[index, *detection]])
-            remaining = []
-            for tr in self.active:
-                if index - tr[-1][0] > 4:
-                    candidate = candidate_from_points(tr, self.frame_rate)
-                    if candidate is not None:
-                        result.append(candidate)
-                else:
-                    # Long tracks are kept as duration evidence but bounded in
-                    # memory. Their original start ensures they stay rejected.
-                    if len(tr) > 150:
-                        tr[:] = [tr[0], *tr[-100:]]
-                    remaining.append(tr)
-            self.active = remaining
+            yield index, residual, binary, reset
             cv2.accumulateWeighted(smooth, self.background, .025)
-            self.last_frame = index
-        if final:
-            result.extend(c for tr in self.active
-                          if (c := candidate_from_points(tr, self.frame_rate)) is not None)
+            last_read = index
+
+    def _update_tracks(self, detections, index, reset, result):
+        if reset:
             self.active = []
-        return result
+        if detections:
+            tree = cKDTree(np.asarray(detections)[:, :2])
+            choices = []
+            positions, gates = _track_predictions(self.active, index)
+            if len(positions):
+                # Exact nearest-neighbour queries, with the same tree,
+                # arithmetic, and greedy tie ordering as individual calls.
+                distances, indices = tree.query(np.asarray(positions))
+                # A batched two-component dot can round differently from
+                # scalar BLAS norm. Recheck every boundary-near comparison
+                # with the original arithmetic; greedy choices stay exact.
+                for tid in np.flatnonzero(np.abs(distances - gates) <= 1e-10):
+                    tr = self.active[tid]
+                    if len(tr) >= 2:
+                        last, previous = tr[-1], tr[-2]
+                        velocity = (np.asarray(last[1:3]) - previous[1:3]) / max(1, last[0] - previous[0])
+                        gates[tid] = max(12, min(90, np.linalg.norm(velocity) * (index-last[0]) * .7 + 12))
+                for tid in np.flatnonzero(distances < gates):
+                    choices.append((float(distances[tid]), int(tid), int(indices[tid])))
+            used_tracks, used_detections = set(), set()
+            for _, tid, di in sorted(choices):
+                if tid in used_tracks or di in used_detections:
+                    continue
+                used_tracks.add(tid)
+                used_detections.add(di)
+                self.active[tid].append([index, *detections[di]])
+            for di, detection in enumerate(detections):
+                if di not in used_detections:
+                    self.active.append([[index, *detection]])
+        remaining = []
+        for tr in self.active:
+            if index - tr[-1][0] > 4:
+                candidate = candidate_from_points(tr, self.frame_rate)
+                if candidate is not None:
+                    result.append(candidate)
+            else:
+                # Long tracks are kept as duration evidence but bounded in
+                # memory. Their original start ensures they stay rejected.
+                if len(tr) > 150:
+                    tr[:] = [tr[0], *tr[-100:]]
+                remaining.append(tr)
+        self.active = remaining
+        self.last_frame = index
 
 
 def _track_predictions(active, index):

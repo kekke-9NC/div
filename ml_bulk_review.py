@@ -12,6 +12,8 @@ import uuid
 
 import ml_training_data
 
+_metadata_cache = {}
+
 
 @dataclass(frozen=True)
 class ReviewFilter:
@@ -60,30 +62,44 @@ class BatchResult:
     error: str = ""
 
 
-def _pending_metadata(path: Path, root: Path):
+def _pending_metadata(path: Path, root: Path, *, reuse=False):
     # Never follow a stale selection into reviewed/skipped or another dataset.
     if path.parent not in (root / "pending/meteor", root / "pending/not_meteor"):
         raise ValueError("未確認データ以外は一括処理できません。")
     if path.is_symlink() or path.resolve() != path or (path / "metadata.json").is_symlink():
         raise ValueError("リンク先のデータは一括処理できません。")
-    raw = (path / "metadata.json").read_bytes()
+    marker = path / "metadata.json"
+    identity = ml_training_data._file_identity(marker)
+    cached = _metadata_cache.get(marker) if reuse else None
+    if cached is not None and cached[0] == identity:
+        return cached[1], cached[2]
+    raw = marker.read_bytes()
     metadata = json.loads(raw)
     if not isinstance(metadata, dict) or metadata.get("review_status", "pending") != "pending":
         raise ValueError("このデータは未確認ではありません。")
-    return metadata, hashlib.sha256(raw).hexdigest()
+    digest = hashlib.sha256(raw).hexdigest()
+    if reuse and ml_training_data._file_identity(marker) == identity:
+        if len(_metadata_cache) >= 10000:
+            _metadata_cache.clear()
+        _metadata_cache[marker] = (identity, metadata, digest)
+    return metadata, digest
 
 
 def select_events(root_dir: str, criteria: ReviewFilter, cancel: threading.Event,
                   progress: Callable[[int, int], None] = lambda _done, _total: None) -> Selection:
     root = Path(root_dir).expanduser().resolve()
     result = Selection(criteria)
-    events = ml_training_data.pending_events(str(root))
+    try:
+        events = ml_training_data.pending_events(str(root), cancel=cancel)
+    except InterruptedError:
+        result.cancelled = True
+        return result
     for index, path in enumerate(events):
         if cancel.is_set():
             result.cancelled = True
             break
         try:
-            meta, digest = _pending_metadata(path, root)
+            meta, digest = _pending_metadata(path, root, reuse=True)
             raw_probability = meta["meteor_probability"]
             if isinstance(raw_probability, bool):
                 raise ValueError("Invalid probability")

@@ -33,7 +33,9 @@ def write_json(path, value):
     fd, temporary = tempfile.mkstemp(prefix=".meteor_meta_", dir=path.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(value, handle, ensure_ascii=False)
+            # dumps uses the native encoder for a whole document; dump's
+            # token-by-token writes held the GIL for large saved sky models.
+            handle.write(json.dumps(value, ensure_ascii=False))
         os.replace(temporary, path)
     finally:
         Path(temporary).unlink(missing_ok=True)
@@ -75,6 +77,8 @@ class ChunkCatalog:
         self.root = Path(root) / ".rtsp_live"
         self.ready = ready or (lambda _path: True)
         self.csv_offsets = {}
+        self.entries = {}
+        self.present = set()
 
     def _stamp_csv(self, listing):
         offset = self.csv_offsets.get(listing, 0)
@@ -106,27 +110,60 @@ class ChunkCatalog:
 
     def paths(self):
         if not self.root.exists():
+            self.present = set()
             return []
-        for listing in self.root.rglob("segments.csv"):
+        # A restart can leave tens of thousands of video sidecars in a few
+        # session directories. Path.rglob's recursive selector builds and
+        # hashes paths for every sidecar twice per poll. Walk once, filtering
+        # plain filenames before constructing just the matching paths.
+        listings, paths = [], []
+        for directory, _subdirectories, names in os.walk(self.root):
+            folder = Path(directory)
+            for name in names:
+                matched = os.path.normcase(name)
+                if matched == 'segments.csv':
+                    listings.append(folder/name)
+                elif (matched.startswith('chunk_') and matched.endswith('.mp4')
+                      and '_temp_' not in name and '_innovation' not in name):
+                    paths.append(folder/name)
+        csv_folders = {listing.parent for listing in listings}
+        self.present = set(paths)
+        for listing in listings:
             try:
                 self._stamp_csv(listing)
             except (OSError, ValueError, KeyError):
                 continue
         found = []
-        for path in self.root.rglob("chunk_*.mp4"):
-            if "_temp_" in path.name or "_innovation" in path.name or rtsp_startup.is_deferred_recording(path):
+        present = set()
+        for path in paths:
+            if rtsp_startup.is_deferred_recording(path):
                 continue
             try:
-                if not self.ready(path) or not rtsp_segments.is_finalized_mp4(path):
+                present.add(path)
+                if not self.ready(path):
                     continue
-                # A CSV recorder publishes timing only after closing the file.
-                if (path.parent / "segments.csv").exists() and not Path(
-                        str(path) + ".capture.json").exists():
+                marker = Path(str(path) + '.capture.json')
+                stat = path.stat()
+                try:
+                    stamp = marker.stat()
+                except FileNotFoundError:
+                    stamp = None
+                # The directory walk already tells us whether a CSV recorder
+                # is present. Check its completion sidecar once, not twice.
+                if path.parent in csv_folders and stamp is None:
                     continue
-                data = timing(path)
-                found.append((datetime.fromisoformat(data["start_time"]), path))
+                identity = (stat.st_ino, stat.st_size, stat.st_mtime_ns,
+                            (stamp.st_size, stamp.st_mtime_ns) if stamp else None)
+                cached = self.entries.get(path)
+                if cached is None or cached[0] != identity:
+                    if not rtsp_segments.is_finalized_mp4(path):
+                        continue
+                    data = timing(path)
+                    self.entries[path] = (identity, datetime.fromisoformat(data['start_time']))
+                found.append((self.entries[path][1], path))
             except (OSError, ValueError, cv2.error):
                 continue
+        self.entries = {path: entry for path, entry in self.entries.items() if path in present}
         return [path for _, path in sorted(found)]
 
 
@@ -279,6 +316,7 @@ class MinuteArchiver:
         self.seconds = seconds
         self.catalog = ChunkCatalog(root, ready)
         self.recovered = set()
+        self.archive_targets = {}
 
     def _recover(self):
         for marker in self.root.glob("[0-9]*/[0-9]*/*_minute_*.mp4.capture.json"):
@@ -337,13 +375,28 @@ class MinuteArchiver:
             write_json(str(path) + ".archived.json", {"archive": str(output.relative_to(self.root))})
         self.status(f"[RTSP保存] 1分アーカイブ保存: {output.name} ({len(paths)}区間)")
 
+    def _archive_target(self, path):
+        """Reuse an unchanged publication sidecar; still check its target each poll."""
+        marker = Path(str(path) + ".archived.json")
+        try:
+            stat = marker.stat()
+        except FileNotFoundError:
+            self.archive_targets.pop(path, None)
+            return None
+        identity = (stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+        cached = self.archive_targets.get(path)
+        if cached is None or cached[0] != identity:
+            target = self.root / json.loads(marker.read_text(encoding="utf-8"))["archive"]
+            self.archive_targets[path] = (identity, target)
+        return self.archive_targets[path][1]
+
     def _cleanup(self, path):
         consumed = Path(str(path) + ".analysis_consumed.json")
         archived = Path(str(path) + ".archived.json")
         if not consumed.exists() or not archived.exists():
             return
-        archive = self.root / json.loads(archived.read_text(encoding="utf-8"))["archive"]
-        if not archive.exists() or not rtsp_segments.is_finalized_mp4(archive):
+        archive = self._archive_target(path)
+        if archive is None or not archive.exists() or not rtsp_segments.is_finalized_mp4(archive):
             return
         for item in (path, path.with_name(path.stem + "_innovation.mp4"),
                      *(Path(str(path) + suffix) for suffix in (
@@ -355,10 +408,25 @@ class MinuteArchiver:
         self._recover()
         paths = self.catalog.paths()
         groups = {}
+        present = set(paths)
+        self.archive_targets = {path: value for path, value in self.archive_targets.items()
+                                if path in present}
+        target_exists = {}
         for path in paths:
-            if Path(str(path) + ".archived.json").exists():
-                self._cleanup(path)
-                continue
+            archived = Path(str(path) + ".archived.json")
+            target = self._archive_target(path)
+            if target is not None:
+                if target not in target_exists:
+                    target_exists[target] = target.exists()
+                if target_exists[target]:
+                    self._cleanup(path)
+                    continue
+                # A stale publication marker is not proof that pixels survive.
+                # Remove only that marker, then republish the retained originals
+                # and validate all frames before normal consumed cleanup.
+                archived.unlink()
+                self.archive_targets.pop(path, None)
+                self.status(f"[RTSP保存] 欠落した連結先を元区間から復旧: {target.name}")
             groups.setdefault(path.parent, []).append(path)
         for session_paths in groups.values():
             batch, duration = [], 0.0
@@ -406,12 +474,26 @@ class RealtimeRunner:
         self.seen_lock = threading.Lock()
         self.threads = []
 
+    def _discovery_interval(self):
+        # A queued backlog of at least five seconds already supplies the
+        # detector. Avoid repeatedly walking thousands of durable inputs while
+        # it catches up. Live discovery resumes its normal cadence near the tail.
+        size = self.queue.qsize()
+        if size >= 100:
+            # About 50 seconds are queued; a five-second discovery pause
+            # does not withhold the next frames from the backlog consumer.
+            return max(5.0, config.RTSP_SCAN_INTERVAL)
+        return max(1.0, config.RTSP_SCAN_INTERVAL) if size >= 10 else config.RTSP_SCAN_INTERVAL
+
     def _scan(self):
         last_status = 0.0
         while not self.cancel.is_set():
+            paths = self.catalog.paths()
             with self.seen_lock:
-                self.seen = {path for path in self.seen if path.exists()}
-            for path in self.catalog.paths():
+                # Use the directory inventory just collected by the catalog.
+                # Avoid a second stat of every queued chunk on each poll.
+                self.seen.intersection_update(self.catalog.present)
+            for path in paths:
                 with self.seen_lock:
                     if path not in self.seen and not Path(str(path) + ".analysis_consumed.json").exists():
                         self.seen.add(path)
@@ -419,7 +501,7 @@ class RealtimeRunner:
             if self.queue.qsize() >= 10 and time.monotonic() - last_status >= 10:
                 self.status(f"[RTSP解析] 解析待ち: {self.queue.qsize()}区間（録画は継続）")
                 last_status = time.monotonic()
-            self.cancel.wait(config.RTSP_SCAN_INTERVAL)
+            self.cancel.wait(self._discovery_interval())
 
     def _consume(self, path):
         write_json(str(path) + ".analysis_consumed.json", {"consumed": True})
@@ -446,6 +528,12 @@ class RealtimeRunner:
                 self.cancel.wait(.5)
             pending = capture.pending
 
+    def _archiving_interval(self):
+        # Minute publication and consumed-spool cleanup can wait five seconds
+        # while dozens of seconds of durable input are already queued. Keep
+        # the original cadence near the live tail; cancellation still wakes it.
+        return 5.0 if self.queue.qsize() >= 100 else 1.0
+
     def _archive(self):
         while not self.cancel.is_set():
             try:
@@ -454,7 +542,7 @@ class RealtimeRunner:
                 self.archiver.compact(flush=flush)
             except Exception as exc:
                 self.status(f"[RTSP保存] 連結再試行予定（元動画は保持）: {exc}")
-            self.cancel.wait(1)
+            self.cancel.wait(self._archiving_interval())
 
     def start(self):
         self.threads = [threading.Thread(target=target, daemon=True, name=name)

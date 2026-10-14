@@ -34,6 +34,7 @@ _CACHE_LOCK = threading.RLock()
 _CACHE_BUILDS = {}
 _CACHE_PINS = Counter()
 _CACHE_CLEAR_PENDING = set()
+_CACHE_STATES = {}
 CONCAT_GROUP_SIZE = 10
 DEFAULTS = dict(timelapse=False, blend_video=False, blend_image=False, concatenate=False,
                 duration=15.0, fps=60.0, constellations=True, timestamp=True,
@@ -103,7 +104,12 @@ def overlapping_schedule_windows(started_at, ended_at, clock):
 
 
 class ProductCache:
-    """Atomic cache entries with oldest-created-first eviction and shared locking."""
+    """Atomic immutable entries with shared capacity accounting.
+
+    Published entries are only changed through this class. Explicit size queries
+    reconcile disk contents; root replacement or external entry additions also
+    invalidate the ledger. Restart always inventories the actual files.
+    """
     def __init__(self, root, limit=CACHE_LIMIT):
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
@@ -116,26 +122,82 @@ class ProductCache:
             self._trim(0)
 
     def entries(self):
-        return sorted((p for p in self.root.iterdir() if p.is_dir() and not p.name.startswith(".")),
-                      key=lambda p: (p.stat().st_mtime_ns, p.name))
+        with _CACHE_LOCK:
+            state = self._state()
+            return sorted(state['entries'], key=lambda path: (state['entries'][path][1], path.name))
+
+    def _root_stamp(self):
+        stat = self.root.stat()
+        return stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_ctime_ns
+
+    def _state(self, refresh=False):
+        stamp = self._root_stamp()
+        state = _CACHE_STATES.get(self.root)
+        if refresh or state is None or state['stamp'] != stamp:
+            entries = {}
+            unmanaged = 0
+            for entry in self.root.iterdir():
+                if entry in _CACHE_BUILDS:
+                    continue
+                if entry.is_dir():
+                    size = sum(path.stat().st_size for path in entry.rglob('*') if path.is_file())
+                    if entry.name.startswith('.'):
+                        unmanaged += size
+                    else:
+                        entries[entry] = size, entry.stat().st_mtime_ns
+                elif entry.is_file():
+                    unmanaged += entry.stat().st_size
+            state = dict(stamp=stamp, entries=entries,
+                         size=unmanaged+sum(value[0] for value in entries.values()))
+            _CACHE_STATES[self.root] = state
+        return state
+
+    def _sync_stamp(self):
+        state = _CACHE_STATES.get(self.root)
+        if state is not None:
+            state['stamp'] = self._root_stamp()
+
+    def _published(self, target, size):
+        state = _CACHE_STATES[self.root]
+        previous = state['entries'].get(target, (0, 0))[0]
+        state['entries'][target] = size, target.stat().st_mtime_ns
+        state['size'] += size-previous
+        self._sync_stamp()
+
+    def _delete(self, target):
+        state = self._state()
+        shutil.rmtree(target)
+        state['size'] -= state['entries'].pop(target, (0, 0))[0]
+        self._sync_stamp()
+
+    def entry_sizes(self):
+        with _CACHE_LOCK:
+            state = self._state()
+            return [(path.name, state['entries'][path][0]) for path in self.entries()]
 
     def size(self):
         with _CACHE_LOCK:
-            return sum(p.stat().st_size for p in self.root.rglob("*") if p.is_file())
+            used = self._state(refresh=True)['size']
+            return used + sum(path.stat().st_size for temporary, (_reserved, target) in _CACHE_BUILDS.items()
+                              if target.parent == self.root for path in temporary.rglob('*') if path.is_file())
 
     def _trim(self, incoming):
-        used = self.size()
+        state = self._state()
+        used = state['size']
         for temporary, (reserved, target) in _CACHE_BUILDS.items():
             if target.parent == self.root:
-                written = sum(p.stat().st_size for p in temporary.rglob("*") if p.is_file())
-                used += max(0, reserved-written)
+                # Active video writers normally contain just one output file.
+                # Count overshoot too, preserving the previous quota behavior
+                # even if a writer violates its reservation before rejection.
+                written = sum(path.stat().st_size for path in temporary.rglob('*') if path.is_file())
+                used += max(reserved, written)
         for entry in self.entries():
             if used + incoming <= self.limit:
                 break
             if _CACHE_PINS[entry]:
                 continue
-            size = sum(p.stat().st_size for p in entry.rglob("*") if p.is_file())
-            shutil.rmtree(entry)
+            size = state['entries'][entry][0]
+            self._delete(entry)
             used -= size
         return used + incoming <= self.limit
 
@@ -143,9 +205,12 @@ class ProductCache:
         """Files are already encoded bytes; no transient on-disk quota overshoot."""
         size = sum(len(data) for data in files.values())
         with _CACHE_LOCK:
+            self._state()
             if size > self.limit:
                 return False
             target = self.root / key
+            if target in _CACHE_CLEAR_PENDING:
+                return False
             if target.exists():
                 return True
             if not self._trim(size):
@@ -155,9 +220,11 @@ class ProductCache:
                 for name, data in files.items():
                     (temporary / name).write_bytes(data)
                 temporary.rename(target)
+                self._published(target, size)
             finally:
                 if temporary.exists():
                     shutil.rmtree(temporary)
+                self._sync_stamp()
             return True
 
     def build(self, key, reserve, writer):
@@ -168,13 +235,17 @@ class ProductCache:
         from taking each other's capacity. The writer must respect its bound.
         """
         with _CACHE_LOCK:
+            self._state()
             target = self.root / key
+            if target in _CACHE_CLEAR_PENDING:
+                return False
             if target.exists():
                 return True
             if reserve > self.limit or not self._trim(reserve):
                 return False
             temporary = Path(tempfile.mkdtemp(prefix=".entry_", dir=self.root))
             _CACHE_BUILDS[temporary] = (reserve, target)
+            self._sync_stamp()
         try:
             writer(temporary)
             written = sum(p.stat().st_size for p in temporary.rglob("*") if p.is_file())
@@ -186,6 +257,7 @@ class ProductCache:
                     return False
                 if not target.exists():
                     temporary.rename(target)
+                    self._published(target, written)
                 return True
         finally:
             with _CACHE_LOCK:
@@ -193,6 +265,7 @@ class ProductCache:
                 _CACHE_CLEAR_PENDING.discard(target)
                 if temporary.exists():
                     shutil.rmtree(temporary)
+                self._sync_stamp()
 
     @contextmanager
     def pin(self, keys):
@@ -212,7 +285,7 @@ class ProductCache:
                         if path in _CACHE_CLEAR_PENDING:
                             _CACHE_CLEAR_PENDING.discard(path)
                             if path.exists():
-                                shutil.rmtree(path)
+                                self._delete(path)
 
     def read(self, key, name):
         with _CACHE_LOCK:
@@ -227,7 +300,7 @@ class ProductCache:
                     if _CACHE_PINS[entry]:
                         _CACHE_CLEAR_PENDING.add(entry)
                     else:
-                        shutil.rmtree(entry)
+                        self._delete(entry)
             for _temporary, (_reserved, target) in _CACHE_BUILDS.items():
                 if target.parent == self.root and (allowed is None or target.name in allowed):
                     _CACHE_CLEAR_PENDING.add(target)
@@ -341,7 +414,13 @@ class ScheduleProducts:
         self.flush_archives = lambda: None
         self.thread = None
         self.overlay_module = None
+        self.annotation_worker = None
         self.source_data = {}
+        self.source_stamps = {}
+        self.source_indexes = {}
+        self.sample_gaps = {}
+        self.timelapse_revisions = {}
+        self.prepared_timelapses = {}
         self.ai_unavailable = None
         self.stream_signatures = {}
         self.source_properties = {}
@@ -597,13 +676,37 @@ class ScheduleProducts:
         return paths
 
     def _timing(self, source):
-        if source not in self.source_data:
+        stamp = self._source_stamp(source)
+        if source not in self.source_data or self.source_stamps.get(source) != stamp:
             self.source_data[source] = rtsp_live.timing(source)
+            self.source_stamps[source] = self._source_stamp(source)
         return self.source_data[source]
 
-    def _source_frame(self, job, when, radius=0):
+    @staticmethod
+    def _source_stamp(source):
+        result = []
+        for path in (Path(source), Path(str(source) + ".capture.json")):
+            try:
+                stat = path.stat()
+                result.append((stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns))
+            except FileNotFoundError:
+                result.append(None)
+        return tuple(result)
+
+    def _source_revision(self, job):
+        return tuple((source, self._source_stamp(source)) for source in job["archives"])
+
+    def _source_frame(self, job, when, radius=0, source_revision=None):
         sources = job["archives"]
-        starts = [datetime.fromisoformat(self._timing(path)["start_time"]) for path in sources]
+        # A sampling batch owns a revision and verifies it again before
+        # committing its PNGs. Other callers continue to revalidate here.
+        revision = self._source_revision(job) if source_revision is None else source_revision
+        cached = self.source_indexes.get(job["id"])
+        if cached is None or cached[0] != revision:
+            starts = [datetime.fromisoformat(self._timing(path)["start_time"]) for path in sources]
+            self.source_indexes[job["id"]] = revision, starts
+        else:
+            starts = cached[1]
         position = bisect_right(starts, when)-1
         if position < 0:
             return None
@@ -801,9 +904,19 @@ class ScheduleProducts:
             payload = job["sky_payload"]
             if frame.shape[:2] != (payload["height"], payload["width"]):
                 raise ValueError("配信の星座モデルと録画の解像度が一致しません")
-            layer = self.overlay_module.render_layer(payload, when, self._mask(job), job["sky_opacity"])
-            alpha = layer[:, :, 3:4].astype(np.float32)/255
-            frame = np.rint(frame*(1-alpha) + layer[:, :, :3][:, :, ::-1]*alpha).astype(np.uint8)
+            mask = self._mask(job)
+            rendered = None
+            if self.thread is not None and threading.current_thread() is self.thread and not self.cancel.is_set():
+                if self.annotation_worker is None:
+                    from rtsp_annotation_worker import AnnotationWorker
+                    self.annotation_worker = AnnotationWorker()
+                rendered = self.annotation_worker.render(frame,payload,when,mask,job['sky_opacity'])
+            if rendered is None:
+                layer = self.overlay_module.render_layer(payload, when, mask, job["sky_opacity"])
+                alpha = layer[:, :, 3:4].astype(np.float32)/255
+                frame = np.rint(frame*(1-alpha) + layer[:, :, :3][:, :, ::-1]*alpha).astype(np.uint8)
+            else:
+                frame = rendered
         if options["timestamp"]:
             import timelapse_creator
             frame = timelapse_creator._draw_timestamp(frame, when, timelapse_creator._normalize_timestamp_settings({
@@ -816,18 +929,59 @@ class ScheduleProducts:
             return
         start, end = datetime.fromisoformat(job["start"]), datetime.fromisoformat(job["end"])
         count = max(1, round(options["duration"]*options["fps"]))
+        sources = self._source_revision(job)
+        source_versions = dict(sources)
+        # Persist the identities behind the disposable PNGs. Replacing an
+        # existing archive must rebuild its samples as well as the final MP4.
+        previous = job.get("sample_source_versions", {})
+        changed = bool(set(previous) - set(source_versions)) or any(
+            source in source_versions and json.dumps(stamp) != json.dumps(source_versions[source])
+            for source, stamp in previous.items())
+        sample_times = sorted(datetime.fromisoformat(when) for when in job["samples"].values())
+        for source in set(source_versions) - set(previous):
+            if not sample_times:
+                break
+            data = self._timing(source)
+            low = datetime.fromisoformat(data["start_time"])
+            high = low + timedelta(seconds=data["frame_count"] / data["fps"])
+            position = bisect_right(sample_times, low-timedelta(microseconds=1))
+            if position < len(sample_times) and sample_times[position] < high:
+                changed = True
+                break
+        if changed:
+            self._clear_sample_cache(job,count)
+            job["samples"].clear()
+            job['outputs'].pop('timelapse',None)
+            self.sample_gaps.pop(job["id"], None)
+            self.status("[自動作成] 録画の差し替えを検知。タイムラプス素材を再作成します")
+        job["sample_source_versions"] = source_versions
+        revision = (sources, job["start"], job["end"], count,
+                    options["mean_radius"])
+        cached = self.sample_gaps.get(job["id"])
+        if cached is None or cached[0] != revision:
+            gaps = set()
+            self.sample_gaps[job["id"]] = revision, gaps
+        else:
+            gaps = cached[1]
         # Sampling uses the full schedule clock, never a dusk/dawn filter.
         for index in range(count):
             if self.cancel.is_set():
                 return
             key = job["id"] + f"_sample_{index:06d}"
             if (self.cache.root / key / "frame.png").is_file():
+                if str(index) in job['samples']:
+                    continue
+                # A crash between publishing PNG and saving its timestamp can
+                # leave an unregistered image. Rebuild from the current source.
+                self.cache.clear([key])
+            if index in gaps:
                 continue
             when = start + (end-start)*(index/max(1, count-1))
             if index == count-1:
                 when = end-timedelta(milliseconds=40)
-            frame = self._source_frame(job, when, options["mean_radius"])
+            frame = self._source_frame(job, when, options["mean_radius"],source_revision=sources)
             if frame is None:
+                gaps.add(index)
                 continue  # Real connection gaps remain gaps, not fabricated frames.
             mask = self._mask(job)
             if mask is not None:
@@ -835,7 +989,33 @@ class ScheduleProducts:
             frame = self._annotate(job, frame, when)
             self.cache.put(key, {"frame.png": png_bytes(frame)})
             job["samples"][str(index)] = when.isoformat()
+        # Metadata or archive replacement during the batch can change the
+        # chronological lookup. Discard those disposable samples and retry;
+        # never finalize a timelapse using the obsolete source index.
+        if self._source_revision(job) != sources:
+            self._clear_sample_cache(job,count)
+            job["samples"].clear()
+            job["sample_source_versions"] = {}
+            self.sample_gaps.pop(job["id"],None)
+            self._save(job)
+            raise IOError("タイムラプス素材の作成中に録画が変更されました。再作成します")
         self._save(job)
+
+    def _clear_sample_cache(self,job,count):
+        indices = set(range(count)) | {int(index) for index in job['samples']}
+        self.cache.clear([job['id']+f'_sample_{index:06d}' for index in indices])
+
+    def _assert_sample_sources(self,job):
+        if json.dumps(job.get('sample_source_versions',{}),sort_keys=True) == json.dumps(dict(self._source_revision(job)),sort_keys=True):
+            return
+        count = max(1,round(job['options']['duration']*job['options']['fps']))
+        self._clear_sample_cache(job,count)
+        job['samples'].clear()
+        job['outputs'].pop('timelapse',None)
+        job['sample_source_versions'] = {}
+        self.sample_gaps.pop(job['id'],None)
+        self._save(job)
+        raise IOError('タイムラプス公開前に録画が変更されました。素材を再作成します')
 
     def _drained(self, job):
         start, end = datetime.fromisoformat(job["start"]), datetime.fromisoformat(job["end"])
@@ -888,8 +1068,12 @@ class ScheduleProducts:
         count = max(1, round(options["duration"]*options["fps"]))
         # Stretch only actual captured samples when a connection gap removed slots.
         def frames():
+            previous_index, frame = None, None
             for position in np.linspace(0, len(available)-1, count):
                 index = available[int(round(position))]
+                if index == previous_index:
+                    yield frame
+                    continue
                 key = job["id"] + f"_sample_{index:06d}"
                 frame = decode_png(self.cache.read(key, "frame.png"))
                 if frame is None:
@@ -901,8 +1085,44 @@ class ScheduleProducts:
                     if mask is not None:
                         frame = cv2.bitwise_and(frame, frame, mask=cv2.resize(mask, (frame.shape[1], frame.shape[0]), interpolation=cv2.INTER_NEAREST))
                     frame = self._annotate(job, frame, when)
+                previous_index = index
                 yield frame
-        self._write_video(output, frames(), options["fps"])
+        from video_encoding import write_repeated_images
+        written = write_repeated_images(output, frames(), options["fps"], self.cancel,
+                                       {"codec": "h264", "quality": "standard"})
+        if written != count or rtsp_segments._properties(output)[1] != count:
+            raise IOError("タイムラプス動画のフレーム数検証に失敗しました")
+
+    def _timelapse_key(self, job):
+        samples = []
+        for index, when in sorted(job["samples"].items()):
+            path = self.cache.root / (job["id"] + f"_sample_{int(index):06d}") / "frame.png"
+            samples.append((index, when, self._source_stamp(path)))
+        revision = (job["options"], self._source_revision(job), samples)
+        digest = hashlib.sha256(json.dumps(revision, sort_keys=True).encode()).hexdigest()[:24]
+        return job["id"] + "_timelapse_" + digest
+
+    def _prepare_timelapse(self, job):
+        # This product depends only on captured samples. During a backlog it
+        # can render while the detector is still finding events for the blends.
+        # A changed archive/sample revision produces a different cache key;
+        # final publication still waits for detection and validates that key.
+        if not job["options"]["timelapse"] or not job["samples"] or "timelapse" in job["outputs"]:
+            return
+        key = self._timelapse_key(job)
+        if self.timelapse_revisions.get(job["id"]) != key:
+            # Observe the same revision on two product ticks before spending
+            # encoding time; archives may still arrive during backlog recovery.
+            self.timelapse_revisions[job["id"]] = key
+            return
+        if not (self.cache.root / key / "timelapse.mp4").exists():
+            self.status(f"[自動作成] タイムラプスを並行準備: {len(job['archives'])}録画・{len(job['samples'])}素材 ({key})")
+        reserve = int(job["options"]["duration"] * 48_000_000 / 8) + 16 * 1024**2
+        if self.cache.build(key, reserve, lambda directory: self._timelapse(job, directory / "timelapse.mp4")):
+            previous = self.prepared_timelapses.get(job["id"])
+            self.prepared_timelapses[job["id"]] = key
+            if previous and previous != key:
+                self.cache.clear([previous])
 
     def _blends(self, job, directory):
         events = job["events"]
@@ -1188,9 +1408,23 @@ class ScheduleProducts:
             self._concatenate(job, Path(job["outputs"]["concatenate"]))
         else:
             if job["options"]["timelapse"] and "timelapse" not in job["outputs"]:
+                self._assert_sample_sources(job)
                 with tempfile.TemporaryDirectory(prefix=".timelapse_", dir=output) as temporary:
                     path = Path(temporary) / "timelapse.mp4"
-                    self._timelapse(job, path)
+                    key = self._timelapse_key(job)
+                    with self.cache.pin([key]):
+                        prepared = self.cache.root / key / "timelapse.mp4"
+                        if prepared.exists():
+                            shutil.copyfile(prepared, path)
+                            fps, count, _ = rtsp_segments._properties(path)
+                            if count != round(job["options"]["duration"] * job["options"]["fps"]) or abs(fps-job["options"]["fps"]) > .05:
+                                raise IOError("準備済みタイムラプスのフレーム数/FPSが一致しません")
+                        else:
+                            self.status(f"[自動作成] タイムラプス素材更新のため再生成: {key}")
+                            self._timelapse(job, path)
+                    self._assert_sample_sources(job)
+                    if self._timelapse_key(job) != key:
+                        raise IOError('タイムラプス公開前に素材が変更されました。再作成します')
                     os.replace(path, output / path.name)
                 job["outputs"]["timelapse"] = str(output / "timelapse.mp4")
                 self._save(job)
@@ -1204,10 +1438,18 @@ class ScheduleProducts:
                 job["blends_done"] = True
                 self._save(job)
             if job["options"]["concatenate"]:
+                if job['options']['timelapse']:
+                    self._assert_sample_sources(job)
                 self._concatenate(job, output / "recording.mp4")
+            elif job['options']['timelapse']:
+                self._assert_sample_sources(job)
         self._assert_capture_ready(job)
         job["state"] = "complete"
         self._save(job)
+        self.source_indexes.pop(job["id"], None)
+        self.sample_gaps.pop(job["id"], None)
+        self.timelapse_revisions.pop(job["id"], None)
+        self.prepared_timelapses.pop(job["id"], None)
         self.status(f"[自動作成] スケジュール終了後の作成完了: {output}")
 
     def tick(self, now=None):
@@ -1236,6 +1478,9 @@ class ScheduleProducts:
             self._prepare_concatenation(job)
             if now >= datetime.fromisoformat(job["end"]):
                 self.flush_archives()
+                self._archives(job)
+                self._prepare_samples(job)
+                self._prepare_timelapse(job)
                 if not self._drained(job):
                     continue
                 self._archives(job)
@@ -1268,6 +1513,8 @@ class ScheduleProducts:
         self.cancel.set()
         if self.thread:
             self.thread.join(timeout=5)
+        if self.annotation_worker is not None:
+            self.annotation_worker.close()
 
 
 _SERVICE_LOCK = threading.RLock()
