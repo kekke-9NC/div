@@ -334,6 +334,21 @@ class TrainingDataReviewWindow(tk.Toplevel):
             messagebox.showerror("レビュー保存エラー", result["error"], parent=self)
         elif operation.startswith("undo_") and not result.get("restored"):
             messagebox.showinfo("判定を戻す", "戻せる判定はありません。", parent=self)
+        if operation in ("review", "skip") and not result.get("error"):
+            moved = {Path(record["from"]) for record in result.get("records", [])}
+            self.events = [event for event in self.events if event not in moved]
+            self.index = min(self.index, max(0, len(self.events) - 1))
+            self.skip_status_var.set(f"スキップ中: {len(self.skip_stack)}件")
+            if self._pending_media_directories is not None:
+                self.media_directories = self._pending_media_directories
+                self._pending_media_directories = None
+                self.refresh(synchronize_media=True)
+                return
+            for control in self._review_controls:
+                control.state(["!disabled"])
+            self._show_current()
+            self._notify_bulk_loaded()
+            return
         self.refresh(include_history=bool(result.get("error")))
 
     def _notify_bulk_loaded(self) -> None:
