@@ -104,7 +104,7 @@ class BulkReviewDialog(tk.Toplevel):
             messagebox.showinfo("対象日", "表示中の検出日を読み取れません。", parent=self)
 
     def _update_buttons(self):
-        loading = self.reviewer._load_busy or self.reviewer._closing
+        loading = self.reviewer._load_busy or self.reviewer._closing or self.reviewer._load_failed
         unavailable = self.busy or loading
         for widget in self.inputs + [self.scan_button]:
             widget.state(["disabled" if unavailable else "!disabled"])
@@ -115,7 +115,7 @@ class BulkReviewDialog(tk.Toplevel):
         self.cancel_button.state(["!disabled" if self.busy else "disabled"])
 
     def _start(self, operation, function):
-        if self.busy or self.reviewer._load_busy or self.reviewer._closing:
+        if self.busy or self.reviewer._load_busy or self.reviewer._closing or self.reviewer._load_failed:
             return
         self.busy = True
         self.cancel.clear()
@@ -201,6 +201,9 @@ class BulkReviewDialog(tk.Toplevel):
             self.after(50, self._poll)
 
     def reviewer_loaded(self):
+        if self.reviewer._load_failed:
+            self.selection = None
+            self.status.set("一覧を読み込めません。一括画面を閉じて再読み込みしてください。")
         self.batch_records = bulk.latest_batch_records(self.reviewer.undo_stack + self.reviewer.skip_stack)
         self._update_buttons()
 

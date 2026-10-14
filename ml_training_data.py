@@ -596,7 +596,8 @@ def undo_review(record: Dict[str, Any], root_dir: str) -> Optional[Path]:
     return destination
 
 
-def undoable_history(root_dir: str, *, cancel: Optional[threading.Event] = None
+def undoable_history(root_dir: str, *, cancel: Optional[threading.Event] = None,
+                     strict: bool = False
                      ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Read both undo histories in one pass, retaining their original ordering."""
     log_path = Path(root_dir).expanduser() / "review_log.jsonl"
@@ -629,6 +630,8 @@ def undoable_history(root_dir: str, *, cancel: Optional[threading.Event] = None
     except InterruptedError:
         raise
     except OSError:
+        if strict:
+            raise
         return [], []
     def surviving(records):
         result = []

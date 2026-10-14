@@ -48,6 +48,7 @@ class TrainingDataReviewWindow(tk.Toplevel):
         self.undo_stack: List[Dict[str, Any]] = []
         self.skip_stack: List[Dict[str, Any]] = []
         self._load_busy = False
+        self._load_failed = False
         self._closing = False
         self._closed = False
         self._load_cancel = threading.Event()
@@ -104,7 +105,8 @@ class TrainingDataReviewWindow(tk.Toplevel):
         ttk.Label(toolbar, textvariable=self.status_var).pack(side=tk.LEFT)
         ttk.Label(toolbar, textvariable=self.skip_status_var).pack(side=tk.LEFT, padx=(18, 0))
         ttk.Button(toolbar, text="流星確率で一括選別", command=self._open_bulk_review).pack(side=tk.RIGHT, padx=8)
-        ttk.Button(toolbar, text="再読み込み", command=self.refresh).pack(side=tk.RIGHT)
+        self.refresh_button = ttk.Button(toolbar, text="再読み込み", command=self.refresh)
+        self.refresh_button.pack(side=tk.RIGHT)
 
         ttk.Label(
             self, textvariable=self.detail_var, padding=(10, 0, 10, 6), justify=tk.LEFT
@@ -195,7 +197,7 @@ class TrainingDataReviewWindow(tk.Toplevel):
                 if cancel.is_set():
                     raise InterruptedError()
                 events = ml_training_data.pending_events(root_dir, cancel=cancel)
-                reviews, skips = ml_training_data.undoable_history(root_dir, cancel=cancel)
+                reviews, skips = ml_training_data.undoable_history(root_dir, cancel=cancel, strict=True)
                 if cancel.is_set():
                     raise InterruptedError()
                 results.put(("ready", (events, reviews, skips, current_name, moved_count, sync_error)))
@@ -230,11 +232,16 @@ class TrainingDataReviewWindow(tk.Toplevel):
             self.refresh(synchronize_media=True)
             return
         if kind != "ready":
+            self._load_failed = True
+            for control in self._review_controls:
+                control.state(["disabled"])
+            self.refresh_button.state(["!disabled"])
             self.status_var.set("読み込みに失敗しました。再読み込みしてください。")
             self._notify_bulk_loaded()
             if kind == "error":
                 messagebox.showerror("レビュー読み込みエラー", value, parent=self)
             return
+        self._load_failed = False
         self.events, self.undo_stack, self.skip_stack, current_name, moved_count, sync_error = value
         if current_name:
             for i, event in enumerate(self.events):
@@ -275,7 +282,7 @@ class TrainingDataReviewWindow(tk.Toplevel):
         self._stop_video()
 
     def _open_bulk_review(self) -> None:
-        if self._load_busy or self._closing:
+        if self._load_busy or self._closing or self._load_failed:
             return
         if self.bulk_dialog is not None and self.bulk_dialog.winfo_exists():
             self.bulk_dialog.lift()
@@ -389,21 +396,21 @@ class TrainingDataReviewWindow(tk.Toplevel):
             self.cap = None
 
     def _previous(self) -> None:
-        if self._load_busy or self._closing:
+        if self._load_busy or self._closing or self._load_failed:
             return
         if self.events:
             self.index = (self.index - 1) % len(self.events)
             self._show_current()
 
     def _next(self) -> None:
-        if self._load_busy or self._closing:
+        if self._load_busy or self._closing or self._load_failed:
             return
         if self.events:
             self.index = (self.index + 1) % len(self.events)
             self._show_current()
 
     def _classify(self, label: str) -> None:
-        if self._load_busy or self._closing:
+        if self._load_busy or self._closing or self._load_failed:
             return
         event = self.current_event
         if event is None:
@@ -422,7 +429,7 @@ class TrainingDataReviewWindow(tk.Toplevel):
             self.refresh()
 
     def _skip_events(self, events: List[Path], reason: str) -> None:
-        if self._load_busy or self._closing:
+        if self._load_busy or self._closing or self._load_failed:
             return
         if not events:
             return
@@ -457,7 +464,7 @@ class TrainingDataReviewWindow(tk.Toplevel):
         self._skip_events(selected, f"from_here:{len(selected)}")
 
     def _skip_same_day(self) -> None:
-        if self._load_busy or self._closing:
+        if self._load_busy or self._closing or self._load_failed:
             return
         event = self.current_event
         if event is None:
@@ -479,7 +486,7 @@ class TrainingDataReviewWindow(tk.Toplevel):
         self._skip_events(selected, f"same_date:{target_date}")
 
     def _undo_skip(self) -> None:
-        if self._load_busy or self._closing:
+        if self._load_busy or self._closing or self._load_failed:
             return
         try:
             count = max(1, int(self.undo_skip_count_var.get()))
@@ -499,7 +506,7 @@ class TrainingDataReviewWindow(tk.Toplevel):
         self.refresh()
 
     def _undo(self) -> None:
-        if self._load_busy or self._closing:
+        if self._load_busy or self._closing or self._load_failed:
             return
         try:
             count = max(1, int(self.undo_count_var.get()))
