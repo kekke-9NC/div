@@ -875,6 +875,7 @@ class App(
                 command=lambda selected_tab=tab: self._select_page(selected_tab),
             )
         view_menu.add_separator()
+        view_menu.add_command(label="未確認データを目視レビュー…", command=self.open_ml_training_review)
         view_menu.add_command(label="イベントログ", command=self._focus_activity)
         menu_bar.add_cascade(label="表示", menu=view_menu)
 
