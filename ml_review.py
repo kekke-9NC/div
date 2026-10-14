@@ -290,7 +290,7 @@ class TrainingDataReviewWindow(tk.Toplevel):
         self._update_history_records(operation, result.records)
         # The transaction already returned its exact committed records. Only
         # rescan the small pending inventory, not the full historical log.
-        self.refresh(include_history=False)
+        self.refresh(include_history=bool(result.changed or result.error))
 
     def _start_action(self, operation, function):
         if self._load_busy or self._closing or self._load_failed:
@@ -566,7 +566,10 @@ class TrainingDataReviewWindow(tk.Toplevel):
                     break
                 try:
                     restored = undo(record, root)
-                    result["records"].append(record)
+                    # A destination conflict does not undo an active review.
+                    # Keep it in the local stack just as a history reload would.
+                    if restored is not None or not Path(record.get("to", "")).exists():
+                        result["records"].append(record)
                     result["restored"] += restored is not None
                 except Exception as exc:
                     result["error"] = str(exc)
