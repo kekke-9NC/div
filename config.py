@@ -181,7 +181,7 @@ RTSP_CANNY_THRESH2 = 240
 
 
 # --- GUI関連 ---
-GUI_WINDOW_TITLE = "Meteor Detector v0.10.14.5"
+GUI_WINDOW_TITLE = "Meteor Detector v0.10.14.6"
 GUI_WINDOW_GEOMETRY = "1200x900"
 GUI_RESIZED_WIDTH = 640      # GUIで動画フレームをリサイズ表示する際の幅
 GUI_RESIZED_HEIGHT = 300     # GUIで動画フレームをリサイズ表示する際の高さ
