@@ -47,6 +47,8 @@ quantized_model/
 *.pth
 *.npy
 *.npz
+!models/meteor_event_transformer_boost_v6.pth
+!models/auxiliary/meteor_event_noise_gate_v6.pth
 
 # User settings
 app_settings.json
@@ -93,6 +95,7 @@ README.md
 
 # Reproducible event-model diagnostics (deployment metadata stays visible)
 models/*.evaluation.json
+!models/meteor_event_transformer_boost_v6.evaluation.json
 models/diagnostics/event_boost_initial/
 models/diagnostics/event_boost_features/
 
