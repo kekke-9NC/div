@@ -1,4 +1,5 @@
 from gui_common import *
+import gui_layout
 import tempfile
 import media_time
 import camera_model_catalog
@@ -18,70 +19,13 @@ UI_ACCENT = ui_theme.COLORS["accent"]
 class AnalysisMixin:
     def create_analysis_tab(self, parent):
         """Create the analysis tab with focused, on-demand analysis entry points."""
-        # The tab is taller than many laptop displays.  Previously only the
-        # file lists scrolled, leaving the video-concatenation controls below
-        # the visible area with no way to reach them.
         tab_frame = ttk.Frame(parent)
-        tab_frame.pack(fill=tk.BOTH, expand=True)
-        self.analysis_tab_canvas = tk.Canvas(tab_frame, highlightthickness=0, bg=UI_BG)
-        analysis_scrollbar = ttk.Scrollbar(tab_frame, orient=tk.VERTICAL, command=self.analysis_tab_canvas.yview)
-        analysis_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self.analysis_tab_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        self.analysis_tab_canvas.configure(yscrollcommand=analysis_scrollbar.set)
-
-        self.analysis_scrollable_frame = ttk.Frame(self.analysis_tab_canvas)
-        analysis_window = self.analysis_tab_canvas.create_window(
-            (0, 0), window=self.analysis_scrollable_frame, anchor="nw"
-        )
-        self.analysis_scrollable_frame.bind(
-            "<Configure>",
-            lambda _event: self.analysis_tab_canvas.configure(scrollregion=self.analysis_tab_canvas.bbox("all")),
-        )
-        self.analysis_tab_canvas.bind(
-            "<Configure>",
-            lambda event: self.analysis_tab_canvas.itemconfigure(analysis_window, width=event.width),
-        )
-
-        def is_descendant(widget, ancestor):
-            while widget is not None:
-                if widget == ancestor:
-                    return True
-                try:
-                    widget = widget.master
-                except (AttributeError, tk.TclError):
-                    return False
-            return False
-
-        def on_analysis_tab_mousewheel(event):
-            # Keep each file list's own scrollbar independent from the tab.
-            analysis_list_canvas = getattr(self, "analysis_list_canvas", None)
-            video_concat_list_canvas = getattr(self, "video_concat_list_canvas", None)
-            if (
-                analysis_list_canvas is not None
-                and is_descendant(event.widget, analysis_list_canvas)
-            ) or (
-                video_concat_list_canvas is not None
-                and is_descendant(event.widget, video_concat_list_canvas)
-            ):
-                return None
-            if event.widget != self.analysis_tab_canvas and not is_descendant(event.widget, self.analysis_scrollable_frame):
-                return None
-            delta = getattr(event, "delta", 0)
-            if delta:
-                # macOS trackpads may report deltas smaller than 120.
-                amount = -delta if abs(delta) < 120 else -int(delta / 120)
-            else:
-                amount = -1 if getattr(event, "num", None) == 4 else 1
-            self.analysis_tab_canvas.yview_scroll(amount, "units")
-            return "break"
-
-        # Wheel events are delivered to the child control beneath the pointer.
-        self.bind_all("<MouseWheel>", on_analysis_tab_mousewheel, add="+")
-        self.bind_all("<Button-4>", on_analysis_tab_mousewheel, add="+")
-        self.bind_all("<Button-5>", on_analysis_tab_mousewheel, add="+")
-
-        frame = ttk.Frame(self.analysis_scrollable_frame)
-        frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        self.analysis_sections, pages = gui_layout.section_pages(tab_frame, (
+            ('tools', '解析・可視化'), ('media', '画像・動画作成'), ('concat', '動画連結'),
+        ))
+        frame = pages['tools'].body
+        self.analysis_tab_canvas = pages['tools'].canvas
+        self.analysis_scrollable_frame = frame
 
         # Radiant-analysis controls live in a focused, on-demand workspace.
         # Keep only the small entry point in the main analysis page so the
@@ -104,7 +48,7 @@ class AnalysisMixin:
         action_frame.columnconfigure(1, weight=1, uniform="analysis_actions")
 
         trajectory_tools = ttk.LabelFrame(action_frame, text="放射点解析")
-        trajectory_tools.grid(row=0, column=0, sticky=tk.NSEW, padx=(0, 4), pady=(0, 8))
+        trajectory_tools.grid(row=0, column=0, columnspan=2, sticky=tk.NSEW, pady=(0, 8))
         trajectory_grid = ttk.Frame(trajectory_tools)
         trajectory_grid.pack(fill=tk.X)
         trajectory_grid.columnconfigure(0, weight=1)
@@ -160,8 +104,8 @@ class AnalysisMixin:
                 pady=3,
             )
 
-        media_tools = ttk.LabelFrame(action_frame, text="メディア作成")
-        media_tools.grid(row=0, column=1, sticky=tk.NSEW, padx=(4, 0), pady=(0, 8))
+        media_tools = ttk.LabelFrame(pages["media"].body, text="メディア作成")
+        media_tools.pack(fill=tk.X, pady=(0, 8))
         media_grid = ttk.Frame(media_tools)
         media_grid.pack(fill=tk.X)
         media_grid.columnconfigure(0, weight=1, uniform="media")
@@ -169,14 +113,10 @@ class AnalysisMixin:
         self.btn_blend_image = ttk.Button(media_grid, text="比較明合成画像", command=self.create_lighten_blend_image_callback)
         self.btn_blend_video = ttk.Button(media_grid, text="比較明合成動画", command=self.create_lighten_blend_video_callback)
         self.btn_timelapse = ttk.Button(media_grid, text="タイムラプス", command=self.create_timelapse_callback)
-        self.btn_camera_control = ttk.Button(media_grid, text="カメラコントロール", command=self.open_camera_control, style="Gray.TButton")
-        self.btn_model_training = ttk.Button(media_grid, text="機械学習モデル作成", command=self.open_model_training_tool)
         media_buttons = (
             self.btn_blend_image,
             self.btn_blend_video,
             self.btn_timelapse,
-            self.btn_camera_control,
-            self.btn_model_training,
         )
         for index, button in enumerate(media_buttons):
             button.grid(
@@ -187,7 +127,7 @@ class AnalysisMixin:
                 pady=3,
             )
 
-        lf_concat = ttk.LabelFrame(frame, text="動画連結")
+        lf_concat = ttk.LabelFrame(pages["concat"].body, text="動画連結")
         lf_concat.pack(fill=tk.BOTH, expand=True, pady=5)
 
         concat_drop_label = ttk.Label(
@@ -221,7 +161,7 @@ class AnalysisMixin:
         self.video_concat_list_canvas.bind("<Configure>", on_concat_canvas_configure)
         
         def on_concat_mousewheel(event):
-            self.video_concat_list_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+            return gui_layout.scroll_under_pointer(event)
         self.video_concat_list_canvas.bind("<MouseWheel>", on_concat_mousewheel)
         self.video_concat_list_frame.bind("<MouseWheel>", on_concat_mousewheel)
         
@@ -452,7 +392,7 @@ class AnalysisMixin:
         path_label.bind("<Button-1>", on_click)
         
         def on_mousewheel(event):
-            self.analysis_list_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+            return gui_layout.scroll_under_pointer(event)
         item_frame.bind("<MouseWheel>", on_mousewheel)
         badge_canvas.bind("<MouseWheel>", on_mousewheel)
         path_label.bind("<MouseWheel>", on_mousewheel)
@@ -576,7 +516,7 @@ class AnalysisMixin:
         path_label.bind("<Button-1>", on_click)
         
         def on_mousewheel(event):
-            self.video_concat_list_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+            return gui_layout.scroll_under_pointer(event)
         item_frame.bind("<MouseWheel>", on_mousewheel)
         badge_canvas.bind("<MouseWheel>", on_mousewheel)
         path_label.bind("<MouseWheel>", on_mousewheel)

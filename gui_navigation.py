@@ -1,4 +1,5 @@
 from gui_common import *
+import gui_layout
 
 
 class NavigationMixin:
@@ -6,6 +7,7 @@ class NavigationMixin:
         """Navigate to Source Selection tab and highlight the drop area for a few seconds."""
         self.notebook.select(self.tab_source)
 
+        gui_layout.reveal_widget(self.source_drop_label)
         style = ttk.Style()
         style.configure(
             "Highlight.TLabel",
@@ -117,7 +119,7 @@ class NavigationMixin:
         self.notebook.select(self.tab_analysis)
 
     def navigate_to_model_training_button(self):
-        self.notebook.select(self.tab_analysis)
+        self.notebook.select(self.tab_settings)
         if hasattr(self, "btn_model_training"):
             self._scroll_analysis_to_widget(self.btn_model_training)
             self._flash_button(self.btn_model_training)
@@ -181,24 +183,7 @@ class NavigationMixin:
             self._flash_button(self.btn_video_concat_start)
 
     def _scroll_analysis_to_widget(self, widget, top_margin=16):
-        """Scroll the analysis tab so a requested action is visible."""
-        def do_scroll():
-            try:
-                canvas = self.analysis_tab_canvas
-                scrollable_frame = self.analysis_scrollable_frame
-                if not canvas.winfo_exists() or not scrollable_frame.winfo_exists():
-                    return
-                bbox = canvas.bbox("all")
-                if not bbox:
-                    return
-                max_scroll = max(1, (bbox[3] - bbox[1]) - canvas.winfo_height())
-                widget_y = widget.winfo_rooty() - scrollable_frame.winfo_rooty()
-                canvas.yview_moveto(min(1.0, max(0.0, (widget_y - top_margin) / max_scroll)))
-            except (AttributeError, tk.TclError):
-                pass
-
-        self.after(20, do_scroll)
-        self.after(140, do_scroll)
+        gui_layout.reveal_widget(widget, top_margin)
 
     def navigate_to_chat_tab(self):
         self.notebook.select(self.tab_chat)
@@ -235,42 +220,12 @@ class NavigationMixin:
             self.after(160, lambda: self._flash_button(self.btn_ps_mask))
 
     def _scroll_settings_to_widget(self, widget, top_margin=16):
-        """Scroll settings tab canvas so target widget becomes visible near top."""
-        def do_scroll():
-            try:
-                if widget is None or not widget.winfo_exists():
-                    return
-                if not hasattr(self, "settings_canvas") or not hasattr(self, "settings_scrollable_frame"):
-                    return
-                canvas = self.settings_canvas
-                scrollable_frame = self.settings_scrollable_frame
-                if not canvas.winfo_exists() or not scrollable_frame.winfo_exists():
-                    return
-
-                self.update_idletasks()
-                bbox = canvas.bbox("all")
-                if not bbox:
-                    return
-
-                total_h = max(1, bbox[3] - bbox[1])
-                view_h = max(1, canvas.winfo_height())
-                max_scroll = max(1, total_h - view_h)
-
-                # y position inside scrollable frame (independent from current scroll)
-                y_in_frame = widget.winfo_rooty() - scrollable_frame.winfo_rooty()
-                target_y = max(0, y_in_frame - top_margin)
-                frac = min(1.0, max(0.0, target_y / max_scroll))
-                canvas.yview_moveto(frac)
-            except Exception:
-                pass
-
-        # Run twice to stabilize position after tab switch/layout refresh.
-        self.after(20, do_scroll)
-        self.after(140, do_scroll)
+        gui_layout.reveal_widget(widget, top_margin)
 
     def _flash_entry(self, entry):
         if entry is None:
             return
+        gui_layout.reveal_widget(entry)
         try:
             if not entry.winfo_exists():
                 return
@@ -299,6 +254,7 @@ class NavigationMixin:
     def _flash_button(self, button):
         if button is None:
             return
+        gui_layout.reveal_widget(button)
         try:
             if not button.winfo_exists():
                 return

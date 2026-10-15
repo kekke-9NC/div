@@ -1,44 +1,20 @@
 from gui_common import *
+import gui_layout
 
 
 class AdvancedSettingsMixin:
     def create_advanced_settings_tab(self, parent):
         frame = ttk.Frame(parent)
-        frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-
-        canvas = tk.Canvas(
-            frame,
-            highlightthickness=0,
-            bg=ui_theme.COLORS["content_raised"],
-        )
-        scrollbar = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=canvas.yview)
-        scrollable_frame = ttk.Frame(canvas)
-
-        scrollable_frame.bind(
-            "<Configure>",
-            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
-        )
-
-        canvas_window = canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
-
-        def on_canvas_configure(event):
-            canvas.itemconfig(canvas_window, width=event.width)
-        canvas.bind("<Configure>", on_canvas_configure)
-
-        canvas.configure(yscrollcommand=scrollbar.set)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        def on_mousewheel(event):
-            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-        canvas.bind_all("<MouseWheel>", on_mousewheel)
+        self.advanced_sections, pages = gui_layout.section_pages(frame, (
+            ('models', 'モデル・AI'), ('detection', '検出・処理'), ('clips', 'クリップ'),
+        ))
 
         # 基本の処理パラメータ（保存設定タブから移設）
-        self._create_basic_processing_params_section(scrollable_frame)
-        self._create_model_selection_section(scrollable_frame)
-        self._create_ai_vlm_section(scrollable_frame)
+        self._create_basic_processing_params_section(pages["detection"].body)
+        self._create_model_selection_section(pages["models"].body)
+        self._create_ai_vlm_section(pages["models"].body)
 
-        lf_ps_fov = ttk.LabelFrame(scrollable_frame, text="プレートソルブ時の視野角設定")
+        lf_ps_fov = ttk.LabelFrame(pages["models"].body, text="プレートソルブ時の視野角設定")
         lf_ps_fov.pack(fill=tk.X, pady=5)
         ps_fov_row = ttk.Frame(lf_ps_fov)
         ps_fov_row.pack(fill=tk.X, pady=2)
@@ -54,7 +30,7 @@ class AdvancedSettingsMixin:
         self.btn_apply_plate_solve_fov.pack(side=tk.LEFT, padx=(12, 0))
 
         # 検出パラメータ
-        lf_detect = ttk.LabelFrame(scrollable_frame, text="検出パラメータ")
+        lf_detect = ttk.LabelFrame(pages["detection"].body, text="検出パラメータ")
         lf_detect.pack(fill=tk.X, pady=5)
         
         def add_param(parent, text, var, from_, to, increment=1):
@@ -69,7 +45,7 @@ class AdvancedSettingsMixin:
         add_param(lf_detect, "流星判定確率 (METEOR_PROB_THRESH):", self.cfg_meteor_prob_var, 0.1, 1.0, 0.05)
 
         # 詳細検出パラメータ
-        lf_finer = ttk.LabelFrame(scrollable_frame, text="詳細検出パラメータ")
+        lf_finer = ttk.LabelFrame(pages["detection"].body, text="詳細検出パラメータ")
         lf_finer.pack(fill=tk.X, pady=5)
         add_param(lf_finer, "詳細検出ウィンドウ秒数:", self.cfg_finer_window_sec_var, 1.0, 10.0, 0.5)
         add_param(lf_finer, "比較明合成ステップ数:", self.cfg_finer_comp_step_var, 1, 20)
@@ -81,15 +57,15 @@ class AdvancedSettingsMixin:
         # 飛行機判定パラメータは設定セクションから非表示化（内部パラメータは維持）
 
         # 動画クリップパラメータ
-        lf_clip = ttk.LabelFrame(scrollable_frame, text="動画クリップパラメータ")
+        lf_clip = ttk.LabelFrame(pages["clips"].body, text="動画クリップパラメータ")
         lf_clip.pack(fill=tk.X, pady=5)
         add_param(lf_clip, "最大クリップ秒数:", self.cfg_max_clip_dur_var, 1, 30)
         add_param(lf_clip, "クリップ秒数目安:", self.cfg_clip_dur_sec_var, 1.0, 30.0, 0.5)
         add_param(lf_clip, "切り出しサイズ (CUTOUT_SIZE):", self.cfg_cutout_size_var, 128, 1023, 64)
 
-        btn_frame = ttk.Frame(scrollable_frame)
-        btn_frame.pack(fill=tk.X, pady=10)
-        self.btn_reset_advanced = ttk.Button(btn_frame, text="デフォルトに戻す", command=self.reset_advanced_settings)
+        btn_frame = ttk.Frame(frame)
+        btn_frame.pack(fill=tk.X, pady=10, side=tk.BOTTOM, before=self.advanced_sections)
+        self.btn_reset_advanced = ttk.Button(btn_frame, text="詳細設定全体を初期値に戻す", command=self.reset_advanced_settings)
         self.btn_reset_advanced.pack(side=tk.LEFT, padx=5)
 
         return frame

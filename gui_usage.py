@@ -1,4 +1,5 @@
 from gui_common import *
+import gui_layout
 
 UI_BG = ui_theme.COLORS["content_raised"]
 UI_FIELD = ui_theme.COLORS["field"]
@@ -14,39 +15,8 @@ UI_SUCCESS = ui_theme.COLORS["success"]
 
 class UsageMixin:
     def create_usage_tab(self, parent):
-        frame = ttk.Frame(parent)
-
-        canvas = tk.Canvas(frame, highlightthickness=0, bg=UI_BG)
-        scrollbar = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=canvas.yview)
-        scrollable_frame = ttk.Frame(canvas)
-
-        scrollable_frame.bind(
-            "<Configure>",
-            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
-        )
-
-        canvas_window = canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
-
-        def on_canvas_configure(event):
-            canvas.itemconfig(canvas_window, width=event.width)
-        canvas.bind("<Configure>", on_canvas_configure)
-
-        canvas.configure(yscrollcommand=scrollbar.set)
-
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        def on_mousewheel(event):
-            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-
-        def _bind_mousewheel(event):
-            canvas.bind_all("<MouseWheel>", on_mousewheel)
-
-        def _unbind_mousewheel(event):
-            canvas.unbind_all("<MouseWheel>")
-
-        canvas.bind("<Enter>", _bind_mousewheel)
-        canvas.bind("<Leave>", _unbind_mousewheel)
+        frame = gui_layout.ScrollPage(parent)
+        scrollable_frame = frame.body
 
         pad_x = 12
         pad_y = 7

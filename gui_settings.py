@@ -1,5 +1,6 @@
 from gui_common import *
 import ml_training_data
+import gui_layout
 
 UI_BG = ui_theme.COLORS["content_raised"]
 UI_FIELD = ui_theme.COLORS["field"]
@@ -13,48 +14,14 @@ UI_BORDER = ui_theme.COLORS["border"]
 class SettingsMixin:
     def create_settings_tab(self, parent):
         frame = ttk.Frame(parent)
+        self.settings_sections, pages = gui_layout.section_pages(frame, (
+            ('output', '保存先・保存物'), ('noise', 'ノイズ低減'),
+            ('calibration', 'カメラ校正'), ('training', '学習データ'),
+        ))
+        self.settings_canvas = pages['output'].canvas
+        self.settings_scrollable_frame = pages['output'].body
 
-        # スクロール可能なキャンバスとスクロールバーを作成
-        canvas = tk.Canvas(frame, highlightthickness=0, bg=UI_BG)
-        scrollbar = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=canvas.yview)
-        scrollable_frame = ttk.Frame(canvas)
-        self.settings_canvas = canvas
-        self.settings_scrollable_frame = scrollable_frame
-
-        scrollable_frame.bind(
-            "<Configure>",
-            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
-        )
-
-        canvas_window = canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
-
-        # キャンバスのリサイズ時に内部フレームの幅を合わせる
-        def on_canvas_configure(event):
-            canvas.itemconfig(canvas_window, width=event.width)
-        canvas.bind("<Configure>", on_canvas_configure)
-
-        canvas.configure(yscrollcommand=scrollbar.set)
-
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        # マウスホイールでスクロール（キャンバス上にカーソルがある間のみ）
-        def on_mousewheel(event):
-            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-
-        def _bind_mousewheel(event):
-            canvas.bind_all("<MouseWheel>", on_mousewheel)
-        
-        def _unbind_mousewheel(event):
-            canvas.unbind_all("<MouseWheel>")
-
-        # Canvasに入った時だけスクロールを割り当て、出たら解除
-        # これにより他のタブやウィジェットへの干渉を防ぐ
-        canvas.bind("<Enter>", _bind_mousewheel)
-        canvas.bind("<Leave>", _unbind_mousewheel)
-
-        # 以下の内容はscrollable_frameに配置
-        lf_save = ttk.LabelFrame(scrollable_frame, text="保存アイテム")
+        lf_save = ttk.LabelFrame(pages["output"].body, text="保存アイテム")
         lf_save.pack(fill=tk.X, pady=5)
         save_map = {
             'video': "動画クリップ (cutout.mp4)", 
@@ -172,7 +139,7 @@ class SettingsMixin:
                 self.toggle_summary_settings_button()
 
         twin_frame = ttk.LabelFrame(
-            scrollable_frame, text="共通ノイズ前処理（NoiseTwin / モデル不要時間平均）"
+            pages["noise"].body, text="共通ノイズ前処理（NoiseTwin / モデル不要時間平均）"
         )
         twin_frame.pack(fill=tk.X, pady=(6, 2))
         ttk.Checkbutton(
@@ -225,7 +192,7 @@ class SettingsMixin:
         ).pack(anchor=tk.W, padx=24, pady=(0, 4))
         self._update_rtsp_save_temporal_mean_state()
 
-        encoding_frame = ttk.LabelFrame(twin_frame, text="ノイズ低減済み連続動画の圧縮")
+        encoding_frame = ttk.LabelFrame(pages["output"].body, text="ノイズ低減済み連続動画の圧縮")
         encoding_frame.pack(fill=tk.X, padx=4, pady=(2, 5))
         codec_row = ttk.Frame(encoding_frame)
         codec_row.pack(fill=tk.X, padx=4, pady=(3, 1))
@@ -272,7 +239,7 @@ class SettingsMixin:
         )
         self.update_processed_video_encoding_ui()
 
-        lf_path = ttk.LabelFrame(scrollable_frame, text="保存先")
+        lf_path = ttk.LabelFrame(pages["output"].body, text="保存先")
         lf_path.pack(fill=tk.X, pady=5)
         path_frame1 = ttk.Frame(lf_path); path_frame1.pack(fill=tk.X, pady=2)
         ttk.Label(path_frame1, text="流星:", width=10).pack(side=tk.LEFT)
@@ -285,7 +252,9 @@ class SettingsMixin:
         ttk.Button(path_frame2, text="選択", command=lambda: self.select_save_path(self.not_meteor_save_path_var)).pack(side=tk.LEFT, padx=(5,0))
         ttk.Button(path_frame2, text="📂", command=lambda: self.open_not_meteor_folder_in_finder()).pack(side=tk.LEFT, padx=(2,0))
 
-        ml_frame = ttk.LabelFrame(scrollable_frame, text="機械学習向けデータセット")
+        lf_path.pack_configure(before=lf_save)
+
+        ml_frame = ttk.LabelFrame(pages["training"].body, text="機械学習向けデータセット")
         ml_frame.pack(fill=tk.X, pady=5)
         ttk.Checkbutton(
             ml_frame,
@@ -323,7 +292,11 @@ class SettingsMixin:
             command=self.open_ml_training_review,
         ).pack(anchor=tk.W, padx=4, pady=(4, 5))
 
-        archive_frame = ttk.LabelFrame(scrollable_frame, text="過去動画フォルダの自動処理")
+        self.btn_model_training = ttk.Button(
+            pages['training'].body, text="機械学習モデルを作成…", command=self.open_model_training_tool)
+        self.btn_model_training.pack(anchor=tk.W, pady=(6, 0))
+
+        archive_frame = ttk.LabelFrame(self.source_file_body, text="過去動画フォルダの自動処理")
         archive_frame.pack(fill=tk.X, pady=5)
         ttk.Checkbutton(
             archive_frame,
@@ -354,7 +327,7 @@ class SettingsMixin:
             style="Hint.TLabel",
         ).pack(anchor=tk.W, padx=24, pady=(0, 4))
 
-        lf_astro = ttk.LabelFrame(scrollable_frame, text="プレートソルブ & マスク")
+        lf_astro = ttk.LabelFrame(pages["calibration"].body, text="プレートソルブ & マスク")
         lf_astro.pack(fill=tk.X, pady=5)
         
         # プレートソルブ説明用ヘルプアイコン
@@ -443,9 +416,9 @@ class SettingsMixin:
 
         selected_model_lf = ttk.LabelFrame(lf_astro, text="使用する固定カメラ・プレートソルブモデル")
         selected_model_lf.pack(fill=tk.X, pady=(6, 2))
+        ttk.Label(selected_model_lf, text="モデル（種類・被覆率・基準夜・状態）:").pack(anchor=tk.W)
         selected_model_row = ttk.Frame(selected_model_lf)
         selected_model_row.pack(fill=tk.X, pady=(3, 1))
-        ttk.Label(selected_model_row, text="モデル（種類・被覆率・基準夜・状態）:").pack(side=tk.LEFT, padx=(0, 6))
         self.cmb_plate_solve_model = ttk.Combobox(
             selected_model_row,
             textvariable=self.plate_solve_model_var,

@@ -1,5 +1,6 @@
 from gui_common import *
 import ui_state
+import gui_layout
 from fixed_pattern import apply_fixed_pattern_correction
 
 UI_BG = ui_theme.COLORS["content_raised"]
@@ -17,46 +18,14 @@ UI_CYAN = ui_theme.COLORS["cyan"]
 class SourceMixin:
     def create_source_tab(self, parent):
         frame = ttk.Frame(parent)
-        # スクロール可能なキャンバスとスクロールバーを作成
-        canvas = tk.Canvas(frame, highlightthickness=0, bg=UI_BG)
-        scrollbar = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=canvas.yview)
-        scrollable_frame = ttk.Frame(canvas)
+        self.source_sections, pages = gui_layout.section_pages(frame, (
+            ('files', '動画・フォルダ'), ('rtsp', 'RTSPカメラ'),
+            ('periodic', '監視フォルダ'), ('priority', '実行の優先順位'),
+        ))
+        self.source_file_body = pages['files'].body
+        self._create_processing_priority_section(pages['priority'].body)
 
-        scrollable_frame.bind(
-            "<Configure>",
-            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
-        )
-
-        canvas_window = canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
-
-        # キャンバスのリサイズ時に内部フレームの幅を合わせる
-        def on_canvas_configure(event):
-            canvas.itemconfig(canvas_window, width=event.width)
-        canvas.bind("<Configure>", on_canvas_configure)
-
-        canvas.configure(yscrollcommand=scrollbar.set)
-
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        # マウスホイールでスクロール
-        def on_mousewheel(event):
-            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-
-        def _bind_mousewheel(event):
-            canvas.bind_all("<MouseWheel>", on_mousewheel)
-        
-        def _unbind_mousewheel(event):
-            canvas.unbind_all("<MouseWheel>")
-
-        canvas.bind("<Enter>", _bind_mousewheel)
-        canvas.bind("<Leave>", _unbind_mousewheel)
-        
-        # ===== ここから内部ウィジェット =====
-        # Note: pack()の親は scrollable_frame にする
-        self._create_processing_priority_section(scrollable_frame)
-        
-        lf_folder = ttk.LabelFrame(scrollable_frame, text="フォルダ / 動画ファイル")
+        lf_folder = ttk.LabelFrame(pages["files"].body, text="フォルダ / 動画ファイル")
         lf_folder.pack(fill=tk.X, expand=True, pady=5)
         
         self.source_drop_label = ttk.Label(
@@ -96,9 +65,7 @@ class SourceMixin:
         # 内側スクロール: 親と競合しないようローカルでbindする
         
         def on_inner_mousewheel(event):
-            self.folder_list_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-            # イベント伝播を止めたいが、Tkinter bindでは return "break" する必要がある
-            return "break"
+            return gui_layout.scroll_under_pointer(event)
 
         self.folder_list_canvas.bind("<MouseWheel>", on_inner_mousewheel)
         self.folder_list_frame.bind("<MouseWheel>", on_inner_mousewheel)
@@ -133,7 +100,7 @@ class SourceMixin:
             command=self.remove_selected_folders,
         ).pack(side=tk.RIGHT, padx=4)
 
-        lf_rtsp = ttk.LabelFrame(scrollable_frame, text="RTSPストリーム")
+        lf_rtsp = ttk.LabelFrame(pages["rtsp"].body, text="RTSPストリーム")
         lf_rtsp.pack(fill=tk.X, expand=True, pady=5)
 
         rtsp_intro = ttk.Frame(lf_rtsp)
@@ -211,7 +178,7 @@ class SourceMixin:
             command=utils.play_notification_sound,
         ).pack(side=tk.LEFT, padx=(8, 0))
         
-        rtsp_list_section = ttk.LabelFrame(lf_rtsp, text="接続済みストリーム", style="Section.TLabelframe")
+        rtsp_list_section = ttk.LabelFrame(lf_rtsp, text="登録済みストリーム", style="Section.TLabelframe")
         rtsp_list_section.pack(fill=tk.X, expand=True, pady=(0, 6))
         rtsp_list_container = ttk.Frame(rtsp_list_section)
         rtsp_list_container.pack(fill=tk.BOTH, expand=True)
@@ -235,8 +202,7 @@ class SourceMixin:
         self.rtsp_list_canvas.bind("<Configure>", on_rtsp_canvas_configure)
         
         def on_rtsp_inner_mousewheel(event):
-            self.rtsp_list_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-            return "break"
+            return gui_layout.scroll_under_pointer(event)
             
         self.rtsp_list_canvas.bind("<MouseWheel>", on_rtsp_inner_mousewheel)
         self.rtsp_list_frame.bind("<MouseWheel>", on_rtsp_inner_mousewheel)
@@ -251,12 +217,11 @@ class SourceMixin:
         ttk.Button(rtsp_list_actions, text="すべて削除", style="Quiet.TButton", command=self.remove_all_rtsp).pack(side=tk.LEFT)
 
         rtsp_tools = ttk.Frame(lf_rtsp)
-        rtsp_tools.pack(fill=tk.X, pady=(0, 6))
         rtsp_tools.columnconfigure(0, weight=1)
         rtsp_tools.columnconfigure(1, weight=1)
 
         rtsp_analysis = ttk.LabelFrame(rtsp_tools, text="解析ツール", style="Section.TLabelframe")
-        rtsp_analysis.grid(row=0, column=0, sticky=tk.NSEW, padx=(0, 3))
+        rtsp_analysis.grid(row=0, column=0, columnspan=2, sticky=tk.NSEW, pady=(0, 6))
         ttk.Label(rtsp_analysis, text="カメラ映像から解析用の設定を作成します。", style="Hint.TLabel").pack(anchor=tk.W, pady=(0, 6))
         analysis_buttons = ttk.Frame(rtsp_analysis)
         analysis_buttons.pack(anchor=tk.W)
@@ -264,9 +229,11 @@ class SourceMixin:
         self.btn_rtsp_plate_solve.pack(side=tk.LEFT, padx=(0, 5))
         self.btn_rtsp_mask = ttk.Button(analysis_buttons, text="マスク作成", command=self.create_rtsp_mask)
         self.btn_rtsp_mask.pack(side=tk.LEFT)
+        self.btn_camera_control = ttk.Button(analysis_buttons, text="カメラ操作", command=self.open_camera_control)
+        self.btn_camera_control.pack(side=tk.LEFT, padx=(5, 0))
 
         rtsp_pattern = ttk.LabelFrame(rtsp_tools, text="固定パターン補正", style="Section.TLabelframe")
-        rtsp_pattern.grid(row=0, column=1, sticky=tk.NSEW, padx=(3, 0))
+        rtsp_pattern.grid(row=1, column=0, columnspan=2, sticky=tk.NSEW)
         ttk.Label(
             rtsp_pattern,
             text="補正マップを作成し、この欄で補正の有効／無効を設定します。",
@@ -291,12 +258,12 @@ class SourceMixin:
         )
         self.cmb_rtsp_fixed_pattern_samples.pack(side=tk.LEFT, padx=(0, 8))
         self.chk_apply_rtsp_dark = ttk.Checkbutton(
-            rtsp_pattern_buttons,
+            rtsp_pattern,
             text="固定パターン補正を有効化",
             variable=self.apply_rtsp_dark_var,
             command=self.on_apply_rtsp_dark_changed,
         )
-        self.chk_apply_rtsp_dark.pack(side=tk.LEFT)
+        self.chk_apply_rtsp_dark.pack(anchor=tk.W, pady=(5, 0))
         ttk.Label(
             rtsp_pattern,
             text="約1時間の録画全体からランダム抽出します。推奨: 360枚（実測約55秒）。",
@@ -353,9 +320,10 @@ class SourceMixin:
         
         self._build_schedule_product_controls(rtsp_time_frame)
         self.toggle_rtsp_time_limit_frame()
+        rtsp_tools.pack(fill=tk.X, pady=(8, 6))
         
         # ===== 定期スキャン (移設) =====
-        lf_periodic = ttk.LabelFrame(scrollable_frame, text="定期スキャン (監視フォルダ)")
+        lf_periodic = ttk.LabelFrame(pages["periodic"].body, text="定期スキャン (監視フォルダ)")
         lf_periodic.pack(fill=tk.X, expand=True, pady=5)
 
         # Header frame for Checkbutton + Help
@@ -422,7 +390,7 @@ atomcam2で利用する場合は、GitHubで公開されている
         ttk.Label(interval_frame, text="スキャン間隔 (秒):").pack(side=tk.LEFT)
         ttk.Entry(interval_frame, textvariable=self.periodic_interval_var, width=5).pack(side=tk.LEFT)
 
-        lf_time = ttk.LabelFrame(scrollable_frame, text="時間制限 (定期スキャン用)")
+        lf_time = ttk.LabelFrame(lf_periodic, text="スキャン時間帯")
         lf_time.pack(fill=tk.X, expand=True, pady=5)
         
         row_frame = ttk.Frame(lf_time)
@@ -666,7 +634,7 @@ atomcam2で利用する場合は、GitHubで公開されている
         path_label.bind("<Button-1>", on_click)
         
         def on_mousewheel(event):
-            self.folder_list_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+            return gui_layout.scroll_under_pointer(event)
         item_frame.bind("<MouseWheel>", on_mousewheel)
         badge_canvas.bind("<MouseWheel>", on_mousewheel)
         path_label.bind("<MouseWheel>", on_mousewheel)
@@ -780,7 +748,7 @@ atomcam2で利用する場合は、GitHubで公開されている
         url_label.bind("<Button-1>", on_click)
         
         def on_mousewheel(event):
-            self.rtsp_list_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+            return gui_layout.scroll_under_pointer(event)
         item_frame.bind("<MouseWheel>", on_mousewheel)
         badge_canvas.bind("<MouseWheel>", on_mousewheel)
         url_label.bind("<MouseWheel>", on_mousewheel)
