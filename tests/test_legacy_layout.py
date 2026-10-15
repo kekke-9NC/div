@@ -84,3 +84,16 @@ def test_small_trackpad_delta_is_not_discarded(root):
     root.update()
     gui_layout.scroll_under_pointer(SimpleNamespace(widget=page.body, delta=-1))
     assert page.canvas.yview()[0] > 0
+
+
+def test_standalone_explanations_follow_page_width_after_resize(root):
+    page = gui_layout.ScrollPage(root)
+    page.pack(fill='both', expand=True)
+    label = ttk.Label(page.body, text='A long explanation ' * 25, wraplength=1120)
+    label.pack(anchor='w')
+    root.update()
+    original_height = label.winfo_height()
+    root.geometry('360x400')
+    root.update()
+    assert label.winfo_reqwidth() <= page.body.winfo_width()
+    assert label.winfo_height() > original_height

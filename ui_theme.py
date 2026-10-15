@@ -61,10 +61,10 @@ PAGE_META = (
     {
         "key": "settings",
         "glyph": "⇩",
-        "label": "保存と出力",
+        "label": "出力・補正",
         "eyebrow": "OUTPUT",
-        "title": "保存と出力",
-        "subtitle": "生成するデータ、保存先、解析モデルを設定します。",
+        "title": "出力・補正",
+        "subtitle": "保存先・保存物、ノイズ低減、カメラ校正、学習データを設定します。",
     },
     {
         "key": "analysis",

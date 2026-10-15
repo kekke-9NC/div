@@ -3,82 +3,60 @@ import gui_common as common
 
 
 class PreviewMixin:
-    def create_info_panel(self, parent):
+    def create_info_panel(self, parent, controls_parent=None):
         c = ui_theme.COLORS
         activity_header = tk.Frame(parent, bg=c["glass"])
         activity_header.pack(fill=tk.X, pady=(2, 12))
-        activity_copy = tk.Frame(activity_header, bg=c["glass"])
-        activity_copy.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        tk.Label(
-            activity_copy,
-            text="アクティビティ",
-            bg=c["glass"],
-            fg=c["text"],
-            anchor=tk.W,
-            font=("SF Pro Display", 16, "bold"),
-        ).pack(fill=tk.X)
-        tk.Label(
-            activity_copy,
-            text="処理状況とイベント",
-            bg=c["glass"],
-            fg=c["text_tertiary"],
-            anchor=tk.W,
-            font=("SF Pro Text", 9),
-        ).pack(fill=tk.X, pady=(2, 0))
-        ui_theme.make_badge(activity_header, "● READY").pack(side=tk.RIGHT)
+        tk.Label(activity_header, text="アクティビティ", bg=c["glass"], fg=c["text"],
+                 font=("SF Pro Display", 16, "bold")).pack(side=tk.LEFT)
+        ttk.Button(activity_header, text="閉じる", style="Quiet.TButton",
+                   command=lambda: self._set_activity_visible(False)).pack(side=tk.RIGHT)
 
-        control_card = ttk.LabelFrame(parent, text="観測コントロール")
-        control_card.pack(fill=tk.X, pady=(0, 12))
+        # Execution controls stay visible even when the activity pane is closed.
+        control_card = ttk.Frame(controls_parent if controls_parent is not None else parent,
+                                 padding=(12, 10))
+        control_card.pack(fill=tk.X)
+        control_card.columnconfigure(0, weight=1)
+        control_card.columnconfigure(1, weight=1)
+        self.execution_source_var = tk.StringVar(value="入力ソースを選択してください")
+        ttk.Label(control_card, text="次に開始する入力（優先順）", style="Hint.TLabel").grid(
+            row=0, column=0, sticky=tk.W)
+        ttk.Label(control_card, textvariable=self.execution_source_var).grid(
+            row=1, column=0, sticky=tk.W, padx=(0, 16))
 
         status_row = ttk.Frame(control_card)
-        status_row.pack(fill=tk.X, pady=(0, 7))
+        status_row.grid(row=0, column=1, rowspan=2, sticky=tk.EW, padx=(8, 20))
+        self.status_label = ttk.Label(status_row, text="待機中", anchor=tk.W)
+        self.status_label.pack(anchor=tk.W)
         self.progress = ttk.Progressbar(status_row, orient=tk.HORIZONTAL, mode='determinate')
-        self.progress.pack(fill=tk.X, expand=True, side=tk.LEFT, padx=(0, 10))
-        self.status_label = ttk.Label(status_row, text="待機中", width=9, anchor=tk.E)
-        self.status_label.pack(side=tk.LEFT)
-
-        time_frame = ttk.Frame(control_card)
-        time_frame.pack(fill=tk.X, pady=(0, 8))
-        self.eta_label = ttk.Label(time_frame, text="残り --:--:--")
+        self.progress.pack(fill=tk.X, pady=3)
+        time_frame = ttk.Frame(status_row)
+        time_frame.pack(fill=tk.X)
+        self.eta_label = ttk.Label(time_frame, text="残り --:--:--", style="Hint.TLabel")
         self.eta_label.pack(side=tk.LEFT)
-        self.elapsed_label = ttk.Label(time_frame, text="経過 00:00:00")
-        self.elapsed_label.pack(side=tk.RIGHT)
+        self.elapsed_label = ttk.Label(time_frame, text="経過 00:00:00", style="Hint.TLabel")
+        self.elapsed_label.pack(side=tk.RIGHT, padx=(12, 0))
 
-        btn_frame = ttk.Frame(control_card)
-        btn_frame.pack(fill=tk.X)
-        self.start_button = ttk.Button(
-            btn_frame,
-            text="開始",
-            style="Primary.TButton",
-            command=self.start_processing,
-        )
-        self.start_button.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
+        buttons = ttk.Frame(control_card)
+        buttons.grid(row=0, column=2, rowspan=2, sticky=tk.E)
         self.live_preview_button = ttk.Button(
-            btn_frame,
-            text="ライブ",
-            style="Quiet.TButton",
-            command=self.open_rtsp_live_preview,
-            state=tk.DISABLED,
-        )
-        self.live_preview_button.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
+            buttons, text="ライブ", style="Quiet.TButton", command=self.open_rtsp_live_preview,
+            state=tk.DISABLED)
+        self.live_preview_button.pack(side=tk.LEFT, padx=(0, 6))
+        self.start_button = ttk.Button(
+            buttons, text="開始", style="Primary.TButton", command=self.start_processing)
+        self.start_button.pack(side=tk.LEFT, padx=(0, 6))
         self.cancel_button = ttk.Button(
-            control_card,
-            text="停止",
-            style="Danger.TButton",
-            command=self.cancel_processing,
-            state=tk.DISABLED,
-        )
-        self.cancel_button.pack(fill=tk.X, pady=(7, 0))
+            buttons, text="停止", style="Danger.TButton", command=self.cancel_processing,
+            state=tk.DISABLED)
+        self.cancel_button.pack(side=tk.LEFT)
         self._update_live_preview_button_state()
 
         panel = status_panel.StatusPanel(parent, progress_queue=self.progress_queue, app=self)
         panel.pack(fill=tk.BOTH, expand=True)
         self.status_panel = panel
-
         self.log_text = panel.log_text
         self._init_summary_log_hover_preview()
-
-        # Share status callback with worker-side pipeline.
         try:
             common.STATUS_CALLBACK = panel.get_status_callback()
         except Exception:

@@ -187,7 +187,7 @@ class UsageMixin:
             "Step 0: 最短で動かす手順 🚀",
             [
                 [("text", "最初に "), ("button", "ソース選択へ", self.navigate_to_source_drop_area, "#FFD700"), ("text", " で入力データを追加します。")],
-                [("text", "次に "), ("button", "保存設定へ", self.navigate_to_settings_tab, "#FFD700"), ("text", " で保存先・保存項目を確認します。")],
+                [("text", "次に "), ("button", "出力・補正へ", self.navigate_to_settings_tab, "#FFD700"), ("text", " で保存先・保存項目を確認します。")],
                 [("text", "準備ができたら "), ("button", "開始ボタン", self.navigate_to_start_button, "#90EE90"), ("text", " を押して処理を開始します。")],
             ],
             phase="detect",
@@ -206,7 +206,7 @@ class UsageMixin:
         add_section(
             "Step 2: 保存・検出・座標設定（マスク / プレートソルブ / APIキー） ⚙️",
             [
-                [("text", "保存設定は "), ("button", "保存設定へ", self.navigate_to_settings_tab, "#FFD700"), ("text", " で行います。")],
+                [("text", "保存設定は "), ("button", "出力・補正へ", self.navigate_to_settings_tab, "#FFD700"), ("text", " で行います。")],
                 [("text", "誤検出が多い場合は "), ("button", "検出マスク", self.navigate_to_detection_mask_button, "#FFD700"), ("text", " を作成して調整します。")],
                 [("text", "プレートソルブを使う場合は "), ("button", "PS動画の選択", self.navigate_to_plate_solve_select_video_button, "#87CEEB"), ("text", " の後に "), ("button", "プレートソルブ実行", self.navigate_to_plate_solve_run_button, "#87CEEB"), ("text", " を押します。")],
                 [("text", "プレートソルブの視野角は "), ("button", "プレートソルブ時の視野角設定", self.navigate_to_plate_solve_fov_settings, "#87CEEB"), ("text", " で設定してください。設定した値が正しくない場合、プレートソルブがうまくいかない場合があります。")],

@@ -57,7 +57,7 @@ class StatusPanel(ttk.Frame):
         
         # ログ保存ボタン
         log_btn_frame = ttk.Frame(self.log_frame)
-        log_btn_frame.pack(fill=tk.X, padx=5, pady=(0, 5))
+        log_btn_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=5, pady=(0, 5), before=self.log_text)
         save_log_btn = ttk.Button(
             log_btn_frame,
             text="ログを保存",
@@ -91,19 +91,21 @@ class StatusPanel(ttk.Frame):
         # Download queue label + canvas
         c = ui_theme.COLORS
         dl_label = ttk.Label(self.status_frame, text="ダウンロード")
-        dl_label.pack(anchor='w', padx=pad, pady=(pad, 0))
+        self.status_frame.columnconfigure(0, weight=1, uniform="queues")
+        self.status_frame.columnconfigure(1, weight=1, uniform="queues")
+        dl_label.grid(row=0, column=0, sticky=tk.W, padx=pad, pady=(pad, 0))
         self.dl_canvas = tk.Canvas(
             self.status_frame,
-            height=52,
+            height=86,
             bg=c["field"],
             highlightthickness=1,
             highlightbackground=c["border"],
         )
-        self.dl_canvas.pack(fill=tk.X, padx=pad, pady=(2, pad))
+        self.dl_canvas.grid(row=1, column=0, sticky=tk.EW, padx=pad, pady=(2, pad))
 
         # Processing queue label + canvas
         pr_label = ttk.Label(self.status_frame, text="ワーカー")
-        pr_label.pack(anchor='w', padx=pad, pady=(pad, 0))
+        pr_label.grid(row=0, column=1, sticky=tk.W, padx=pad, pady=(pad, 0))
         self.pr_canvas = tk.Canvas(
             self.status_frame,
             height=86,
@@ -111,11 +113,11 @@ class StatusPanel(ttk.Frame):
             highlightthickness=1,
             highlightbackground=c["border"],
         )
-        self.pr_canvas.pack(fill=tk.X, padx=pad, pady=(2, pad))
+        self.pr_canvas.grid(row=1, column=1, sticky=tk.EW, padx=pad, pady=(2, pad))
 
         # legend
         legend_frame = ttk.Frame(self.status_frame)
-        legend_frame.pack(anchor='w', padx=pad, pady=(0, pad))
+        legend_frame.grid(row=2, column=0, columnspan=2, sticky=tk.W, padx=pad, pady=(0, pad))
         ttk.Label(legend_frame, text="● 処理中", foreground=c["accent"]).pack(side=tk.LEFT, padx=(0, 10))
         ttk.Label(legend_frame, text="○ 待機", foreground=c["text_secondary"]).pack(side=tk.LEFT)
 

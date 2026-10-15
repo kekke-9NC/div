@@ -614,6 +614,8 @@ class App(
         shell = tk.Frame(self, bg=c["window"])
         shell.pack(fill=tk.BOTH, expand=True, padx=12, pady=(8, 12))
 
+        controls_host = ttk.Frame(shell)
+        controls_host.pack(side=tk.BOTTOM, fill=tk.X, pady=(8, 0))
         main_pane = PanedWindow(
             shell,
             orient=tk.HORIZONTAL,
@@ -633,9 +635,12 @@ class App(
             highlightcolor=c["border_bright"],
             highlightthickness=1,
         )
-        content = ttk.Frame(main_pane, style="Content.TFrame", padding=(22, 14, 22, 18))
-        right_frame = tk.Frame(
-            main_pane,
+        content = ttk.Frame(main_pane, style="Content.TFrame", padding=(18, 12, 18, 12))
+        work_area = PanedWindow(content, orient=tk.VERTICAL, sashwidth=8, borderwidth=0,
+                                bg=c["content"], opaqueresize=True, showhandle=False)
+        self._activity_pane = work_area
+        activity_frame = tk.Frame(
+            work_area,
             bg=c["glass"],
             highlightbackground=c["border"],
             highlightcolor=c["border_bright"],
@@ -645,7 +650,9 @@ class App(
         )
         # Source-tab construction queries the processing controls to determine
         # whether Start should be enabled, so build this panel first.
-        self.create_info_panel(right_frame)
+        self._activity_frame = activity_frame
+        self._activity_visible = False
+        self.create_info_panel(activity_frame, controls_parent=controls_host)
 
         brand = tk.Frame(sidebar, bg=c["glass"])
         brand.pack(fill=tk.X, padx=18, pady=(20, 22))
@@ -690,7 +697,8 @@ class App(
         header = ttk.Frame(content, style="Content.TFrame")
         header.pack(fill=tk.X, pady=(2, 12))
         header_copy = ttk.Frame(header, style="Content.TFrame")
-        header_copy.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        header.columnconfigure(0, weight=1)
+        header_copy.grid(row=0, column=0, sticky=tk.EW)
         self.page_eyebrow_var = tk.StringVar()
         self.page_title_var = tk.StringVar()
         self.page_subtitle_var = tk.StringVar()
@@ -704,31 +712,33 @@ class App(
             textvariable=self.page_title_var,
             style="PageTitle.TLabel",
         ).pack(anchor=tk.W, pady=(2, 2))
-        ttk.Label(
-            header_copy,
-            textvariable=self.page_subtitle_var,
-            style="PageSubtitle.TLabel",
-        ).pack(anchor=tk.W)
+        subtitle = ttk.Label(header_copy, textvariable=self.page_subtitle_var,
+                             style="PageSubtitle.TLabel", wraplength=600)
+        subtitle.pack(anchor=tk.W)
+        header_copy.bind('<Configure>', lambda event: subtitle.configure(
+            wraplength=max(200, event.width - 10)))
 
         header_actions = ttk.Frame(header, style="Content.TFrame")
-        header_actions.pack(side=tk.RIGHT, padx=(12, 0))
+        header_actions.grid(row=0, column=1, sticky=tk.NE, padx=(12, 0))
         ttk.Button(
             header_actions,
             text="使い方",
             style="Toolbar.TButton",
             command=lambda: self._select_page(self.tab_usage),
         ).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(
+        self.activity_button = ttk.Button(
             header_actions,
-            text="アクティビティ",
+            text="ログ・処理状況",
             style="Quiet.TButton",
-            command=self._focus_activity,
-        ).pack(side=tk.LEFT)
+            command=self._toggle_activity,
+        )
+        self.activity_button.pack(side=tk.LEFT)
 
         ttk.Separator(content, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=(0, 12))
 
-        self.notebook = ttk.Notebook(content, style="Content.TNotebook")
-        self.notebook.pack(fill=tk.BOTH, expand=True)
+        work_area.pack(fill=tk.BOTH, expand=True)
+        self.notebook = ttk.Notebook(work_area, style="Content.TNotebook")
+        work_area.add(self.notebook, minsize=150, stretch="always")
 
         self.tab_usage = self.create_usage_tab(self.notebook)
         self.tab_source = self.create_source_tab(self.notebook)
@@ -774,28 +784,15 @@ class App(
             button.pack(fill=tk.X, pady=2)
             self._sidebar_buttons[str(tab)] = button
 
-        footer = tk.Frame(sidebar, bg=c["glass_strong"], padx=14, pady=12)
+        footer = tk.Frame(sidebar, bg=c["glass"], padx=2)
         footer.pack(fill=tk.X, padx=12, pady=12)
-        tk.Label(
-            footer,
-            text="●  準備完了",
-            bg=c["glass_strong"],
-            fg=c["success"],
-            anchor=tk.W,
-            font=("SF Pro Text", 10, "bold"),
-        ).pack(fill=tk.X)
-        tk.Label(
-            footer,
-            text="入力ソースを選ぶと開始できます",
-            bg=c["glass_strong"],
-            fg=c["text_tertiary"],
-            anchor=tk.W,
-            font=("SF Pro Text", 9),
-        ).pack(fill=tk.X, pady=(3, 0))
+        ttk.Button(footer, text="未確認データのレビュー", style="Quiet.TButton",
+                   command=self.open_ml_training_review).pack(fill=tk.X, pady=(0, 6))
+        ttk.Button(footer, text="流星の保存先を開く", style="Quiet.TButton",
+                   command=self.open_meteor_folder_in_finder).pack(fill=tk.X)
 
-        main_pane.add(sidebar, width=232, minsize=210, stretch="never")
-        main_pane.add(content, width=880, minsize=640, stretch="always")
-        main_pane.add(right_frame, width=340, minsize=300, stretch="never")
+        main_pane.add(sidebar, width=208, minsize=180, stretch="never")
+        main_pane.add(content, width=1000, minsize=520, stretch="always")
 
         self.notebook.bind("<<NotebookTabChanged>>", self._on_page_changed, add="+")
         for index, tab in enumerate(tabs, start=1):
@@ -812,17 +809,7 @@ class App(
         self.bind_all("<Command-Return>", lambda _event: self.start_button.invoke(), add="+")
         self._create_application_menu()
 
-        def _set_initial_sash():
-            try:
-                total = main_pane.winfo_width()
-                if total <= 0:
-                    return
-                main_pane.sash_place(0, 232, 0)
-                main_pane.sash_place(1, max(880, total - 340), 0)
-            except Exception:
-                pass
-
-        self.after(120, _set_initial_sash)
+        self.after_idle(lambda: main_pane.sash_place(0, 208, 0))
         self.after_idle(lambda: self._select_page(self.tab_usage))
 
     def _create_application_menu(self):
@@ -908,7 +895,23 @@ class App(
         for tab_key, button in self._sidebar_buttons.items():
             button.set_selected(tab_key == key)
 
+    def _set_activity_visible(self, visible):
+        if visible == self._activity_visible:
+            return
+        self._activity_visible = visible
+        if visible:
+            self._activity_pane.add(self._activity_frame, height=250, minsize=220, stretch="never")
+            self.update_idletasks()
+            self._activity_pane.sash_place(0, 0, max(150, self._activity_pane.winfo_height() - 258))
+        else:
+            self._activity_pane.forget(self._activity_frame)
+        self.activity_button.configure(text="ログを閉じる" if visible else "ログ・処理状況")
+
+    def _toggle_activity(self):
+        self._set_activity_visible(not self._activity_visible)
+
     def _focus_activity(self):
+        self._set_activity_visible(True)
         try:
             self.status_panel.notebook.select(self.status_panel.log_frame)
             self.log_text.focus_set()

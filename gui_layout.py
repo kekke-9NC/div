@@ -17,14 +17,28 @@ class ScrollPage(ttk.Frame):
         self.canvas.configure(yscrollcommand=scrollbar.set)
         self.body = ttk.Frame(self.canvas, padding=(4, 6, 8, 12))
         window = self.canvas.create_window((0, 0), window=self.body, anchor='nw')
-        self.body.bind('<Configure>', lambda _e: self.canvas.configure(
-            scrollregion=self.canvas.bbox('all')))
+        self.body.bind('<Configure>', self._update_body_layout)
+        self.bind('<Map>', self._update_body_layout)
         self.canvas.bind('<Configure>', lambda e: self.canvas.itemconfigure(window, width=e.width))
         root = self.winfo_toplevel()
         if not getattr(root, '_workspace_wheel_installed', False):
             root._workspace_wheel_installed = True
             for sequence in ('<MouseWheel>', '<Button-4>', '<Button-5>'):
                 root.bind_all(sequence, scroll_under_pointer, add='+')
+
+    def _update_body_layout(self, _event=None):
+        # Standalone explanations follow the available page width. Inline field
+        # labels keep their intrinsic width so forms retain their alignment.
+        pending = list(self.body.winfo_children())
+        while pending:
+            widget = pending.pop()
+            pending.extend(widget.winfo_children())
+            if isinstance(widget, (tk.Label, ttk.Label)) and widget.winfo_manager() == 'pack':
+                if widget.pack_info().get('side') == 'top':
+                    available = widget.master.winfo_width() - 32
+                    if available > 48 and str(widget.cget('wraplength')) != str(available):
+                        widget.configure(wraplength=available)
+        self.canvas.configure(scrollregion=self.canvas.bbox('all'))
 
 
 def scroll_under_pointer(event):

@@ -448,6 +448,7 @@ atomcam2で利用する場合は、GitHubで公開されている
         self.processing_source_priority = ui_state.normalize_source_priority(priority)
         if getattr(self, "processing_priority_cards_frame", None) is not None:
             self._refresh_processing_priority_cards()
+        self._refresh_execution_source()
 
     def reset_processing_source_priority(self):
         self.set_processing_source_priority(ui_state.SOURCE_PRIORITY_DEFAULT)
@@ -532,6 +533,16 @@ atomcam2で利用する場合は、GitHubで公開されている
         self._processing_priority_drag_key = None
         self._processing_priority_drop_key = None
 
+    def _refresh_execution_source(self):
+        if not hasattr(self, "execution_source_var"):
+            return
+        source = ui_state.select_source_by_priority(
+            self.processing_source_priority, periodic_enabled=self.periodic_scan_var.get(),
+            has_rtsp=bool(self.rtsp_urls), has_folder=bool(self.folder_paths))
+        labels = {"folder": f"動画・フォルダ {len(self.folder_paths)}件",
+                  "rtsp": f"RTSPカメラ {len(self.rtsp_urls)}件", "periodic": "監視フォルダ"}
+        self.execution_source_var.set(labels.get(source, "入力ソースを選択してください"))
+
     def update_start_button_state(self, *args):
         is_running = (self.worker_thread and self.worker_thread.is_alive()) or \
                      (self.rtsp_thread and self.rtsp_thread.is_alive()) or \
@@ -559,6 +570,7 @@ atomcam2で利用する場合は、GitHubで公開されている
 
         self.start_button.config(state=tk.NORMAL if enable else tk.DISABLED)
         self._update_live_preview_button_state()
+        self._refresh_execution_source()
 
     def drop(self, event):
         paths = self.splitlist(event.data)

@@ -80,8 +80,7 @@ class NavigationMixin:
 
     def navigate_to_settings_tab(self):
         self.notebook.select(self.tab_settings)
-        if hasattr(self, "btn_detection_mask"):
-            self._flash_button(self.btn_detection_mask)
+        self.settings_sections.select(0)
 
     def navigate_to_mask_download_button(self):
         self.notebook.select(self.tab_settings)
@@ -194,6 +193,7 @@ class NavigationMixin:
             self._flash_button(self.btn_reset_advanced)
 
     def navigate_to_log_tab(self):
+        self._set_activity_visible(True)
         if hasattr(self, "status_panel") and hasattr(self.status_panel, "notebook"):
             try:
                 self.status_panel.notebook.select(self.status_panel.log_frame)
@@ -201,6 +201,7 @@ class NavigationMixin:
                 pass
 
     def navigate_to_processing_status_tab(self):
+        self._set_activity_visible(True)
         if hasattr(self, "status_panel") and hasattr(self.status_panel, "notebook"):
             try:
                 self.status_panel.notebook.select(self.status_panel.status_frame)
