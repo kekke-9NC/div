@@ -2021,34 +2021,27 @@ class SettingsMixin:
         except Exception as e:
             self.append_log(f"詳細設定の適用中にエラーが発生しました: {e}")
 
+    def _open_data_folder(self, path):
+        """Open an existing output directory using the platform's file manager."""
+        path = os.path.abspath(os.fspath(path))
+        if not os.path.isdir(path):
+            messagebox.showwarning("フォルダを開けません",
+                                   f"指定されたフォルダが存在しません:\n{path}", parent=self)
+            return
+        try:
+            if sys.platform == "darwin":
+                subprocess.Popen(["open", path])
+            elif sys.platform == "win32":
+                os.startfile(path)
+            else:
+                subprocess.Popen(["xdg-open", path])
+        except OSError as exc:
+            messagebox.showerror("フォルダを開けません", f"{path}\n\n{exc}", parent=self)
+
     def open_meteor_folder_in_finder(self):
         """Open the current meteor data save folder in Finder."""
-        path = self.meteor_save_path_var.get()
-        if not path:
-            path = config.DEFAULT_METEOR_SAVE_PATH
-        if not os.path.exists(path):
-            messagebox.showwarning("フォルダを開けません",
-                                   f"指定されたフォルダが存在しません:\n{path}")
-            return
-        if sys.platform == "darwin":
-            subprocess.Popen(["open", path])
-        elif sys.platform == "win32":
-            os.startfile(path)
-        else:
-            subprocess.Popen(["xdg-open", path])
+        self._open_data_folder(self.meteor_save_path_var.get() or config.DEFAULT_METEOR_SAVE_PATH)
 
     def open_not_meteor_folder_in_finder(self):
         """Open the current non-meteor data save folder in Finder."""
-        path = self.not_meteor_save_path_var.get()
-        if not path:
-            path = config.DEFAULT_NOT_METEOR_SAVE_PATH
-        if not os.path.exists(path):
-            messagebox.showwarning("フォルダを開けません",
-                                   f"指定されたフォルダが存在しません:\n{path}")
-            return
-        if sys.platform == "darwin":
-            subprocess.Popen(["open", path])
-        elif sys.platform == "win32":
-            os.startfile(path)
-        else:
-            subprocess.Popen(["xdg-open", path])
+        self._open_data_folder(self.not_meteor_save_path_var.get() or config.DEFAULT_NOT_METEOR_SAVE_PATH)
