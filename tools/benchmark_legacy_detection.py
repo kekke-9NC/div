@@ -119,7 +119,7 @@ def main():
     options.update(
         ml_training_export_enabled=settings.get('ml_training_export_enabled', False),
         ml_training_data_root=str(args.output / 'ml_training_data'),
-        ml_training_min_probability=settings.get('ml_training_min_probability', config.DEFAULT_ML_TRAINING_MIN_PROBABILITY),
+        ml_training_boundary_fraction=settings.get('ml_training_boundary_fraction', config.DEFAULT_ML_TRAINING_BOUNDARY_FRACTION),
         auto_video_mask_enabled=settings.get('auto_video_mask_enabled', False),
         auto_video_mask_cache_dir=str(args.output / 'auto_mask_cache'),
         full_video_timestamp_enabled=timestamp.get('enabled', config.FULL_VIDEO_TIMESTAMP_ENABLED),
