@@ -16,6 +16,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 import cv2
 import numpy as np
 from temporal_statistics import temporal_median
+import ml_collection_policy
 
 
 SCHEMA_VERSION = 1
@@ -156,8 +157,11 @@ def export_training_event(
     frame_range: Sequence[int],
     media_directories: Optional[Dict[str, str]] = None,
     minimum_probability: float = 0.15,
+    decision_threshold: Optional[float] = None,
+    boundary_fraction: float = ml_collection_policy.DEFAULT_BOUNDARY_FRACTION,
+    model_info: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
-    """Atomically export one pending event and return its directory."""
+    """Export a review candidate; use the legacy floor only without a model threshold."""
     if isinstance(minimum_probability, bool):
         raise ValueError("minimum_probability must be between 0 and 1")
     try:
@@ -169,11 +173,47 @@ def export_training_event(
         raise ValueError("minimum_probability must be between 0 and 1")
     if not math.isfinite(probability) or not 0.0 <= probability <= 1.0:
         raise ValueError("probability must be between 0 and 1")
-    if probability < minimum_probability:
+    collection = None
+    root = Path(root_dir).expanduser().resolve()
+    if decision_threshold is not None:
+        collection = ml_collection_policy.collection_decision(
+            probability=probability, decision_threshold=decision_threshold,
+            boundary_fraction=boundary_fraction, source=source,
+            detection_time=detection_time, frame_range=frame_range, cutout_rect=cutout_rect,
+        )
+        if collection is None:
+            return None
+    elif probability < minimum_probability:
         return None
 
+    reserved = collection is not None and collection["reason"] == "low_score_sample"
+    if reserved and not ml_collection_policy.reserve_low_score(
+        root, collection["observation_night"], collection["event_key"],
+    ):
+        return None
+    try:
+        return _write_training_event(
+            root=root, predicted_label=predicted_label, probability=probability,
+            event_id=event_id, source=source, detection_time=detection_time,
+            frames=frames, classification_diff=classification_diff,
+            cutout_rect=cutout_rect, cutout_size=cutout_size, frame_rate=frame_rate,
+            detected_line=detected_line, frame_range=frame_range,
+            media_directories=media_directories,
+            minimum_probability=minimum_probability if collection is None else None,
+            collection=collection, model_info=model_info,
+        )
+    except Exception:
+        if reserved:
+            ml_collection_policy.release_low_score(root, collection["observation_night"], collection["event_key"])
+        raise
+
+
+def _write_training_event(*, root, predicted_label, probability, event_id, source,
+                          detection_time, frames, classification_diff, cutout_rect,
+                          cutout_size, frame_rate, detected_line, frame_range,
+                          media_directories, minimum_probability, collection, model_info):
+
     label = "meteor" if predicted_label == "meteor" else "not_meteor"
-    root = Path(root_dir).expanduser().resolve()
     pending = root / "pending" / label
     pending.mkdir(parents=True, exist_ok=True)
     safe_event_id = "".join(c if c.isalnum() or c in "-_." else "_" for c in event_id)
@@ -182,6 +222,7 @@ def export_training_event(
         final_dir = pending / f"{safe_event_id}_{uuid.uuid4().hex[:8]}"
     temp_dir = pending / f".{final_dir.name}.tmp-{uuid.uuid4().hex}"
     temp_dir.mkdir(parents=False)
+    renamed = False
 
     try:
         diff = _gray(_extract_square(classification_diff, cutout_rect, cutout_size))
@@ -203,6 +244,8 @@ def export_training_event(
             "predicted_label": label,
             "meteor_probability": probability,
             "minimum_save_probability": minimum_probability,
+            "collection": collection,
+            "model": dict(model_info) if model_info else None,
             "source": str(source),
             "detection_time": detection_time.isoformat(),
             "created_at": _utc_now(),
@@ -230,6 +273,7 @@ def export_training_event(
         with (temp_dir / "metadata.json").open("w", encoding="utf-8") as handle:
             json.dump(metadata, handle, ensure_ascii=False, indent=2)
         temp_dir.rename(final_dir)
+        renamed = True
         _append_jsonl(root / "export_log.jsonl", {
             "action": "export", "timestamp": _utc_now(), "event_id": final_dir.name,
             "predicted_label": label, "path": str(final_dir),
@@ -237,6 +281,8 @@ def export_training_event(
         return str(final_dir)
     except Exception:
         shutil.rmtree(temp_dir, ignore_errors=True)
+        if renamed:
+            shutil.rmtree(final_dir, ignore_errors=True)
         raise
 
 
