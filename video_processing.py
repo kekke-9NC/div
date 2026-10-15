@@ -2107,23 +2107,16 @@ def create_line_video_clips(
                                                 "meteor": meteor_save_path,
                                                 "not_meteor": not_meteor_save_path,
                                             },
-                                            minimum_probability=save_options.get(
-                                                'ml_training_min_probability',
-                                                config.DEFAULT_ML_TRAINING_MIN_PROBABILITY,
+                                            decision_threshold=model.get_meteor_decision_threshold(),
+                                            model_info=model.get_active_model_info(),
+                                            boundary_fraction=save_options.get(
+                                                'ml_training_boundary_fraction',
+                                                config.DEFAULT_ML_TRAINING_BOUNDARY_FRACTION,
                                             ),
                                         )
                                         if ml_event_dir:
                                             saved_paths['ml_training_event'] = ml_event_dir
                                             print(f"機械学習向けイベントを保存しました: {ml_event_dir}")
-                                        else:
-                                            minimum = save_options.get(
-                                                'ml_training_min_probability',
-                                                config.DEFAULT_ML_TRAINING_MIN_PROBABILITY,
-                                            )
-                                            print(
-                                                f"流星確率 {probability:.3f} が学習データの保存下限 "
-                                                f"{float(minimum):.3f} 未満のため保存しません。"
-                                            )
                                     except Exception as e_ml:
                                         print(f"機械学習向けイベントの保存に失敗: {e_ml}")
                             
@@ -2726,23 +2719,16 @@ def create_line_video_clips(
                                     "meteor": meteor_save_path,
                                     "not_meteor": not_meteor_save_path,
                                 },
-                                minimum_probability=save_options.get(
-                                    'ml_training_min_probability',
-                                    config.DEFAULT_ML_TRAINING_MIN_PROBABILITY,
+                                decision_threshold=model.get_meteor_decision_threshold(),
+                                model_info=model.get_active_model_info(),
+                                boundary_fraction=save_options.get(
+                                    'ml_training_boundary_fraction',
+                                    config.DEFAULT_ML_TRAINING_BOUNDARY_FRACTION,
                                 ),
                             )
                             if ml_event_dir:
                                 saved_paths['ml_training_event'] = ml_event_dir
                                 print(f"機械学習向けイベントを保存しました: {ml_event_dir}")
-                            else:
-                                minimum = save_options.get(
-                                    'ml_training_min_probability',
-                                    config.DEFAULT_ML_TRAINING_MIN_PROBABILITY,
-                                )
-                                print(
-                                    f"流星確率 {probability:.3f} が学習データの保存下限 "
-                                    f"{float(minimum):.3f} 未満のため保存しません。"
-                                )
                         except Exception as e_ml:
                             print(f"機械学習向けイベントの保存に失敗: {e_ml}")
 
