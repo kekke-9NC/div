@@ -277,6 +277,8 @@ class SourceMixin:
         ttk.Label(rtsp_pattern, textvariable=self.rtsp_dark_status_var, style="Hint.TLabel", anchor=tk.W).pack(fill=tk.X, pady=(6, 0))
         self.load_rtsp_dark_frame()
         
+        self._build_rtsp_storage_controls(lf_rtsp)
+
         rtsp_time_frame = ttk.LabelFrame(lf_rtsp, text="録画スケジュール", style="Section.TLabelframe")
         rtsp_time_frame.pack(fill=tk.X)
         
@@ -1253,6 +1255,50 @@ atomcam2で利用する場合は、GitHubで公開されている
         for name, value in rtsp_schedule_products.DEFAULTS.items():
             cls = tk.BooleanVar if isinstance(value, bool) else tk.StringVar
             self.schedule_product_vars[name] = cls(master=self, value=value)
+
+    def _rtsp_products_folder(self):
+        # Match ScheduleProducts: custom paths are relative to CWD, with no ~ expansion.
+        custom = self.schedule_product_vars["output_dir"].get()
+        base = Path(custom) if custom else Path(config.RTSP_SAVE_ROOT).resolve() / "schedule_products"
+        return str(base.absolute())
+
+    def open_rtsp_recording_folder(self):
+        self._open_data_folder(config.RTSP_SAVE_ROOT)
+
+    def open_rtsp_products_folder(self):
+        self._open_data_folder(self._rtsp_products_folder())
+
+    def _build_rtsp_storage_controls(self, parent):
+        frame = ttk.LabelFrame(parent, text="録画データ", style="Section.TLabelframe")
+        self.rtsp_storage_frame = frame
+        frame.pack(fill=tk.X, pady=(0, 8))
+        rows = ttk.Frame(frame)
+        rows.pack(fill=tk.X)
+        rows.columnconfigure(1, weight=1)
+        self.rtsp_recording_path_var = tk.StringVar(master=self, value=str(Path(config.RTSP_SAVE_ROOT).resolve()))
+        self.rtsp_products_path_var = tk.StringVar(master=self, value=self._rtsp_products_folder())
+        for row, (label, variable, command, name) in enumerate((
+            ("録画保存先:", self.rtsp_recording_path_var, self.open_rtsp_recording_folder, "btn_rtsp_recording_folder"),
+            ("自動生成物:", self.rtsp_products_path_var, self.open_rtsp_products_folder, "btn_rtsp_products_folder"),
+        )):
+            ttk.Label(rows, text=label).grid(row=row, column=0, sticky=tk.W, padx=(4, 8), pady=3)
+            ttk.Entry(rows, textvariable=variable, state="readonly", width=1).grid(row=row, column=1, sticky=tk.EW, pady=3)
+            button = ttk.Button(rows, text="開く", command=command)
+            button.grid(row=row, column=2, padx=(6, 4), pady=3)
+            setattr(self, name, button)
+        ttk.Label(
+            frame,
+            text="録画は日付・時刻別、自動生成物はスケジュール別のフォルダに保存されます。",
+            style="Hint.TLabel",
+        ).pack(anchor=tk.W, padx=4, pady=(3, 0))
+        ttk.Label(
+            frame,
+            text="自動生成物は現在の出力先設定です。変更前の生成物は元の保存先に残ります。",
+            style="Hint.TLabel",
+        ).pack(anchor=tk.W, padx=4, pady=(2, 4))
+        self.schedule_product_vars["output_dir"].trace_add(
+            "write", lambda *_: self.rtsp_products_path_var.set(self._rtsp_products_folder())
+        )
 
     def _schedule_product_values(self):
         return {name: variable.get() for name, variable in self.schedule_product_vars.items()}
