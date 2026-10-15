@@ -55,10 +55,10 @@ struct InheritedSettingsView: View {
             }
             LegacySettingsCard(title: "検出の詳細条件", subtitle: "旧アプリのしきい値と追跡条件を復元します", fields: Self.advanced)
             LegacySettingsCard(title: "動画の時刻表示と圧縮", subtitle: "検出後に保存する動画に適用します", fields: Self.video)
-            LegacySettingsCard(title: "学習データと自動マスク", subtitle: "流星確率の下限未満の検出は学習データに保存しません", fields: [
+            LegacySettingsCard(title: "学習データと自動マスク", subtitle: "流星判定・境界付近・一部の低スコア候補をレビュー用に保存します", fields: [
                 .toggle("学習データを保存", "ml_training_export_enabled"),
                 .text("学習データの保存先", "ml_training_data_root"),
-                .text("流星確率の保存下限（既定0.15）", "ml_training_min_probability", default: "0.15"),
+                .text("判定閾値の直下を残す幅（既定0.30）", "ml_training_boundary_fraction", default: "0.30"),
                 .toggle("動画からマスクを自動生成", "auto_video_mask_enabled"),
             ])
             LegacySettingsCard(title: "AI解析", subtitle: "旧アプリで選択した解析方法と接続先を使用します", fields: [
