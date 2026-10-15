@@ -215,8 +215,15 @@ def _reload_model_unlocked(model_path: Optional[str] = None, metadata: Optional[
         input_resize = meta.get("input_resize", list(model_catalog.DEFAULT_INPUT_RESIZE))
 
         loaded_transform = _build_transform(mean, std, input_resize)
+        model_digest = hashlib.sha256()
+        with open(target_path, "rb") as model_file:
+            for chunk in iter(lambda: model_file.read(1024 * 1024), b""):
+                model_digest.update(chunk)
         loaded_info = {
             "model_path": target_path,
+            "model_sha256": model_digest.hexdigest(),
+            "release_id": meta.get("release_id"),
+            "preprocess_version": meta.get("preprocess_version"),
             "mean": [float(x) for x in mean],
             "std": [float(x) for x in std],
             "input_resize": input_resize,
