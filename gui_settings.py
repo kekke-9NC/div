@@ -1334,7 +1334,7 @@ class SettingsMixin:
                     f"過去動画の観測地点を取得: 緯度={lat:.6f}, 経度={lon:.6f}"
                 ))
             except Exception as exc:
-                self.after(0, lambda: messagebox.showerror("現在地取得エラー", str(exc)))
+                self.after(0, lambda error=exc: messagebox.showerror("現在地取得エラー", str(error)))
         threading.Thread(target=worker, daemon=True).start()
 
     def _set_noise_twin_training_buttons(self, enabled):
