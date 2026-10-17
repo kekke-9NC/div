@@ -91,8 +91,17 @@ class MaskMixin:
         else:
             window_title = "検出マスク作成"
             source_folders = self.folder_paths or ([self.periodic_dir_var.get()] if self.periodic_scan_var.get() and self.periodic_dir_var.get() else [])
-            for folder in source_folders:
-                videos = sorted([p for p in Path(folder).rglob('*') if p.suffix.lower() in config.PERIODIC_VIDEO_EXTENSIONS])
+            for source_path in source_folders:
+                source = Path(source_path)
+                if source.is_file() and source.suffix.lower() in config.PERIODIC_VIDEO_EXTENSIONS:
+                    videos = [source]
+                elif source.is_dir():
+                    videos = sorted(
+                        p for p in source.rglob('*')
+                        if p.is_file() and p.suffix.lower() in config.PERIODIC_VIDEO_EXTENSIONS
+                    )
+                else:
+                    videos = []
                 if videos:
                     base_image_path = str(videos[0])
                     break
