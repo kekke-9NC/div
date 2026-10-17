@@ -976,7 +976,8 @@ def process_new_rtsp_files(
     summary_video_config: Optional[List[Dict[str, Any]]] = None,
     max_workers: int = 1,
     time_limit_enabled: bool = False, start_hour: int = 17, start_minute: int = 0,
-    end_hour: int = 7, end_minute: int = 0
+    end_hour: int = 7, end_minute: int = 0,
+    final_scan: bool = False,
 ):
     new_files_to_process = []
     video_extensions = config.PERIODIC_VIDEO_EXTENSIONS
@@ -1001,7 +1002,8 @@ def process_new_rtsp_files(
                 for file in files:
                     if file.lower().endswith(video_extensions) and '_temp_' not in file:
                         # 現在書き込み中のファイルはスキップ
-                        if (os.path.normcase(os.path.abspath(root_dir)) in current_hour_dirs and
+                        if (not final_scan and
+                                os.path.normcase(os.path.abspath(root_dir)) in current_hour_dirs and
                                 file.startswith(current_minute_prefix)):
                             continue
                         full_path = os.path.join(root_dir, file)
@@ -1016,7 +1018,7 @@ def process_new_rtsp_files(
                             try:
                                 file_mtime = os.path.getmtime(full_path)
                                 time_since_modified = current_time - file_mtime
-                                if time_since_modified < WRITING_THRESHOLD_SECONDS:
+                                if not final_scan and time_since_modified < WRITING_THRESHOLD_SECONDS:
                                     # 書き込み中の可能性が高いためスキップ
                                     print(f"[RTSP解析] スキップ (書き込み中の可能性): {os.path.basename(full_path)} (更新 {time_since_modified:.1f}秒前)")
                                     continue
@@ -1146,6 +1148,20 @@ def rtsp_save_and_process_thread_target(
         if cancel_flag is not None:
             cancel_flag.set()
         save_thread.join()
+        final_scan_message = "[RTSP統合] 録画停止後の最終スキャンを開始します。"
+        print(final_scan_message)
+        if progress_callback:
+            try:
+                progress_callback((final_scan_message, None))
+            except Exception:
+                pass
+        process_new_rtsp_files(
+            save_root, rtsp_processed_files, progress_callback, mask, global_wcs_info, plate_solve_mask,
+            meteor_save_path, not_meteor_save_path, None, save_options,
+            interval, duration, min_length, summary_video_config, max_workers,
+            time_limit_enabled, start_hour, start_minute, end_hour, end_minute,
+            final_scan=True,
+        )
         print("[RTSP統合] 統合処理スレッドを終了します。")
         if progress_callback:
             try:
