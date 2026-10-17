@@ -48,11 +48,26 @@ def extract_datetime_from_video_path(video_path: str) -> Optional[datetime]:
     path_obj = Path(video_path); parts = path_obj.parts
     try:
         if len(parts) >= 4:
-            date_part, hour_part, minute_part_base = parts[-3], parts[-2], path_obj.stem
-            if '_' in minute_part_base and minute_part_base.split('_')[-1].isdigit(): minute_part = minute_part_base.split('_')[-1][:2]
-            elif minute_part_base.isdigit(): minute_part = minute_part_base[:2]
-            else: raise ValueError(f"分解析不可: {path_obj.name}")
-            return datetime.strptime(f"{date_part}_{hour_part}_{minute_part}", "%Y%m%d_%H_%M")
+            date_part, hour_part = parts[-3], parts[-2]
+            filename_parts = path_obj.stem.split('_')
+            minute_token = filename_parts[0]
+            if minute_token.isdigit() and len(minute_token) <= 2:
+                minute_part = minute_token.zfill(2)
+            elif path_obj.stem.isdigit():
+                minute_part = path_obj.stem[:2]
+            else:
+                raise ValueError(f"分解析不可: {path_obj.name}")
+
+            # Current FFmpeg recordings use MM_SS_<session-id>; OpenCV and
+            # older recordings use MM_temp_<session-id> or just MM.mp4.
+            second_part = "00"
+            if (len(filename_parts) >= 3 and filename_parts[1].isdigit()
+                    and len(filename_parts[1]) <= 2):
+                second_part = filename_parts[1].zfill(2)
+            return datetime.strptime(
+                f"{date_part}_{hour_part}_{minute_part}_{second_part}",
+                "%Y%m%d_%H_%M_%S",
+            )
         else: print(f"パス階層不足: {video_path}"); return None
     except (IndexError, ValueError, TypeError) as e: print(f"動画日時解析失敗 ({video_path}): {e}"); return None
 
