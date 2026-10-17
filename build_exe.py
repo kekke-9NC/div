@@ -37,7 +37,7 @@ if model_source_path is None:
 # Data files to include: (source, dest_in_bundle)
 datas = [
     # (settings_file, "."), # Don't bundle settings, copy it manually later
-    (masks_file, "."),
+    (masks_file, ".") if os.path.exists(masks_file) else None,
     (model_source_path, "."),
     (icon_path, ".") if os.path.exists(icon_path) else None,
 ]
