@@ -172,16 +172,23 @@ def create_lighten_blend_video(
             progress_callback("有効な動画ファイルがありませんでした。")
         return False
     
-    # 最長フレーム数を取得
-    max_frames = max(info['frame_count'] for info in video_infos)
-    
     # 最初の動画の解像度を基準にする
     base_width = video_infos[0]['width']
     base_height = video_infos[0]['height']
     base_fps = video_infos[0]['fps']
     
-    if base_fps <= 0 or base_fps > 120:
+    if not np.isfinite(base_fps) or base_fps <= 0 or base_fps > 120:
         base_fps = 30.0
+
+    for info in video_infos:
+        source_fps = info['fps']
+        if not np.isfinite(source_fps) or source_fps <= 0 or source_fps > 120:
+            source_fps = base_fps
+        info['source_fps'] = source_fps
+        info['duration'] = info['frame_count'] / source_fps
+
+    max_duration = max(info['duration'] for info in video_infos)
+    max_frames = int(np.ceil(max_duration * base_fps))
     
     # メモリ計算: 厳密に計算
     # 1フレーム = width * height * 3 bytes (BGR)
@@ -327,9 +334,17 @@ def _create_lighten_blend_video_streaming(
         # バッファサイズを最小に設定してメモリ節約
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         if cap.isOpened():
+            source_fps = info.get('source_fps', info.get('fps', base_fps))
+            if not np.isfinite(source_fps) or source_fps <= 0 or source_fps > 120:
+                source_fps = base_fps
+            frame_count = info['frame_count']
             caps.append({
                 'cap': cap,
-                'frame_count': info['frame_count'],
+                'frame_count': frame_count,
+                'source_fps': source_fps,
+                'duration': info.get('duration', frame_count / source_fps),
+                'read_index': 0,
+                'current_frame': None,
                 'width': info['width'],
                 'height': info['height'],
                 'path': info['path']  # パスを保持（per_video_masks用）
@@ -402,12 +417,26 @@ def _create_lighten_blend_video_streaming(
             # 合成用のベースフレーム（最初のフレームで初期化）
             composite_frame = None
             frames_used = 0
+            output_time = frame_idx / base_fps
             
             for cap_info in caps:
                 cap = cap_info['cap']
-                if frame_idx < cap_info['frame_count']:
-                    ret, frame = cap.read()
-                    if ret and frame is not None:
+                if output_time < cap_info['duration']:
+                    source_frame_idx = min(
+                        cap_info['frame_count'] - 1,
+                        int(round(output_time * cap_info['source_fps']))
+                    )
+                    while cap_info['read_index'] <= source_frame_idx:
+                        ret, next_frame = cap.read()
+                        if not ret or next_frame is None:
+                            cap_info['current_frame'] = None
+                            cap_info['read_index'] = cap_info['frame_count']
+                            break
+                        cap_info['current_frame'] = next_frame
+                        cap_info['read_index'] += 1
+
+                    frame = cap_info['current_frame']
+                    if frame is not None:
                         # 解像度が異なる場合はリサイズ
                         if frame.shape[1] != base_width or frame.shape[0] != base_height:
                             frame = cv2.resize(frame, (base_width, base_height))
@@ -418,7 +447,7 @@ def _create_lighten_blend_video_streaming(
                             frame = np.where(per_video_masks_3ch[video_path] > 0, frame, 0).astype(np.uint8)
                         
                         if composite_frame is None:
-                            composite_frame = frame
+                            composite_frame = frame.copy()
                         else:
                             # 比較明合成（その場で更新してメモリ節約）
                             np.maximum(composite_frame, frame, out=composite_frame)
