@@ -2909,6 +2909,12 @@ atomcam2で利用する場合は、GitHubで公開されている
         self.apply_selected_model(show_message=True)
 
     def apply_selected_model(self, show_message=False, silent=False):
+        def restore_active_model_selection():
+            active_model_path = model.get_active_model_info().get("model_path")
+            if active_model_path and os.path.isfile(active_model_path):
+                self.selected_model_path_var.set(active_model_path)
+                self.update_model_meta_info(active_model_path)
+
         model_path = self.selected_model_path_var.get().strip()
         if not model_path:
             if not silent:
@@ -2919,6 +2925,7 @@ atomcam2で利用する場合は、GitHubで公開されている
         if not os.path.exists(model_path):
             if not silent:
                 messagebox.showerror("エラー", f"モデルファイルが見つかりません: {model_path}")
+            restore_active_model_selection()
             return False
 
         metadata = model_catalog.load_model_metadata(model_path)
@@ -2927,6 +2934,7 @@ atomcam2で利用する場合は、GitHubで公開されている
             if not silent:
                 messagebox.showerror("エラー", f"モデル読み込みに失敗しました: {msg}")
             self.append_log(f"モデル読み込み失敗: {msg}")
+            restore_active_model_selection()
             return False
 
         config.MODEL_PATH = model_path

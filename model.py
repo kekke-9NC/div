@@ -128,7 +128,6 @@ def reload_model(model_path: Optional[str] = None, metadata: Optional[Dict] = No
     if not target_path:
         return False, "Model path is empty."
     if not os.path.exists(target_path):
-        _model_ready = False
         return False, f"Model file not found: {target_path}"
 
     meta = metadata if isinstance(metadata, dict) else model_catalog.load_model_metadata(target_path)
@@ -142,12 +141,8 @@ def reload_model(model_path: Optional[str] = None, metadata: Optional[Dict] = No
         mean = meta.get("mean", list(model_catalog.DEFAULT_MEAN))
         std = meta.get("std", list(model_catalog.DEFAULT_STD))
         input_resize = meta.get("input_resize", list(model_catalog.DEFAULT_INPUT_RESIZE))
-
-        model = loaded
-        transform = _build_transform(mean, std, input_resize)
-        _model_ready = True
-
-        _active_model_info = {
+        loaded_transform = _build_transform(mean, std, input_resize)
+        loaded_model_info = {
             "model_path": target_path,
             "mean": [float(x) for x in mean],
             "std": [float(x) for x in std],
@@ -156,14 +151,19 @@ def reload_model(model_path: Optional[str] = None, metadata: Optional[Dict] = No
             "meteor_class_index": int(meta.get("meteor_class_index", 0)),
             "metadata_path": meta.get("metadata_path", model_catalog.metadata_path_for_model(target_path)),
         }
-        config.MODEL_PATH = target_path
-        print(f"Loaded model: {target_path}")
-        print(f"Normalization mean/std: {_active_model_info['mean']} / {_active_model_info['std']}")
-        print(f"Resize policy: {_active_model_info['input_resize']}")
-        return True, "ok"
     except Exception as e:
-        _model_ready = False
         return False, str(e)
+
+    # Replace the active model only after every load and metadata step succeeds.
+    model = loaded
+    transform = loaded_transform
+    _active_model_info = loaded_model_info
+    _model_ready = True
+    config.MODEL_PATH = target_path
+    print(f"Loaded model: {target_path}")
+    print(f"Normalization mean/std: {_active_model_info['mean']} / {_active_model_info['std']}")
+    print(f"Resize policy: {_active_model_info['input_resize']}")
+    return True, "ok"
 
 
 def get_active_model_info() -> Dict:
