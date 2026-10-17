@@ -3,6 +3,7 @@ import numpy as np
 from typing import Tuple, List, Dict, Any, Optional
 import subprocess
 import sys
+import os
 
 def create_summary_video(
     summary_video_config: List[Dict[str, Any]],
@@ -13,8 +14,9 @@ def create_summary_video(
     cutout_rect: Tuple[int, int, int, int],
     frame_rate: float,
     output_resolution: Tuple[int, int] = (1920, 1080),
-    full_video_path: Optional[str] = None
-):
+    full_video_path: Optional[str] = None,
+    full_video_frames: Optional[List[np.ndarray]] = None
+) -> bool:
     """
     ユーザー設定に基づき、検出結果をまとめた概要動画を生成する。
     FFMPEGを利用して高速に動画を書き出す。
@@ -46,17 +48,17 @@ def create_summary_video(
         proc = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     except FileNotFoundError:
         print("\n" + "="*50 + "\nエラー: `ffmpeg` が見つかりません。\n" + "="*50)
-        return
+        return False
     except Exception as e:
         print(f"ffmpegの起動に失敗しました: {e}")
-        return
+        return False
 
     # --- ヘルパー関数 ---
     def _add_image_sequence(img_path, duration_sec, proc_handle):
         img = cv2.imread(img_path)
         if img is None:
             print(f"警告: 画像を読み込めませんでした: {img_path}")
-            img = np.zeros((H, W, 3), dtype=np.uint8)
+            return False
         
         h, w = img.shape[:2]
         scale = min(W / w, H / h)
@@ -72,12 +74,13 @@ def create_summary_video(
         for _ in range(num_frames):
             if proc_handle.stdin:
                 proc_handle.stdin.write(final_frame.tobytes())
+        return True
 
     def _add_zoom_sequence(img_path, duration_sec, proc_handle):
         annotated_img = cv2.imread(img_path)
         if annotated_img is None:
              print("警告: ズーム用の画像が読み込めません。ズームをスキップします。")
-             return
+             return False
         
         img_h, img_w = annotated_img.shape[:2]
         num_zoom_frames = int(duration_sec * frame_rate)
@@ -105,30 +108,52 @@ def create_summary_video(
             
             if proc_handle.stdin:
                 proc_handle.stdin.write(frame.tobytes())
+        return True
     
+    def _add_video_frame(frame, proc_handle):
+        h, w = frame.shape[:2]
+        scale = min(W / w, H / h)
+        new_w, new_h = int(w * scale), int(h * scale)
+        resized_frame = cv2.resize(frame, (new_w, new_h))
+
+        top = (H - new_h) // 2; bottom = H - new_h - top
+        left = (W - new_w) // 2; right = W - new_w - left
+
+        final_frame = cv2.copyMakeBorder(resized_frame, top, bottom, left, right, cv2.BORDER_CONSTANT, value=[0, 0, 0])
+        if proc_handle.stdin:
+            proc_handle.stdin.write(final_frame.tobytes())
+
     def _add_video_clip(video_path, proc_handle):
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
             print(f"警告: カットアウト動画を読み込めませんでした: {video_path}")
-            return
-        
-        while True:
-            ret, frame = cap.read()
-            if not ret: break
-            
-            h, w = frame.shape[:2]
-            scale = min(W / w, H / h)
-            new_w, new_h = int(w * scale), int(h * scale)
-            resized_frame = cv2.resize(frame, (new_w, new_h))
-            
-            top = (H - new_h) // 2; bottom = H - new_h - top
-            left = (W - new_w) // 2; right = W - new_w - left
-            
-            final_frame = cv2.copyMakeBorder(resized_frame, top, bottom, left, right, cv2.BORDER_CONSTANT, value=[0, 0, 0])
-            if proc_handle.stdin:
-                proc_handle.stdin.write(final_frame.tobytes())
-        cap.release()
+            cap.release()
+            return False
 
+        decoded_frames = 0
+        try:
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                _add_video_frame(frame, proc_handle)
+                decoded_frames += 1
+        finally:
+            cap.release()
+
+        if decoded_frames == 0:
+            print(f"警告: カットアウト動画からフレームを読み込めませんでした: {video_path}")
+            return False
+        return True
+
+    def _add_video_frame_sequence(frames, proc_handle):
+        frame_count = 0
+        for frame in frames:
+            _add_video_frame(frame, proc_handle)
+            frame_count += 1
+        return frame_count > 0
+
+    generation_failed = False
     try:
         # --- 設定に基づいて動画シーケンスを動的に生成 ---
         step_counter = 1
@@ -143,30 +168,57 @@ def create_summary_video(
             print(f"  - ステップ{step_counter}/{total_steps}: '{name}' を追加中...")
 
             if name == "Composite Image":
-                _add_image_sequence(composite_image_path, duration, proc)
+                if not _add_image_sequence(composite_image_path, duration, proc):
+                    generation_failed = True
             elif name == "Annotated Image":
-                _add_image_sequence(annotated_image_path, duration, proc)
+                if not _add_image_sequence(annotated_image_path, duration, proc):
+                    generation_failed = True
             elif name == "Zoom Sequence":
-                _add_zoom_sequence(annotated_image_path, duration, proc)
+                if not _add_zoom_sequence(annotated_image_path, duration, proc):
+                    generation_failed = True
             elif name == "Cutout Video":
-                _add_video_clip(cutout_video_path, proc)
+                if not _add_video_clip(cutout_video_path, proc):
+                    generation_failed = True
             elif name == "Full Size Video":
                 if full_video_path:
-                    _add_video_clip(full_video_path, proc)
+                    if not _add_video_clip(full_video_path, proc):
+                        generation_failed = True
+                elif full_video_frames is not None:
+                    if not _add_video_frame_sequence(full_video_frames, proc):
+                        generation_failed = True
                 else:
-                    print("警告: フルサイズ動画が指定されていません。スキップします。")
+                    print("警告: フルサイズ動画の入力がありません。スキップします。")
+                    generation_failed = True
             
             step_counter += 1
 
     except Exception as e:
+        generation_failed = True
         print(f"概要動画の生成中にエラーが発生しました: {e}")
         import traceback
         traceback.print_exc()
     finally:
-        if proc.stdin:
-            proc.stdin.close()
-        
-        stderr_output = proc.communicate()[1]
+        try:
+            # communicate closes stdin, drains stderr, and waits for ffmpeg. In
+            # particular, it handles BrokenPipeError when ffmpeg exits early.
+            stderr_output = proc.communicate()[1]
+        except Exception as cleanup_error:
+            generation_failed = True
+            print(f"FFMPEGの終了処理に失敗しました: {cleanup_error}")
+            try:
+                proc.kill()
+            except OSError:
+                pass
+            try:
+                stderr_output = proc.communicate()[1]
+            except Exception as final_cleanup_error:
+                stderr_output = b""
+                print(f"FFMPEGプロセスを回収できませんでした: {final_cleanup_error}")
+                try:
+                    proc.wait()
+                except Exception as wait_error:
+                    print(f"FFMPEGの終了待機に失敗しました: {wait_error}")
+
         if proc.returncode != 0:
             print("="*50 + "\nFFMPEGがエラーを返しました:\n" + "="*50)
             try:
@@ -176,3 +228,9 @@ def create_summary_video(
             print("="*50)
         else:
             print(f"概要動画の生成が完了しました: {output_video_path}")
+
+    try:
+        output_exists = os.path.isfile(output_video_path) and os.path.getsize(output_video_path) > 0
+    except OSError:
+        output_exists = False
+    return not generation_failed and proc.returncode == 0 and output_exists

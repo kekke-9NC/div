@@ -167,6 +167,39 @@ def create_line_video_clips(
             clip_cap = cv2.VideoCapture(source)
         return clip_cap
 
+    def report_output_error(message: str) -> None:
+        print(f"エラー: {message}")
+        if progress_callback:
+            try:
+                progress_callback((f"エラー: {message}", None))
+            except Exception:
+                pass
+        if raise_on_error:
+            raise IOError(message)
+
+    def video_output_has_expected_frames(path: str, expected_frames: int) -> bool:
+        if not os.path.isfile(path) or os.path.getsize(path) <= 0:
+            return False
+
+        output_cap = cv2.VideoCapture(path)
+        if not output_cap.isOpened():
+            output_cap.release()
+            return False
+
+        decoded_frames = 0
+        try:
+            while True:
+                ret, _ = output_cap.read()
+                if not ret:
+                    break
+                decoded_frames += 1
+                if decoded_frames > expected_frames:
+                    return False
+        finally:
+            output_cap.release()
+
+        return decoded_frames == expected_frames
+
     frame_rate = cap.get(cv2.CAP_PROP_FPS)
     if frame_rate <= 0:
         frame_rate = config.DEFAULT_FPS
@@ -566,18 +599,25 @@ def create_line_video_clips(
                                 fourcc = cv2.VideoWriter_fourcc(*config.VIDEO_FOURCC)
                                 out_clip = cv2.VideoWriter(output_clip_path, fourcc, frame_rate, (cut_size, cut_size))
                                 if out_clip.isOpened():
-                                    for frame in final_frames_for_clip:
-                                        cut_frame = frame[y_start_cut:y_end_cut, x_start_cut:x_end_cut]
-                                        if cut_frame.shape[0] != cut_size or cut_frame.shape[1] != cut_size:
-                                            cut_frame_resized = cv2.resize(cut_frame, (cut_size, cut_size))
-                                        else:
-                                            cut_frame_resized = cut_frame
-                                        out_clip.write(cut_frame_resized)
-                                    out_clip.release()
-                                    saved_paths['video'] = output_clip_path
-                                    print(f"動画クリップを保存しました: {output_clip_path}")
+                                    try:
+                                        for frame in final_frames_for_clip:
+                                            cut_frame = frame[y_start_cut:y_end_cut, x_start_cut:x_end_cut]
+                                            if cut_frame.shape[0] != cut_size or cut_frame.shape[1] != cut_size:
+                                                cut_frame_resized = cv2.resize(cut_frame, (cut_size, cut_size))
+                                            else:
+                                                cut_frame_resized = cut_frame
+                                            out_clip.write(cut_frame_resized)
+                                    finally:
+                                        out_clip.release()
+                                    if not video_output_has_expected_frames(
+                                            output_clip_path, len(final_frames_for_clip)):
+                                        report_output_error(f"動画クリップを保存できませんでした ({output_clip_path})")
+                                    else:
+                                        saved_paths['video'] = output_clip_path
+                                        print(f"動画クリップを保存しました: {output_clip_path}")
                                 else:
-                                    print(f"エラー: 動画クリップの書き込み開始に失敗 ({output_clip_path})")
+                                    out_clip.release()
+                                    report_output_error(f"動画クリップの書き込み開始に失敗 ({output_clip_path})")
                             
                             if save_options.get('full_video', False) and final_frames_for_clip:
                                 full_video_path = os.path.join(save_dir, f"{base_filename}_full.mp4")
@@ -585,13 +625,20 @@ def create_line_video_clips(
                                 full_h, full_w = final_frames_for_clip[0].shape[:2]
                                 out_full = cv2.VideoWriter(full_video_path, fourcc, frame_rate, (full_w, full_h))
                                 if out_full.isOpened():
-                                    for frame in final_frames_for_clip:
-                                        out_full.write(frame)
-                                    out_full.release()
-                                    saved_paths['full_video'] = full_video_path
-                                    print(f"フルサイズ動画を保存しました: {full_video_path}")
+                                    try:
+                                        for frame in final_frames_for_clip:
+                                            out_full.write(frame)
+                                    finally:
+                                        out_full.release()
+                                    if not video_output_has_expected_frames(
+                                            full_video_path, len(final_frames_for_clip)):
+                                        report_output_error(f"フルサイズ動画を保存できませんでした ({full_video_path})")
+                                    else:
+                                        saved_paths['full_video'] = full_video_path
+                                        print(f"フルサイズ動画を保存しました: {full_video_path}")
                                 else:
-                                    print(f"エラー: フルサイズ動画の書き込み開始に失敗 ({full_video_path})")
+                                    out_full.release()
+                                    report_output_error(f"フルサイズ動画の書き込み開始に失敗 ({full_video_path})")
                             
                             if save_options.get('cutout', False):
                                 cutout_diff_path = os.path.join(save_dir, f"{base_filename}_cutout_diff.jpg")
@@ -599,7 +646,7 @@ def create_line_video_clips(
                                     saved_paths['cutout'] = cutout_diff_path
                                     print(f"切り出し差分画像を保存しました: {cutout_diff_path}")
                                 else:
-                                    print(f"エラー: 切り出し差分画像の保存に失敗 ({cutout_diff_path})")
+                                    report_output_error(f"切り出し差分画像の保存に失敗 ({cutout_diff_path})")
                             
                             if save_options.get('full', False):
                                 full_diff_path = os.path.join(save_dir, f"{base_filename}_full_diff.jpg")
@@ -607,7 +654,7 @@ def create_line_video_clips(
                                     saved_paths['full'] = full_diff_path
                                     print(f"全体差分画像を保存しました: {full_diff_path}")
                                 else:
-                                    print(f"エラー: 全体差分画像の保存に失敗 ({full_diff_path})")
+                                    report_output_error(f"全体差分画像の保存に失敗 ({full_diff_path})")
                             
                             if save_options.get('composite', False) and final_frames_for_clip:
                                 try:
@@ -627,9 +674,11 @@ def create_line_video_clips(
                                             saved_paths['annotated'] = annotated_path
                                             print(f"注釈付き画像を保存しました: {annotated_path}")
                                     else:
-                                        print(f"エラー: 比較明合成画像の保存に失敗 ({composite_path})")
+                                        report_output_error(f"比較明合成画像の保存に失敗 ({composite_path})")
                                 except Exception as e_comp:
                                     print(f"比較明合成または注釈処理中にエラー: {e_comp}")
+                                    if raise_on_error:
+                                        raise
                             
                             if save_options.get('info', False):
                                 info_path = os.path.join(save_dir, f"{base_filename}_info.txt")
@@ -660,13 +709,15 @@ def create_line_video_clips(
                                     print(f"検出情報ファイルを保存しました: {info_path}")
                                 except Exception as e_info:
                                     print(f"エラー: 検出情報ファイルの保存中にエラー: {e_info}")
+                                    if raise_on_error:
+                                        raise
                             
                             if save_options.get('summary', False):
                                 if all(key in saved_paths for key in ['composite', 'annotated', 'video']):
                                     summary_video_path = os.path.join(save_dir, f"{base_filename}_summary.mp4")
                                     try:
                                         orig_h, orig_w = final_frames_for_clip[0].shape[:2]
-                                        video_creation.create_summary_video(
+                                        summary_created = video_creation.create_summary_video(
                                             summary_video_config=summary_video_config,
                                             composite_image_path=saved_paths['composite'],
                                             annotated_image_path=saved_paths['annotated'],
@@ -675,15 +726,26 @@ def create_line_video_clips(
                                             cutout_rect=cutout_rect,
                                             frame_rate=frame_rate,
                                             output_resolution=(orig_w, orig_h),
-                                            full_video_path=saved_paths.get('full_video')
+                                            full_video_path=saved_paths.get('full_video'),
+                                            full_video_frames=(final_frames_for_clip
+                                                               if not saved_paths.get('full_video') else None)
                                         )
-                                        saved_paths['summary'] = summary_video_path
-                                        print(f"概要動画を保存しました: {summary_video_path}")
+                                        if summary_created:
+                                            saved_paths['summary'] = summary_video_path
+                                            print(f"概要動画を保存しました: {summary_video_path}")
+                                        else:
+                                            report_output_error(f"概要動画の生成に失敗しました ({summary_video_path})")
                                     except Exception as e_summary:
                                         print(f"エラー: 概要動画の生成に失敗しました: {e_summary}")
                                         import traceback; traceback.print_exc()
+                                        if raise_on_error:
+                                            raise
                                 else:
-                                    print("警告: 概要動画の作成に必要なファイルが不足しているため、スキップします。")
+                                    message = "概要動画の作成に必要なファイルが不足しているため、スキップします。"
+                                    if raise_on_error:
+                                        report_output_error(message)
+                                    else:
+                                        print(f"警告: {message}")
                             
                             if progress_callback:
                                 progress_callback((f"検出 {detection_counter}: {detection_label} (Prob: {probability:.2f}) @ {display_timestamp}", None))
@@ -1035,18 +1097,25 @@ def create_line_video_clips(
                     fourcc = cv2.VideoWriter_fourcc(*config.VIDEO_FOURCC)
                     out_clip = cv2.VideoWriter(output_clip_path, fourcc, frame_rate, (cut_size, cut_size))
                     if out_clip.isOpened():
-                        for frame in final_frames_for_clip:
-                            cut_frame = frame[y_start_cut:y_end_cut, x_start_cut:x_end_cut]
-                            if cut_frame.shape[0] != cut_size or cut_frame.shape[1] != cut_size:
-                                cut_frame_resized = cv2.resize(cut_frame, (cut_size, cut_size))
-                            else:
-                                cut_frame_resized = cut_frame
-                            out_clip.write(cut_frame_resized)
-                        out_clip.release()
-                        saved_paths['video'] = output_clip_path
-                        print(f"動画クリップを保存しました: {output_clip_path}")
+                        try:
+                            for frame in final_frames_for_clip:
+                                cut_frame = frame[y_start_cut:y_end_cut, x_start_cut:x_end_cut]
+                                if cut_frame.shape[0] != cut_size or cut_frame.shape[1] != cut_size:
+                                    cut_frame_resized = cv2.resize(cut_frame, (cut_size, cut_size))
+                                else:
+                                    cut_frame_resized = cut_frame
+                                out_clip.write(cut_frame_resized)
+                        finally:
+                            out_clip.release()
+                        if not video_output_has_expected_frames(
+                                output_clip_path, len(final_frames_for_clip)):
+                            report_output_error(f"動画クリップを保存できませんでした ({output_clip_path})")
+                        else:
+                            saved_paths['video'] = output_clip_path
+                            print(f"動画クリップを保存しました: {output_clip_path}")
                     else:
-                        print(f"エラー: 動画クリップの書き込み開始に失敗 ({output_clip_path})")
+                        out_clip.release()
+                        report_output_error(f"動画クリップの書き込み開始に失敗 ({output_clip_path})")
 
                 if save_options.get('full_video', False) and final_frames_for_clip:
                     full_video_path = os.path.join(save_dir, f"{base_filename}_full.mp4")
@@ -1054,13 +1123,20 @@ def create_line_video_clips(
                     full_h, full_w = final_frames_for_clip[0].shape[:2]
                     out_full = cv2.VideoWriter(full_video_path, fourcc, frame_rate, (full_w, full_h))
                     if out_full.isOpened():
-                        for frame in final_frames_for_clip:
-                            out_full.write(frame)
-                        out_full.release()
-                        saved_paths['full_video'] = full_video_path
-                        print(f"フルサイズ動画を保存しました: {full_video_path}")
+                        try:
+                            for frame in final_frames_for_clip:
+                                out_full.write(frame)
+                        finally:
+                            out_full.release()
+                        if not video_output_has_expected_frames(
+                                full_video_path, len(final_frames_for_clip)):
+                            report_output_error(f"フルサイズ動画を保存できませんでした ({full_video_path})")
+                        else:
+                            saved_paths['full_video'] = full_video_path
+                            print(f"フルサイズ動画を保存しました: {full_video_path}")
                     else:
-                        print(f"エラー: フルサイズ動画の書き込み開始に失敗 ({full_video_path})")
+                        out_full.release()
+                        report_output_error(f"フルサイズ動画の書き込み開始に失敗 ({full_video_path})")
 
                 if save_options.get('cutout', False):
                     cutout_diff_path = os.path.join(save_dir, f"{base_filename}_cutout_diff.jpg")
@@ -1068,7 +1144,7 @@ def create_line_video_clips(
                         saved_paths['cutout'] = cutout_diff_path
                         print(f"切り出し差分画像を保存しました: {cutout_diff_path}")
                     else:
-                        print(f"エラー: 切り出し差分画像の保存に失敗 ({cutout_diff_path})")
+                        report_output_error(f"切り出し差分画像の保存に失敗 ({cutout_diff_path})")
 
                 if save_options.get('full', False):
                     full_diff_path = os.path.join(save_dir, f"{base_filename}_full_diff.jpg")
@@ -1076,7 +1152,7 @@ def create_line_video_clips(
                         saved_paths['full'] = full_diff_path
                         print(f"全体差分画像を保存しました: {full_diff_path}")
                     else:
-                        print(f"エラー: 全体差分画像の保存に失敗 ({full_diff_path})")
+                        report_output_error(f"全体差分画像の保存に失敗 ({full_diff_path})")
 
                 if save_options.get('composite', False) and final_frames_for_clip:
                     try:
@@ -1096,9 +1172,11 @@ def create_line_video_clips(
                                 saved_paths['annotated'] = annotated_path
                                 print(f"注釈付き画像を保存しました: {annotated_path}")
                         else:
-                             print(f"エラー: 比較明合成画像の保存に失敗 ({composite_path})")
+                             report_output_error(f"比較明合成画像の保存に失敗 ({composite_path})")
                     except Exception as e_comp:
                          print(f"比較明合成または注釈処理中にエラー: {e_comp}")
+                         if raise_on_error:
+                             raise
 
                 if save_options.get('info', False):
                     info_path = os.path.join(save_dir, f"{base_filename}_info.txt")
@@ -1129,13 +1207,15 @@ def create_line_video_clips(
                         print(f"検出情報ファイルを保存しました: {info_path}")
                     except Exception as e_info:
                         print(f"エラー: 検出情報ファイルの保存中にエラー: {e_info}")
+                        if raise_on_error:
+                            raise
 
                 if save_options.get('summary', False):
                     if all(key in saved_paths for key in ['composite', 'annotated', 'video']):
                         summary_video_path = os.path.join(save_dir, f"{base_filename}_summary.mp4")
                         try:
                             orig_h, orig_w = final_frames_for_clip[0].shape[:2]
-                            video_creation.create_summary_video(
+                            summary_created = video_creation.create_summary_video(
                                 summary_video_config=summary_video_config,
                                 composite_image_path=saved_paths['composite'],
                                 annotated_image_path=saved_paths['annotated'],
@@ -1144,15 +1224,26 @@ def create_line_video_clips(
                                 cutout_rect=cutout_rect,
                                 frame_rate=frame_rate,
                                 output_resolution=(orig_w, orig_h),
-                                full_video_path=saved_paths.get('full_video')
+                                full_video_path=saved_paths.get('full_video'),
+                                full_video_frames=(final_frames_for_clip
+                                                   if not saved_paths.get('full_video') else None)
                             )
-                            saved_paths['summary'] = summary_video_path
-                            print(f"概要動画を保存しました: {summary_video_path}")
+                            if summary_created:
+                                saved_paths['summary'] = summary_video_path
+                                print(f"概要動画を保存しました: {summary_video_path}")
+                            else:
+                                report_output_error(f"概要動画の生成に失敗しました ({summary_video_path})")
                         except Exception as e_summary:
                             print(f"エラー: 概要動画の生成に失敗しました: {e_summary}")
                             import traceback; traceback.print_exc()
+                            if raise_on_error:
+                                raise
                     else:
-                        print("警告: 概要動画の作成に必要なファイルが不足しているため、スキップします。")
+                        message = "概要動画の作成に必要なファイルが不足しているため、スキップします。"
+                        if raise_on_error:
+                            report_output_error(message)
+                        else:
+                            print(f"警告: {message}")
 
                 if progress_callback:
                     progress_callback((f"検出 {detection_counter}: {detection_label} (Prob: {probability:.2f}) @ {display_timestamp}", None))
