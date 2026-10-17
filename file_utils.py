@@ -46,7 +46,7 @@ def is_rtsp_file_within_time_range(
     file_path: str, limit_enabled: bool,
     start_h: int, start_m: int, end_h: int, end_m: int
 ) -> bool:
-    """RTSP保存ファイルの HH/MM.mp4 形式の時刻が録画時間内か判定する。"""
+    """RTSP保存ファイルの HH/MM_* 形式の時刻が録画時間内か判定する。"""
     if not limit_enabled:
         return True
     try:
@@ -315,9 +315,10 @@ def save_rtsp_video_segments_ffmpeg(
             hour_dir = os.path.join(base_dir, now.strftime("%H"))
             os.makedirs(hour_dir, exist_ok=True)
             
-            # セグメントファイル名パターン: YYYYMMDD/HH/MM.mp4
-            # strftimeを使って時刻ベースのファイル名を生成
-            segment_pattern = os.path.join(base_dir, "%H", "%M.mp4")
+            # Add a unique recording-session suffix so a reconnect in the same
+            # minute cannot overwrite an earlier segment.
+            session_id = time.time_ns()
+            segment_pattern = os.path.join(base_dir, "%H", f"%M_%S_{session_id}.mp4")
             
             # FFmpegコマンドを構築（segment muxer使用）
             ffmpeg_cmd = [ffmpeg_path, '-y']
@@ -812,8 +813,12 @@ def process_new_rtsp_files(
     new_files_to_process = []
     video_extensions = config.PERIODIC_VIDEO_EXTENSIONS
     
-    # 現在の分のファイル名（書き込み中の可能性があるためスキップ）
-    current_minute_filename = datetime.now().strftime("%M.mp4")
+    # 現在の分のセグメントは録画中の可能性があるためスキップする。
+    now = datetime.now()
+    current_minute_prefix = now.strftime("%M_")
+    current_hour_dir = os.path.normcase(os.path.abspath(
+        os.path.join(rtsp_root, now.strftime("%Y%m%d"), now.strftime("%H"))
+    ))
     current_time = time.time()
     # 書き込み中と判定する閾値（最終更新から5秒以内は書き込み中とみなす）
     WRITING_THRESHOLD_SECONDS = 5
@@ -823,7 +828,8 @@ def process_new_rtsp_files(
             for file in files:
                 if file.lower().endswith(video_extensions) and '_temp_' not in file:
                     # 現在書き込み中のファイルはスキップ
-                    if file == current_minute_filename:
+                    if (os.path.normcase(os.path.abspath(root_dir)) == current_hour_dir and
+                            file.startswith(current_minute_prefix)):
                         continue
                     full_path = os.path.join(root_dir, file)
                     if full_path not in processed_files_set:
