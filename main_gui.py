@@ -4450,7 +4450,13 @@ atomcam2で利用する場合は、GitHubで公開されている
             window_title = "検出マスク作成"
             source_folders = self.folder_paths or ([self.periodic_dir_var.get()] if self.periodic_scan_var.get() and self.periodic_dir_var.get() else [])
             for folder in source_folders:
-                videos = sorted([p for p in Path(folder).rglob('*') if p.suffix.lower() in config.PERIODIC_VIDEO_EXTENSIONS])
+                source_path = Path(folder)
+                if source_path.is_file() and source_path.suffix.lower() in config.PERIODIC_VIDEO_EXTENSIONS:
+                    base_image_path = str(source_path)
+                    break
+                if not source_path.is_dir():
+                    continue
+                videos = sorted([p for p in source_path.rglob('*') if p.suffix.lower() in config.PERIODIC_VIDEO_EXTENSIONS])
                 if videos:
                     base_image_path = str(videos[0])
                     break
