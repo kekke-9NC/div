@@ -1,4 +1,5 @@
 import os
+import hashlib
 import cv2
 import numpy as np
 from pathlib import Path
@@ -6,6 +7,7 @@ import time
 from datetime import datetime, timedelta
 import threading
 import queue
+import uuid
 from typing import List, Tuple, Optional, Callable, Dict, Any
 from astropy.io import fits
 from astropy.wcs import WCS
@@ -127,6 +129,14 @@ def create_line_video_clips(
     if cancel_flag is not None and cancel_flag.is_set():
         print("処理開始前にキャンセルされました。")
         return []
+
+    source_identity = (
+        source.strip()
+        if is_rtsp
+        else os.path.normcase(os.path.realpath(os.path.abspath(source)))
+    )
+    source_id = hashlib.sha256(source_identity.encode("utf-8", errors="replace")).hexdigest()[:12]
+    run_id = uuid.uuid4().hex[:12]
 
     default_save_options = {
         'video': config.DEFAULT_SAVE_VIDEO_CLIP, 'cutout': config.DEFAULT_SAVE_CUTOUT_DIFF,
@@ -597,6 +607,7 @@ def create_line_video_clips(
                             base_filename = (
                                 f"{detection_datetime.strftime('%Y%m%d_%H%M%S%f')[:-3]}"
                                 f"_{detection_label}_{detection_counter}_prob{probability:.2f}"
+                                f"_src{source_id}_run{run_id}"
                             )
                             saved_paths = {}
                             
@@ -1101,6 +1112,7 @@ def create_line_video_clips(
                 base_filename = (
                     f"{detection_datetime.strftime('%Y%m%d_%H%M%S%f')[:-3]}"
                     f"_{detection_label}_{detection_counter}_prob{probability:.2f}"
+                    f"_src{source_id}_run{run_id}"
                 )
                 saved_paths = {}
 
