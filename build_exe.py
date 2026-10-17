@@ -61,6 +61,7 @@ hidden_imports = [
     "astrometry",
     "image_processing",
     "model",
+    "model_catalog",
     "utils",
     "location_utils",
     "sun_times",
