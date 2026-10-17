@@ -205,9 +205,11 @@ def run_pipeline(
                 task_q.task_done()
 
     # optional status updater thread
+    status_stop_event = threading.Event()
     def status_updater_fn():
-        # keep reporting until everything is done or cancel
-        while not cancel_flag.is_set():
+        # Keep reporting while this run is active. A completed run does not set
+        # the shared cancel flag, so use a run-local stop event as well.
+        while not cancel_flag.is_set() and not status_stop_event.is_set():
             try:
                 qsz = task_q.qsize()
                 with src_lock:
@@ -219,9 +221,9 @@ def run_pipeline(
                         status_callback({'download_queue_size': qsz, 'pending_sources': pending, 'processors_busy': busy_copy})
                     except Exception:
                         pass
-                time.sleep(0.5)
             except Exception:
-                time.sleep(0.5)
+                pass
+            status_stop_event.wait(0.5)
 
     status_thread = None
     if status_callback:
@@ -232,36 +234,34 @@ def run_pipeline(
     downloaders = [threading.Thread(target=downloader_thread_fn, args=(i,), daemon=True) for i in range(max_workers)]
     processors = [threading.Thread(target=processor_thread_fn, args=(i,), daemon=True) for i in range(max_workers)]
 
-    for t in processors:
-        t.start()
-    for t in downloaders:
-        t.start()
+    try:
+        for t in processors:
+            t.start()
+        for t in downloaders:
+            t.start()
 
-    # wait for downloaders to finish
-    for t in downloaders:
-        t.join()
-    downloaders_done.set()
+        # wait for downloaders to finish
+        for t in downloaders:
+            t.join()
+        downloaders_done.set()
 
-    # A downloader may have enqueued just as a processor observed cancellation
-    # and exited. With producers stopped, discard any such remaining work safely.
-    if cancel_flag.is_set():
-        while True:
-            try:
-                item = task_q.get_nowait()
-            except queue.Empty:
-                break
-            discard_task(item)
+        # A downloader may have enqueued just as a processor observed cancellation
+        # and exited. With producers stopped, discard any such remaining work safely.
+        if cancel_flag.is_set():
+            while True:
+                try:
+                    item = task_q.get_nowait()
+                except queue.Empty:
+                    break
+                discard_task(item)
 
-    # wait for queue to be processed
-    task_q.join()
+        # wait for queue to be processed
+        task_q.join()
 
-    # processors will exit when queue empty and all downloads done
-    for t in processors:
-        t.join()
-
-    # stop status thread
-    if status_thread:
-        try:
-            status_thread.join(timeout=0.1)
-        except Exception:
-            pass
+        # processors will exit when queue empty and all downloads done
+        for t in processors:
+            t.join()
+    finally:
+        status_stop_event.set()
+        if status_thread:
+            status_thread.join()
