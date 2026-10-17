@@ -16,6 +16,7 @@ dependencies:
   - matplotlib
   - requests
   - pip:
+    - pyinstaller
     - opencv-python
     - tkinterdnd2
     - openai
