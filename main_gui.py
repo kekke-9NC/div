@@ -54,6 +54,18 @@ import chat_gui
 
 STATUS_CALLBACK = None
 
+
+def _deep_merge_settings(current, updates):
+    """Apply settings updates while retaining keys owned by other frontends."""
+    merged = dict(current)
+    for key, value in updates.items():
+        if isinstance(merged.get(key), dict) and isinstance(value, dict):
+            merged[key] = _deep_merge_settings(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
 class _StderrProgressStream(io.TextIOBase):
     def __init__(self, log_callback, passthrough=None):
         super().__init__()
@@ -4789,7 +4801,6 @@ atomcam2で利用する場合は、GitHubで公開されている
             'ai_vlm_backend': self.ai_vlm_backend_var.get(),
             'lm_studio_vlm_url': self.lm_studio_vlm_url_var.get(),
             'lm_studio_vlm_model_id': self.lm_studio_vlm_model_var.get(),
-            'lm_studio_vlm_api_key': "",
             'has_mask_image': self.mask_image is not None, 'has_plate_solve_mask_image': self.plate_solve_mask_image is not None,
             'summary_video_config': self.summary_video_config,
             'auto_time_updater_enabled': self.auto_time_updater_enabled_var.get(),
@@ -4829,8 +4840,21 @@ atomcam2で利用する場合は、GitHubで公開されている
             if isinstance(serializable_wcs.get('plate_solve_datetime'), datetime):
                 serializable_wcs['plate_solve_datetime'] = serializable_wcs['plate_solve_datetime'].isoformat()
             settings['global_wcs_info'] = serializable_wcs
+        else:
+            settings['global_wcs_info'] = None
 
         try:
+            current_settings = {}
+            if os.path.exists(self.settings_file):
+                try:
+                    with open(self.settings_file, 'r', encoding='utf-8') as f:
+                        current_settings = json.load(f)
+                except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+                    # Preserve the legacy behavior of recovering from corrupt JSON.
+                    current_settings = {}
+            if not isinstance(current_settings, dict):
+                current_settings = {}
+            settings = _deep_merge_settings(current_settings, settings)
             with open(self.settings_file, 'w', encoding='utf-8') as f: json.dump(settings, f, indent=4)
             masks_to_save = {}
             if self.mask_image is not None: masks_to_save['mask_image'] = self.mask_image
