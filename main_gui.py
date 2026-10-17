@@ -1574,6 +1574,19 @@ atomcam2で利用する場合は、GitHubで公開されている
         except Exception:
             return path
 
+    def _confirm_date_prefixed_output_path(self, selected_path: str) -> Optional[str]:
+        """Confirm overwrite if date-prefixing changes an existing save target."""
+        output_path = self._ensure_date_prefix(selected_path)
+        if output_path != selected_path and os.path.exists(output_path):
+            should_overwrite = messagebox.askyesno(
+                "上書き確認",
+                f"日付を付けた保存先にはすでにファイルがあります。上書きしますか？\n\n{output_path}",
+                parent=self,
+            )
+            if not should_overwrite:
+                return None
+        return output_path
+
     def create_analysis_tab(self, parent):
         """Create the '解析' tab where users can drop meteor info .txt files and run batch drawing."""
         frame = ttk.Frame(parent)
@@ -6456,7 +6469,9 @@ atomcam2で利用する場合は、GitHubで公開されている
         
         if not output_path:
             return
-        output_path = self._ensure_date_prefix(output_path)
+        output_path = self._confirm_date_prefixed_output_path(output_path)
+        if not output_path:
+            return
         
         self.append_log(f"比較明合成動画の作成を開始します... ({len(video_files)}個の動画)")
         
@@ -6701,7 +6716,9 @@ atomcam2で利用する場合は、GitHubで公開されている
         
         if not output_path:
             return
-        output_path = self._ensure_date_prefix(output_path)
+        output_path = self._confirm_date_prefixed_output_path(output_path)
+        if not output_path:
+            return
 
         dialog = ProcessingOptionDialog(self)
         if dialog.result is None:  # キャンセル
@@ -7208,10 +7225,9 @@ class TimelapseDragDropWindow(Toplevel):
         
         if not output_path:
             return
-        try:
-            output_path = self.parent._ensure_date_prefix(output_path)
-        except Exception:
-            pass
+        output_path = self.parent._confirm_date_prefixed_output_path(output_path)
+        if not output_path:
+            return
         
         duration = self.duration_var.get()
         paths = list(self.dropped_paths)
