@@ -40,7 +40,7 @@ class DetectionPreviewWindow(tk.Toplevel):
         self.visible_items_count = 3  # 初期値
         
         # データ管理
-        # key: filename, value: {'boxes': [(x1,y1,x2,y2)...], 'image_path': str, 'image_shape': (h, w)}
+        # key: item key, value: {'display_name': str, 'boxes': [...], 'image_path': str, 'image_shape': (h, w)}
         self.results: Dict[str, dict] = {}
         self.photo_images = {}  # メモリ保持用
 
@@ -283,17 +283,22 @@ class DetectionPreviewWindow(tk.Toplevel):
         self.current_top_index = 0
         self.refresh_view()
 
-    def add_item(self, filename: str, image_path: str, boxes: List[Tuple], reanalyze_callback: Callable):
+    def add_item(
+        self, filename: str, image_path: str, boxes: List[Tuple],
+        reanalyze_callback: Callable, item_key: Optional[str] = None
+    ):
         """
         リストにアイテムを追加（または更新）
         """
+        item_key = item_key or filename
         # データ登録
         full_image = imread_with_japanese_path(image_path)
         if full_image is None:
             return
             
         height, width = full_image.shape[:2]
-        self.results[filename] = {
+        self.results[item_key] = {
+            'display_name': filename,
             'boxes': boxes,
             'image_path': image_path,
             'image_shape': (height, width),
@@ -301,8 +306,8 @@ class DetectionPreviewWindow(tk.Toplevel):
         }
         
         # 順序管理（新規追加時のみ）
-        if filename not in self.item_order:
-            self.item_order.append(filename)
+        if item_key not in self.item_order:
+            self.item_order.append(item_key)
             self.processed_items += 1
             self.progress['value'] = self.processed_items
             self._update_time_display()
@@ -323,15 +328,16 @@ class DetectionPreviewWindow(tk.Toplevel):
         # 合成開始ボタン有効化
         self.btn_start.config(state=tk.NORMAL)
 
-    def _create_item_widget(self, filename: str):
+    def _create_item_widget(self, item_key: str):
         """指定されたファイルのUIアイテムを作成・表示（packする）"""
-        if filename not in self.results:
+        if item_key not in self.results:
             return
 
-        data = self.results[filename]
+        data = self.results[item_key]
         boxes = data['boxes']
         image_path = data['image_path']
         reanalyze_callback = data['reanalyze_callback']
+        display_name = data.get('display_name', item_key)
 
         # アイテムフレーム作成
         frame = ttk.Frame(self.items_frame, relief=tk.RIDGE, borderwidth=1)
@@ -348,7 +354,7 @@ class DetectionPreviewWindow(tk.Toplevel):
         ctrl_frame = ttk.Frame(frame)
         ctrl_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=10, pady=5)
         
-        ttk.Label(ctrl_frame, text=filename, font=("", 11, "bold")).pack(anchor="nw")
+        ttk.Label(ctrl_frame, text=display_name, font=("", 11, "bold")).pack(anchor="nw")
         coord_label = ttk.Label(ctrl_frame, text=self._format_boxes(boxes))
         coord_label.pack(anchor="nw", pady=5)
         
@@ -357,19 +363,19 @@ class DetectionPreviewWindow(tk.Toplevel):
         btn_box.pack(anchor="nw", pady=10)
         
         ttk.Button(btn_box, text="再検出 (AI)", 
-                  command=lambda: self._handle_reanalyze(filename, reanalyze_callback)).pack(side=tk.LEFT, padx=2)
+                  command=lambda: self._handle_reanalyze(item_key, reanalyze_callback)).pack(side=tk.LEFT, padx=2)
         
         btn_manual = ttk.Button(btn_box, text="手動で枠を追加", 
-                   command=lambda: self._enable_manual_draw(filename, img_canvas))
+                   command=lambda: self._enable_manual_draw(item_key, img_canvas))
         btn_manual.pack(side=tk.LEFT, padx=2)
         
         ttk.Button(btn_box, text="枠をクリア", 
-                  command=lambda: self._clear_boxes(filename, img_canvas, coord_label)).pack(side=tk.LEFT, padx=2)
+                  command=lambda: self._clear_boxes(item_key, img_canvas, coord_label)).pack(side=tk.LEFT, padx=2)
         
         # 画像読み込みと描画
         full_image = imread_with_japanese_path(image_path)
         if full_image is not None:
-            self._draw_image_on_canvas(filename, img_canvas, full_image, boxes)
+            self._draw_image_on_canvas(item_key, img_canvas, full_image, boxes)
 
     def _format_boxes(self, boxes):
         if not boxes:
