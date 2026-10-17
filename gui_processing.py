@@ -245,10 +245,34 @@ class ProcessingMixin:
                 'summary_config': [item.copy() for item in self.summary_video_config]
             }
             periodic_scan_interval = None
+            periodic_schedule_times = None
             if selected_source == "periodic":
                 periodic_scan_interval = int(self.periodic_interval_var.get())
                 if periodic_scan_interval < 1:
                     raise ValueError("定期スキャンの間隔は1秒以上で指定してください。")
+                periodic_schedule_times = (
+                    int(self.start_hour_var.get()), int(self.start_min_var.get()),
+                    int(self.end_hour_var.get()), int(self.end_min_var.get()),
+                )
+                if self.periodic_time_limit_var.get():
+                    start_hour, start_minute, end_hour, end_minute = periodic_schedule_times
+                    if not (0 <= start_hour <= 23 and 0 <= end_hour <= 23
+                            and 0 <= start_minute <= 59 and 0 <= end_minute <= 59):
+                        raise ValueError("定期スキャンの時刻は24時間表記で指定してください。")
+                    if (start_hour, start_minute) == (end_hour, end_minute):
+                        raise ValueError("定期スキャン時間帯の開始・終了時刻を異なる時刻にしてください。")
+            elif selected_source == "rtsp":
+                rtsp_time_limit = self.rtsp_time_limit_var.get()
+                rtsp_sh = int(self.rtsp_start_hour_var.get())
+                rtsp_sm = int(self.rtsp_start_min_var.get())
+                rtsp_eh = int(self.rtsp_end_hour_var.get())
+                rtsp_em = int(self.rtsp_end_min_var.get())
+                if rtsp_time_limit:
+                    if not (0 <= rtsp_sh <= 23 and 0 <= rtsp_eh <= 23
+                            and 0 <= rtsp_sm <= 59 and 0 <= rtsp_em <= 59):
+                        raise ValueError("RTSP録画時間は24時間表記で指定してください。")
+                    if (rtsp_sh, rtsp_sm) == (rtsp_eh, rtsp_em):
+                        raise ValueError("RTSP録画時間の開始・終了時刻を異なる時刻にしてください。")
             local_wideangle_requested = bool(
                 self.use_plate_solve_var.get()
                 and self.plate_solve_mode_var.get() == "local"
@@ -358,8 +382,8 @@ class ProcessingMixin:
                 'interval': params['interval_sec'], 'duration': params['duration_sec'], 
                 'min_length': config.MIN_LINE_LENGTH, 'summary_video_config': params['summary_config'],
                 'time_limit_enabled': self.periodic_time_limit_var.get(),
-                'start_hour': int(self.start_hour_var.get()), 'start_minute': int(self.start_min_var.get()),
-                'end_hour': int(self.end_hour_var.get()), 'end_minute': int(self.end_min_var.get()),
+                'start_hour': periodic_schedule_times[0], 'start_minute': periodic_schedule_times[1],
+                'end_hour': periodic_schedule_times[2], 'end_minute': periodic_schedule_times[3],
                 'fixed_pattern_correction': params['fixed_pattern_correction'],
                 'noise_twin_options': params['noise_twin_options'],
             }
@@ -372,11 +396,6 @@ class ProcessingMixin:
 
         elif selected_source == "rtsp":
             url = self.rtsp_urls[0]
-            rtsp_time_limit = self.rtsp_time_limit_var.get()
-            rtsp_sh = int(self.rtsp_start_hour_var.get())
-            rtsp_sm = int(self.rtsp_start_min_var.get())
-            rtsp_eh = int(self.rtsp_end_hour_var.get())
-            rtsp_em = int(self.rtsp_end_min_var.get())
             
             log_msg = f"RTSP処理開始 (URL: {url}, 並列処理数: {params['max_workers']})"
             if rtsp_time_limit:
@@ -416,8 +435,6 @@ class ProcessingMixin:
                 if rtsp_schedule_products.enabled(product_options):
                     if not rtsp_time_limit:
                         raise ValueError("自動作成には「時間帯を指定して録画する」をONにしてください。")
-                    if (rtsp_sh, rtsp_sm) == (rtsp_eh, rtsp_em):
-                        raise ValueError("録画スケジュールの開始・終了時刻を異なる時刻にしてください。")
             except ValueError as exc:
                 messagebox.showerror("自動作成の設定", str(exc))
                 self.cancel_processing(restore_button_state=True)
