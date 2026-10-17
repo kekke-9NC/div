@@ -4769,6 +4769,77 @@ atomcam2で利用する場合は、GitHubで公開されている
         ttk.Button(ok_cancel_frame, text="OK", command=on_ok).pack(side=tk.LEFT, padx=5)
         ttk.Button(ok_cancel_frame, text="キャンセル", command=win.destroy).pack(side=tk.LEFT, padx=5)
 
+    def _fetch_rtsp_frame_for_mask(self, rtsp_url: str, is_plate_solve_mask: bool):
+        progress_win = Toplevel(self)
+        progress_win.title("接続中")
+        progress_win.geometry("300x100")
+        progress_win.transient(self)
+        progress_win.grab_set()
+        progress_win.resizable(False, False)
+        ttk.Label(progress_win, text="RTSPストリームに接続中...\nしばらくお待ちください。").pack(pady=15)
+
+        cancel_event = threading.Event()
+        result_queue = queue.Queue(maxsize=1)
+
+        def on_cancel():
+            cancel_event.set()
+            try:
+                progress_win.destroy()
+            except tk.TclError:
+                pass
+
+        progress_win.protocol("WM_DELETE_WINDOW", on_cancel)
+        ttk.Button(progress_win, text="キャンセル", command=on_cancel).pack(pady=5)
+
+        progress_win.update_idletasks()
+        x = self.winfo_x() + (self.winfo_width() - progress_win.winfo_width()) // 2
+        y = self.winfo_y() + (self.winfo_height() - progress_win.winfo_height()) // 2
+        progress_win.geometry(f"+{x}+{y}")
+
+        def fetch_frame():
+            cap = None
+            try:
+                cap = utils.create_rtsp_capture(rtsp_url)
+                if not cap.isOpened():
+                    raise IOError("RTSPストリームを開けませんでした。")
+                ret, frame = cap.read()
+                if cancel_event.is_set():
+                    return
+                if not ret or frame is None:
+                    raise ValueError("RTSPストリームからフレームを読み込めませんでした。")
+                result_queue.put((frame, None))
+            except Exception as e:
+                if not cancel_event.is_set():
+                    result_queue.put((None, str(e)))
+            finally:
+                if cap is not None:
+                    cap.release()
+
+        fetch_thread = threading.Thread(target=fetch_frame, daemon=True)
+        fetch_thread.start()
+
+        def check_result():
+            if cancel_event.is_set():
+                return
+            try:
+                frame, error = result_queue.get_nowait()
+            except queue.Empty:
+                if fetch_thread.is_alive():
+                    self.after(100, check_result)
+                    return
+                frame, error = None, "RTSPストリームからフレームを取得できませんでした。"
+
+            try:
+                progress_win.destroy()
+            except tk.TclError:
+                pass
+            if error:
+                messagebox.showerror("エラー", f"RTSPからのフレーム取得に失敗しました:\n{error}")
+            else:
+                self._open_rtsp_mask_window(frame, is_plate_solve_mask)
+
+        self.after(100, check_result)
+
     def create_mask_window(self, is_plate_solve_mask: bool):
         base_image_path = None
         is_rtsp_source = False
@@ -4816,12 +4887,12 @@ atomcam2で利用する場合は、GitHubで公開されている
             messagebox.showwarning("情報", "マスク作成の元となる動画ソースが見つかりません。")
             return
 
+        if is_rtsp_source:
+            self._fetch_rtsp_frame_for_mask(base_image_path, is_plate_solve_mask)
+            return
+
         try:
             cap = cv2.VideoCapture(base_image_path)
-            if is_rtsp_source:
-                # RTSPのタイムアウト設定
-                cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000)
-                cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 5000)
             ret, frame = cap.read()
             cap.release()
             if not ret:
