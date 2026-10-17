@@ -4477,8 +4477,21 @@ atomcam2で利用する場合は、GitHubで公開されている
             window_title = "プレートソルブ用マスク作成"
         else:
             window_title = "検出マスク作成"
-            source_folders = self.folder_paths or ([self.periodic_dir_var.get()] if self.periodic_scan_var.get() and self.periodic_dir_var.get() else [])
+            source_folders = []
+            if self.periodic_scan_var.get():
+                periodic_dir = self.periodic_dir_var.get().strip()
+                if periodic_dir:
+                    source_folders = [periodic_dir]
+            elif self.rtsp_urls:
+                selected_index = min(self.rtsp_selected_indices) if self.rtsp_selected_indices else 0
+                base_image_path = self.rtsp_urls[selected_index]
+                is_rtsp_source = True
+            else:
+                source_folders = self.folder_paths
+
             for folder in source_folders:
+                if base_image_path:
+                    break
                 source_path = Path(folder)
                 if source_path.is_file() and source_path.suffix.lower() in config.PERIODIC_VIDEO_EXTENSIONS:
                     base_image_path = str(source_path)
@@ -4490,9 +4503,10 @@ atomcam2で利用する場合は、GitHubで公開されている
                     base_image_path = str(videos[0])
                     break
             
-            # フォルダに動画がなくRTSP URLがある場合はRTSPから取得
-            if not base_image_path and self.rtsp_urls:
-                base_image_path = self.rtsp_urls[0]
+            # ローカル動画を選択している場合に限り、補助的にRTSPから取得する
+            if not base_image_path and not self.periodic_scan_var.get() and self.rtsp_urls:
+                selected_index = min(self.rtsp_selected_indices) if self.rtsp_selected_indices else 0
+                base_image_path = self.rtsp_urls[selected_index]
                 is_rtsp_source = True
         
         if not base_image_path:
