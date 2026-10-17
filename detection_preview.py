@@ -149,8 +149,8 @@ class DetectionPreviewWindow(tk.Toplevel):
             new_top = int(total * ratio)
             self._set_scroll_pos(new_top)
         elif args[0] == 'scroll':
-            unit = args[1] # 'units' or 'pages'
             amount = int(args[1])
+            unit = args[2] if len(args) > 2 else 'units'
             step = 1
             if unit == 'pages':
                 step = self.visible_items_count
