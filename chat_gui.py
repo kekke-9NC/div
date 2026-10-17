@@ -207,6 +207,7 @@ RTSPストリーム（ライブカメラ）を使う場合、URLを入力して�
         self.input_field.delete(0, tk.END)
         self.input_field.config(state='disabled')
         self.send_btn.config(state='disabled')
+        self.clear_btn.config(state='disabled')
         
         # Thread generation
         threading.Thread(target=self._get_response, args=(msg,), daemon=True).start()
@@ -242,6 +243,7 @@ RTSPストリーム（ライブカメラ）を使う場合、URLを入力して�
         self._update_status("")
         self.input_field.config(state='normal')
         self.send_btn.config(state='normal')
+        self.clear_btn.config(state='normal')
         self.input_field.focus()
 
     def _parse_shortcuts_from_response(self, response):
