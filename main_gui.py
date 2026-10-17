@@ -4221,7 +4221,8 @@ atomcam2で利用する場合は、GitHubで公開されている
             self.periodic_scan_thread.start()
 
         elif self.rtsp_urls:
-            url = self.rtsp_urls[0]
+            selected_rtsp_index = min(self.rtsp_selected_indices) if self.rtsp_selected_indices else 0
+            url = self.rtsp_urls[selected_rtsp_index]
             rtsp_sh, rtsp_sm, rtsp_eh, rtsp_em = rtsp_time_window
             
             log_msg = f"RTSP処理開始 (URL: {url}, 並列処理数: {params['max_workers']})"
