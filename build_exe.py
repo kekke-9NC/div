@@ -3,6 +3,7 @@ import PyInstaller.__main__
 import os
 import sys
 import shutil
+import config
 
 # Ensure we are in the script directory
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
@@ -16,25 +17,28 @@ icon_path = "icon.ico"
 settings_file = "app_settings.json"
 masks_file = "app_masks.npz"
 
-# Model file - assuming it's in the parent directory as per original config
-# We want to bundle it into the exe
-model_filename = "model_epoch_46.pth"
-model_source_path = os.path.join("..", model_filename)
-
-if not os.path.exists(model_source_path):
-    print(f"Warning: Model file not found at {model_source_path}. Checking local...")
-    if os.path.exists(model_filename):
-        model_source_path = model_filename
-    else:
-        print("Error: Model file not found!")
-        # sys.exit(1) # Don't exit, maybe user wants to build without it? 
-        # But config.py expects it.
+# Bundle the first model supported by config.py from the project or parent dir.
+model_search_dirs = [os.path.dirname(os.path.dirname(os.path.abspath(__file__))), os.getcwd()]
+model_source_path = next(
+    (
+        os.path.join(directory, filename)
+        for filename in config.MODEL_FILENAMES
+        for directory in model_search_dirs
+        if os.path.isfile(os.path.join(directory, filename))
+    ),
+    None,
+)
+if model_source_path is None:
+    raise SystemExit(
+        "Error: No supported classifier model found. Expected one of: "
+        + ", ".join(config.MODEL_FILENAMES)
+    )
 
 # Data files to include: (source, dest_in_bundle)
 datas = [
     # (settings_file, "."), # Don't bundle settings, copy it manually later
     (masks_file, "."),
-    (model_source_path, ".") if os.path.exists(model_source_path) else None,
+    (model_source_path, "."),
     (icon_path, ".") if os.path.exists(icon_path) else None,
 ]
 # Filter out None
