@@ -4935,7 +4935,22 @@ atomcam2で利用する場合は、GitHubで公開されている
                 self._add_rtsp_item(url)
 
             saved_opts = settings.get('save_options', {})
-            for key, var in self.save_options_vars.items(): var.set(saved_opts.get(key, True))
+            if not isinstance(saved_opts, dict):
+                saved_opts = {}
+            default_save_options = {
+                'video': config.DEFAULT_SAVE_VIDEO_CLIP,
+                'cutout': config.DEFAULT_SAVE_CUTOUT_DIFF,
+                'full': config.DEFAULT_SAVE_FULL_DIFF,
+                'composite': config.DEFAULT_SAVE_COMPOSITE,
+                'info': config.DEFAULT_SAVE_DETECTION_INFO,
+                'summary': True,
+                'full_video': config.DEFAULT_SAVE_FULL_VIDEO
+            }
+            for key, var in self.save_options_vars.items():
+                try:
+                    var.set(saved_opts.get(key, default_save_options[key]))
+                except (tk.TclError, TypeError, ValueError):
+                    var.set(default_save_options[key])
 
             self.plate_solve_wcs_path_var.set(settings.get('plate_solve_wcs_path', ''))
             self.plate_solve_video_path_var.set(settings.get('plate_solve_video_path', ''))
