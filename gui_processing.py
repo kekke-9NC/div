@@ -188,6 +188,14 @@ class ProcessingMixin:
             messagebox.showwarning("情報", "別のプロセスが実行中です。")
             return
 
+        is_periodic = self.periodic_scan_var.get()
+        selected_source = ui_state.select_source_by_priority(
+            getattr(self, "processing_source_priority", ui_state.SOURCE_PRIORITY_DEFAULT),
+            periodic_enabled=is_periodic,
+            has_rtsp=bool(self.rtsp_urls),
+            has_folder=bool(self.folder_paths),
+        )
+
         self.cancel_flag.clear()
         self.append_log("処理準備中...")
 
@@ -236,6 +244,11 @@ class ProcessingMixin:
                 'rtsp_notification_sound': self.rtsp_notification_sound_var.get(),
                 'summary_config': [item.copy() for item in self.summary_video_config]
             }
+            periodic_scan_interval = None
+            if selected_source == "periodic":
+                periodic_scan_interval = int(self.periodic_interval_var.get())
+                if periodic_scan_interval < 1:
+                    raise ValueError("定期スキャンの間隔は1秒以上で指定してください。")
             local_wideangle_requested = bool(
                 self.use_plate_solve_var.get()
                 and self.plate_solve_mode_var.get() == "local"
@@ -319,13 +332,6 @@ class ProcessingMixin:
         self.elapsed_label.config(text="経過: 00:00:00")
         self.start_time_gui = time.time()
 
-        is_periodic = self.periodic_scan_var.get()
-        selected_source = ui_state.select_source_by_priority(
-            getattr(self, "processing_source_priority", ui_state.SOURCE_PRIORITY_DEFAULT),
-            periodic_enabled=is_periodic,
-            has_rtsp=bool(self.rtsp_urls),
-            has_folder=bool(self.folder_paths),
-        )
         active_source_count = sum((is_periodic, bool(self.rtsp_urls), bool(self.folder_paths)))
         if active_source_count > 1 and selected_source:
             source_labels = {
@@ -344,7 +350,7 @@ class ProcessingMixin:
             
             log_msg = f"定期スキャン開始 (フォルダ: {periodic_dir})"
             monitor_kwargs = {
-                'directory': periodic_dir, 'scan_interval': int(self.periodic_interval_var.get()),
+                'directory': periodic_dir, 'scan_interval': periodic_scan_interval,
                 'progress_callback': self.progress_queue.put, 'mask': params['mask'], 
                 'global_wcs_info': params['global_wcs_info'], 'plate_solve_mask': params['plate_solve_mask'], 
                 'meteor_save_path': params['meteor_save_path'], 'not_meteor_save_path': params['not_meteor_save_path'], 
