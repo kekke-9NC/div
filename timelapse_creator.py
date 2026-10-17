@@ -93,6 +93,24 @@ def get_files_from_path(path: str) -> Tuple[List[str], List[str]]:
     return images, videos
 
 
+def get_ordered_files_from_path(path: str) -> List[str]:
+    """Return supported files from one input path in a stable mixed-media order."""
+    if os.path.isfile(path):
+        if Path(path).suffix.lower() in IMAGE_EXTENSIONS | VIDEO_EXTENSIONS:
+            return [path]
+        return []
+
+    if not os.path.isdir(path):
+        return []
+
+    return [
+        str(candidate)
+        for candidate in sorted(Path(path).iterdir())
+        if candidate.is_file()
+        and candidate.suffix.lower() in IMAGE_EXTENSIONS | VIDEO_EXTENSIONS
+    ]
+
+
 def get_video_frame_count(video_path: str) -> int:
     """動画のフレーム数を取得する。"""
     cap = cv2.VideoCapture(video_path)
@@ -108,23 +126,42 @@ def count_total_frames(
     all_videos: List[str],
     progress_callback: Optional[Callable[[str], None]] = None
 ) -> Tuple[int, List[Tuple[str, int, int]]]:
-    """総フレーム数をカウントし、各ソースの情報を返す。"""
+    """Count image and video frames, with images preceding videos."""
+    return count_total_frames_in_order(
+        [*all_images, *all_videos], progress_callback
+    )
+
+
+def count_total_frames_in_order(
+    ordered_files: List[str],
+    progress_callback: Optional[Callable[[str], None]] = None
+) -> Tuple[int, List[Tuple[str, int, int]]]:
+    """Count frames while preserving the supplied mixed-media file order."""
     sources = []
     total_frames = 0
-    
-    for img_path in all_images:
-        sources.append((img_path, total_frames, 1))
-        total_frames += 1
-    
-    for i, video_path in enumerate(all_videos):
-        if progress_callback and i % 10 == 0:
-            progress_callback(f"動画情報を取得中: {i + 1}/{len(all_videos)}")
-        
-        frame_count = get_video_frame_count(video_path)
+
+    video_index = 0
+    video_count = sum(
+        Path(path).suffix.lower() in VIDEO_EXTENSIONS for path in ordered_files
+    )
+    for path in ordered_files:
+        extension = Path(path).suffix.lower()
+        if extension in IMAGE_EXTENSIONS:
+            frame_count = 1
+        elif extension in VIDEO_EXTENSIONS:
+            video_index += 1
+            if progress_callback and (video_index - 1) % 10 == 0:
+                progress_callback(
+                    f"動画情報を取得中: {video_index}/{video_count}"
+                )
+            frame_count = get_video_frame_count(path)
+        else:
+            continue
+
         if frame_count > 0:
-            sources.append((video_path, total_frames, frame_count))
+            sources.append((path, total_frames, frame_count))
             total_frames += frame_count
-    
+
     return total_frames, sources
 
 
@@ -258,16 +295,23 @@ def create_timelapse(
         progress_callback(f"ファイルをスキャン中... ({len(input_paths)}個のパス)")
     
     # 全ての入力パスからファイルを収集
-    all_images = []
-    all_videos = []
-    
+    ordered_files = []
+    seen_paths = set()
     for path in input_paths:
-        images, videos = get_files_from_path(path)
-        all_images.extend(images)
-        all_videos.extend(videos)
-    
-    all_images = sorted(list(set(all_images)))
-    all_videos = sorted(list(set(all_videos)))
+        for file_path in get_ordered_files_from_path(path):
+            dedupe_key = os.path.normcase(os.path.abspath(file_path))
+            if dedupe_key not in seen_paths:
+                seen_paths.add(dedupe_key)
+                ordered_files.append(file_path)
+
+    all_images = [
+        path for path in ordered_files
+        if Path(path).suffix.lower() in IMAGE_EXTENSIONS
+    ]
+    all_videos = [
+        path for path in ordered_files
+        if Path(path).suffix.lower() in VIDEO_EXTENSIONS
+    ]
     
     if progress_callback:
         progress_callback(f"検出: 画像 {len(all_images)}枚, 動画 {len(all_videos)}本")
@@ -281,7 +325,9 @@ def create_timelapse(
     if progress_callback:
         progress_callback("総フレーム数を計算中...")
     
-    total_frames, sources = count_total_frames(all_images, all_videos, progress_callback)
+    total_frames, sources = count_total_frames_in_order(
+        ordered_files, progress_callback
+    )
     
     if total_frames == 0:
         if progress_callback:
