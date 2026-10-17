@@ -3498,8 +3498,16 @@ atomcam2で利用する場合は、GitHubで公開されている
             except Exception:
                 fps_str = "Error"
             return fps_str
+
+        def source_key(source_path):
+            return os.path.normcase(os.path.realpath(os.path.abspath(source_path)))
+
+        known_source_keys = {source_key(path) for path in self.folder_paths}
         
         for path in paths:
+            if source_key(path) in known_source_keys:
+                continue
+
             if os.path.isdir(path):
                 # Scan folder for video files
                 video_files = sorted([
@@ -3522,22 +3530,23 @@ atomcam2で利用する場合は、GitHubで公開されている
                     fps_str = fps_values[0]
                     path_str = f"{path} ({len(video_files)} files)"
                     items_to_add.append((fps_str, path_str, path))
+                    known_source_keys.add(source_key(path))
                 else:
                     # Mixed FPS - add individual files
                     for video_path, fps_str in zip(video_files, fps_values):
-                        if video_path not in self.folder_paths:
+                        if source_key(video_path) not in known_source_keys:
                             items_to_add.append((fps_str, video_path, video_path))
+                            known_source_keys.add(source_key(video_path))
                             
             elif os.path.isfile(path) and Path(path).suffix.lower() in config.PERIODIC_VIDEO_EXTENSIONS:
-                if path not in self.folder_paths:
-                    fps_str = get_fps_str(path)
-                    items_to_add.append((fps_str, path, path))
+                fps_str = get_fps_str(path)
+                items_to_add.append((fps_str, path, path))
+                known_source_keys.add(source_key(path))
 
         if items_to_add:
             for fps_str, path_str, internal_path in items_to_add:
-                if internal_path not in self.folder_paths:
-                    self.folder_paths.append(internal_path)
-                    self._add_folder_item(fps_str, path_str)
+                self.folder_paths.append(internal_path)
+                self._add_folder_item(fps_str, path_str)
             self.update_start_button_state()
         else:
             messagebox.showwarning("情報", "有効なフォルダまたは動画ファイルがドロップされませんでした。")
@@ -4261,6 +4270,16 @@ atomcam2で利用する場合は、GitHubで公開されている
                     sources_to_process.extend([{'path': str(fp), 'is_rtsp': False} for fp in found])
                 elif p.is_file() and p.suffix.lower() in config.PERIODIC_VIDEO_EXTENSIONS:
                     sources_to_process.append({'path': str(p), 'is_rtsp': False})
+
+            unique_sources = []
+            seen_source_paths = set()
+            for source in sources_to_process:
+                source_path = os.path.normcase(os.path.realpath(os.path.abspath(source['path'])))
+                if source_path in seen_source_paths:
+                    continue
+                seen_source_paths.add(source_path)
+                unique_sources.append(source)
+            sources_to_process = unique_sources
             
             if not sources_to_process:
                 messagebox.showwarning("情報", "選択されたフォルダに動画ファイルが見つかりませんでした。")
