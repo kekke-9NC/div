@@ -217,7 +217,7 @@ def create_line_video_clips(
     else:
         video_path_for_naming = source
         # RTSP録画ファイルの場合は、ファイル更新時刻から動画長を引いて開始時刻を計算
-        is_rtsp_recorded_file_for_time = config.RTSP_SAVE_ROOT in source
+        is_rtsp_recorded_file_for_time = config.is_rtsp_recorded_file(source)
         if is_rtsp_recorded_file_for_time:
             try:
                 # ファイルの更新時刻（録画完了時刻）を取得
@@ -263,8 +263,8 @@ def create_line_video_clips(
             start_index_diff, end_index_diff = frame_idx_tuple
 
             # RTSP時、またはRTSP録画ファイル時は専用パラメータを使用（ノイズ対策）
-            # RTSP録画ファイルのパスにRTSP_SAVE_ROOTが含まれているかチェック
-            is_rtsp_recorded_file = not is_rtsp and config.RTSP_SAVE_ROOT in source
+            # Recognize recordings from the current or an older frozen path.
+            is_rtsp_recorded_file = not is_rtsp and config.is_rtsp_recorded_file(source)
             use_rtsp_params = is_rtsp or is_rtsp_recorded_file
             
             if use_rtsp_params:

@@ -12,6 +12,20 @@ import utils  # RTSP最適化用
 
 rtsp_processed_files: Set[str] = set()
 
+
+def _rtsp_recording_scan_roots(write_root: str) -> List[str]:
+    """Include old frozen recording folders without moving their contents."""
+    roots = []
+    seen = set()
+    for path in (write_root, *config.LEGACY_RTSP_SAVE_ROOTS):
+        if not path:
+            continue
+        normalized = os.path.normcase(os.path.abspath(path))
+        if normalized not in seen:
+            seen.add(normalized)
+            roots.append(path)
+    return roots
+
 def get_unique_file_path(base_path: str) -> str:
     """
     ファイルパスが既に存在する場合、_1, _2 ... を付けてユニークなパスを返す。
@@ -970,41 +984,46 @@ def process_new_rtsp_files(
     # 現在の分のセグメントは録画中の可能性があるためスキップする。
     now = datetime.now()
     current_minute_prefix = now.strftime("%M_")
-    current_hour_dir = os.path.normcase(os.path.abspath(
-        os.path.join(rtsp_root, now.strftime("%Y%m%d"), now.strftime("%H"))
-    ))
+    scan_roots = _rtsp_recording_scan_roots(rtsp_root)
+    current_hour_dirs = {
+        os.path.normcase(os.path.abspath(
+            os.path.join(scan_root, now.strftime("%Y%m%d"), now.strftime("%H"))
+        ))
+        for scan_root in scan_roots
+    }
     current_time = time.time()
     # 書き込み中と判定する閾値（最終更新から5秒以内は書き込み中とみなす）
     WRITING_THRESHOLD_SECONDS = 5
     
     try:
-        for root_dir, _, files in os.walk(rtsp_root):
-            for file in files:
-                if file.lower().endswith(video_extensions) and '_temp_' not in file:
-                    # 現在書き込み中のファイルはスキップ
-                    if (os.path.normcase(os.path.abspath(root_dir)) == current_hour_dir and
-                            file.startswith(current_minute_prefix)):
-                        continue
-                    full_path = os.path.join(root_dir, file)
-                    if full_path not in processed_files_set:
-                        if not is_rtsp_file_within_time_range(
-                            full_path, time_limit_enabled, start_hour, start_minute, end_hour, end_minute
-                        ):
-                            print(f"[RTSP解析] スキップ (録画時間外): {full_path}")
-                            processed_files_set.add(full_path)
+        for scan_root in scan_roots:
+            for root_dir, _, files in os.walk(scan_root):
+                for file in files:
+                    if file.lower().endswith(video_extensions) and '_temp_' not in file:
+                        # 現在書き込み中のファイルはスキップ
+                        if (os.path.normcase(os.path.abspath(root_dir)) in current_hour_dirs and
+                                file.startswith(current_minute_prefix)):
                             continue
-                        # ファイルの最終更新時刻をチェック
-                        try:
-                            file_mtime = os.path.getmtime(full_path)
-                            time_since_modified = current_time - file_mtime
-                            if time_since_modified < WRITING_THRESHOLD_SECONDS:
-                                # 書き込み中の可能性が高いためスキップ
-                                print(f"[RTSP解析] スキップ (書き込み中の可能性): {os.path.basename(full_path)} (更新 {time_since_modified:.1f}秒前)")
+                        full_path = os.path.join(root_dir, file)
+                        if full_path not in processed_files_set:
+                            if not is_rtsp_file_within_time_range(
+                                full_path, time_limit_enabled, start_hour, start_minute, end_hour, end_minute
+                            ):
+                                print(f"[RTSP解析] スキップ (録画時間外): {full_path}")
+                                processed_files_set.add(full_path)
                                 continue
-                        except OSError:
-                            # ファイルアクセスエラーの場合もスキップ
-                            continue
-                        new_files_to_process.append(full_path)
+                            # ファイルの最終更新時刻をチェック
+                            try:
+                                file_mtime = os.path.getmtime(full_path)
+                                time_since_modified = current_time - file_mtime
+                                if time_since_modified < WRITING_THRESHOLD_SECONDS:
+                                    # 書き込み中の可能性が高いためスキップ
+                                    print(f"[RTSP解析] スキップ (書き込み中の可能性): {os.path.basename(full_path)} (更新 {time_since_modified:.1f}秒前)")
+                                    continue
+                            except OSError:
+                                # ファイルアクセスエラーの場合もスキップ
+                                continue
+                            new_files_to_process.append(full_path)
         new_files_to_process.sort(key=os.path.getmtime)
 
         if new_files_to_process:
@@ -1072,15 +1091,18 @@ def rtsp_save_and_process_thread_target(
     global rtsp_processed_files
     video_extensions = config.PERIODIC_VIDEO_EXTENSIONS
 
-    if os.path.isdir(save_root):
+    scan_roots = _rtsp_recording_scan_roots(save_root)
+    existing_roots = [root for root in scan_roots if os.path.isdir(root)]
+    if existing_roots:
         try:
-            initial_scan_message = f"[RTSP統合] 初回スキャン中: {save_root}"
+            initial_scan_message = f"[RTSP統合] 初回スキャン中: {', '.join(existing_roots)}"
             print(initial_scan_message)
             if progress_callback: progress_callback((initial_scan_message, None))
-            for root, _, files in os.walk(save_root):
-                for file in files:
-                    if file.lower().endswith(video_extensions):
-                        rtsp_processed_files.add(os.path.join(root, file))
+            for scan_root in existing_roots:
+                for root, _, files in os.walk(scan_root):
+                    for file in files:
+                        if file.lower().endswith(video_extensions):
+                            rtsp_processed_files.add(os.path.join(root, file))
             completion_message = f"[RTSP統合] 初回スキャン完了。既存の {len(rtsp_processed_files)} ファイルは処理対象外。"
             print(completion_message)
             if progress_callback: progress_callback((completion_message, None))
