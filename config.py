@@ -4,13 +4,31 @@ import os
 import sys
 
 # --- Determine Base Paths for Portable/Frozen execution ---
-if getattr(sys, 'frozen', False):
+IS_FROZEN = bool(getattr(sys, 'frozen', False))
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+if IS_FROZEN:
     # Running as compiled exe
     BUNDLE_DIR = sys._MEIPASS
     EXE_DIR = os.path.dirname(sys.executable)
+    LEGACY_BUNDLE_DIR = BUNDLE_DIR
+    LEGACY_EXE_DIR = EXE_DIR
+    LEGACY_INSTALL_ROOTS = ()
+
+    if sys.platform == "win32":
+        _user_data_base = (
+            os.environ.get("LOCALAPPDATA")
+            or os.environ.get("APPDATA")
+            or os.path.join(os.path.expanduser("~"), "AppData", "Local")
+        )
+    elif sys.platform == "darwin":
+        _user_data_base = os.path.join(os.path.expanduser("~"), "Library", "Application Support")
+    else:
+        _user_data_base = os.environ.get("XDG_DATA_HOME") or os.path.join(os.path.expanduser("~"), ".local", "share")
+    USER_DATA_DIR = os.path.join(_user_data_base, "MeteorDetector")
+    APP_DATA_DIR = USER_DATA_DIR
 else:
     # Running as script (Development)
-    SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
     # Assuming standard structure: my_app/div/config.py
     # So base dir for resources/output should be parent of div
     PARENT_DIR = os.path.dirname(SCRIPT_DIR)
@@ -18,6 +36,22 @@ else:
     # Decide where base ref is. Original code was hardcoded to C:\Users\kekke\Desktop\my_app
     # calculated PARENT_DIR should match that.
     EXE_DIR = PARENT_DIR 
+    BUNDLE_DIR = SCRIPT_DIR
+    LEGACY_BUNDLE_DIR = None
+    LEGACY_EXE_DIR = None
+    LEGACY_INSTALL_ROOTS = ()
+    USER_DATA_DIR = None
+    APP_DATA_DIR = EXE_DIR
+
+
+def is_path_within(path, directory):
+    """Return whether path is directory itself or a descendant of it."""
+    try:
+        normalized_path = os.path.normcase(os.path.abspath(path))
+        normalized_directory = os.path.normcase(os.path.abspath(directory))
+        return os.path.commonpath((normalized_path, normalized_directory)) == normalized_directory
+    except (OSError, ValueError):
+        return False
 
 # Resolve model path relative to this file (portable/exe-friendly).
 _MODEL_CANDIDATES = [
@@ -64,9 +98,28 @@ BRIGHTNESS_CONSISTENCY_THRESHOLD = 20 # 飛行機判定用の輝度一貫性チ�
 VELOCITY_CONSISTENCY_THRESHOLD = 2    # 飛行機判定用の速度一貫性チェックの閾値（ピクセル/フレーム）
 
 # --- 保存パス関連 ---
-DEFAULT_METEOR_SAVE_PATH = os.path.join(EXE_DIR, "meteor")
-DEFAULT_NOT_METEOR_SAVE_PATH = os.path.join(EXE_DIR, "not_meteor")
-TEMP_CLIP_DIR = os.path.join(EXE_DIR, "temp_clips")
+DEFAULT_METEOR_SAVE_PATH = os.path.join(APP_DATA_DIR, "meteor")
+DEFAULT_NOT_METEOR_SAVE_PATH = os.path.join(APP_DATA_DIR, "not_meteor")
+TEMP_CLIP_DIR = os.path.join(APP_DATA_DIR, "temp_clips")
+TEMP_VIDEO_DIR = (
+    os.path.join(APP_DATA_DIR, "temp_video") if IS_FROZEN
+    else os.path.join(SCRIPT_DIR, "temp_video")
+)
+DISTORTION_MAP_DIR = (
+    os.path.join(APP_DATA_DIR, "distortion_maps") if IS_FROZEN
+    else SCRIPT_DIR
+)
+
+# Preserve access to output folders used by older frozen builds. Source runs
+# already use the same directories as the legacy layout.
+LEGACY_METEOR_SAVE_PATH = os.path.join(EXE_DIR, "meteor") if IS_FROZEN else None
+LEGACY_NOT_METEOR_SAVE_PATH = os.path.join(EXE_DIR, "not_meteor") if IS_FROZEN else None
+LEGACY_DISTORTION_MAP_DIRS = tuple(
+    dict.fromkeys(
+        path for path in (LEGACY_BUNDLE_DIR, LEGACY_EXE_DIR)
+        if path and os.path.abspath(path) != os.path.abspath(DISTORTION_MAP_DIR)
+    )
+)
 VIDEO_FOURCC = 'avc1'
 
 # --- Astrometry.net 関連 ---
@@ -91,7 +144,51 @@ VIZIER_STAR_MAG_LIMIT = 3 # Vizierから取得して画像に表示する星の�
 # --- 定期スキャン・RTSP関連 ---
 PERIODIC_VIDEO_EXTENSIONS = ('.mp4', '.avi', '.mov')
 DEFAULT_SCAN_INTERVAL = 60 # 定期スキャンのデフォルト間隔（秒）
-RTSP_SAVE_ROOT = os.path.join(EXE_DIR, "rtsp")
+RTSP_SAVE_ROOT = os.path.join(APP_DATA_DIR, "rtsp")
+LEGACY_RTSP_SAVE_ROOTS = (
+    (os.path.join(EXE_DIR, "rtsp"),)
+    if IS_FROZEN and os.path.abspath(os.path.join(EXE_DIR, "rtsp")) != os.path.abspath(RTSP_SAVE_ROOT)
+    else ()
+)
+
+
+def is_rtsp_recorded_file(path):
+    """Recognize recordings written by this and earlier frozen releases."""
+    return any(
+        is_path_within(path, root)
+        for root in (RTSP_SAVE_ROOT, *LEGACY_RTSP_SAVE_ROOTS)
+    )
+
+
+def register_legacy_install_root(root):
+    """Keep data from a confirmed prior install discoverable after it moves."""
+    global LEGACY_INSTALL_ROOTS, LEGACY_RTSP_SAVE_ROOTS, LEGACY_DISTORTION_MAP_DIRS
+    if not IS_FROZEN or not root:
+        return
+    root = os.path.abspath(root)
+    normalized_root = os.path.normcase(os.path.abspath(root))
+    existing_install_roots = {
+        os.path.normcase(os.path.abspath(path))
+        for path in LEGACY_INSTALL_ROOTS
+    }
+    if normalized_root not in existing_install_roots:
+        LEGACY_INSTALL_ROOTS = (*LEGACY_INSTALL_ROOTS, root)
+    rtsp_root = os.path.join(root, "rtsp")
+    rtsp_roots = {
+        os.path.normcase(os.path.abspath(path))
+        for path in LEGACY_RTSP_SAVE_ROOTS
+    }
+    if os.path.normcase(os.path.abspath(rtsp_root)) not in rtsp_roots:
+        LEGACY_RTSP_SAVE_ROOTS = (*LEGACY_RTSP_SAVE_ROOTS, rtsp_root)
+    existing_map_roots = {
+        os.path.normcase(os.path.abspath(path))
+        for path in LEGACY_DISTORTION_MAP_DIRS
+    }
+    for map_root in (root, os.path.join(root, "_internal")):
+        normalized_map_root = os.path.normcase(os.path.abspath(map_root))
+        if normalized_map_root not in existing_map_roots:
+            LEGACY_DISTORTION_MAP_DIRS = (*LEGACY_DISTORTION_MAP_DIRS, map_root)
+            existing_map_roots.add(normalized_map_root)
 RTSP_FPS = 25 # RTSPストリームの前提FPS
 RTSP_SEGMENT_FRAMES = 1500 # 1セグメントあたりのフレーム数 (25fps * 60秒 = 1500フレーム)
 RTSP_SEGMENT_DURATION = 60 # RTSP動画の1セグメントあたりの秒数（参考値）

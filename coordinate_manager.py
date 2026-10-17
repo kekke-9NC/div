@@ -32,8 +32,9 @@ class CoordinatePoint:
 class CoordinateManager:
     """Manages a collection of coordinate points with persistence."""
     
-    def __init__(self, storage_file: str = "custom_coordinates.json"):
+    def __init__(self, storage_file: str = "custom_coordinates.json", legacy_storage_files=None):
         self.storage_file = storage_file
+        self.legacy_storage_files = list(legacy_storage_files or [])
         self.points: List[CoordinatePoint] = []
         self.on_change_callback: Optional[Callable] = None
         self.load()
@@ -72,6 +73,8 @@ class CoordinateManager:
         """Save points to JSON file."""
         try:
             data = [p.to_dict() for p in self.points]
+            parent_dir = os.path.dirname(os.path.abspath(self.storage_file))
+            os.makedirs(parent_dir, exist_ok=True)
             with open(self.storage_file, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
         except Exception as e:
@@ -79,16 +82,19 @@ class CoordinateManager:
     
     def load(self) -> None:
         """Load points from JSON file."""
-        if not os.path.exists(self.storage_file):
-            return
-        
-        try:
-            with open(self.storage_file, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            self.points = [CoordinatePoint.from_dict(item) for item in data]
-        except Exception as e:
-            print(f"Failed to load coordinates: {e}")
-            self.points = []
+        for candidate in (self.storage_file, *self.legacy_storage_files):
+            if not os.path.exists(candidate):
+                continue
+            try:
+                with open(candidate, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                self.points = [CoordinatePoint.from_dict(item) for item in data]
+                if candidate != self.storage_file:
+                    print(f"Loaded legacy coordinates from {candidate}")
+                return
+            except Exception as e:
+                print(f"Failed to load coordinates from {candidate}: {e}")
+        self.points = []
     
     def set_change_callback(self, callback: Callable) -> None:
         """Set a callback function to be called when points change."""

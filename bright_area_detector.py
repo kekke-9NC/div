@@ -39,10 +39,30 @@ TextIteratorStreamer = None
 process_vision_info = None
 
 MODEL_ID = "Qwen/Qwen3-VL-4B-Instruct"
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
+IS_FROZEN = bool(getattr(app_config, "IS_FROZEN", False))
+BASE_DIR = (
+    os.path.join(getattr(app_config, "APP_DATA_DIR", MODULE_DIR), "ai_models")
+    if IS_FROZEN else MODULE_DIR
+)
 FULL_MODEL_DIR = os.path.join(BASE_DIR, "full_model")
 LOCAL_MODEL_DIR = os.path.join(BASE_DIR, "quantized_model")
 HF_CACHE_DIR = os.path.join(BASE_DIR, "hf_cache")
+LEGACY_LOCAL_MODEL_DIR = (
+    os.path.join(MODULE_DIR, "quantized_model")
+    if IS_FROZEN and os.path.abspath(MODULE_DIR) != os.path.abspath(BASE_DIR)
+    else None
+)
+LEGACY_FULL_MODEL_DIR = (
+    os.path.join(MODULE_DIR, "full_model")
+    if IS_FROZEN and os.path.abspath(MODULE_DIR) != os.path.abspath(BASE_DIR)
+    else None
+)
+LEGACY_HF_CACHE_DIR = (
+    os.path.join(MODULE_DIR, "hf_cache")
+    if IS_FROZEN and os.path.abspath(MODULE_DIR) != os.path.abspath(BASE_DIR)
+    else None
+)
 MODEL_OFFLOAD_TIMEOUT = 300
 
 AI_BACKEND_LOCAL = getattr(app_config, "AI_VLM_BACKEND_LOCAL_QWEN3_VL_4B", "local_qwen3_vl_4b")
@@ -508,9 +528,119 @@ def _has_model_files(model_dir: str) -> bool:
     return False
 
 
+def _quantized_model_candidates() -> List[str]:
+    candidates = [LOCAL_MODEL_DIR, LEGACY_LOCAL_MODEL_DIR]
+    candidates.extend(_legacy_install_directories("quantized_model"))
+    result = []
+    seen = set()
+    for candidate in candidates:
+        if not candidate:
+            continue
+        normalized = os.path.normcase(os.path.abspath(candidate))
+        if normalized not in seen:
+            seen.add(normalized)
+            result.append(candidate)
+    return result
+
+
+def _legacy_install_directories(directory_name: str) -> List[str]:
+    """Find old model directories beside a previously installed frozen app."""
+    candidates = []
+    for install_root in getattr(app_config, "LEGACY_INSTALL_ROOTS", ()):
+        for parent in (install_root, os.path.join(install_root, "_internal")):
+            candidates.append(os.path.join(parent, directory_name))
+    result = []
+    seen = set()
+    for candidate in candidates:
+        normalized = os.path.normcase(os.path.abspath(candidate))
+        if normalized not in seen:
+            seen.add(normalized)
+            result.append(candidate)
+    return result
+
+
+def _has_complete_model_files(model_dir: str) -> bool:
+    if not _has_model_files(model_dir):
+        return False
+    for index_name in ("model.safetensors.index.json", "pytorch_model.bin.index.json"):
+        index_path = os.path.join(model_dir, index_name)
+        if not os.path.isfile(index_path):
+            continue
+        try:
+            with open(index_path, "r", encoding="utf-8") as index_file:
+                index_data = json.load(index_file)
+            if not isinstance(index_data, dict):
+                return False
+            weight_map = index_data.get("weight_map")
+            if not isinstance(weight_map, dict) or not weight_map:
+                return False
+            shard_names = set(weight_map.values())
+            if any(not isinstance(name, str) or not name for name in shard_names):
+                return False
+            return bool(shard_names) and all(
+                os.path.isfile(os.path.join(model_dir, shard_name))
+                for shard_name in shard_names
+            )
+        except (AttributeError, OSError, TypeError, ValueError):
+            return False
+    return True
+
+
+def _legacy_full_model_candidates() -> List[str]:
+    """Find complete full-model copies in older frozen cache locations."""
+    candidates = [LEGACY_FULL_MODEL_DIR]
+    candidates.extend(_legacy_install_directories("full_model"))
+
+    legacy_hf_cache_dirs = [LEGACY_HF_CACHE_DIR]
+    legacy_hf_cache_dirs.extend(_legacy_install_directories("hf_cache"))
+    for legacy_hf_cache_dir in legacy_hf_cache_dirs:
+        if not legacy_hf_cache_dir:
+            continue
+        repo_cache_dir = os.path.join(
+            legacy_hf_cache_dir,
+            f"models--{MODEL_ID.replace('/', '--')}",
+        )
+        snapshots_dir = os.path.join(repo_cache_dir, "snapshots")
+        preferred_snapshot = None
+        try:
+            with open(os.path.join(repo_cache_dir, "refs", "main"), "r", encoding="utf-8") as ref_file:
+                preferred_snapshot = os.path.join(snapshots_dir, ref_file.read().strip())
+        except OSError:
+            pass
+        if preferred_snapshot:
+            candidates.append(preferred_snapshot)
+        try:
+            snapshots = [
+                os.path.join(snapshots_dir, name)
+                for name in os.listdir(snapshots_dir)
+                if os.path.isdir(os.path.join(snapshots_dir, name))
+            ]
+            def snapshot_mtime(snapshot_path):
+                try:
+                    return os.path.getmtime(snapshot_path)
+                except OSError:
+                    return 0
+
+            snapshots.sort(key=snapshot_mtime, reverse=True)
+            candidates.extend(snapshots)
+        except OSError:
+            pass
+
+    result = []
+    seen = set()
+    for candidate in candidates:
+        if not candidate:
+            continue
+        normalized = os.path.abspath(candidate)
+        if normalized not in seen and _has_complete_model_files(candidate):
+            seen.add(normalized)
+            result.append(candidate)
+    return result
+
+
 def has_quantized_model() -> bool:
     """有効な量子化モデルがローカルに存在するかを返す。"""
-    return _has_model_files(LOCAL_MODEL_DIR)
+    return any(_has_model_files(model_dir) for model_dir in _quantized_model_candidates())
 
 
 def _load_processor_compat(
@@ -644,52 +774,88 @@ def _get_model(status_callback: Optional[Callable[[str], None]] = None):
 
         _log("モデルをロード中...", status_callback)
 
-        if _has_model_files(LOCAL_MODEL_DIR):
+        for model_dir in _quantized_model_candidates():
+            if not _has_model_files(model_dir):
+                continue
             try:
-                _log(f"ローカル量子化モデルを読み込み中: {LOCAL_MODEL_DIR}", status_callback)
+                _log(f"ローカル量子化モデルを読み込み中: {model_dir}", status_callback)
                 _model = Qwen3VLForConditionalGeneration.from_pretrained(
-                    LOCAL_MODEL_DIR,
+                    model_dir,
                     device_map="auto",
                     trust_remote_code=True,
                     low_cpu_mem_usage=True
                 )
                 _processor = _load_processor_compat(
-                    AutoProcessor, LOCAL_MODEL_DIR, status_callback
+                    AutoProcessor, model_dir, status_callback
                 )
                 _log("ローカル量子化モデルの読み込み完了", status_callback)
                 _reset_offload_timer()
                 return _model, _processor
             except Exception as e:
                 _log(f"ローカル量子化モデル読み込み失敗。再構築します: {e}", status_callback)
+                # Do not remove model files from the old bundle location. They
+                # may be the only reusable copy and the install may be read-only.
+                if os.path.abspath(model_dir) == os.path.abspath(LOCAL_MODEL_DIR):
+                    try:
+                        shutil.rmtree(LOCAL_MODEL_DIR, ignore_errors=True)
+                    except Exception:
+                        pass
+
+        legacy_full_models = _legacy_full_model_candidates()
+        full_model_dir_to_use = None
+        quantized_model = None
+        quantized_processor = None
+        for legacy_full_model_dir in legacy_full_models:
+            try:
+                _log(f"旧保存先のフルモデルを再利用します: {legacy_full_model_dir}", status_callback)
+                _log("フルモデルを量子化して読み込み中...", status_callback)
+                quantized_model = Qwen3VLForConditionalGeneration.from_pretrained(
+                    legacy_full_model_dir,
+                    quantization_config=bnb_config,
+                    device_map="auto",
+                    low_cpu_mem_usage=True,
+                    trust_remote_code=True
+                )
+                quantized_processor = _load_processor_compat(
+                    AutoProcessor, legacy_full_model_dir, status_callback
+                )
+                full_model_dir_to_use = legacy_full_model_dir
+                break
+            except Exception as e:
+                _log(f"旧保存先のフルモデルを利用できません。別の保存先を確認します: {e}", status_callback)
+                quantized_model = None
+                quantized_processor = None
                 try:
-                    shutil.rmtree(LOCAL_MODEL_DIR, ignore_errors=True)
+                    torch.cuda.empty_cache()
+                    gc.collect()
                 except Exception:
                     pass
 
-        os.makedirs(HF_CACHE_DIR, exist_ok=True)
-        os.makedirs(FULL_MODEL_DIR, exist_ok=True)
+        if full_model_dir_to_use is None:
+            os.makedirs(HF_CACHE_DIR, exist_ok=True)
+            os.makedirs(FULL_MODEL_DIR, exist_ok=True)
 
-        _log(f"フルモデルをダウンロード中: {MODEL_ID}", status_callback)
-        snapshot_download(
-            repo_id=MODEL_ID,
-            cache_dir=HF_CACHE_DIR,
-            local_dir=FULL_MODEL_DIR,
-            local_files_only=False,
-            force_download=False,
-        )
-        _log(f"フルモデルのダウンロード完了: {FULL_MODEL_DIR}", status_callback)
-
-        _log("フルモデルを量子化して読み込み中...", status_callback)
-        quantized_model = Qwen3VLForConditionalGeneration.from_pretrained(
-            FULL_MODEL_DIR,
-            quantization_config=bnb_config,
-            device_map="auto",
-            low_cpu_mem_usage=True,
-            trust_remote_code=True
-        )
-        quantized_processor = _load_processor_compat(
-            AutoProcessor, FULL_MODEL_DIR, status_callback
-        )
+            _log(f"フルモデルをダウンロード中: {MODEL_ID}", status_callback)
+            snapshot_download(
+                repo_id=MODEL_ID,
+                cache_dir=HF_CACHE_DIR,
+                local_dir=FULL_MODEL_DIR,
+                local_files_only=False,
+                force_download=False,
+            )
+            full_model_dir_to_use = FULL_MODEL_DIR
+            _log(f"フルモデルのダウンロード完了: {FULL_MODEL_DIR}", status_callback)
+            _log("フルモデルを量子化して読み込み中...", status_callback)
+            quantized_model = Qwen3VLForConditionalGeneration.from_pretrained(
+                full_model_dir_to_use,
+                quantization_config=bnb_config,
+                device_map="auto",
+                low_cpu_mem_usage=True,
+                trust_remote_code=True
+            )
+            quantized_processor = _load_processor_compat(
+                AutoProcessor, full_model_dir_to_use, status_callback
+            )
 
         tmp_quant_dir = f"{LOCAL_MODEL_DIR}_tmp"
         shutil.rmtree(tmp_quant_dir, ignore_errors=True)
@@ -710,9 +876,10 @@ def _get_model(status_callback: Optional[Callable[[str], None]] = None):
         except Exception:
             pass
 
-        _log(f"フルモデルを削除中: {FULL_MODEL_DIR}", status_callback)
-        shutil.rmtree(FULL_MODEL_DIR, ignore_errors=True)
-        _log("フルモデル削除完了", status_callback)
+        if os.path.abspath(full_model_dir_to_use) == os.path.abspath(FULL_MODEL_DIR):
+            _log(f"フルモデルを削除中: {FULL_MODEL_DIR}", status_callback)
+            shutil.rmtree(FULL_MODEL_DIR, ignore_errors=True)
+            _log("フルモデル削除完了", status_callback)
 
         _log("量子化モデルのみを再ロード中...", status_callback)
         _model = Qwen3VLForConditionalGeneration.from_pretrained(

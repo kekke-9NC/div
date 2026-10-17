@@ -116,6 +116,68 @@ def _write_masks_atomically(path, masks):
             os.remove(temporary_path)
 
 
+def _distortion_map_paths():
+    """Prefer a complete writable map pair, then read complete legacy pairs."""
+    for directory in (config.DISTORTION_MAP_DIR, *config.LEGACY_DISTORTION_MAP_DIRS):
+        map_x_path = os.path.join(directory, "distortion_map_x.npy")
+        map_y_path = os.path.join(directory, "distortion_map_y.npy")
+        if os.path.exists(map_x_path) and os.path.exists(map_y_path):
+            return map_x_path, map_y_path
+    return (
+        os.path.join(config.DISTORTION_MAP_DIR, "distortion_map_x.npy"),
+        os.path.join(config.DISTORTION_MAP_DIR, "distortion_map_y.npy"),
+    )
+
+
+def _normalized_paths_equal(first_path, second_path):
+    if not isinstance(first_path, str) or not isinstance(second_path, str):
+        return False
+    try:
+        first_normalized = os.path.normcase(os.path.abspath(os.path.normpath(first_path)))
+        second_normalized = os.path.normcase(os.path.abspath(os.path.normpath(second_path)))
+    except (OSError, TypeError, ValueError):
+        return False
+    if first_normalized == second_normalized:
+        return True
+    try:
+        return os.path.samefile(first_path, second_path)
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def _migrate_legacy_default_output_path(saved_path, legacy_path, current_path):
+    """Move only the old frozen default; keep any user-selected folder intact."""
+    if not config.IS_FROZEN or not legacy_path:
+        return saved_path
+    return current_path if _normalized_paths_equal(saved_path, legacy_path) else saved_path
+
+
+def _legacy_output_roots_from_paths(meteor_path, not_meteor_path):
+    """Return roots that contain paths shaped like the old frozen defaults."""
+    if not config.IS_FROZEN:
+        return []
+    roots = []
+    seen = set()
+    for saved_path, expected_name in (
+        (meteor_path, "meteor"),
+        (not_meteor_path, "not_meteor"),
+    ):
+        if not isinstance(saved_path, str) or not saved_path.strip():
+            continue
+        try:
+            normalized_path = os.path.abspath(os.path.normpath(saved_path))
+            if os.path.normcase(os.path.basename(normalized_path)) != os.path.normcase(expected_name):
+                continue
+            root = os.path.dirname(normalized_path)
+            normalized_root = os.path.normcase(root)
+            if normalized_root not in seen:
+                seen.add(normalized_root)
+                roots.append(root)
+        except (OSError, TypeError, ValueError):
+            continue
+    return roots
+
+
 class _RunProgressQueue:
     STATUS_ITEM_MARKER = object()
 
@@ -257,6 +319,8 @@ class App(TkinterDnD.Tk):
             {'name': "Cutout Video", 'enabled': True}
         ]
         self._legacy_settings_directories = []
+        self._legacy_output_roots = []
+        self._reviewed_legacy_output_roots = []
         self._bundled_resource_directory = None
         if getattr(sys, 'frozen', False):
             # インストール先が読み取り専用でも保存できるよう、ユーザー領域を使う。
@@ -473,7 +537,20 @@ class App(TkinterDnD.Tk):
         self.analysis_cy = None
         self.analysis_pixel_per_deg = None
         # Coordinate manager for custom points
-        self.coord_manager = coord_mgr.CoordinateManager()
+        if config.IS_FROZEN:
+            coordinate_storage_file = os.path.join(config.APP_DATA_DIR, "custom_coordinates.json")
+            legacy_coordinate_files = []
+            for directory in (config.LEGACY_EXE_DIR, config.LEGACY_BUNDLE_DIR, os.getcwd()):
+                if directory:
+                    legacy_file = os.path.join(directory, "custom_coordinates.json")
+                    if os.path.abspath(legacy_file) != os.path.abspath(coordinate_storage_file):
+                        legacy_coordinate_files.append(legacy_file)
+        else:
+            coordinate_storage_file = "custom_coordinates.json"
+            legacy_coordinate_files = []
+        self.coord_manager = coord_mgr.CoordinateManager(
+            coordinate_storage_file, legacy_coordinate_files
+        )
         self.coord_manager.set_change_callback(self.on_coordinates_changed)
         self.auto_time_updater_enabled_var = tk.BooleanVar(value=False)
         self.auto_updater = auto_time_updater.AutoTimeUpdater()
@@ -3183,6 +3260,12 @@ atomcam2で利用する場合は、GitHubで公開されている
         try:
             candidates.append(os.path.join(config.DEFAULT_METEOR_SAVE_PATH, os.path.basename(ref)))
             candidates.append(os.path.join(config.DEFAULT_NOT_METEOR_SAVE_PATH, os.path.basename(ref)))
+            for legacy_dir in (config.LEGACY_METEOR_SAVE_PATH, config.LEGACY_NOT_METEOR_SAVE_PATH):
+                if legacy_dir:
+                    candidates.append(os.path.join(legacy_dir, os.path.basename(ref)))
+            for legacy_root in self._legacy_output_roots:
+                candidates.append(os.path.join(legacy_root, "meteor", os.path.basename(ref)))
+                candidates.append(os.path.join(legacy_root, "not_meteor", os.path.basename(ref)))
         except Exception:
             pass
 
@@ -3549,7 +3632,15 @@ atomcam2で利用する場合は、GitHubで公開されている
             self.append_log(f"モデル容量情報の取得に失敗したため既定値で見積もります: {e}")
 
         temporary_bytes = download_bytes + final_bytes + overhead_bytes
-        free_bytes = shutil.disk_usage(os.path.abspath(".")).free
+        storage_path = os.path.abspath(
+            getattr(detector_module, "LOCAL_MODEL_DIR", os.path.abspath("."))
+        )
+        while not os.path.isdir(storage_path):
+            parent_path = os.path.dirname(storage_path)
+            if parent_path == storage_path:
+                break
+            storage_path = parent_path
+        free_bytes = shutil.disk_usage(storage_path).free
 
         return {
             "repo_id": repo_id,
@@ -4348,8 +4439,7 @@ atomcam2で利用する場合は、GitHubで公開されている
             os.makedirs(params['meteor_save_path'], exist_ok=True)
             os.makedirs(params['not_meteor_save_path'], exist_ok=True)
             # set temp_video dir path on the App instance so GUI can shorten logs
-            module_dir = os.path.dirname(os.path.abspath(__file__))
-            self.temp_video_dir = os.path.join(module_dir, 'temp_video')
+            self.temp_video_dir = config.TEMP_VIDEO_DIR
             os.makedirs(self.temp_video_dir, exist_ok=True)
         except (ValueError, Exception) as e:
             messagebox.showerror("設定エラー", f"パラメータ値が無効です: {e}")
@@ -5041,6 +5131,8 @@ atomcam2で利用する場合は、GitHubで公開されている
             'mask_path_or_status': self.mask_path_var.get(), 'concurrency': self.concurrency_var.get(),
             'interval': self.interval_var.get(), 'duration': self.duration_var.get(),
             'meteor_save_path': self.meteor_save_path_var.get(), 'not_meteor_save_path': self.not_meteor_save_path_var.get(),
+            'legacy_output_roots': list(self._legacy_output_roots),
+            'reviewed_legacy_output_roots': list(self._reviewed_legacy_output_roots),
             'selected_model_path': self.selected_model_path_var.get(),
             'custom_model_paths': list(self.custom_model_paths),
             'ai_vlm_backend': self.ai_vlm_backend_var.get(),
@@ -5268,8 +5360,99 @@ atomcam2で利用する場合は、GitHubで公開されている
             self.concurrency_var.set(settings.get('concurrency', str(config.DEFAULT_CONCURRENCY)))
             self.interval_var.set(settings.get('interval', str(config.DEFAULT_INTERVAL)))
             self.duration_var.set(settings.get('duration', str(config.DEFAULT_DURATION)))
-            self.meteor_save_path_var.set(settings.get('meteor_save_path', config.DEFAULT_METEOR_SAVE_PATH))
-            self.not_meteor_save_path_var.set(settings.get('not_meteor_save_path', config.DEFAULT_NOT_METEOR_SAVE_PATH))
+            saved_meteor_path = settings.get('meteor_save_path', config.DEFAULT_METEOR_SAVE_PATH)
+            saved_not_meteor_path = settings.get('not_meteor_save_path', config.DEFAULT_NOT_METEOR_SAVE_PATH)
+            saved_legacy_roots = settings.get('legacy_output_roots', [])
+            if isinstance(saved_legacy_roots, list):
+                self._legacy_output_roots = [
+                    os.path.abspath(path)
+                    for path in saved_legacy_roots
+                    if isinstance(path, str) and path.strip()
+                ]
+            saved_reviewed_roots = settings.get('reviewed_legacy_output_roots', [])
+            if isinstance(saved_reviewed_roots, list):
+                self._reviewed_legacy_output_roots = [
+                    os.path.abspath(path)
+                    for path in saved_reviewed_roots
+                    if isinstance(path, str) and path.strip()
+                ]
+            current_default_root = os.path.dirname(config.DEFAULT_METEOR_SAVE_PATH)
+            reviewed_roots = {
+                os.path.normcase(path) for path in self._reviewed_legacy_output_roots
+            }
+            confirmed_migration_roots = []
+            for candidate_root in _legacy_output_roots_from_paths(
+                saved_meteor_path, saved_not_meteor_path,
+            ):
+                if (
+                    _normalized_paths_equal(candidate_root, current_default_root)
+                    or any(
+                        _normalized_paths_equal(candidate_root, reviewed_root)
+                        for reviewed_root in reviewed_roots
+                    )
+                ):
+                    continue
+                matching_paths = []
+                if _normalized_paths_equal(
+                    saved_meteor_path, os.path.join(candidate_root, "meteor")
+                ):
+                    matching_paths.append(saved_meteor_path)
+                if _normalized_paths_equal(
+                    saved_not_meteor_path, os.path.join(candidate_root, "not_meteor")
+                ):
+                    matching_paths.append(saved_not_meteor_path)
+                if not matching_paths:
+                    continue
+                should_migrate = messagebox.askyesno(
+                    "旧保存先の確認",
+                    "保存先が以前のアプリ標準フォルダの構成に見えますが、旧インストール先を確認できません。\n\n"
+                    f"旧保存先:\n{candidate_root}\n\n"
+                    f"該当する設定:\n{chr(10).join(matching_paths)}\n\n"
+                    f"該当する保存先をユーザー領域に切り替えますか？\n{config.APP_DATA_DIR}\n\n"
+                    "既存ファイルは元の場所に残り、旧保存先として参照します。",
+                    parent=self,
+                )
+                if should_migrate:
+                    confirmed_migration_roots.append(candidate_root)
+                    if not any(
+                        _normalized_paths_equal(candidate_root, path)
+                        for path in self._legacy_output_roots
+                    ):
+                        self._legacy_output_roots.append(candidate_root)
+                else:
+                    self._reviewed_legacy_output_roots.append(candidate_root)
+
+            for legacy_root in self._legacy_output_roots:
+                config.register_legacy_install_root(legacy_root)
+                legacy_coordinate_path = os.path.join(legacy_root, "custom_coordinates.json")
+                if (
+                    os.path.abspath(legacy_coordinate_path)
+                    not in {os.path.abspath(path) for path in self.coord_manager.legacy_storage_files}
+                ):
+                    self.coord_manager.legacy_storage_files.insert(0, legacy_coordinate_path)
+            if self._legacy_output_roots:
+                self.coord_manager.load()
+
+            legacy_meteor_defaults = [
+                os.path.join(root, "meteor") for root in confirmed_migration_roots
+            ]
+            legacy_not_meteor_defaults = [
+                os.path.join(root, "not_meteor") for root in confirmed_migration_roots
+            ]
+            migrated_meteor_path = saved_meteor_path
+            for legacy_path in legacy_meteor_defaults:
+                migrated_meteor_path = _migrate_legacy_default_output_path(
+                    migrated_meteor_path, legacy_path, config.DEFAULT_METEOR_SAVE_PATH
+                )
+            migrated_not_meteor_path = saved_not_meteor_path
+            for legacy_path in legacy_not_meteor_defaults:
+                migrated_not_meteor_path = _migrate_legacy_default_output_path(
+                    migrated_not_meteor_path, legacy_path, config.DEFAULT_NOT_METEOR_SAVE_PATH
+                )
+            if migrated_meteor_path != saved_meteor_path or migrated_not_meteor_path != saved_not_meteor_path:
+                self.append_log("旧インストール先の標準保存先をユーザー領域へ切り替えました。")
+            self.meteor_save_path_var.set(migrated_meteor_path)
+            self.not_meteor_save_path_var.set(migrated_not_meteor_path)
             self.custom_model_paths = [str(p) for p in settings.get('custom_model_paths', []) if isinstance(p, str)]
             self.selected_model_path_var.set(settings.get('selected_model_path', config.MODEL_PATH))
             self.refresh_model_candidates()
@@ -5434,10 +5617,7 @@ atomcam2で利用する場合は、GitHubで公開されている
         if not output_path:
             return
 
-        # Distortion maps are stored next to this module.
-        module_dir = os.path.dirname(os.path.abspath(__file__))
-        map_x_path = os.path.join(module_dir, "distortion_map_x.npy")
-        map_y_path = os.path.join(module_dir, "distortion_map_y.npy")
+        map_x_path, map_y_path = _distortion_map_paths()
 
         def run_task():
             self.append_log("ゆがみ補正処理を開始します...")
@@ -5727,17 +5907,18 @@ atomcam2で利用する場合は、GitHubで公開されている
             f"開始動画:\n{selected_start_video}\n\n"
             f"マスク方式: {'自動+手動' if mask_mode == 'auto_plus_manual' else ('自動のみ' if mask_mode == 'auto_only' else '手動のみ')}\n\n"
             "対策として自動マスク(時刻表示/グロー領域)を作成し、データ欠損区間は自動スキップします。\n"
-            "既存の distortion_map_x.npy / distortion_map_y.npy は上書きされます。\n\n"
+            "新しい distortion_map_x.npy / distortion_map_y.npy をユーザー領域に保存します。\n\n"
             "続行しますか？"
         ):
             return
 
-        module_dir = os.path.dirname(os.path.abspath(__file__))
-        map_x_path = os.path.join(module_dir, "distortion_map_x.npy")
-        map_y_path = os.path.join(module_dir, "distortion_map_y.npy")
-        auto_mask_output_path = os.path.join(module_dir, "distortion_selfcal_auto_mask.png")
-        manual_mask_output_path = os.path.join(module_dir, "distortion_selfcal_manual_mask.png")
-        metadata_output_path = os.path.join(module_dir, "distortion_selfcal_meta.json")
+        map_output_dir = config.DISTORTION_MAP_DIR
+        os.makedirs(map_output_dir, exist_ok=True)
+        map_x_path = os.path.join(map_output_dir, "distortion_map_x.npy")
+        map_y_path = os.path.join(map_output_dir, "distortion_map_y.npy")
+        auto_mask_output_path = os.path.join(map_output_dir, "distortion_selfcal_auto_mask.png")
+        manual_mask_output_path = os.path.join(map_output_dir, "distortion_selfcal_manual_mask.png")
+        metadata_output_path = os.path.join(map_output_dir, "distortion_selfcal_meta.json")
 
         # Backup current maps if they exist so the user can roll back easily.
         backup_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -5745,10 +5926,10 @@ atomcam2で利用する場合は、GitHubで公開されている
         backup_map_y = None
         try:
             if os.path.exists(map_x_path):
-                backup_map_x = os.path.join(module_dir, f"distortion_map_x.backup_{backup_ts}.npy")
+                backup_map_x = os.path.join(map_output_dir, f"distortion_map_x.backup_{backup_ts}.npy")
                 shutil.copy2(map_x_path, backup_map_x)
             if os.path.exists(map_y_path):
-                backup_map_y = os.path.join(module_dir, f"distortion_map_y.backup_{backup_ts}.npy")
+                backup_map_y = os.path.join(map_output_dir, f"distortion_map_y.backup_{backup_ts}.npy")
                 shutil.copy2(map_y_path, backup_map_y)
         except Exception as e:
             self.append_log(f"既存ゆがみマップのバックアップ作成に失敗しました: {e}")
@@ -5841,10 +6022,10 @@ atomcam2で利用する場合は、GitHubで公開されている
         if not self.check_admin_password():
             return
 
-        module_dir = os.path.dirname(os.path.abspath(__file__))
-        default_map_x = os.path.join(module_dir, "distortion_map_x.npy")
-        default_map_y = os.path.join(module_dir, "distortion_map_y.npy")
-        default_meta = os.path.join(module_dir, "distortion_selfcal_meta.json")
+        default_map_x, default_map_y = _distortion_map_paths()
+        default_meta = os.path.join(
+            os.path.dirname(default_map_x), "distortion_selfcal_meta.json"
+        )
 
         map_x_path = default_map_x
         map_y_path = default_map_y
@@ -5856,7 +6037,11 @@ atomcam2で利用する場合は、GitHubで公開されている
             )
             map_x_path = filedialog.askopenfilename(
                 title="distortion_map_x.npy を選択",
-                initialdir=module_dir,
+                initialdir=(
+                    config.DISTORTION_MAP_DIR
+                    if os.path.isdir(config.DISTORTION_MAP_DIR)
+                    else os.path.expanduser("~")
+                ),
                 filetypes=[("NumPy Array", "*.npy"), ("All Files", "*.*")]
             )
             if not map_x_path:
@@ -6958,8 +7143,7 @@ def worker_main_loop(
     if total_videos == 0: return
 
     # Use a two-stage pipeline (downloaders + processors) implemented in download_pipeline
-    module_dir = os.path.dirname(os.path.abspath(__file__))
-    tmp_root_dir = os.path.join(module_dir, 'temp_video')
+    tmp_root_dir = config.TEMP_VIDEO_DIR
     os.makedirs(tmp_root_dir, exist_ok=True)
 
     try:
