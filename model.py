@@ -1,4 +1,5 @@
 import os
+import math
 from typing import Dict, Optional
 
 import torch
@@ -169,11 +170,11 @@ def get_active_model_info() -> Dict:
     return dict(_active_model_info)
 
 
-def predict_meteor_probability(image_path: str) -> float:
+def predict_meteor_probability(image_path: str) -> Optional[float]:
     global model, transform
     if not _model_ready or model is None or transform is None:
         print("Warning: prediction requested before model is ready.")
-        return 0.0
+        return None
 
     try:
         pil_image = Image.open(image_path).convert("RGB")
@@ -196,13 +197,16 @@ def predict_meteor_probability(image_path: str) -> float:
             meteor_idx = int(_active_model_info.get("meteor_class_index", 0))
             if meteor_idx < 0 or meteor_idx >= avg_probabilities.numel():
                 meteor_idx = 0
-            return float(avg_probabilities[meteor_idx].item())
+            probability = float(avg_probabilities[meteor_idx].item())
+            if not math.isfinite(probability):
+                raise ValueError("model returned a non-finite probability")
+            return probability
     except FileNotFoundError:
         print(f"Error: image not found: {image_path}")
-        return 0.0
+        return None
     except Exception as e:
         print(f"Prediction error ({image_path}): {e}")
-        return 0.0
+        return None
 
 
 _ok, _msg = reload_model(config.MODEL_PATH)
