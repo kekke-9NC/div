@@ -67,6 +67,8 @@ def _deep_merge_settings(current, updates):
 
 
 class _RunProgressQueue:
+    STATUS_ITEM_MARKER = object()
+
     def __init__(self, target_queue, marker, run_id):
         self.target_queue = target_queue
         self.marker = marker
@@ -74,6 +76,9 @@ class _RunProgressQueue:
 
     def put(self, item):
         self.target_queue.put((self.marker, self.run_id, item))
+
+    def put_status(self, status):
+        self.target_queue.put((self.marker, self.run_id, (self.STATUS_ITEM_MARKER, status)))
 
 
 class _StderrProgressStream(io.TextIOBase):
@@ -4363,6 +4368,10 @@ atomcam2で利用する場合は、GitHubで公開されている
                     _, run_generation, progress_item = queued_item
                     if run_generation != self._active_progress_run_generation:
                         continue
+                    if (isinstance(progress_item, tuple) and len(progress_item) == 2 and
+                            progress_item[0] is _RunProgressQueue.STATUS_ITEM_MARKER):
+                        self.status_panel.update_status(progress_item[1])
+                        continue
                     message, value = progress_item
                 else:
                     message, value = queued_item
@@ -6737,6 +6746,7 @@ def worker_main_loop(
     os.makedirs(tmp_root_dir, exist_ok=True)
 
     try:
+        status_callback = getattr(progress_queue, "put_status", STATUS_CALLBACK)
         download_pipeline.run_pipeline(
             sources=sources,
             max_workers=max_workers,
@@ -6752,7 +6762,7 @@ def worker_main_loop(
             save_options=save_options,
             summary_video_config=summary_video_config,
             tmp_root=tmp_root_dir,
-            status_callback=STATUS_CALLBACK,
+            status_callback=status_callback,
         )
 
         if not cancel_flag.is_set():
