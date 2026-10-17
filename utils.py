@@ -274,7 +274,15 @@ def create_rtsp_capture(rtsp_url: str, use_tcp: bool = None, use_nvidia_hwaccel:
         print(f"[RTSP] FFmpegオプション: {os.environ['OPENCV_FFMPEG_CAPTURE_OPTIONS']}")
     
     if rtsp_url.startswith("rtsp://"):
-        cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
+        cap = cv2.VideoCapture()
+        cap.open(
+            rtsp_url,
+            cv2.CAP_FFMPEG,
+            [
+                cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000,
+                cv2.CAP_PROP_READ_TIMEOUT_MSEC, 5000,
+            ],
+        )
         cap.set(cv2.CAP_PROP_BUFFERSIZE, config.RTSP_BUFFER_SIZE)
     else:
         cap = cv2.VideoCapture(rtsp_url)
