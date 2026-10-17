@@ -387,7 +387,10 @@ def create_lighten_blend_image(
     gc.collect()
     
     try:
-        cv2.imwrite(output_path, composite_uint8)
+        if not cv2.imwrite(output_path, composite_uint8):
+            if progress_callback:
+                progress_callback(f"保存エラー: 画像を書き込めませんでした: {output_path}")
+            return False
         if progress_callback:
             progress_callback(f"比較明合成画像を保存しました: {output_path}")
         return True
