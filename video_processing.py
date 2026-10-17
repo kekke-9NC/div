@@ -576,6 +576,12 @@ def create_line_video_clips(
                             probability = model.predict_meteor_probability(temp_diff_image_path)
                             try: os.remove(temp_diff_image_path)
                             except OSError as e: print(f"警告: 一時差分ファイルの削除に失敗: {e}")
+                            if probability is None:
+                                message = f"分類に失敗したため、候補 ({cx}, {cy}) を未分類のままスキップしました。"
+                                print(message)
+                                if progress_callback:
+                                    progress_callback((message, None))
+                                continue
                             print(f"流星確率: {probability:.4f}")
                             
                             is_meteor = probability >= config.METEOR_PROBABILITY_THRESHOLD
@@ -1074,6 +1080,12 @@ def create_line_video_clips(
                 probability = model.predict_meteor_probability(temp_diff_image_path)
                 try: os.remove(temp_diff_image_path)
                 except OSError as e: print(f"警告: 一時差分ファイルの削除に失敗: {e}")
+                if probability is None:
+                    message = f"分類に失敗したため、候補 ({cx}, {cy}) を未分類のままスキップしました。"
+                    print(message)
+                    if progress_callback:
+                        progress_callback((message, None))
+                    continue
                 print(f"流星確率: {probability:.4f}")
 
                 is_meteor = probability >= config.METEOR_PROBABILITY_THRESHOLD
