@@ -105,7 +105,7 @@ def get_ordered_files_from_path(path: str) -> List[str]:
 
     return [
         str(candidate)
-        for candidate in sorted(Path(path).iterdir())
+        for candidate in sorted(Path(path).rglob("*"))
         if candidate.is_file()
         and candidate.suffix.lower() in IMAGE_EXTENSIONS | VIDEO_EXTENSIONS
     ]
