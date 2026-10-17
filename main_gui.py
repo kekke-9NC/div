@@ -341,6 +341,8 @@ class App(TkinterDnD.Tk):
         self.rtsp_thread = None
         self.periodic_scan_thread = None
         self.cancel_flag = threading.Event()
+        self._aux_cancel_events = set()
+        self._aux_cancel_events_lock = threading.Lock()
         self.progress_queue = queue.Queue()
         self._plate_solve_status_marker = object()
         self._plate_solve_result_marker = object()
@@ -2100,6 +2102,17 @@ atomcam2で利用する場合は、GitHubで公開されている
             item['badge'].bind("<Button-1>", make_click_handler(i))
             item['label'].bind("<Button-1>", make_click_handler(i))
 
+    def _register_aux_cancel_event(self):
+        """Create and track a cancellation event for a non-pipeline job."""
+        cancel_event = threading.Event()
+        with self._aux_cancel_events_lock:
+            self._aux_cancel_events.add(cancel_event)
+        return cancel_event
+
+    def _release_aux_cancel_event(self, cancel_event):
+        with self._aux_cancel_events_lock:
+            self._aux_cancel_events.discard(cancel_event)
+
     def start_video_concat(self):
         """動画連結処理を開始"""
         if len(self.video_concat_files) < 2:
@@ -2136,21 +2149,26 @@ atomcam2で利用する場合は、GitHubで公開されている
         
         self.append_log(f"動画連結を開始: {len(files)}ファイル")
         self.append_log(f"設定: ビットレート={bitrate}, コーデック={codec}, FPS={fps_str}")
+        cancel_event = self._register_aux_cancel_event()
         
         thread = threading.Thread(
             target=self._video_concat_worker,
-            args=(files, output_path, bitrate, codec, fps_val, safe_mode),
+            args=(files, output_path, bitrate, codec, fps_val, safe_mode, cancel_event),
             daemon=True
         )
-        thread.start()
+        try:
+            thread.start()
+        except Exception:
+            self._release_aux_cancel_event(cancel_event)
+            raise
 
-    def _video_concat_worker(self, files, output_path, bitrate, codec, fps, safe_mode):
+    def _video_concat_worker(self, files, output_path, bitrate, codec, fps, safe_mode, cancel_event):
         """動画連結のバックグラウンド処理"""
         def progress_callback(progress, message):
             self.after(0, lambda: self.append_log(message))
         
         def cancel_check():
-            return self.cancel_flag.is_set()
+            return cancel_event.is_set()
         
         try:
             success, message = video_processor.concatenate_videos(
@@ -2174,6 +2192,8 @@ atomcam2で利用する場合は、GitHubで公開されている
             error_msg = f"予期せぬエラー: {e}"
             self.after(0, lambda: messagebox.showerror("エラー", error_msg))
             self.after(0, lambda: self.append_log(error_msg))
+        finally:
+            self._release_aux_cancel_event(cancel_event)
 
     def start_analysis(self):
         if not self.check_admin_password():
@@ -4172,11 +4192,16 @@ atomcam2で利用する場合は、GitHubで公開されている
             self.plate_solve_status_var.set("プレートソルブ: 未実行")
             return
         self.plate_solve_status_var.set("プレートソルブ: 実行中...")
-        threading.Thread(
-            target=self.execute_plate_solve_thread,
-            args=(video_file_path, self.plate_solve_mode_var.get(), self.plate_solve_mask_image),
-            daemon=True,
-        ).start()
+        cancel_event = self._register_aux_cancel_event()
+        try:
+            threading.Thread(
+                target=self.execute_plate_solve_thread,
+                args=(video_file_path, self.plate_solve_mode_var.get(), self.plate_solve_mask_image, cancel_event),
+                daemon=True,
+            ).start()
+        except Exception:
+            self._release_aux_cancel_event(cancel_event)
+            raise
 
     def start_rtsp_plate_solve(self):
         """RTSPストリームからプレートソルブを実行する"""
@@ -4191,11 +4216,16 @@ atomcam2で利用する場合は、GitHubで公開されている
             messagebox.showwarning("警告", "RTSPストリームを追加してください。")
             return
         self.plate_solve_status_var.set("プレートソルブ: RTSP接続中...")
-        threading.Thread(
-            target=self.execute_rtsp_plate_solve_thread,
-            args=(rtsp_url, self.plate_solve_mode_var.get(), self.plate_solve_mask_image),
-            daemon=True,
-        ).start()
+        cancel_event = self._register_aux_cancel_event()
+        try:
+            threading.Thread(
+                target=self.execute_rtsp_plate_solve_thread,
+                args=(rtsp_url, self.plate_solve_mode_var.get(), self.plate_solve_mask_image, cancel_event),
+                daemon=True,
+            ).start()
+        except Exception:
+            self._release_aux_cancel_event(cancel_event)
+            raise
 
     def _queue_plate_solve_status(self, status):
         self.progress_queue.put((self._plate_solve_status_marker, status))
@@ -4212,7 +4242,7 @@ atomcam2で利用する場合は、GitHubで公開されている
             },
         ))
 
-    def execute_rtsp_plate_solve_thread(self, rtsp_url: str, solve_mode: str, solve_mask):
+    def execute_rtsp_plate_solve_thread(self, rtsp_url: str, solve_mode: str, solve_mask, cancel_event):
         """RTSPストリームからフレームを取得してプレートソルブを実行するスレッド"""
         self.progress_queue.put((f"RTSPプレートソルブを実行中: {rtsp_url}", None))
         try:
@@ -4264,7 +4294,7 @@ atomcam2で利用する場合は、GitHubで公開されている
             use_local_solver = (solve_mode == "local")
             plate_solve_result = astrometry.plate_solve_image(
                 temp_composite_path, mask=solve_mask,
-                plate_solve_video_path=rtsp_url, cancel_flag=self.cancel_flag,
+                plate_solve_video_path=rtsp_url, cancel_flag=cancel_event,
                 scale_lower=config.RTSP_SCALE_LOWER, scale_upper=config.RTSP_SCALE_UPPER,
                 use_local=use_local_solver
             )
@@ -4295,8 +4325,10 @@ atomcam2で利用する場合は、GitHubで公開されている
             error_message = f"RTSPプレートソルブ中にエラーが発生しました: {e}"
             self.progress_queue.put((error_message, None))
             self._queue_plate_solve_result(None, "プレートソルブ: エラー", "showerror", "エラー", error_message)
+        finally:
+            self._release_aux_cancel_event(cancel_event)
 
-    def execute_plate_solve_thread(self, video_file_path: str, solve_mode: str, solve_mask):
+    def execute_plate_solve_thread(self, video_file_path: str, solve_mode: str, solve_mask, cancel_event):
         self.progress_queue.put(("プレートソルブを実行中...", None))
         try:
             cap = cv2.VideoCapture(video_file_path)
@@ -4322,7 +4354,7 @@ atomcam2で利用する場合は、GitHubで公開されている
             use_local_solver = (solve_mode == "local")
             plate_solve_result = astrometry.plate_solve_image(
                 temp_composite_path, mask=solve_mask,
-                plate_solve_video_path=video_file_path, cancel_flag=self.cancel_flag,
+                plate_solve_video_path=video_file_path, cancel_flag=cancel_event,
                 use_local=use_local_solver
             )
             if os.path.exists(temp_composite_path): os.remove(temp_composite_path)
@@ -4351,6 +4383,8 @@ atomcam2で利用する場合は、GitHubで公開されている
             error_message = f"プレートソルブ中にエラーが発生しました: {e}"
             self.progress_queue.put((error_message, None))
             self._queue_plate_solve_result(None, "プレートソルブ: エラー", "showerror", "エラー", error_message)
+        finally:
+            self._release_aux_cancel_event(cancel_event)
 
     def on_closing(self):
         if self._closing_dialog_active:
@@ -4387,6 +4421,10 @@ atomcam2で利用する場合は、GitHubで公開されている
             if self.auto_updater:
                 self.auto_updater.stop()
             self.cancel_flag.set()
+            with self._aux_cancel_events_lock:
+                aux_cancel_events = tuple(self._aux_cancel_events)
+            for cancel_event in aux_cancel_events:
+                cancel_event.set()
             self.destroy()
             closing_completed = True
         finally:
@@ -4413,7 +4451,9 @@ atomcam2で利用する場合は、GitHubで公開されている
             self.progress_queue, self._progress_envelope_marker,
             self._active_progress_run_generation
         )
-        self.cancel_flag.clear()
+        # Each run owns its event so a completed or cancelled worker cannot be
+        # revived by clearing a flag reused by a later run.
+        self.cancel_flag = threading.Event()
         self.append_log("処理準備中...")
         is_periodic = self.periodic_scan_var.get()
         periodic_scan_interval = None
