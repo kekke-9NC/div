@@ -7,6 +7,7 @@ NVIDIA GPUが利用可能な場合はNVENCを使用してハードウェアエ�
 """
 
 import os
+import shutil
 import subprocess
 import tempfile
 import json
@@ -264,6 +265,16 @@ def concatenate_videos(
     
     if len(input_files) < 2:
         return False, "連結には2つ以上の動画ファイルが必要です"
+
+    missing_tools = [
+        tool for tool in (get_ffmpeg_path(), get_ffprobe_path())
+        if shutil.which(tool) is None
+    ]
+    if missing_tools:
+        return False, (
+            "動画連結にはFFmpegとFFprobeが必要です。両方をインストールしてPATHに追加してください。\n"
+            f"見つからないコマンド: {', '.join(missing_tools)}"
+        )
     
     # NVENCの利用可否をチェック
     use_nvenc = check_nvenc_available()
