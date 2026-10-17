@@ -42,6 +42,7 @@ def run_pipeline(
     # Allow a larger buffer so downloaders can queue more items without
     # overwhelming processors; user requested max_workers * 20.
     task_q: queue.Queue = queue.Queue(maxsize=max_workers * 20)
+    downloaders_done = threading.Event()
 
     # track processor busy state so the UI can show which slots are active
     processors_busy = [False] * max_workers
@@ -53,6 +54,15 @@ def run_pipeline(
                 return None
             src_index['i'] += 1
             return sources[i]
+
+    def discard_task(item):
+        try:
+            if isinstance(item, dict):
+                network_copy.cleanup_tempdir(item.get('tmp_dir'))
+        except Exception:
+            pass
+        finally:
+            task_q.task_done()
 
     # downloader will try up to retry_count times with exponential backoff
     retry_count = 3
@@ -79,14 +89,16 @@ def run_pipeline(
                             pass
                         break
                     # try until put succeeds or cancel set
+                    enqueued = False
                     while not cancel_flag.is_set():
                         try:
                             task_q.put(item, timeout=0.2)
+                            enqueued = True
                             break
                         except queue.Full:
                             continue
-                    if cancel_flag.is_set():
-                        # cancelled while waiting to enqueue; cleanup temp and exit retry loop
+                    if not enqueued:
+                        # Cancelled while waiting to enqueue; no processor owns this temp copy.
                         try:
                             network_copy.cleanup_tempdir(tmp_dir)
                         except Exception:
@@ -124,14 +136,21 @@ def run_pipeline(
         # downloader exits
 
     def processor_thread_fn(tid: int):
-        while not cancel_flag.is_set():
+        while True:
+            if cancel_flag.is_set():
+                try:
+                    item = task_q.get_nowait()
+                except queue.Empty:
+                    break
+                discard_task(item)
+                continue
+
             try:
                 item = task_q.get(timeout=1.0)
             except queue.Empty:
-                # check if all downloaders are done and queue is empty
-                with src_lock:
-                    done = src_index['i'] >= len(sources)
-                if done and task_q.empty():
+                # Sources can be assigned before their downloads finish. Wait
+                # until every downloader has exited before declaring the queue done.
+                if downloaders_done.is_set() and task_q.empty():
                     break
                 else:
                     continue
@@ -139,6 +158,10 @@ def run_pipeline(
             if item is None:
                 task_q.task_done()
                 break
+
+            if cancel_flag.is_set():
+                discard_task(item)
+                continue
 
             local_path = item.get('local_path')
             tmp_dir = item.get('tmp_dir')
@@ -217,6 +240,17 @@ def run_pipeline(
     # wait for downloaders to finish
     for t in downloaders:
         t.join()
+    downloaders_done.set()
+
+    # A downloader may have enqueued just as a processor observed cancellation
+    # and exited. With producers stopped, discard any such remaining work safely.
+    if cancel_flag.is_set():
+        while True:
+            try:
+                item = task_q.get_nowait()
+            except queue.Empty:
+                break
+            discard_task(item)
 
     # wait for queue to be processed
     task_q.join()
