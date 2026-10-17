@@ -54,9 +54,10 @@ def is_path_within(path, directory):
         return False
 
 # Resolve model path relative to this file (portable/exe-friendly).
+MODEL_FILENAMES = ("model_epoch_47.pth", "model_latest_1.pth")
 _MODEL_CANDIDATES = [
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "model_epoch_47.pth"),
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "model_latest_1.pth"),
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
+    for filename in MODEL_FILENAMES
 ]
 MODEL_PATH = _MODEL_CANDIDATES[0]
 for _candidate in _MODEL_CANDIDATES:

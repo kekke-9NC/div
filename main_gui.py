@@ -2863,12 +2863,16 @@ atomcam2で利用する場合は、GitHubで公開されている
             self.custom_model_paths,
             recursive=False,
         )
-        if current and current not in discovered:
-            discovered.append(current)
+        if current and os.path.isfile(current):
+            current = os.path.abspath(current)
+            if current not in discovered:
+                discovered.append(current)
+        else:
+            current = ""
         self.available_model_paths = discovered
         if hasattr(self, "cmb_model_select"):
             self.cmb_model_select.configure(values=discovered)
-        if (not current) and discovered:
+        if not current and discovered:
             self.selected_model_path_var.set(discovered[0])
         self.update_model_meta_info(self.selected_model_path_var.get())
 
