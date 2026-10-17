@@ -1845,10 +1845,14 @@ class SettingsMixin:
             self.camera_model_interval_var.set(str(settings.get('camera_model_interval', '60')))
             self.camera_model_cloud_filter_var.set(bool(settings.get('camera_model_cloud_filter', True)))
             self.use_plate_solve_var.set(settings.get('use_plate_solve', True))
-            # Annotation now defaults to the on-device wide-angle solver even
-            # for settings files created by older API-only app versions.
-            self.plate_solve_mode_var.set(
+            default_plate_solve_mode = (
                 'local' if getattr(config, "LOCAL_SOLVER_ENABLED", False) else 'api'
+            )
+            saved_plate_solve_mode = settings.get('plate_solve_mode')
+            self.plate_solve_mode_var.set(
+                saved_plate_solve_mode
+                if saved_plate_solve_mode in ('local', 'api')
+                else default_plate_solve_mode
             )
             
             if settings.get('global_wcs_info'):
