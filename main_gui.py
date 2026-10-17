@@ -3921,26 +3921,32 @@ atomcam2で利用する場合は、GitHubで公開されている
         file_path = filedialog.askopenfilename(title="プレートソルブ用動画を選択", filetypes=[("動画ファイル", "*.mp4 *.avi *.mov"), ("すべてのファイル", "*.*")])
         if file_path: self.plate_solve_video_path_var.set(file_path)
 
+    def _read_valid_celestial_wcs_header(self, file_path):
+        if not isinstance(file_path, str) or not file_path:
+            raise ValueError("WCSファイルのパスが設定されていません。")
+        if not os.path.isfile(file_path):
+            raise FileNotFoundError(f"WCSファイルが見つかりません: {file_path}")
+
+        with fits.open(file_path) as hdul:
+            header = hdul[0].header.copy()
+        wcs = WCS(header, relax=True, fix=False)
+        if not (wcs.is_celestial and wcs.pixel_n_dim == 2):
+            raise ValueError("有効な2次元天球WCSではありません。")
+        return header
+
     def select_plate_solve_wcs_file(self):
         file_path = filedialog.askopenfilename(title="既存のWCSファイルを選択", filetypes=[("WCS/FITSファイル", "*.wcs *.fits"), ("すべてのファイル", "*.*")])
         if file_path:
             try:
                 ps_datetime = None
-                # まずWCSファイル(FITS)のヘッダーから'DATE-OBS'を読み込もうと試みる
-                try:
-                    with fits.open(file_path) as hdul:
-                        header = hdul[0].header
-                        if not WCS(header).is_celestial:
-                            raise ValueError("有効な天球WCSではありません。")
-                        
-                        if 'DATE-OBS' in header:
-                            date_obs_str = header['DATE-OBS']
-                            ps_datetime = datetime.fromisoformat(date_obs_str)
-                            print(f"WCSヘッダーから基準時刻を読み込みました: {ps_datetime}")
-                except Exception as fits_e:
-                    print(f"FITSヘッダーの読み込みまたは解析に失敗しました: {fits_e}")
-                    # FITSとして開けなかった場合や'DATE-OBS'がない場合は、従来の方法に進む
-                    pass
+                header = self._read_valid_celestial_wcs_header(file_path)
+                date_obs_str = header.get('DATE-OBS')
+                if date_obs_str:
+                    try:
+                        ps_datetime = datetime.fromisoformat(str(date_obs_str))
+                        print(f"WCSヘッダーから基準時刻を読み込みました: {ps_datetime}")
+                    except (TypeError, ValueError):
+                        print(f"WCSヘッダーのDATE-OBSが不正です: {date_obs_str}")
 
                 # ヘッダーから時刻が取得できなかった場合、ファイルパスから抽出を試みる
                 if ps_datetime is None:
@@ -5068,11 +5074,25 @@ atomcam2で利用する場合は、GitHubで公開されている
             self.use_plate_solve_var.set(settings.get('use_plate_solve', True))
             self.plate_solve_mode_var.set(settings.get('plate_solve_mode', 'local'))
             
-            if settings.get('global_wcs_info'):
-                self.global_wcs_info = settings['global_wcs_info']
-                if isinstance(self.global_wcs_info.get('plate_solve_datetime'), str):
-                    self.global_wcs_info['plate_solve_datetime'] = datetime.fromisoformat(self.global_wcs_info['plate_solve_datetime'])
-                if self.global_wcs_info.get('wcs_file'): self.plate_solve_status_var.set("プレートソルブ: 成功 (復元)")
+            restored_wcs_info = settings.get('global_wcs_info')
+            if isinstance(restored_wcs_info, dict) and restored_wcs_info:
+                restored_wcs_info = restored_wcs_info.copy()
+                wcs_file_path = restored_wcs_info.get('wcs_file')
+                try:
+                    self._read_valid_celestial_wcs_header(wcs_file_path)
+                    restored_wcs_datetime = restored_wcs_info.get('plate_solve_datetime')
+                    if isinstance(restored_wcs_datetime, str):
+                        try:
+                            restored_wcs_info['plate_solve_datetime'] = datetime.fromisoformat(restored_wcs_datetime)
+                        except ValueError:
+                            restored_wcs_info['plate_solve_datetime'] = None
+                    self.global_wcs_info = restored_wcs_info
+                    self.plate_solve_wcs_path_var.set(wcs_file_path)
+                    self.plate_solve_status_var.set("プレートソルブ: 成功 (復元)")
+                except Exception as wcs_error:
+                    self.global_wcs_info = None
+                    self.plate_solve_status_var.set("プレートソルブ: WCSファイル確認失敗")
+                    self.append_log(f"保存済みWCSを利用できません: {wcs_error}")
 
             self.apply_mask_var.set(settings.get('apply_mask', False))
             self.mask_path_var.set(settings.get('mask_path_or_status', ''))
