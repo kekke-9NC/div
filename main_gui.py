@@ -4111,6 +4111,8 @@ atomcam2で利用する場合は、GitHubで公開されている
 
         self.cancel_flag.clear()
         self.append_log("処理準備中...")
+        is_periodic = self.periodic_scan_var.get()
+        periodic_scan_interval = None
 
         try:
             params = {
@@ -4125,6 +4127,10 @@ atomcam2で利用する場合は、GitHubで公開されている
                 'plate_solve_mask': self.plate_solve_mask_image,
                 'summary_config': [item.copy() for item in self.summary_video_config]
             }
+            if is_periodic:
+                periodic_scan_interval = int(self.periodic_interval_var.get())
+                if periodic_scan_interval < 1:
+                    raise ValueError("定期スキャンの間隔は1秒以上で指定してください。")
             
             if self.rtsp_preset_var.get() == "clear":
                 preset = config.RTSP_PRESET_CLEAR_SKY
@@ -4159,8 +4165,6 @@ atomcam2で利用する場合は、GitHubで公開されている
         self.elapsed_label.config(text="経過: 00:00:00")
         self.start_time_gui = time.time()
 
-        is_periodic = self.periodic_scan_var.get()
-
         if is_periodic:
             periodic_dir = self.periodic_dir_var.get().strip()
             if not periodic_dir or not os.path.isdir(periodic_dir):
@@ -4170,7 +4174,7 @@ atomcam2で利用する場合は、GitHubで公開されている
             
             log_msg = f"定期スキャン開始 (フォルダ: {periodic_dir})"
             monitor_kwargs = {
-                'directory': periodic_dir, 'scan_interval': int(self.periodic_interval_var.get()),
+                'directory': periodic_dir, 'scan_interval': periodic_scan_interval,
                 'progress_callback': self.progress_queue.put, 'mask': params['mask'], 
                 'global_wcs_info': params['global_wcs_info'], 'plate_solve_mask': params['plate_solve_mask'], 
                 'meteor_save_path': params['meteor_save_path'], 'not_meteor_save_path': params['not_meteor_save_path'], 
