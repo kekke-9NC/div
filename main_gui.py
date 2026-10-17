@@ -935,11 +935,21 @@ class App(TkinterDnD.Tk):
             phase="post",
         )
 
+        training_tool_guide = [
+            ("text", "独自モデル学習ツールはこのビルドに含まれていません。")
+        ]
+        if self._model_training_tool_available():
+            training_tool_guide = [
+                ("text", "独自モデルを作る場合は "),
+                ("button", "機械学習モデル作成", self.navigate_to_model_training_button, "#FFD700"),
+                ("text", " から学習画面を開きます。"),
+            ]
+
         add_section(
             "Step 6: モデル学習と切替 🧠",
             [
                 [("text", "推論に使うCNNは "), ("button", "流星分類モデル選択", self.navigate_to_model_selector, "#87CEEB"), ("text", " から切り替えます。")],
-                [("text", "独自モデルを作る場合は "), ("button", "機械学習モデル作成", self.navigate_to_model_training_button, "#FFD700"), ("text", " から学習画面を開きます。")],
+                training_tool_guide,
             ],
             phase="post",
         )
@@ -1679,8 +1689,11 @@ atomcam2で利用する場合は、GitHubで公開されている
 
         row4 = ttk.Frame(action_frame)
         row4.pack(fill=tk.X, pady=2)
-        self.btn_model_training = ttk.Button(row4, text="機械学習モデル作成", command=self.open_model_training_tool)
-        self.btn_model_training.pack(side=tk.LEFT, padx=(0, 5))
+        if self._model_training_tool_available():
+            self.btn_model_training = ttk.Button(row4, text="機械学習モデル作成", command=self.open_model_training_tool)
+            self.btn_model_training.pack(side=tk.LEFT, padx=(0, 5))
+        else:
+            ttk.Label(row4, text="独自モデル学習ツールはこのビルドに含まれていません。").pack(side=tk.LEFT)
 
         lf_concat = ttk.LabelFrame(frame, text="動画連結")
         lf_concat.pack(fill=tk.BOTH, expand=True, pady=5)
@@ -1796,10 +1809,16 @@ atomcam2で利用する場合は、GitHubで公開されている
             self.append_log(f"依存関係インストールエラー: {e}")
             return False
 
+    def _model_training_tool_path(self):
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), "train_labeled_backup0826.py")
+
+    def _model_training_tool_available(self):
+        return not getattr(sys, "frozen", False) and os.path.isfile(self._model_training_tool_path())
+
     def open_model_training_tool(self):
-        trainer_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "train_labeled_backup0826.py")
-        if not os.path.exists(trainer_path):
-            messagebox.showerror("エラー", f"学習スクリプトが見つかりません: {trainer_path}")
+        trainer_path = self._model_training_tool_path()
+        if not self._model_training_tool_available():
+            messagebox.showinfo("利用不可", "このビルドには独自モデル学習ツールが含まれていません。")
             return
 
         if not self._ensure_training_tool_dependencies():
