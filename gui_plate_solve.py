@@ -731,7 +731,7 @@ class PlateSolveMixin:
             messagebox.showwarning("警告", "RTSPストリームを追加してください。")
             return
         use_local = self.plate_solve_mode_var.get() == "local"
-        rtsp_mask = self.mask_image if self.apply_mask_var.get() else None
+        rtsp_mask = self.plate_solve_mask_image
         fixed_pattern = self.rtsp_dark_frame if self.apply_rtsp_dark_var.get() else None
         threading.Thread(
             target=self.execute_rtsp_plate_solve_thread,
