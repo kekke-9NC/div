@@ -28,6 +28,39 @@ def get_ffprobe_path() -> str:
     return "ffprobe"
 
 
+def _run_cancellable_subprocess(command, cancel_check=None):
+    """Run a subprocess while polling for cancellation."""
+    if cancel_check and cancel_check():
+        return None, "", "", True
+
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    while True:
+        try:
+            stdout, stderr = process.communicate(timeout=0.25)
+            return process.returncode, stdout, stderr, False
+        except subprocess.TimeoutExpired:
+            if not cancel_check or not cancel_check():
+                continue
+
+            try:
+                process.terminate()
+            except OSError:
+                pass
+            try:
+                stdout, stderr = process.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                stdout, stderr = process.communicate()
+            return process.returncode, stdout, stderr, True
+
+
 def check_nvenc_available() -> bool:
     """
     NVIDIA NVENCが利用可能かチェックする
@@ -365,6 +398,8 @@ def concatenate_videos(
 
     # セーフモード: すべてのファイルを一時MPEG-TSに変換
     ts_temp_files = []
+    ts_temp_paths = []
+    ts_temp_dir = None
     files_to_concat = valid_files # デフォルトは元のファイル
 
     if safe_mode:
@@ -373,14 +408,15 @@ def concatenate_videos(
         
         try:
             ts_dir = tempfile.mkdtemp(prefix="safe_concat_")
+            ts_temp_dir = ts_dir
             
             for i, vf in enumerate(valid_files):
                 # キャンセル確認
                 if cancel_check and cancel_check():
-                    # Cleanup below will handle removing created files
-                    pass
+                    return False, "処理がキャンセルされました"
 
                 ts_path = os.path.join(ts_dir, f"temp_{i:04d}.ts")
+                ts_temp_paths.append(ts_path)
                 
                 # ストリームコピーでTS変換 (高速)
                 # -bsf:v h264_mp4toannexb は自動で適用されることが多いが明示的に指定も可
@@ -410,10 +446,14 @@ def concatenate_videos(
                     ts_path
                 ]
 
-                res = subprocess.run(ts_cmd, capture_output=True, text=True, encoding='utf-8')
+                return_code, _, _, was_cancelled = _run_cancellable_subprocess(
+                    ts_cmd, cancel_check
+                )
+                if was_cancelled:
+                    return False, "処理がキャンセルされました"
                 
                 # 変換成功チェック
-                conversion_success = (res.returncode == 0)
+                conversion_success = (return_code == 0)
                 
                 if not conversion_success:
                     if progress_callback:
@@ -431,8 +471,12 @@ def concatenate_videos(
                         ts_path
                     ]
                     
-                    res_repair = subprocess.run(repair_cmd, capture_output=True, text=True, encoding='utf-8')
-                    if res_repair.returncode == 0:
+                    repair_return_code, _, _, was_cancelled = _run_cancellable_subprocess(
+                        repair_cmd, cancel_check
+                    )
+                    if was_cancelled:
+                        return False, "処理がキャンセルされました"
+                    if repair_return_code == 0:
                         conversion_success = True
                         if progress_callback:
                             progress_callback(0.0, f"修復成功: {os.path.basename(vf)}")
@@ -687,15 +731,15 @@ def concatenate_videos(
             pass
         
         # セーフモードの一時ファイルを削除
-        for ts_file in ts_temp_files:
+        for ts_file in ts_temp_paths:
             try:
                 os.unlink(ts_file)
             except:
                 pass
         # 一時ディレクトリ削除
-        if ts_temp_files:
+        if ts_temp_dir:
             try:
-                os.rmdir(os.path.dirname(ts_temp_files[0]))
+                os.rmdir(ts_temp_dir)
             except:
                 pass
 
