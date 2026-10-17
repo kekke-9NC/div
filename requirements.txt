@@ -13,6 +13,5 @@ requests
 transformers
 qwen-vl-utils
 accelerate
-bitsandbytes
 protobuf
 pyinstaller
