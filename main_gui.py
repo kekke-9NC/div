@@ -11,6 +11,7 @@ import shutil
 import re
 import subprocess
 import importlib.util
+import tempfile
 import cv2
 import numpy as np
 import tkinter as tk
@@ -64,6 +65,55 @@ def _deep_merge_settings(current, updates):
         else:
             merged[key] = value
     return merged
+
+
+def _user_settings_directory(app_name="MeteorDetector"):
+    """Return a writable, per-user directory for frozen-app settings."""
+    if sys.platform == "win32":
+        base_path = os.environ.get("APPDATA") or os.environ.get("LOCALAPPDATA")
+        if not base_path:
+            base_path = os.path.join(os.path.expanduser("~"), "AppData", "Roaming")
+    elif sys.platform == "darwin":
+        base_path = os.path.join(os.path.expanduser("~"), "Library", "Application Support")
+    else:
+        base_path = os.environ.get("XDG_CONFIG_HOME")
+        if not base_path:
+            base_path = os.path.join(os.path.expanduser("~"), ".config")
+    return os.path.join(base_path, app_name)
+
+
+def _write_json_atomically(path, payload):
+    directory = os.path.dirname(path)
+    os.makedirs(directory, exist_ok=True)
+    file_descriptor, temporary_path = tempfile.mkstemp(
+        prefix=".app_settings_", suffix=".tmp", dir=directory
+    )
+    try:
+        with os.fdopen(file_descriptor, "w", encoding="utf-8") as settings_file:
+            json.dump(payload, settings_file, indent=4)
+            settings_file.flush()
+            os.fsync(settings_file.fileno())
+        os.replace(temporary_path, path)
+    finally:
+        if os.path.exists(temporary_path):
+            os.remove(temporary_path)
+
+
+def _write_masks_atomically(path, masks):
+    directory = os.path.dirname(path)
+    os.makedirs(directory, exist_ok=True)
+    file_descriptor, temporary_path = tempfile.mkstemp(
+        prefix=".app_masks_", suffix=".npz", dir=directory
+    )
+    os.close(file_descriptor)
+    try:
+        np.savez(temporary_path, **masks)
+        with open(temporary_path, "rb+") as masks_file:
+            os.fsync(masks_file.fileno())
+        os.replace(temporary_path, path)
+    finally:
+        if os.path.exists(temporary_path):
+            os.remove(temporary_path)
 
 
 class _RunProgressQueue:
@@ -206,14 +256,21 @@ class App(TkinterDnD.Tk):
             {'name': "Zoom Sequence", 'enabled': False, 'duration': 2.0},
             {'name': "Cutout Video", 'enabled': True}
         ]
+        self._legacy_settings_directories = []
+        self._bundled_resource_directory = None
         if getattr(sys, 'frozen', False):
-            # exeと同じディレクトリに設定ファイルを置く
-            base_path = os.path.dirname(sys.executable)
+            # インストール先が読み取り専用でも保存できるよう、ユーザー領域を使う。
+            legacy_base_path = os.path.dirname(os.path.abspath(sys.executable))
+            base_path = _user_settings_directory()
+            self._legacy_settings_directories.append(legacy_base_path)
+            self._bundled_resource_directory = getattr(sys, "_MEIPASS", None)
         else:
             base_path = os.path.dirname(os.path.abspath(__file__))
+        self._legacy_settings_directories.append(os.path.abspath(os.getcwd()))
         self.settings_file = os.path.join(base_path, "app_settings.json")
         self.masks_file = os.path.join(base_path, "app_masks.npz")
         self._settings_save_confirmation_required = False
+        self._last_settings_save_error = None
         self._migrate_legacy_settings_files()
 
         self.worker_thread = None
@@ -234,24 +291,53 @@ class App(TkinterDnD.Tk):
         self.after(100, self.update_progress)
 
     def _migrate_legacy_settings_files(self):
-        """Move legacy setting files from CWD to app directory if needed."""
+        """Copy legacy or bundled settings into the writable user directory."""
         try:
-            legacy_settings = os.path.abspath("app_settings.json")
-            legacy_masks = os.path.abspath("app_masks.npz")
             target_settings = os.path.abspath(self.settings_file)
             target_masks = os.path.abspath(self.masks_file)
+            legacy_directories = []
+            for directory in self._legacy_settings_directories:
+                absolute_directory = os.path.abspath(directory)
+                if absolute_directory not in legacy_directories:
+                    legacy_directories.append(absolute_directory)
 
-            if legacy_settings != target_settings and os.path.exists(legacy_settings) and not os.path.exists(target_settings):
-                os.makedirs(os.path.dirname(target_settings), exist_ok=True)
-                shutil.move(legacy_settings, target_settings)
-                print(f"設定ファイルを移動しました: {legacy_settings} -> {target_settings}")
+            settings_sources = [
+                os.path.join(directory, "app_settings.json")
+                for directory in legacy_directories
+            ]
+            mask_sources = [
+                os.path.join(directory, "app_masks.npz")
+                for directory in legacy_directories
+            ]
+            if self._bundled_resource_directory:
+                mask_sources.append(
+                    os.path.join(self._bundled_resource_directory, "app_masks.npz")
+                )
 
-            if legacy_masks != target_masks and os.path.exists(legacy_masks) and not os.path.exists(target_masks):
-                os.makedirs(os.path.dirname(target_masks), exist_ok=True)
-                shutil.move(legacy_masks, target_masks)
-                print(f"マスクファイルを移動しました: {legacy_masks} -> {target_masks}")
+            for source, target, label in (
+                *((source, target_settings, "設定") for source in settings_sources),
+                *((source, target_masks, "マスク") for source in mask_sources),
+            ):
+                if os.path.abspath(source) == target or os.path.exists(target):
+                    continue
+                if not os.path.isfile(source):
+                    continue
+                target_directory = os.path.dirname(target)
+                os.makedirs(target_directory, exist_ok=True)
+                file_descriptor, temporary_path = tempfile.mkstemp(
+                    prefix=f".{os.path.basename(target)}_", suffix=".tmp",
+                    dir=target_directory
+                )
+                os.close(file_descriptor)
+                try:
+                    shutil.copy2(source, temporary_path)
+                    os.replace(temporary_path, target)
+                    print(f"{label}ファイルをコピーしました: {source} -> {target}")
+                finally:
+                    if os.path.exists(temporary_path):
+                        os.remove(temporary_path)
         except Exception as e:
-            print(f"設定ファイル移動の確認中にエラーが発生しました: {e}")
+            print(f"設定ファイル移行中にエラーが発生しました: {e}")
 
     def check_admin_password(self):
         """Prompt for admin password and return True if correct."""
@@ -3033,6 +3119,7 @@ atomcam2で利用する場合は、GitHubで公開されている
     def _init_summary_log_hover_preview(self):
         self._summary_log_line_map = {}
         self._active_summary_line = None
+        self._closing_dialog_active = False
         self._summary_preview_window = None
         self._summary_preview_title_label = None
         self._summary_preview_image_label = None
@@ -3149,6 +3236,8 @@ atomcam2で利用する場合は、GitHubで公開されている
 
     def _hide_summary_preview_if_pointer_outside(self):
         self._summary_preview_hide_after_id = None
+        if self._closing_dialog_active:
+            return
 
         preview_has_pointer = False
         if self._summary_preview_window is not None and self._summary_preview_window.winfo_exists():
@@ -4130,8 +4219,14 @@ atomcam2で利用する場合は、GitHubで公開されている
             messagebox.showerror("エラー", error_message)
 
     def on_closing(self):
-        if messagebox.askokcancel("終了", "アプリケーションを終了しますか？"):
-            self._hide_summary_preview()
+        if self._closing_dialog_active:
+            return
+        self._cancel_summary_preview_hide()
+        self._closing_dialog_active = True
+        closing_completed = False
+        try:
+            if not messagebox.askokcancel("終了", "アプリケーションを終了しますか？"):
+                return
             should_save_settings = True
             if self._settings_save_confirmation_required:
                 should_save_settings = messagebox.askyesno(
@@ -4142,12 +4237,29 @@ atomcam2で利用する場合は、GitHubで公開されている
                 )
             if should_save_settings:
                 self.append_log("設定を保存しています...")
-                self.save_settings()
+                if not self.save_settings():
+                    save_error_detail = self._last_settings_save_error or "原因の詳細はログを確認してください。"
+                    exit_without_saving = messagebox.askyesno(
+                        "設定の保存に失敗しました",
+                        "設定を保存できませんでした。\n"
+                        f"{save_error_detail}\n\n"
+                        "アプリを終了すると今回の変更は失われます。終了しますか？",
+                        default=messagebox.NO
+                    )
+                    if not exit_without_saving:
+                        return
+            self._hide_summary_preview()
             # 自動更新を停止
             if self.auto_updater:
                 self.auto_updater.stop()
             self.cancel_flag.set()
             self.destroy()
+            closing_completed = True
+        finally:
+            self._closing_dialog_active = False
+            if not closing_completed and self._summary_preview_window is not None:
+                self._cancel_summary_preview_hide()
+                self._hide_summary_preview_if_pointer_outside()
 
     def start_processing(self):
         # 詳細設定をconfigに適用
@@ -4976,6 +5088,16 @@ atomcam2で利用する場合は、GitHubで公開されている
         else:
             settings['global_wcs_info'] = None
 
+        masks_to_save = {}
+        if self.mask_image is not None:
+            masks_to_save['mask_image'] = self.mask_image
+        if self.plate_solve_mask_image is not None:
+            masks_to_save['plate_solve_mask_image'] = self.plate_solve_mask_image
+
+        self._last_settings_save_error = None
+        mask_backup_path = None
+        masks_replaced = False
+        preserve_mask_backup = False
         try:
             current_settings = {}
             if os.path.exists(self.settings_file):
@@ -4988,15 +5110,62 @@ atomcam2で利用する場合は、GitHubで公開されている
             if not isinstance(current_settings, dict):
                 current_settings = {}
             settings = _deep_merge_settings(current_settings, settings)
-            with open(self.settings_file, 'w', encoding='utf-8') as f: json.dump(settings, f, indent=4)
-            masks_to_save = {}
-            if self.mask_image is not None: masks_to_save['mask_image'] = self.mask_image
-            if self.plate_solve_mask_image is not None: masks_to_save['plate_solve_mask_image'] = self.plate_solve_mask_image
-            if masks_to_save: np.savez(self.masks_file, **masks_to_save)
-            elif os.path.exists(self.masks_file): os.remove(self.masks_file)
+            if masks_to_save and os.path.exists(self.masks_file):
+                masks_directory = os.path.dirname(self.masks_file)
+                file_descriptor, mask_backup_path = tempfile.mkstemp(
+                    prefix=".app_masks_backup_", suffix=".npz", dir=masks_directory
+                )
+                os.close(file_descriptor)
+                shutil.copy2(self.masks_file, mask_backup_path)
+
+            if masks_to_save:
+                _write_masks_atomically(self.masks_file, masks_to_save)
+                masks_replaced = True
+            _write_json_atomically(self.settings_file, settings)
+
+            # settings.json now marks these masks as absent, so failure to remove
+            # a stale archive cannot make the previous masks active again.
+            if not masks_to_save and os.path.exists(self.masks_file):
+                try:
+                    os.remove(self.masks_file)
+                except OSError as cleanup_error:
+                    self.append_log(f"古いマスクファイルを削除できませんでした: {cleanup_error}")
+
+            if mask_backup_path and os.path.exists(mask_backup_path):
+                try:
+                    os.remove(mask_backup_path)
+                except OSError as cleanup_error:
+                    self.append_log(f"マスク保存用の一時バックアップを削除できませんでした: {cleanup_error}")
+                mask_backup_path = None
             print("設定を保存しました。")
+            return True
         except Exception as e:
+            if masks_replaced:
+                try:
+                    if mask_backup_path and os.path.exists(mask_backup_path):
+                        os.replace(mask_backup_path, self.masks_file)
+                        mask_backup_path = None
+                    elif os.path.exists(self.masks_file):
+                        os.remove(self.masks_file)
+                except Exception as rollback_error:
+                    if mask_backup_path and os.path.exists(mask_backup_path):
+                        preserve_mask_backup = True
+                        e = RuntimeError(
+                            f"{e}; マスクの復元にも失敗しました: {rollback_error}; "
+                            f"旧マスクのバックアップを保持しました: {mask_backup_path}"
+                        )
+                    else:
+                        e = RuntimeError(f"{e}; マスクの復元にも失敗しました: {rollback_error}")
             print(f"設定の保存に失敗しました: {e}")
+            self._last_settings_save_error = str(e)
+            self.append_log(f"設定の保存に失敗しました: {e}")
+            return False
+        finally:
+            if not preserve_mask_backup and mask_backup_path and os.path.exists(mask_backup_path):
+                try:
+                    os.remove(mask_backup_path)
+                except OSError:
+                    pass
 
     def load_settings(self):
         if not os.path.exists(self.settings_file):
