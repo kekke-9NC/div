@@ -342,6 +342,8 @@ class App(TkinterDnD.Tk):
         self.periodic_scan_thread = None
         self.cancel_flag = threading.Event()
         self.progress_queue = queue.Queue()
+        self._plate_solve_status_marker = object()
+        self._plate_solve_result_marker = object()
         self._progress_envelope_marker = object()
         self._progress_run_generation = 0
         self._active_progress_run_generation = 0
@@ -4156,7 +4158,17 @@ atomcam2で利用する場合は、GitHubで公開されている
 
     def start_plate_solve(self):
         self.apply_advanced_settings_to_config()
-        threading.Thread(target=self.execute_plate_solve_thread, daemon=True).start()
+        video_file_path = self.plate_solve_video_path_var.get().strip()
+        if not video_file_path:
+            messagebox.showwarning("警告", "プレートソルブに使用する動画を選択してください。")
+            self.plate_solve_status_var.set("プレートソルブ: 未実行")
+            return
+        self.plate_solve_status_var.set("プレートソルブ: 実行中...")
+        threading.Thread(
+            target=self.execute_plate_solve_thread,
+            args=(video_file_path, self.plate_solve_mode_var.get(), self.plate_solve_mask_image),
+            daemon=True,
+        ).start()
 
     def start_rtsp_plate_solve(self):
         """RTSPストリームからプレートソルブを実行する"""
@@ -4170,11 +4182,30 @@ atomcam2で利用する場合は、GitHubで公開されている
         else:
             messagebox.showwarning("警告", "RTSPストリームを追加してください。")
             return
-        threading.Thread(target=self.execute_rtsp_plate_solve_thread, args=(rtsp_url,), daemon=True).start()
-
-    def execute_rtsp_plate_solve_thread(self, rtsp_url: str):
-        """RTSPストリームからフレームを取得してプレートソルブを実行するスレッド"""
         self.plate_solve_status_var.set("プレートソルブ: RTSP接続中...")
+        threading.Thread(
+            target=self.execute_rtsp_plate_solve_thread,
+            args=(rtsp_url, self.plate_solve_mode_var.get(), self.plate_solve_mask_image),
+            daemon=True,
+        ).start()
+
+    def _queue_plate_solve_status(self, status):
+        self.progress_queue.put((self._plate_solve_status_marker, status))
+
+    def _queue_plate_solve_result(self, result, status, dialog_type, dialog_title, dialog_message):
+        self.progress_queue.put((
+            self._plate_solve_result_marker,
+            {
+                "result": result,
+                "status": status,
+                "dialog_type": dialog_type,
+                "dialog_title": dialog_title,
+                "dialog_message": dialog_message,
+            },
+        ))
+
+    def execute_rtsp_plate_solve_thread(self, rtsp_url: str, solve_mode: str, solve_mask):
+        """RTSPストリームからフレームを取得してプレートソルブを実行するスレッド"""
         self.progress_queue.put((f"RTSPプレートソルブを実行中: {rtsp_url}", None))
         try:
             cap = utils.create_rtsp_capture(rtsp_url)
@@ -4184,7 +4215,7 @@ atomcam2で利用する場合は、GitHubで公開されている
             if not cap.isOpened():
                 raise IOError(f"RTSPストリームを開けません: {rtsp_url}")
             
-            self.plate_solve_status_var.set("プレートソルブ: フレーム取得中...")
+            self._queue_plate_solve_status("プレートソルブ: フレーム取得中...")
             
             # 約10秒分のフレームを取得（25fps前提で250フレーム）
             fps = cap.get(cv2.CAP_PROP_FPS)
@@ -4211,21 +4242,20 @@ atomcam2で利用する場合は、GitHubで公開されている
             if frame_count < 10:
                 raise ValueError(f"RTSPストリームから十分なフレームを取得できませんでした。取得フレーム数: {frame_count}")
             
-            self.plate_solve_status_var.set("プレートソルブ: 合成画像作成中...")
+            self._queue_plate_solve_status("プレートソルブ: 合成画像作成中...")
             self.progress_queue.put((f"RTSPから{frame_count}フレームを取得しました。合成画像を作成中...", None))
             
             temp_composite_path = os.path.join(config.TEMP_CLIP_DIR, f"rtsp_composite_{time.time_ns()}.jpg")
             os.makedirs(config.TEMP_CLIP_DIR, exist_ok=True)
             cv2.imwrite(temp_composite_path, composite_image)
             
-            self.plate_solve_status_var.set("プレートソルブ: 実行中...")
+            self._queue_plate_solve_status("プレートソルブ: 実行中...")
             self.progress_queue.put(("Astrometry.netにアップロード中...", None))
             
             # RTSPプレートソルブにも専用のプレートソルブ用マスクを適用
-            rtsp_mask = self.plate_solve_mask_image
-            use_local_solver = (self.plate_solve_mode_var.get() == "local")
+            use_local_solver = (solve_mode == "local")
             plate_solve_result = astrometry.plate_solve_image(
-                temp_composite_path, mask=rtsp_mask,
+                temp_composite_path, mask=solve_mask,
                 plate_solve_video_path=rtsp_url, cancel_flag=self.cancel_flag,
                 scale_lower=config.RTSP_SCALE_LOWER, scale_upper=config.RTSP_SCALE_UPPER,
                 use_local=use_local_solver
@@ -4234,34 +4264,31 @@ atomcam2で利用する場合は、GitHubで公開されている
                 os.remove(temp_composite_path)
             
             if plate_solve_result and 'wcs_file' in plate_solve_result:
-                self.global_wcs_info = plate_solve_result
-                ps_datetime = self.global_wcs_info.get('plate_solve_datetime', datetime.now())
-                self.plate_solve_status_var.set(f"プレートソルブ: 成功 (RTSP) @ {ps_datetime.strftime('%H:%M')}")
-                self.plate_solve_wcs_path_var.set(self.global_wcs_info['wcs_file'])
-                self.progress_queue.put((f"RTSPプレートソルブ成功: {self.global_wcs_info['wcs_file']}", None))
-                messagebox.showinfo("成功", f"RTSPからのプレートソルブに成功しました。\n参照時刻: {ps_datetime.strftime('%Y-%m-%d %H:%M:%S')}")
-                self.update_start_button_state()
+                ps_datetime = plate_solve_result.get('plate_solve_datetime', datetime.now())
+                self.progress_queue.put((f"RTSPプレートソルブ成功: {plate_solve_result['wcs_file']}", None))
+                self._queue_plate_solve_result(
+                    plate_solve_result,
+                    f"プレートソルブ: 成功 (RTSP) @ {ps_datetime.strftime('%H:%M')}",
+                    "showinfo",
+                    "成功",
+                    f"RTSPからのプレートソルブに成功しました。\n参照時刻: {ps_datetime.strftime('%Y-%m-%d %H:%M:%S')}",
+                )
             else:
-                self.global_wcs_info = None
-                self.plate_solve_status_var.set("プレートソルブ: 失敗")
                 self.progress_queue.put(("RTSPプレートソルブ失敗", None))
-                messagebox.showerror("失敗", "RTSPからのプレートソルブに失敗しました。\nストリーム内容、ネットワーク、APIキーを確認してください。")
+                self._queue_plate_solve_result(
+                    None,
+                    "プレートソルブ: 失敗",
+                    "showerror",
+                    "失敗",
+                    "RTSPからのプレートソルブに失敗しました。\nストリーム内容、ネットワーク、APIキーを確認してください。",
+                )
                 
         except Exception as e:
-            self.global_wcs_info = None
-            self.plate_solve_status_var.set("プレートソルブ: エラー")
             error_message = f"RTSPプレートソルブ中にエラーが発生しました: {e}"
             self.progress_queue.put((error_message, None))
-            messagebox.showerror("エラー", error_message)
+            self._queue_plate_solve_result(None, "プレートソルブ: エラー", "showerror", "エラー", error_message)
 
-    def execute_plate_solve_thread(self):
-        video_file_path = self.plate_solve_video_path_var.get()
-        if not video_file_path:
-            messagebox.showwarning("警告", "プレートソルブに使用する動画を選択してください。")
-            self.plate_solve_status_var.set("プレートソルブ: 未実行")
-            return
-
-        self.plate_solve_status_var.set("プレートソルブ: 実行中...")
+    def execute_plate_solve_thread(self, video_file_path: str, solve_mode: str, solve_mask):
         self.progress_queue.put(("プレートソルブを実行中...", None))
         try:
             cap = cv2.VideoCapture(video_file_path)
@@ -4284,34 +4311,38 @@ atomcam2で利用する場合は、GitHubで公開されている
             os.makedirs(config.TEMP_CLIP_DIR, exist_ok=True)
             cv2.imwrite(temp_composite_path, composite_image)
 
-            use_local_solver = (self.plate_solve_mode_var.get() == "local")
+            use_local_solver = (solve_mode == "local")
             plate_solve_result = astrometry.plate_solve_image(
-                temp_composite_path, mask=self.plate_solve_mask_image,
+                temp_composite_path, mask=solve_mask,
                 plate_solve_video_path=video_file_path, cancel_flag=self.cancel_flag,
                 use_local=use_local_solver
             )
             if os.path.exists(temp_composite_path): os.remove(temp_composite_path)
 
             if plate_solve_result and 'wcs_file' in plate_solve_result:
-                self.global_wcs_info = plate_solve_result
-                ps_datetime = self.global_wcs_info.get('plate_solve_datetime', datetime.now())
-                self.plate_solve_status_var.set(f"プレートソルブ: 成功 @ {ps_datetime.strftime('%H:%M')}")
-                self.plate_solve_wcs_path_var.set(self.global_wcs_info['wcs_file'])
-                self.progress_queue.put((f"プレートソルブ成功: {self.global_wcs_info['wcs_file']}", None))
-                messagebox.showinfo("成功", f"プレートソルブに成功しました。\n参照時刻: {ps_datetime.strftime('%Y-%m-%d %H:%M:%S')}")
-                self.update_start_button_state()
+                ps_datetime = plate_solve_result.get('plate_solve_datetime', datetime.now())
+                self.progress_queue.put((f"プレートソルブ成功: {plate_solve_result['wcs_file']}", None))
+                self._queue_plate_solve_result(
+                    plate_solve_result,
+                    f"プレートソルブ: 成功 @ {ps_datetime.strftime('%H:%M')}",
+                    "showinfo",
+                    "成功",
+                    f"プレートソルブに成功しました。\n参照時刻: {ps_datetime.strftime('%Y-%m-%d %H:%M:%S')}",
+                )
             else:
-                self.global_wcs_info = None
-                self.plate_solve_status_var.set("プレートソルブ: 失敗")
                 self.progress_queue.put(("プレートソルブ失敗", None))
-                messagebox.showerror("失敗", "プレートソルブに失敗しました。APIキー、ネットワーク、画像内容を確認してください。")
+                self._queue_plate_solve_result(
+                    None,
+                    "プレートソルブ: 失敗",
+                    "showerror",
+                    "失敗",
+                    "プレートソルブに失敗しました。APIキー、ネットワーク、画像内容を確認してください。",
+                )
 
         except Exception as e:
-            self.global_wcs_info = None
-            self.plate_solve_status_var.set("プレートソルブ: エラー")
             error_message = f"プレートソルブ中にエラーが発生しました: {e}"
             self.progress_queue.put((error_message, None))
-            messagebox.showerror("エラー", error_message)
+            self._queue_plate_solve_result(None, "プレートソルブ: エラー", "showerror", "エラー", error_message)
 
     def on_closing(self):
         if self._closing_dialog_active:
@@ -4585,6 +4616,21 @@ atomcam2で利用する場合は、GitHubで公開されている
         try:
             while True:
                 queued_item = self.progress_queue.get_nowait()
+                if isinstance(queued_item, tuple) and len(queued_item) == 2:
+                    marker, payload = queued_item
+                    if marker is self._plate_solve_status_marker:
+                        self.plate_solve_status_var.set(payload)
+                        continue
+                    if marker is self._plate_solve_result_marker:
+                        self.global_wcs_info = payload["result"]
+                        self.plate_solve_status_var.set(payload["status"])
+                        if self.global_wcs_info:
+                            self.plate_solve_wcs_path_var.set(self.global_wcs_info["wcs_file"])
+                            self.update_start_button_state()
+                        getattr(messagebox, payload["dialog_type"])(
+                            payload["dialog_title"], payload["dialog_message"]
+                        )
+                        continue
                 if (isinstance(queued_item, tuple) and len(queued_item) == 3 and
                         queued_item[0] is self._progress_envelope_marker):
                     _, run_generation, progress_item = queued_item
