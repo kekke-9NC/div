@@ -4048,7 +4048,12 @@ atomcam2で利用する場合は、GitHubで公開されている
             if not cap.isOpened(): raise IOError("動画ファイルを開けません。")
             fps = cap.get(cv2.CAP_PROP_FPS) or config.DEFAULT_FPS
             num_frames = int(fps * 10)
-            frames = [cap.read()[1] for _ in range(num_frames) if cap.isOpened() and cap.read()[0]]
+            frames = []
+            for _ in range(num_frames):
+                ret, frame = cap.read()
+                if not ret or frame is None:
+                    break
+                frames.append(frame)
             cap.release()
             if not frames: raise ValueError("動画からフレームを取得できませんでした。")
             
