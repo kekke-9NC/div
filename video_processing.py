@@ -751,7 +751,12 @@ def create_line_video_clips(
                                             saved_paths['summary'] = summary_video_path
                                             print(f"概要動画を保存しました: {summary_video_path}")
                                         else:
-                                            report_output_error(f"概要動画の生成に失敗しました ({summary_video_path})")
+                                            if video_creation.is_ffmpeg_available():
+                                                report_output_error(f"概要動画の生成に失敗しました ({summary_video_path})")
+                                            else:
+                                                report_output_error(
+                                                    "概要動画の生成にはFFmpegが必要です。インストールしてPATHに追加してください。"
+                                                )
                                     except Exception as e_summary:
                                         print(f"エラー: 概要動画の生成に失敗しました: {e_summary}")
                                         import traceback; traceback.print_exc()
@@ -1256,7 +1261,12 @@ def create_line_video_clips(
                                 saved_paths['summary'] = summary_video_path
                                 print(f"概要動画を保存しました: {summary_video_path}")
                             else:
-                                report_output_error(f"概要動画の生成に失敗しました ({summary_video_path})")
+                                if video_creation.is_ffmpeg_available():
+                                    report_output_error(f"概要動画の生成に失敗しました ({summary_video_path})")
+                                else:
+                                    report_output_error(
+                                        "概要動画の生成にはFFmpegが必要です。インストールしてPATHに追加してください。"
+                                    )
                         except Exception as e_summary:
                             print(f"エラー: 概要動画の生成に失敗しました: {e_summary}")
                             import traceback; traceback.print_exc()

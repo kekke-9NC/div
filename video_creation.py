@@ -4,6 +4,13 @@ from typing import Tuple, List, Dict, Any, Optional
 import subprocess
 import sys
 import os
+import shutil
+
+
+def is_ffmpeg_available() -> bool:
+    """Return whether the FFmpeg command line tool is available on PATH."""
+    return shutil.which("ffmpeg") is not None
+
 
 def create_summary_video(
     summary_video_config: List[Dict[str, Any]],

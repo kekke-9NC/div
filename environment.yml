@@ -12,6 +12,7 @@ dependencies:
   - astropy
   - matplotlib
   - requests
+  - ffmpeg
   - pip:
     - torch
     - torchvision
