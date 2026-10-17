@@ -6709,11 +6709,11 @@ atomcam2で利用する場合は、GitHubで公開されている
                         return None
                     
                     current_path = all_files[file_index[0]]
-                    filename = os.path.basename(current_path)
+                    item_key = os.path.normcase(os.path.abspath(current_path))
                     file_index[0] += 1
                     
-                    if filename in results:
-                        boxes = results[filename]['boxes']
+                    if item_key in results:
+                        boxes = results[item_key]['boxes']
                         h, w = img.shape[:2]
                         if is_meteor_mode:
                             return bright_area_detector.create_inclusion_mask_from_boxes((h, w), boxes)
@@ -6764,6 +6764,7 @@ atomcam2で利用する場合は、GitHubで公開されている
                         return
                     
                     filename = os.path.basename(path)
+                    item_key = os.path.normcase(os.path.abspath(path))
                     self.append_log(f"解析中 ({i+1}/{total}): {filename}")
                     print(f"DEBUG: Analyzing file {i+1}/{total}: {filename}")
                     
@@ -6782,8 +6783,8 @@ atomcam2で利用する場合は、GitHubで公開されている
                     print(f"DEBUG: Detection result for {filename}: {len(boxes)} boxes found")
                     
                     if preview_window.winfo_exists():
-                        self.after(0, lambda fn=filename, fp=path, b=boxes, cb=reanalyze_wrapper: 
-                                  preview_window.add_item(fn, fp, b, cb))
+                        self.after(0, lambda fn=filename, key=item_key, fp=path, b=boxes, cb=reanalyze_wrapper:
+                                  preview_window.add_item(fn, fp, b, cb, item_key=key))
                 
                 self.append_log("全画像の解析が完了しました。検出結果を確認・修正してください。")
                 print("DEBUG: Analysis completed")
