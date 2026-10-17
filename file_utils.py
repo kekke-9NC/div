@@ -387,6 +387,7 @@ def save_rtsp_video_segments_ffmpeg(
             stalled = False
             paused_for_time_limit = False
             last_segment_count = 0
+            last_monitored_hour = datetime.now().strftime("%Y%m%d%H")
             
             print("[RTSP保存] ネットワーク監視を開始（連続録画中）...")
             
@@ -441,6 +442,7 @@ def save_rtsp_video_segments_ffmpeg(
                 # 時間が変わった場合は新しいディレクトリを作成
                 current_now = datetime.now()
                 current_date = current_now.strftime("%Y%m%d")
+                hour_changed = False
                 
                 # 日付が変わった場合は、新しい日付のディレクトリに保存するためにFFmpegを再起動
                 if current_date != session_start_date:
@@ -452,18 +454,28 @@ def save_rtsp_video_segments_ffmpeg(
                         process.kill()
                         process.wait()
                     break  # 外側のwhileループに戻り、新しい日付で再開
+
+                current_hour_key = current_now.strftime("%Y%m%d%H")
+                if current_hour_key != last_monitored_hour:
+                    # Hourly output paths change at this boundary, so start a fresh
+                    # baseline before watching the new and previous hour directories.
+                    last_monitored_hour = current_hour_key
+                    hour_changed = True
                 
                 current_hour_dir = os.path.join(base_dir, current_now.strftime("%H"))
                 os.makedirs(current_hour_dir, exist_ok=True)  # 時間が変わっても対応
+                previous_hour_dir = os.path.join(base_dir, f"{(current_now.hour - 1) % 24:02d}")
                 current_total_size = 0
                 current_segment_count = 0
                 current_max_mtime = 0  # 最新ファイルの更新時刻
                 try:
-                    if os.path.isdir(current_hour_dir):
-                        for f in os.listdir(current_hour_dir):
+                    for watch_dir in (current_hour_dir, previous_hour_dir):
+                        if not os.path.isdir(watch_dir):
+                            continue
+                        for f in os.listdir(watch_dir):
                             if f.endswith('.mp4'):
                                 try:
-                                    fpath = os.path.join(current_hour_dir, f)
+                                    fpath = os.path.join(watch_dir, f)
                                     current_total_size += os.path.getsize(fpath)
                                     current_segment_count += 1
                                     # ファイルの更新時刻を取得
@@ -475,8 +487,15 @@ def save_rtsp_video_segments_ffmpeg(
                 except Exception:
                     pass
                 
+                if hour_changed:
+                    # Establish the new two-directory baseline without counting old
+                    # files as fresh recording activity.
+                    last_total_size = current_total_size
+                    last_max_mtime = current_max_mtime
+                    last_segment_count = current_segment_count
+                    stall_start_time = time.time()
                 # 新しいセグメントが作られたらログ
-                if current_segment_count > last_segment_count:
+                elif current_segment_count > last_segment_count:
                     print(f"[RTSP保存] 新規セグメント検出 (計 {current_segment_count} ファイル, {current_total_size // 1024} KB)")
                     last_segment_count = current_segment_count
                     # 新しいセグメント作成 = 確実に活動中
