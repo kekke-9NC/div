@@ -4912,6 +4912,11 @@ atomcam2で利用する場合は、GitHubで公開されている
             'periodic_start_hour': self.start_hour_var.get(), 'periodic_start_minute': self.start_min_var.get(),
             'periodic_end_hour': self.end_hour_var.get(), 'periodic_end_minute': self.end_min_var.get(),
             'folder_paths': self.folder_paths, 'rtsp_urls': self.rtsp_urls,
+            'selected_rtsp_urls': [
+                self.rtsp_urls[index]
+                for index in sorted(self.rtsp_selected_indices)
+                if 0 <= index < len(self.rtsp_urls)
+            ],
             'save_options': {k: v.get() for k, v in self.save_options_vars.items()},
             'plate_solve_wcs_path': self.plate_solve_wcs_path_var.get(), 'plate_solve_video_path': self.plate_solve_video_path_var.get(),
             'use_plate_solve': self.use_plate_solve_var.get(), 'apply_mask': self.apply_mask_var.get(),
@@ -5031,6 +5036,14 @@ atomcam2で利用する場合は、GitHubで公開されている
             self.rtsp_selected_indices.clear()
             for url in self.rtsp_urls:
                 self._add_rtsp_item(url)
+            selected_rtsp_urls = settings.get('selected_rtsp_urls', [])
+            if isinstance(selected_rtsp_urls, str):
+                selected_rtsp_urls = [selected_rtsp_urls]
+            if isinstance(selected_rtsp_urls, list):
+                selected_rtsp_urls = {url for url in selected_rtsp_urls if isinstance(url, str)}
+                for index, url in enumerate(self.rtsp_urls):
+                    if url in selected_rtsp_urls:
+                        self._toggle_rtsp_selection(index)
 
             saved_opts = settings.get('save_options', {})
             if not isinstance(saved_opts, dict):
