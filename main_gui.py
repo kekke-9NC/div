@@ -4001,8 +4001,8 @@ atomcam2で利用する場合は、GitHubで公開されている
             self.plate_solve_status_var.set("プレートソルブ: 実行中...")
             self.progress_queue.put(("Astrometry.netにアップロード中...", None))
             
-            # RTSPプレートソルブでは検出マスク（RTSPから作成したマスク）を使用
-            rtsp_mask = self.mask_image if self.apply_mask_var.get() else None
+            # RTSPプレートソルブにも専用のプレートソルブ用マスクを適用
+            rtsp_mask = self.plate_solve_mask_image
             use_local_solver = (self.plate_solve_mode_var.get() == "local")
             plate_solve_result = astrometry.plate_solve_image(
                 temp_composite_path, mask=rtsp_mask,
