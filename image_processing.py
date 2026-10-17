@@ -159,6 +159,16 @@ def create_diff_images(
         ret, frame = cap.read()
         if not ret:
             print(f"フレーム {frame_index} の読み込みに失敗、またはストリームが終了しました。")
+            read_failed_before_end = (
+                total_frames != float('inf') and frame_index < total_frames
+            )
+            no_frames_read = frame_index == 0 and total_frames == float('inf')
+            if (not is_rtsp and (cancel_flag is None or not cancel_flag.is_set()) and
+                    (read_failed_before_end or no_frames_read)):
+                raise IOError(
+                    f"動画を最後まで読み込めませんでした "
+                    f"(frame {frame_index} / {total_frames})"
+                )
             break
 
         frames_for_diff.append(frame)

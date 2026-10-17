@@ -81,9 +81,11 @@ def process_video_file_periodic(
             meteor_save_path=meteor_save_path, not_meteor_save_path=not_meteor_save_path,
             use_plate_solve=(global_wcs_info is not None), global_wcs_info=global_wcs_info,
             plate_solve_mask=plate_solve_mask, cancel_flag=cancel_flag, save_options=save_options,
-            notify_on_detection=True, summary_video_config=summary_video_config
+            notify_on_detection=True, summary_video_config=summary_video_config, raise_on_error=True
         )
         # 完了ログはvideo_processing側で出力されるため、ここでは出力しない
+        if cancel_flag is not None and cancel_flag.is_set():
+            return False
         return True
     except IOError as e:
         message = f"[定期スキャン] ファイルを開けませんでした。次回スキャン時に再試行します ({os.path.basename(file_path)}): {e}"
@@ -97,7 +99,7 @@ def process_video_file_periodic(
         if progress_callback:
             progress_callback((message, None))
         import traceback; traceback.print_exc()
-        return True
+        return False
 
 def monitor_directory(
     directory: str, scan_interval: int,
@@ -111,6 +113,13 @@ def monitor_directory(
     start_hour: int = 17, start_minute: int = 0, end_hour: int = 7, end_minute: int = 0
 ):
     processed_files: Set[str] = set()
+    processed_file_stats: Dict[str, Tuple[int, int]] = {}
+    pending_file_stats: Dict[str, Tuple[int, int, float]] = {}
+    startup_file_stats: Dict[str, Tuple[int, int]] = {}
+    startup_pending_files: Set[str] = set()
+    startup_file_paths: Set[str] = set()
+    first_window_unstatable_paths: Set[str] = set()
+    stable_file_seconds = max(5.0, float(scan_interval) * 2)
     video_extensions = config.PERIODIC_VIDEO_EXTENSIONS
 
     if not os.path.isdir(directory):
@@ -127,8 +136,20 @@ def monitor_directory(
         for root, _, files in os.walk(directory):
             for file in files:
                 if file.lower().endswith(video_extensions):
-                    processed_files.add(os.path.join(root, file))
-        message = f"[定期スキャン] アプリ起動時の初回スキャン完了。既存の {len(processed_files)} ファイルは処理対象外。"
+                    full_path = os.path.join(root, file)
+                    startup_file_paths.add(full_path)
+                    try:
+                        file_stat = os.stat(full_path)
+                    except OSError:
+                        continue
+                    observed_at = time.time()
+                    file_stats = (file_stat.st_size, file_stat.st_mtime_ns)
+                    startup_file_stats[full_path] = file_stats
+                    pending_file_stats[full_path] = (*file_stats, observed_at)
+                    if observed_at - file_stat.st_mtime < stable_file_seconds:
+                        # A recently modified file may still be written by the recorder.
+                        startup_pending_files.add(full_path)
+        message = f"[定期スキャン] アプリ起動時の初回スキャン完了。既存の {len(startup_file_stats)} ファイルを確認対象に登録しました。"
         print(message)
         if progress_callback: progress_callback((message, None))
     except Exception as e:
@@ -168,12 +189,109 @@ def monitor_directory(
             print(scan_log_msg)
 
             new_files_found = []
+            observed_file_paths = set()
+            observed_file_stats: Dict[str, Tuple[int, int]] = {}
+            present_file_paths = set()
             for root, _, files in os.walk(directory):
                 for file in files:
                     if file.lower().endswith(video_extensions):
                         full_path = os.path.join(root, file)
-                        if full_path not in processed_files:
-                            new_files_found.append(full_path)
+                        present_file_paths.add(full_path)
+                        try:
+                            file_stat = os.stat(full_path)
+                        except OSError:
+                            if (is_first_scan_after_start and
+                                    full_path not in startup_file_paths and
+                                    full_path not in processed_files):
+                                first_window_unstatable_paths.add(full_path)
+                            pending_file_stats.pop(full_path, None)
+                            continue
+                        observed_file_paths.add(full_path)
+                        observed_at = time.time()
+                        current_file_stats = (file_stat.st_size, file_stat.st_mtime_ns)
+                        observed_file_stats[full_path] = current_file_stats
+                        if full_path in processed_files:
+                            if processed_file_stats.get(full_path) == current_file_stats:
+                                continue
+                            processed_files.discard(full_path)
+                            processed_file_stats.pop(full_path, None)
+                            pending_file_stats[full_path] = (*current_file_stats, observed_at)
+                            startup_pending_files.add(full_path)
+                            continue
+
+                        if full_path in first_window_unstatable_paths:
+                            startup_file_stats[full_path] = current_file_stats
+                            pending_file_stats[full_path] = (*current_file_stats, observed_at)
+                            if observed_at - file_stat.st_mtime < stable_file_seconds:
+                                startup_pending_files.add(full_path)
+                            first_window_unstatable_paths.discard(full_path)
+                            continue
+
+                        previous = pending_file_stats.get(full_path)
+                        if (is_first_scan_after_start and full_path not in startup_file_paths and
+                                previous is None and
+                                observed_at - file_stat.st_mtime >= stable_file_seconds):
+                            # Stable files that accumulated outside the active time window are
+                            # part of this window's initial inventory, not new arrivals.
+                            continue
+                        if (previous is not None and previous[0] == file_stat.st_size and
+                                previous[1] == file_stat.st_mtime_ns):
+                            stable_since = previous[2]
+                            if observed_at - stable_since >= stable_file_seconds:
+                                if (full_path in startup_file_stats and
+                                        full_path not in startup_pending_files):
+                                    processed_files.add(full_path)
+                                    processed_file_stats[full_path] = current_file_stats
+                                    pending_file_stats.pop(full_path, None)
+                                    startup_file_stats.pop(full_path, None)
+                                    startup_file_paths.discard(full_path)
+                                else:
+                                    new_files_found.append(full_path)
+                        else:
+                            pending_file_stats[full_path] = (*current_file_stats, observed_at)
+                            if full_path in startup_file_paths:
+                                baseline_stats = startup_file_stats.get(full_path)
+                                if baseline_stats is None:
+                                    startup_file_stats[full_path] = current_file_stats
+                                    if observed_at - file_stat.st_mtime < stable_file_seconds:
+                                        startup_pending_files.add(full_path)
+                                elif (baseline_stats != current_file_stats or
+                                      observed_at - file_stat.st_mtime < stable_file_seconds):
+                                    startup_pending_files.add(full_path)
+                            else:
+                                startup_pending_files.add(full_path)
+
+            known_file_paths = (
+                set(pending_file_stats) | set(startup_file_stats) |
+                startup_pending_files | startup_file_paths |
+                first_window_unstatable_paths | processed_files |
+                set(processed_file_stats)
+            )
+            for stale_path in known_file_paths - present_file_paths:
+                pending_file_stats.pop(stale_path, None)
+                startup_file_stats.pop(stale_path, None)
+                startup_pending_files.discard(stale_path)
+                startup_file_paths.discard(stale_path)
+                first_window_unstatable_paths.discard(stale_path)
+                processed_files.discard(stale_path)
+                processed_file_stats.pop(stale_path, None)
+
+            if is_first_scan_after_start:
+                for file_path in observed_file_paths:
+                    if file_path in startup_pending_files or file_path in processed_files:
+                        continue
+                    skip_msg = f"  -> スキップ (初回チェック): {os.path.basename(file_path)}"
+                    print(skip_msg)
+                    if progress_callback: progress_callback((skip_msg, None))
+                    processed_files.add(file_path)
+                    processed_file_stats[file_path] = observed_file_stats[file_path]
+                    pending_file_stats.pop(file_path, None)
+                    startup_file_stats.pop(file_path, None)
+                    startup_file_paths.discard(file_path)
+                new_files_found = [
+                    file_path for file_path in new_files_found
+                    if file_path in startup_pending_files
+                ]
 
             new_files_found.sort(key=os.path.getmtime)
             if new_files_found:
@@ -183,19 +301,37 @@ def monitor_directory(
 
                  for file_path in new_files_found:
                       if cancel_flag is not None and cancel_flag.is_set(): break
-                      if is_first_scan_after_start:
-                          skip_msg = f"  -> スキップ (初回チェック): {os.path.basename(file_path)}"
-                          print(skip_msg)
-                          if progress_callback: progress_callback((skip_msg, None))
-                          processed_files.add(file_path)
-                      else:
-                          processed_successfully = process_video_file_periodic(
-                              file_path, progress_callback, mask, global_wcs_info, plate_solve_mask,
-                              meteor_save_path, not_meteor_save_path, cancel_flag, save_options,
-                              interval, duration, min_length, summary_video_config
-                          )
-                          if processed_successfully:
-                              processed_files.add(file_path)
+                      stats_before_processing = pending_file_stats.get(file_path)
+                      processed_successfully = process_video_file_periodic(
+                          file_path, progress_callback, mask, global_wcs_info, plate_solve_mask,
+                          meteor_save_path, not_meteor_save_path, cancel_flag, save_options,
+                          interval, duration, min_length, summary_video_config
+                      )
+                      if processed_successfully:
+                          try:
+                              file_stat = os.stat(file_path)
+                          except OSError:
+                              pending_file_stats.pop(file_path, None)
+                          else:
+                              stats_after_processing = (file_stat.st_size, file_stat.st_mtime_ns)
+                              if (stats_before_processing is not None and
+                                      stats_after_processing == stats_before_processing[:2]):
+                                  processed_files.add(file_path)
+                                  processed_file_stats[file_path] = stats_after_processing
+                                  pending_file_stats.pop(file_path, None)
+                                  startup_file_stats.pop(file_path, None)
+                                  startup_pending_files.discard(file_path)
+                                  startup_file_paths.discard(file_path)
+                              else:
+                                  pending_file_stats[file_path] = (
+                                      *stats_after_processing, time.time()
+                                  )
+                                  startup_pending_files.add(file_path)
+                                  if progress_callback:
+                                      progress_callback((
+                                          f"[定期スキャン] 処理中に更新されたため安定後に再処理します ({os.path.basename(file_path)})",
+                                          None
+                                      ))
             else:
                  print("[定期スキャン] 新規ファイルは見つかりませんでした。")
 
