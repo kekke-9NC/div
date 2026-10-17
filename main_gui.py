@@ -4115,6 +4115,22 @@ atomcam2で利用する場合は、GitHubで公開されている
         periodic_scan_interval = None
 
         try:
+            def read_time_window(start_hour_var, start_minute_var, end_hour_var, end_minute_var, enabled, label):
+                try:
+                    start_hour = int(start_hour_var.get())
+                    start_minute = int(start_minute_var.get())
+                    end_hour = int(end_hour_var.get())
+                    end_minute = int(end_minute_var.get())
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(f"{label}の時刻を数値で指定してください。") from exc
+
+                if not (0 <= start_hour <= 23 and 0 <= end_hour <= 23 and
+                        0 <= start_minute <= 59 and 0 <= end_minute <= 59):
+                    raise ValueError(f"{label}は時を0〜23、分を0〜59の範囲で指定してください。")
+                if enabled and (start_hour, start_minute) == (end_hour, end_minute):
+                    raise ValueError(f"{label}の開始時刻と終了時刻は異なる時刻を指定してください。")
+                return start_hour, start_minute, end_hour, end_minute
+
             params = {
                 'max_workers': int(self.concurrency_var.get()),
                 'interval_sec': float(self.interval_var.get()),
@@ -4131,6 +4147,18 @@ atomcam2で利用する場合は、GitHubで公開されている
                 periodic_scan_interval = int(self.periodic_interval_var.get())
                 if periodic_scan_interval < 1:
                     raise ValueError("定期スキャンの間隔は1秒以上で指定してください。")
+                periodic_time_limit_enabled = self.periodic_time_limit_var.get()
+                periodic_time_window = read_time_window(
+                    self.start_hour_var, self.start_min_var, self.end_hour_var, self.end_min_var,
+                    periodic_time_limit_enabled, "定期スキャンの時間制限"
+                )
+            elif self.rtsp_urls:
+                rtsp_time_limit = self.rtsp_time_limit_var.get()
+                rtsp_time_window = read_time_window(
+                    self.rtsp_start_hour_var, self.rtsp_start_min_var,
+                    self.rtsp_end_hour_var, self.rtsp_end_min_var,
+                    rtsp_time_limit, "RTSP録画時間制限"
+                )
             
             if self.rtsp_preset_var.get() == "clear":
                 preset = config.RTSP_PRESET_CLEAR_SKY
@@ -4181,9 +4209,9 @@ atomcam2で利用する場合は、GitHubで公開されている
                 'cancel_flag': self.cancel_flag, 'save_options': params['save_options'], 
                 'interval': params['interval_sec'], 'duration': params['duration_sec'], 
                 'min_length': config.MIN_LINE_LENGTH, 'summary_video_config': params['summary_config'],
-                'time_limit_enabled': self.periodic_time_limit_var.get(),
-                'start_hour': int(self.start_hour_var.get()), 'start_minute': int(self.start_min_var.get()),
-                'end_hour': int(self.end_hour_var.get()), 'end_minute': int(self.end_min_var.get())
+                'time_limit_enabled': periodic_time_limit_enabled,
+                'start_hour': periodic_time_window[0], 'start_minute': periodic_time_window[1],
+                'end_hour': periodic_time_window[2], 'end_minute': periodic_time_window[3]
             }
             if monitor_kwargs['time_limit_enabled']:
                 log_msg += f", 時間制限: {monitor_kwargs['start_hour']:02d}:{monitor_kwargs['start_minute']:02d} - {monitor_kwargs['end_hour']:02d}:{monitor_kwargs['end_minute']:02d}"
@@ -4194,11 +4222,7 @@ atomcam2で利用する場合は、GitHubで公開されている
 
         elif self.rtsp_urls:
             url = self.rtsp_urls[0]
-            rtsp_time_limit = self.rtsp_time_limit_var.get()
-            rtsp_sh = int(self.rtsp_start_hour_var.get())
-            rtsp_sm = int(self.rtsp_start_min_var.get())
-            rtsp_eh = int(self.rtsp_end_hour_var.get())
-            rtsp_em = int(self.rtsp_end_min_var.get())
+            rtsp_sh, rtsp_sm, rtsp_eh, rtsp_em = rtsp_time_window
             
             log_msg = f"RTSP処理開始 (URL: {url}, 並列処理数: {params['max_workers']})"
             if rtsp_time_limit:
