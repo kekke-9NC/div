@@ -1,4 +1,5 @@
 from gui_common import *
+import legacy_settings
 import ml_training_data
 import gui_layout
 
@@ -1631,7 +1632,6 @@ class SettingsMixin:
             'ai_vlm_backend': self.ai_vlm_backend_var.get(),
             'lm_studio_vlm_url': self.lm_studio_vlm_url_var.get(),
             'lm_studio_vlm_model_id': self.lm_studio_vlm_model_var.get(),
-            'lm_studio_vlm_api_key': "",
             'has_mask_image': self.mask_image is not None, 'has_plate_solve_mask_image': self.plate_solve_mask_image is not None,
             'summary_video_config': self.summary_video_config,
             'video_concat_settings': {
@@ -1699,7 +1699,15 @@ class SettingsMixin:
             settings['global_wcs_info'] = serializable_wcs
 
         try:
-            with open(self.settings_file, 'w', encoding='utf-8') as f: json.dump(settings, f, indent=4)
+            # The SwiftUI frontend shares this file and owns additional keys.
+            # Merge this UI's fields so closing the legacy app doesn't discard
+            # settings that it doesn't expose (including stored credentials).
+            try:
+                legacy_settings.save_settings(Path(self.settings_file).parent, settings)
+            except legacy_settings.LegacySettingsError:
+                # Keep the old UI's recovery behavior for malformed settings files.
+                with open(self.settings_file, 'w', encoding='utf-8') as f:
+                    json.dump(settings, f, indent=2, ensure_ascii=False)
             masks_to_save = {}
             if self.mask_image is not None: masks_to_save['mask_image'] = self.mask_image
             if self.plate_solve_mask_image is not None: masks_to_save['plate_solve_mask_image'] = self.plate_solve_mask_image
