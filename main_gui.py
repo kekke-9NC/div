@@ -66,6 +66,16 @@ def _deep_merge_settings(current, updates):
     return merged
 
 
+class _RunProgressQueue:
+    def __init__(self, target_queue, marker, run_id):
+        self.target_queue = target_queue
+        self.marker = marker
+        self.run_id = run_id
+
+    def put(self, item):
+        self.target_queue.put((self.marker, self.run_id, item))
+
+
 class _StderrProgressStream(io.TextIOBase):
     def __init__(self, log_callback, passthrough=None):
         super().__init__()
@@ -205,6 +215,9 @@ class App(TkinterDnD.Tk):
         self.periodic_scan_thread = None
         self.cancel_flag = threading.Event()
         self.progress_queue = queue.Queue()
+        self._progress_envelope_marker = object()
+        self._progress_run_generation = 0
+        self._active_progress_run_generation = 0
         self.start_time_gui = None
 
         self.setup_variables()
@@ -4127,6 +4140,12 @@ atomcam2で利用する場合は、GitHubで公開されている
             messagebox.showwarning("情報", "別のプロセスが実行中です。")
             return
 
+        self._progress_run_generation += 1
+        self._active_progress_run_generation = self._progress_run_generation
+        run_progress_queue = _RunProgressQueue(
+            self.progress_queue, self._progress_envelope_marker,
+            self._active_progress_run_generation
+        )
         self.cancel_flag.clear()
         self.append_log("処理準備中...")
         is_periodic = self.periodic_scan_var.get()
@@ -4221,7 +4240,7 @@ atomcam2で利用する場合は、GitHubで公開されている
             log_msg = f"定期スキャン開始 (フォルダ: {periodic_dir})"
             monitor_kwargs = {
                 'directory': periodic_dir, 'scan_interval': periodic_scan_interval,
-                'progress_callback': self.progress_queue.put, 'mask': params['mask'], 
+                'progress_callback': run_progress_queue.put, 'mask': params['mask'],
                 'global_wcs_info': params['global_wcs_info'], 'plate_solve_mask': params['plate_solve_mask'], 
                 'meteor_save_path': params['meteor_save_path'], 'not_meteor_save_path': params['not_meteor_save_path'], 
                 'cancel_flag': self.cancel_flag, 'save_options': params['save_options'], 
@@ -4249,7 +4268,7 @@ atomcam2で利用する場合は、GitHubで公開されている
             self.append_log(log_msg)
             
             rtsp_args = (
-                url, config.RTSP_SAVE_ROOT, config.RTSP_SEGMENT_DURATION, 60, self.progress_queue.put,
+                url, config.RTSP_SAVE_ROOT, config.RTSP_SEGMENT_DURATION, 60, run_progress_queue.put,
                 params['mask'], params['global_wcs_info'], params['plate_solve_mask'],
                 params['meteor_save_path'], params['not_meteor_save_path'], self.cancel_flag,
                 params['save_options'], params['interval_sec'], params['duration_sec'],
@@ -4289,10 +4308,10 @@ atomcam2で利用する場合は、GitHubで公開されている
             total_videos = len(sources_to_process)
             self.append_log(f"合計 {total_videos} 個の動画ファイルを処理します。")
             self.progress['maximum'] = total_videos
-            self.progress_queue.put((f"処理開始 ({total_videos} ファイル)", (0, total_videos)))
+            run_progress_queue.put((f"処理開始 ({total_videos} ファイル)", (0, total_videos)))
 
             worker_args = (
-                self.progress_queue, sources_to_process, params['max_workers'], params['interval_sec'], 
+                run_progress_queue, sources_to_process, params['max_workers'], params['interval_sec'],
                 params['duration_sec'], params['mask'], params['global_wcs_info'], params['plate_solve_mask'],
                 params['meteor_save_path'], params['not_meteor_save_path'], self.cancel_flag,
                 params['save_options'], params['summary_config']
@@ -4338,7 +4357,15 @@ atomcam2で利用する場合は、GitHubで公開されている
 
         try:
             while True:
-                message, value = self.progress_queue.get_nowait()
+                queued_item = self.progress_queue.get_nowait()
+                if (isinstance(queued_item, tuple) and len(queued_item) == 3 and
+                        queued_item[0] is self._progress_envelope_marker):
+                    _, run_generation, progress_item = queued_item
+                    if run_generation != self._active_progress_run_generation:
+                        continue
+                    message, value = progress_item
+                else:
+                    message, value = queued_item
                 if isinstance(value, tuple) and len(value) == 2:
                     current, total = value
                     if total > 0:
@@ -4411,7 +4438,6 @@ atomcam2で利用する場合は、GitHubで公開されている
                         if "すべての処理が完了しました" in message:
                             self.progress['value'] = self.progress['maximum']
                         self.start_time_gui = None
-                        self.cancel_flag.clear()
         except queue.Empty:
             pass
 

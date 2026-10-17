@@ -709,9 +709,27 @@ def save_rtsp_video_segments_ffmpeg(
             if process is not None:
                 try:
                     process.terminate()
+                except Exception as terminate_error:
+                    print(f"[RTSP保存] FFmpegの停止要求に失敗: {terminate_error}")
+                try:
                     process.wait(timeout=2)
-                except Exception:
-                    pass
+                except subprocess.TimeoutExpired:
+                    try:
+                        process.kill()
+                    except Exception as kill_error:
+                        print(f"[RTSP保存] FFmpegの強制終了に失敗: {kill_error}")
+                    try:
+                        process.wait()
+                    except Exception as wait_error:
+                        print(f"[RTSP保存] FFmpegの終了待機に失敗: {wait_error}")
+                except Exception as wait_error:
+                    print(f"[RTSP保存] FFmpegの終了待機に失敗: {wait_error}")
+                    if process.poll() is None:
+                        try:
+                            process.kill()
+                            process.wait()
+                        except Exception as kill_error:
+                            print(f"[RTSP保存] FFmpegの回収に失敗: {kill_error}")
             # エラー後も即座に再接続
             print("[RTSP保存] 再接続します...")
             time.sleep(2)
@@ -1086,17 +1104,29 @@ def rtsp_save_and_process_thread_target(
     else:
         print("[RTSP統合] 保存スレッドを開始しました。")
 
-    while cancel_flag is None or not cancel_flag.is_set():
-        process_new_rtsp_files(
-            save_root, rtsp_processed_files, progress_callback, mask, global_wcs_info, plate_solve_mask,
-            meteor_save_path, not_meteor_save_path, cancel_flag, save_options,
-            interval, duration, min_length, summary_video_config, max_workers,
-            time_limit_enabled, start_hour, start_minute, end_hour, end_minute
-        )
-        wait_message = f"[RTSP統合] 解析スキャン完了。次のスキャンまで {scan_interval} 秒待機。"
-        print(wait_message)
-        for _ in range(scan_interval):
-            if cancel_flag is not None and cancel_flag.is_set(): break
-            time.sleep(1)
-
-    print("[RTSP統合] 統合処理スレッドを終了します。")
+    try:
+        while cancel_flag is None or not cancel_flag.is_set():
+            process_new_rtsp_files(
+                save_root, rtsp_processed_files, progress_callback, mask, global_wcs_info, plate_solve_mask,
+                meteor_save_path, not_meteor_save_path, cancel_flag, save_options,
+                interval, duration, min_length, summary_video_config, max_workers,
+                time_limit_enabled, start_hour, start_minute, end_hour, end_minute
+            )
+            wait_message = f"[RTSP統合] 解析スキャン完了。次のスキャンまで {scan_interval} 秒待機。"
+            print(wait_message)
+            for _ in range(scan_interval):
+                if cancel_flag is not None and cancel_flag.is_set(): break
+                time.sleep(1)
+    finally:
+        # The saver shares this event with the UI, which may clear it when the
+        # next run starts. Keep cancellation set until the child has released
+        # its capture/FFmpeg process and actually stopped.
+        if cancel_flag is not None:
+            cancel_flag.set()
+        save_thread.join()
+        print("[RTSP統合] 統合処理スレッドを終了します。")
+        if progress_callback:
+            try:
+                progress_callback(("[RTSP統合] 統合処理終了", None))
+            except Exception:
+                pass
