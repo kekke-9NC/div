@@ -261,11 +261,11 @@ class DetectionPreviewWindow(tk.Toplevel):
         # 新しい順序: 未検出 -> 検出あり
         new_order = no_detection + with_detection
         
-        # UIを再構築（順序を反映）
-        self._rebuild_ui(new_order)
-        
-        # 状態更新
         self.item_order = new_order
+        # UIを再構築（更新前に順序を反映）
+        self._rebuild_ui(new_order)
+
+        # 状態更新
         self.eta_label.config(text="ETA: 完了")
         self.status_label.config(text="解析完了")
         # 最終経過時間を更新
