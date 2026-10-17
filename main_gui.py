@@ -3974,26 +3974,28 @@ atomcam2で利用する場合は、GitHubで公開されている
                 fps = config.RTSP_FPS  # デフォルトのRTSP FPSを使用
             num_frames = int(fps * 10)
             
-            frames = []
+            composite_image = None
+            frame_count = 0
             for _ in range(num_frames):
                 ret, frame = cap.read()
-                if ret and frame is not None:
-                    frames.append(frame)
-                else:
+                if not ret or frame is None:
                     # フレーム取得に失敗した場合、少し待って再試行
                     time.sleep(0.01)
                     ret, frame = cap.read()
-                    if ret and frame is not None:
-                        frames.append(frame)
+                if ret and frame is not None:
+                    if composite_image is None:
+                        composite_image = frame.copy()
+                    else:
+                        np.maximum(composite_image, frame, out=composite_image)
+                    frame_count += 1
             cap.release()
             
-            if len(frames) < 10:
-                raise ValueError(f"RTSPストリームから十分なフレームを取得できませんでした。取得フレーム数: {len(frames)}")
+            if frame_count < 10:
+                raise ValueError(f"RTSPストリームから十分なフレームを取得できませんでした。取得フレーム数: {frame_count}")
             
             self.plate_solve_status_var.set("プレートソルブ: 合成画像作成中...")
-            self.progress_queue.put((f"RTSPから{len(frames)}フレームを取得しました。合成画像を作成中...", None))
+            self.progress_queue.put((f"RTSPから{frame_count}フレームを取得しました。合成画像を作成中...", None))
             
-            composite_image = np.max(np.array(frames), axis=0).astype(np.uint8)
             temp_composite_path = os.path.join(config.TEMP_CLIP_DIR, f"rtsp_composite_{time.time_ns()}.jpg")
             os.makedirs(config.TEMP_CLIP_DIR, exist_ok=True)
             cv2.imwrite(temp_composite_path, composite_image)
@@ -4048,16 +4050,18 @@ atomcam2で利用する場合は、GitHubで公開されている
             if not cap.isOpened(): raise IOError("動画ファイルを開けません。")
             fps = cap.get(cv2.CAP_PROP_FPS) or config.DEFAULT_FPS
             num_frames = int(fps * 10)
-            frames = []
+            composite_image = None
             for _ in range(num_frames):
                 ret, frame = cap.read()
                 if not ret or frame is None:
                     break
-                frames.append(frame)
+                if composite_image is None:
+                    composite_image = frame.copy()
+                else:
+                    np.maximum(composite_image, frame, out=composite_image)
             cap.release()
-            if not frames: raise ValueError("動画からフレームを取得できませんでした。")
-            
-            composite_image = np.max(np.array(frames), axis=0).astype(np.uint8)
+            if composite_image is None: raise ValueError("動画からフレームを取得できませんでした。")
+
             temp_composite_path = os.path.join(config.TEMP_CLIP_DIR, f"temp_composite_{time.time_ns()}.jpg")
             os.makedirs(config.TEMP_CLIP_DIR, exist_ok=True)
             cv2.imwrite(temp_composite_path, composite_image)
