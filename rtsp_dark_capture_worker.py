@@ -126,7 +126,7 @@ def sample_video_directory(
     """Randomly sample an entire recording folder without concatenating it."""
     extensions = {".mp4", ".mov", ".mkv", ".avi", ".m4v"}
     paths = sorted(
-        path for path in directory.iterdir()
+        path for path in directory.rglob("*")
         if path.is_file() and path.suffix.lower() in extensions
     )
     if not paths:
