@@ -275,7 +275,16 @@ def create_rtsp_capture(rtsp_url: str, use_tcp: bool = None, use_nvidia_hwaccel:
         print(f"[RTSP] FFmpegオプション: {os.environ['OPENCV_FFMPEG_CAPTURE_OPTIONS']}")
     
     if rtsp_url.startswith("rtsp://"):
-        cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
+        # These are open-only FFmpeg properties; setting them after
+        # VideoCapture has opened does not bound a blocked connection/read.
+        # A finite read timeout lets cancellation and app shutdown take effect
+        # even when the camera stops responding.
+        timeout_params = [
+            cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000,
+            cv2.CAP_PROP_READ_TIMEOUT_MSEC, 5000,
+        ]
+        cap = cv2.VideoCapture()
+        cap.open(rtsp_url, cv2.CAP_FFMPEG, timeout_params)
         cap.set(cv2.CAP_PROP_BUFFERSIZE, config.RTSP_BUFFER_SIZE)
     else:
         cap = cv2.VideoCapture(rtsp_url)
