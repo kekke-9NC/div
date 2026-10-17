@@ -168,9 +168,20 @@ def count_total_frames_in_order(
 def calculate_sample_indices(total_frames: int, target_duration_seconds: int) -> List[int]:
     """サンプリングするフレームのインデックスを計算する。"""
     target_frame_count = target_duration_seconds * OUTPUT_FPS
-    
-    if total_frames <= target_frame_count:
+
+    if total_frames <= 0 or target_frame_count <= 0:
+        return []
+
+    if total_frames == target_frame_count:
         return list(range(total_frames))
+
+    if total_frames < target_frame_count:
+        if target_frame_count == 1:
+            return [0]
+        # Hold sparse source frames for equal intervals so the selected
+        # duration is respected even when the inputs contain few frames.
+        scale = (total_frames - 1) / (target_frame_count - 1)
+        return [round(index * scale) for index in range(target_frame_count)]
     
     step = total_frames / target_frame_count
     indices = [int(i * step) for i in range(target_frame_count)]
