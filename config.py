@@ -191,7 +191,7 @@ def register_legacy_install_root(root):
             LEGACY_DISTORTION_MAP_DIRS = (*LEGACY_DISTORTION_MAP_DIRS, map_root)
             existing_map_roots.add(normalized_map_root)
 RTSP_FPS = 25 # RTSPストリームの前提FPS
-RTSP_SEGMENT_FRAMES = 1500 # 1セグメントあたりのフレーム数 (25fps * 60秒 = 1500フレーム)
+RTSP_SEGMENT_FRAMES = 1500 # 既定値。実際の録画フレーム数はFPSとセグメント秒数から算出。
 RTSP_SEGMENT_DURATION = 60 # RTSP動画の1セグメントあたりの秒数（参考値）
 RTSP_BUFFER_DURATION = 10 # RTSP処理時にメモリ上に保持するバッファの秒数 (float)
 

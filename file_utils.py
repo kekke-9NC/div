@@ -430,9 +430,7 @@ def save_rtsp_video_segments_ffmpeg(
     else:
         print("[RTSP保存] ソフトウェアデコードを使用 - 連続録画モード")
     
-    fps = config.RTSP_FPS
-    segment_frames = config.RTSP_SEGMENT_FRAMES
-    duration_secs = segment_frames / fps  # 60秒
+    duration_secs = max(1, int(segment_duration))
     
     # 時間外の場合に表示するログを抑制するためのフラグ
     was_outside_time_range = True
@@ -784,8 +782,8 @@ def save_rtsp_video_segments(
     cap = None
     width = 0
     height = 0
-    fps = config.RTSP_FPS
-    segment_frames = config.RTSP_SEGMENT_FRAMES
+    fps = max(1, int(config.RTSP_FPS))
+    segment_frames = max(1, int(round(max(1, int(segment_duration)) * fps)))
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     
     def connect_rtsp():
