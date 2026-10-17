@@ -213,6 +213,7 @@ class App(TkinterDnD.Tk):
             base_path = os.path.dirname(os.path.abspath(__file__))
         self.settings_file = os.path.join(base_path, "app_settings.json")
         self.masks_file = os.path.join(base_path, "app_masks.npz")
+        self._settings_save_confirmation_required = False
         self._migrate_legacy_settings_files()
 
         self.worker_thread = None
@@ -4124,9 +4125,18 @@ atomcam2で利用する場合は、GitHubで公開されている
 
     def on_closing(self):
         if messagebox.askokcancel("終了", "アプリケーションを終了しますか？"):
-            self.append_log("設定を保存しています...")
             self._hide_summary_preview()
-            self.save_settings()
+            should_save_settings = True
+            if self._settings_save_confirmation_required:
+                should_save_settings = messagebox.askyesno(
+                    "設定の保存",
+                    "この起動では前回の設定を復元できていません。今回の設定で保存済みの設定やマスクを上書きしますか？\n"
+                    "保存しない場合、以前のファイルを保持します。",
+                    default=messagebox.NO
+                )
+            if should_save_settings:
+                self.append_log("設定を保存しています...")
+                self.save_settings()
             # 自動更新を停止
             if self.auto_updater:
                 self.auto_updater.stop()
@@ -4978,10 +4988,14 @@ atomcam2で利用する場合は、GitHubで公開されている
             print(f"設定の保存に失敗しました: {e}")
 
     def load_settings(self):
-        if not os.path.exists(self.settings_file): return
+        if not os.path.exists(self.settings_file):
+            self._settings_save_confirmation_required = os.path.exists(self.masks_file)
+            return
         self.append_log(f"設定ファイル読み込み元: {self.settings_file}")
         self.append_log(f"マスクファイル読み込み元: {self.masks_file}")
-        if not messagebox.askyesno("設定の復元", "前回の設定を復元しますか？"): return
+        if not messagebox.askyesno("設定の復元", "前回の設定を復元しますか？"):
+            self._settings_save_confirmation_required = True
+            return
         
         try:
             with open(self.settings_file, 'r', encoding='utf-8') as f: settings = json.load(f)
@@ -5140,6 +5154,7 @@ atomcam2で利用する場合は、GitHubで公開されている
             self.append_log("前回の設定を復元しました。")
             self.update_start_button_state()
         except Exception as e:
+            self._settings_save_confirmation_required = True
             messagebox.showerror("エラー", f"設定の読み込み中にエラーが発生しました: {e}")
 
     def apply_advanced_settings_to_config(self):
