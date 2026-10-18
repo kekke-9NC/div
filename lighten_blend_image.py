@@ -209,13 +209,26 @@ def create_lighten_blend_image(
     
     # フォルダを展開してファイルリストを作成
     all_files = []
+    invalid_inputs = []
     image_ext, video_ext = get_supported_extensions()
     
     for path in file_paths:
         if os.path.isdir(path):
-            all_files.extend(collect_files_from_folder(path))
+            folder_files = collect_files_from_folder(path)
+            if folder_files:
+                all_files.extend(folder_files)
+            else:
+                invalid_inputs.append(path)
         elif os.path.isfile(path):
             all_files.append(path)
+        else:
+            invalid_inputs.append(path)
+
+    if invalid_inputs:
+        if progress_callback:
+            failed_names = ", ".join(os.path.basename(path) or path for path in invalid_inputs)
+            progress_callback(f"選択した入力が見つからないか、有効なファイルを含んでいません: {failed_names}")
+        return False
     
     if not all_files:
         if progress_callback:
@@ -254,7 +267,6 @@ def create_lighten_blend_image(
     max_video_frames_in_memory = max(1, (MAX_MEMORY_BYTES // 2) // single_frame_memory)
     
     composite = first_frame.astype(np.float32)
-    processed = 1
 
     def generate_mask(frame: np.ndarray, source_path: str) -> Optional[np.ndarray]:
         if mask_generator_for_path is not None:
@@ -287,7 +299,9 @@ def create_lighten_blend_image(
         else:
             resized_mask = bright_area_mask
     
+    failed_sources = []
     for idx, file_path in enumerate(all_files, start=1):
+        cap = None
         try:
             file_ext = Path(file_path).suffix.lower()
             
@@ -297,7 +311,11 @@ def create_lighten_blend_image(
             elif file_ext in image_ext:
                 # 画像の場合
                 frame = _imread_unicode(file_path)
-                if frame is not None:
+                if frame is None:
+                    failed_sources.append(file_path)
+                    if progress_callback:
+                        progress_callback(f"画像を読み込めませんでした: {file_path}")
+                else:
                     if frame.shape[1] != base_width or frame.shape[0] != base_height:
                         frame = cv2.resize(frame, (base_width, base_height))
 
@@ -323,7 +341,6 @@ def create_lighten_blend_image(
                         np.maximum(composite, frame_float, out=composite)
                     del frame
                     del frame_float
-                    processed += 1
                     
             else:
                 # 動画の場合：フレームステップを動的に計算
@@ -335,13 +352,15 @@ def create_lighten_blend_image(
                     step = max(1, total_video_frames // max_video_frames_in_memory)
                     
                     frame_idx = 0
+                    decoded_frame_count = 0
                     # Count frame 0, which seeded the composite before this loop.
-                    video_frames_processed = 1 if idx == 1 else 0
+                    video_frames_processed = 0
                     
                     while True:
                         ret, frame = cap.read()
                         if not ret:
                             break
+                        decoded_frame_count += 1
                         
                         # The first video frame was already used to initialize the composite.
                         if frame_idx % step == 0 and not (idx == 1 and frame_idx == 0):
@@ -378,11 +397,21 @@ def create_lighten_blend_image(
                         if frame_idx % 100 == 0:
                             gc.collect()
                     
-                    cap.release()
-                    processed += 1
-                    
-                    if progress_callback and video_frames_processed > 0:
-                        progress_callback(f"動画処理: {os.path.basename(file_path)} ({video_frames_processed}フレーム使用)")
+                    if decoded_frame_count == 0 or (
+                        total_video_frames > 0 and decoded_frame_count < total_video_frames
+                    ):
+                        failed_sources.append(file_path)
+                        if progress_callback:
+                            progress_callback(
+                                f"動画の全フレームを読み込めませんでした: {file_path} "
+                                f"({decoded_frame_count}/{total_video_frames}フレーム)"
+                            )
+                    elif progress_callback:
+                        progress_callback(f"動画処理: {os.path.basename(file_path)} ({video_frames_processed + (1 if idx == 1 else 0)}フレーム使用)")
+                else:
+                    failed_sources.append(file_path)
+                    if progress_callback:
+                        progress_callback(f"動画を開けませんでした: {file_path}")
             
             if progress_callback and idx % 10 == 0:
                 progress = idx / len(all_files) * 100
@@ -392,10 +421,21 @@ def create_lighten_blend_image(
                 gc.collect()
                 
         except Exception as e:
+            failed_sources.append(file_path)
             if progress_callback:
                 progress_callback(f"警告: ファイル処理エラー: {os.path.basename(file_path)} - {e}")
-            continue
+        finally:
+            if cap is not None:
+                cap.release()
     
+    if failed_sources:
+        del composite
+        gc.collect()
+        if progress_callback:
+            failed_names = ", ".join(os.path.basename(path) or path for path in failed_sources)
+            progress_callback(f"入力の処理に失敗したため、合成画像を保存しませんでした: {failed_names}")
+        return False
+
     composite_uint8 = np.clip(composite, 0, 255).astype(np.uint8)
     del composite
     gc.collect()
