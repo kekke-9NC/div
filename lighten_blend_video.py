@@ -18,9 +18,46 @@ from typing import List, Optional, Callable
 import subprocess
 import threading
 import tempfile
+import video_processor
 
 # メモリ制限: 1GB = 1024 * 1024 * 1024 bytes
 MAX_MEMORY_BYTES = 1 * 1024 * 1024 * 1024
+
+
+def _has_same_aspect_ratio(width: int, height: int, base_width: int, base_height: int) -> bool:
+    """Return whether two positive frame sizes have aspect ratios within 0.1%."""
+    return (
+        width > 0
+        and height > 0
+        and base_width > 0
+        and base_height > 0
+        and np.isclose(width / height, base_width / base_height, rtol=1e-3, atol=0.0)
+    )
+
+
+def _aspect_ratios_match(first: float, second: float) -> bool:
+    return first > 0 and second > 0 and np.isclose(first, second, rtol=1e-3, atol=0.0)
+
+
+def _square_pixel_output_size(width: int, height: int, display_aspect_ratio: float) -> tuple:
+    """Keep square-pixel dimensions as-is; expand anamorphic frames to display geometry."""
+    if _aspect_ratios_match(width / height, display_aspect_ratio):
+        return width, height
+
+    output_height = height if height % 2 == 0 else height + 1
+    output_width = max(2, int(round(output_height * display_aspect_ratio)))
+    if output_width % 2:
+        output_width += 1
+    return output_width, output_height
+
+
+def _enable_video_orientation_auto(cap, rotation_degrees: float) -> bool:
+    orientation_property = getattr(cv2, "CAP_PROP_ORIENTATION_AUTO", None)
+    rotation_required = abs(rotation_degrees % 360.0) > 0.5
+    if orientation_property is None:
+        return not rotation_required
+    cap.set(orientation_property, 1)
+    return cap.get(orientation_property) >= 0.5 or not rotation_required
 
 
 def get_video_info(video_path: str) -> Optional[dict]:
@@ -33,17 +70,32 @@ def get_video_info(video_path: str) -> Optional[dict]:
     Returns:
         dict: fps, frame_count, width, height を含む辞書
     """
+    display_info = video_processor.get_video_display_info(video_path)
+    if display_info is None:
+        return None
+
     cap = cv2.VideoCapture(video_path)
     try:
         if not cap.isOpened():
+            return None
+        if not _enable_video_orientation_auto(cap, display_info['rotation_degrees']):
+            return None
+
+        ret, first_frame = cap.read()
+        if not ret or first_frame is None:
+            return None
+        width, height = first_frame.shape[1], first_frame.shape[0]
+        if not _has_same_aspect_ratio(width, height, display_info['width'], display_info['height']):
             return None
 
         return {
             'path': video_path,
             'fps': cap.get(cv2.CAP_PROP_FPS),
             'frame_count': int(cap.get(cv2.CAP_PROP_FRAME_COUNT)),
-            'width': int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
-            'height': int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            'width': width,
+            'height': height,
+            'display_aspect_ratio': display_info['display_aspect_ratio'],
+            'rotation_degrees': display_info['rotation_degrees'],
         }
     except Exception:
         return None
@@ -89,16 +141,44 @@ def create_composite_from_videos(
         return None
         
     composite_image = None
+    video_infos = []
+    for vp in video_paths:
+        info = get_video_info(vp)
+        if info is None or info['width'] <= 0 or info['height'] <= 0:
+            if progress_callback:
+                progress_callback(f"エラー: 動画を開けません: {os.path.basename(vp)}")
+            return None
+        video_infos.append(info)
+
+    base_info = video_infos[0]
+    base_aspect_ratio = base_info['display_aspect_ratio']
+    target_width, target_height = _square_pixel_output_size(
+        base_info['width'], base_info['height'], base_aspect_ratio
+    )
+    for info in video_infos[1:]:
+        if not _aspect_ratios_match(info['display_aspect_ratio'], base_aspect_ratio):
+            if progress_callback:
+                progress_callback(
+                    f"エラー: 動画の表示縦横比が入力間で一致しません: {os.path.basename(info['path'])}"
+                )
+            return None
     
     for i, vp in enumerate(video_paths):
         if progress_callback:
             progress_callback(f"動画をスキャン中 ({i+1}/{len(video_paths)}): {os.path.basename(vp)}")
             
+        info = video_infos[i]
         cap = cv2.VideoCapture(vp)
         try:
             if not cap.isOpened():
                 if progress_callback:
                     progress_callback(f"エラー: 動画を開けません: {os.path.basename(vp)}")
+                return None
+            if not _enable_video_orientation_auto(cap, info['rotation_degrees']):
+                if progress_callback:
+                    progress_callback(
+                        f"エラー: 動画の回転情報を処理できません: {os.path.basename(vp)}"
+                    )
                 return None
             
             frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -113,13 +193,20 @@ def create_composite_from_videos(
                 if not ret or frame is None:
                     break
 
+                if not _has_same_aspect_ratio(
+                    frame.shape[1], frame.shape[0], info['width'], info['height']
+                ):
+                    if progress_callback:
+                        progress_callback(
+                            f"エラー: 動画フレームの縦横比がメタデータと一致しません: {os.path.basename(vp)}"
+                        )
+                    return None
+
                 if count % sample_interval == 0:
                     if composite_image is None:
-                        composite_image = frame.copy()
+                        composite_image = cv2.resize(frame, (target_width, target_height))
                     else:
-                        # サイズが異なる場合はリサイズ（今回は簡易的に最初の動画に合わせる）
-                        if frame.shape != composite_image.shape:
-                            frame = cv2.resize(frame, (composite_image.shape[1], composite_image.shape[0]))
+                        frame = cv2.resize(frame, (target_width, target_height))
                         composite_image = np.maximum(composite_image, frame)
 
                 count += 1
@@ -199,9 +286,18 @@ def create_lighten_blend_video(
         return False
     
     # 最初の動画の解像度を基準にする
-    base_width = video_infos[0]['width']
-    base_height = video_infos[0]['height']
+    base_width, base_height = _square_pixel_output_size(
+        video_infos[0]['width'], video_infos[0]['height'], video_infos[0]['display_aspect_ratio']
+    )
     base_fps = video_infos[0]['fps']
+
+    for info in video_infos[1:]:
+        if not _aspect_ratios_match(
+            info['display_aspect_ratio'], video_infos[0]['display_aspect_ratio']
+        ):
+            if progress_callback:
+                progress_callback(f"エラー: 動画の表示縦横比が入力間で一致しません: {os.path.basename(info['path'])}")
+            return False
     
     if not np.isfinite(base_fps) or base_fps <= 0 or base_fps > 120:
         base_fps = 30.0
@@ -315,6 +411,25 @@ def _create_single_video_with_mask(
             if progress_callback:
                 progress_callback(f"エラー: 動画を開けません: {os.path.basename(video_info['path'])}")
             return False
+        if not _enable_video_orientation_auto(cap, video_info['rotation_degrees']):
+            if progress_callback:
+                progress_callback(
+                    f"エラー: 動画の回転情報を処理できません: {os.path.basename(video_info['path'])}"
+                )
+            return False
+
+        if inclusion_mask is not None and not (
+            _has_same_aspect_ratio(
+                inclusion_mask.shape[1], inclusion_mask.shape[0], base_width, base_height
+            )
+            or _has_same_aspect_ratio(
+                inclusion_mask.shape[1], inclusion_mask.shape[0],
+                video_info['width'], video_info['height']
+            )
+        ):
+            if progress_callback:
+                progress_callback("エラー: マスクと動画の縦横比が一致しません。")
+            return False
     
         command = [
             'ffmpeg', '-y', '-f', 'rawvideo', '-vcodec', 'rawvideo',
@@ -354,6 +469,16 @@ def _create_single_video_with_mask(
                     progress_callback(
                         f"エラー: 動画を最後まで読み込めません: "
                         f"{os.path.basename(video_info['path'])} ({frames_written}/{frame_count} フレーム)"
+                    )
+                break
+
+            if not _has_same_aspect_ratio(
+                frame.shape[1], frame.shape[0], video_info['width'], video_info['height']
+            ):
+                if progress_callback:
+                    progress_callback(
+                        f"エラー: 動画フレームの縦横比が入力と一致しません: "
+                        f"{os.path.basename(video_info['path'])}"
                     )
                 break
             
@@ -427,6 +552,15 @@ def _create_lighten_blend_video_streaming(
             if progress_callback:
                 progress_callback(f"エラー: 動画を開けません: {os.path.basename(info['path'])}")
             return False
+        if not _enable_video_orientation_auto(cap, info['rotation_degrees']):
+            cap.release()
+            for cap_info in caps:
+                cap_info['cap'].release()
+            if progress_callback:
+                progress_callback(
+                    f"エラー: 動画の回転情報を処理できません: {os.path.basename(info['path'])}"
+                )
+            return False
 
         # バッファサイズを最小に設定してメモリ節約
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
@@ -499,6 +633,16 @@ def _create_lighten_blend_video_streaming(
         # 共通マスクの前処理（ループ外で一度だけ実行）
         common_mask_3ch = None
         if inclusion_mask is not None:
+            if not (
+                _has_same_aspect_ratio(
+                    inclusion_mask.shape[1], inclusion_mask.shape[0], base_width, base_height
+                )
+                or _has_same_aspect_ratio(
+                    inclusion_mask.shape[1], inclusion_mask.shape[0],
+                    video_infos[0]['width'], video_infos[0]['height']
+                )
+            ):
+                raise ValueError("マスクと動画の縦横比が一致しません")
             # マスクサイズが異なる場合はリサイズ
             if inclusion_mask.shape[:2] != (base_height, base_width):
                 resized_mask = cv2.resize(inclusion_mask, (base_width, base_height))
@@ -518,6 +662,18 @@ def _create_lighten_blend_video_streaming(
                 video_path = cap_info['path']
                 if video_path in per_video_masks:
                     mask = per_video_masks[video_path]
+                    if not (
+                        _has_same_aspect_ratio(
+                            mask.shape[1], mask.shape[0], base_width, base_height
+                        )
+                        or _has_same_aspect_ratio(
+                            mask.shape[1], mask.shape[0],
+                            cap_info['width'], cap_info['height']
+                        )
+                    ):
+                        raise ValueError(
+                            f"マスクと動画の縦横比が一致しません: {os.path.basename(video_path)}"
+                        )
                     if mask.shape[:2] != (base_height, base_width):
                         mask = cv2.resize(mask, (base_width, base_height))
                     if len(mask.shape) == 2:
@@ -552,6 +708,13 @@ def _create_lighten_blend_video_streaming(
                     if frame is None:
                         raise RuntimeError(
                             f"動画フレームを取得できません: {os.path.basename(cap_info['path'])}"
+                        )
+                    if not _has_same_aspect_ratio(
+                        frame.shape[1], frame.shape[0], cap_info['width'], cap_info['height']
+                    ):
+                        raise RuntimeError(
+                            f"動画フレームの縦横比が基準入力と一致しません: "
+                            f"{os.path.basename(cap_info['path'])}"
                         )
                     # 解像度が異なる場合はリサイズ
                     if frame.shape[1] != base_width or frame.shape[0] != base_height:
@@ -734,7 +897,7 @@ def _create_lighten_blend_video_batched(
             
             success = _create_lighten_blend_video_streaming(
                 final_infos, output_path, base_width, base_height, base_fps, 
-                max_frames, progress_callback, inclusion_mask
+                max_frames, progress_callback, inclusion_mask=None
             )
             
             if not success:

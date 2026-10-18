@@ -13,6 +13,7 @@ from pathlib import Path
 from datetime import datetime
 from typing import List, Optional, Callable
 import config
+import video_processor
 
 
 def _imread_unicode(path: str):
@@ -36,6 +37,34 @@ def get_supported_extensions() -> tuple:
     image_ext = ('.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif')
     video_ext = ('.mp4', '.avi', '.mov', '.mkv', '.wmv')
     return image_ext, video_ext
+
+
+def _has_same_aspect_ratio(width: int, height: int, base_width: int, base_height: int) -> bool:
+    """Return whether two positive image sizes have aspect ratios within 0.1%."""
+    return (
+        width > 0
+        and height > 0
+        and base_width > 0
+        and base_height > 0
+        and np.isclose(width / height, base_width / base_height, rtol=1e-3, atol=0.0)
+    )
+
+
+def _aspect_ratios_match(first: float, second: float) -> bool:
+    return (
+        first is not None and second is not None
+        and first > 0 and second > 0
+        and np.isclose(first, second, rtol=1e-3, atol=0.0)
+    )
+
+
+def _enable_video_orientation_auto(cap, rotation_degrees: float) -> bool:
+    orientation_property = getattr(cv2, "CAP_PROP_ORIENTATION_AUTO", None)
+    rotation_required = abs(rotation_degrees % 360.0) > 0.5
+    if orientation_property is None:
+        return not rotation_required
+    cap.set(orientation_property, 1)
+    return cap.get(orientation_property) >= 0.5 or not rotation_required
 
 
 def get_default_output_path(base_folder: str = None) -> str:
@@ -108,7 +137,9 @@ def estimate_memory_usage(width: int, height: int, num_concurrent: int = 2) -> i
     return frame_size * num_concurrent
 
 
-def get_frame_from_video(video_path: str, frame_index: int = 0) -> Optional[np.ndarray]:
+def get_frame_from_video(
+    video_path: str, frame_index: int = 0, display_info: Optional[dict] = None
+) -> Optional[np.ndarray]:
     """
     動画から指定フレームを取得する。
     
@@ -119,8 +150,16 @@ def get_frame_from_video(video_path: str, frame_index: int = 0) -> Optional[np.n
     Returns:
         フレーム画像 or None
     """
+    if display_info is None:
+        display_info = video_processor.get_video_display_info(video_path)
+    if display_info is None:
+        return None
+
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
+        return None
+    if not _enable_video_orientation_auto(cap, display_info['rotation_degrees']):
+        cap.release()
         return None
     
     if frame_index > 0:
@@ -128,8 +167,14 @@ def get_frame_from_video(video_path: str, frame_index: int = 0) -> Optional[np.n
     
     ret, frame = cap.read()
     cap.release()
-    
-    return frame if ret else None
+
+    if not ret or frame is None:
+        return None
+    if not _has_same_aspect_ratio(
+        frame.shape[1], frame.shape[0], display_info['width'], display_info['height']
+    ):
+        return None
+    return frame
 
 
 def extract_frames_from_video(
@@ -240,11 +285,22 @@ def create_lighten_blend_image(
     
     first_file = all_files[0]
     first_ext = Path(first_file).suffix.lower()
+    first_video_raster_size = None
+    first_video_display_info = None
     
     if first_ext in image_ext:
         first_frame = _imread_unicode(first_file)
+        base_display_aspect_ratio = None
     else:
-        first_frame = get_frame_from_video(first_file)
+        first_video_display_info = video_processor.get_video_display_info(first_file)
+        first_frame = get_frame_from_video(first_file, display_info=first_video_display_info)
+        if first_frame is not None:
+            first_video_raster_size = (first_frame.shape[1], first_frame.shape[0])
+            base_display_aspect_ratio = first_video_display_info['display_aspect_ratio']
+            base_height = first_frame.shape[0]
+            base_width = max(1, int(round(base_height * base_display_aspect_ratio)))
+            if (first_frame.shape[1], first_frame.shape[0]) != (base_width, base_height):
+                first_frame = cv2.resize(first_frame, (base_width, base_height))
     
     if first_frame is None:
         if progress_callback:
@@ -252,6 +308,23 @@ def create_lighten_blend_image(
         return False
     
     base_height, base_width = first_frame.shape[:2]
+    if base_display_aspect_ratio is None:
+        base_display_aspect_ratio = base_width / base_height
+
+    if bright_area_mask is not None and not (
+        _has_same_aspect_ratio(
+            bright_area_mask.shape[1], bright_area_mask.shape[0], base_width, base_height
+        )
+        or (
+            first_video_raster_size is not None
+            and _has_same_aspect_ratio(
+                bright_area_mask.shape[1], bright_area_mask.shape[0], *first_video_raster_size
+            )
+        )
+    ):
+        if progress_callback:
+            progress_callback("エラー: マスクと入力画像の縦横比が一致しません。")
+        return False
     
     # メモリ計算
     single_frame_memory = base_width * base_height * 3
@@ -286,6 +359,14 @@ def create_lighten_blend_image(
                 progress_callback(f"最初のファイルのマスク生成に失敗しました: {first_file} - {e}")
             return False
         if first_mask is not None:
+            if not _has_same_aspect_ratio(
+                first_mask.shape[1], first_mask.shape[0], base_width, base_height
+            ):
+                del composite
+                gc.collect()
+                if progress_callback:
+                    progress_callback(f"最初のファイルのマスクと入力の縦横比が一致しません: {first_file}")
+                return False
             if first_mask.shape[0] != base_height or first_mask.shape[1] != base_width:
                 first_mask = cv2.resize(first_mask, (base_width, base_height), interpolation=cv2.INTER_NEAREST)
             
@@ -322,6 +403,12 @@ def create_lighten_blend_image(
                     failed_sources.append(file_path)
                     if progress_callback:
                         progress_callback(f"画像を読み込めませんでした: {file_path}")
+                elif not _has_same_aspect_ratio(
+                    frame.shape[1], frame.shape[0], base_width, base_height
+                ):
+                    failed_sources.append(file_path)
+                    if progress_callback:
+                        progress_callback(f"入力の縦横比が基準画像と一致しません: {file_path}")
                 else:
                     if frame.shape[1] != base_width or frame.shape[0] != base_height:
                         frame = cv2.resize(frame, (base_width, base_height))
@@ -334,6 +421,10 @@ def create_lighten_blend_image(
                         generated = generate_mask(frame, file_path)
                         if generated is not None:
                             if generated.shape[0] != base_height or generated.shape[1] != base_width:
+                                if not _has_same_aspect_ratio(
+                                    generated.shape[1], generated.shape[0], base_width, base_height
+                                ):
+                                    raise ValueError("生成マスクと入力画像の縦横比が一致しません")
                                 current_mask = cv2.resize(generated, (base_width, base_height), interpolation=cv2.INTER_NEAREST)
                             else:
                                 current_mask = generated
@@ -354,12 +445,36 @@ def create_lighten_blend_image(
                 cap = cv2.VideoCapture(file_path)
                 if cap.isOpened():
                     total_video_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                    video_display_info = (
+                        first_video_display_info
+                        if file_path == first_file
+                        else video_processor.get_video_display_info(file_path)
+                    )
+                    if video_display_info is None or not _enable_video_orientation_auto(
+                        cap,
+                        video_display_info['rotation_degrees'] if video_display_info else 0.0
+                    ):
+                        failed_sources.append(file_path)
+                        if progress_callback:
+                            progress_callback(f"動画の表示情報または回転を取得できません: {file_path}")
+                        continue
+                    video_width = video_display_info['width']
+                    video_height = video_display_info['height']
+                    video_display_aspect_ratio = video_display_info['display_aspect_ratio']
+                    if not _aspect_ratios_match(
+                        video_display_aspect_ratio, base_display_aspect_ratio
+                    ):
+                        failed_sources.append(file_path)
+                        if progress_callback:
+                            progress_callback(f"動画の表示縦横比が基準入力と一致しません: {file_path}")
+                        continue
                     
                     # メモリを超えないようにステップを計算
                     step = max(1, total_video_frames // max_video_frames_in_memory)
                     
                     frame_idx = 0
                     decoded_frame_count = 0
+                    frame_geometry_mismatch = False
                     # Count frame 0, which seeded the composite before this loop.
                     video_frames_processed = 0
                     
@@ -368,12 +483,18 @@ def create_lighten_blend_image(
                         if not ret:
                             break
                         decoded_frame_count += 1
+
+                        if not _has_same_aspect_ratio(
+                            frame.shape[1], frame.shape[0], video_width, video_height
+                        ):
+                            frame_geometry_mismatch = True
+                            break
+
+                        if frame.shape[1] != base_width or frame.shape[0] != base_height:
+                            frame = cv2.resize(frame, (base_width, base_height))
                         
                         # The first video frame was already used to initialize the composite.
                         if frame_idx % step == 0 and not (idx == 1 and frame_idx == 0):
-                            if frame.shape[1] != base_width or frame.shape[0] != base_height:
-                                frame = cv2.resize(frame, (base_width, base_height))
-                            
                             frame_float = frame.astype(np.float32)
                             
                             # 動的マスク生成（全画像処理）
@@ -382,6 +503,11 @@ def create_lighten_blend_image(
                                 generated = generate_mask(frame, file_path)
                                 if generated is not None:
                                     if generated.shape[0] != base_height or generated.shape[1] != base_width:
+                                        if not _has_same_aspect_ratio(
+                                            generated.shape[1], generated.shape[0],
+                                            frame.shape[1], frame.shape[0]
+                                        ):
+                                            raise ValueError("生成マスクと動画フレームの縦横比が一致しません")
                                         current_mask = cv2.resize(generated, (base_width, base_height), interpolation=cv2.INTER_NEAREST)
                                     else:
                                         current_mask = generated
@@ -404,7 +530,11 @@ def create_lighten_blend_image(
                         if frame_idx % 100 == 0:
                             gc.collect()
                     
-                    if decoded_frame_count == 0 or (
+                    if frame_geometry_mismatch:
+                        failed_sources.append(file_path)
+                        if progress_callback:
+                            progress_callback(f"動画のフレームが基準入力と異なる縦横比です: {file_path}")
+                    elif decoded_frame_count == 0 or (
                         total_video_frames > 0 and decoded_frame_count < total_video_frames
                     ):
                         failed_sources.append(file_path)

@@ -13,6 +13,7 @@ import tempfile
 import json
 import re
 import time
+import math
 from typing import List, Callable, Optional, Tuple
 
 # NVENCの利用可否をキャッシュ
@@ -111,12 +112,123 @@ def get_video_info(video_path: str) -> Optional[dict]:
             "-show_streams",
             video_path
         ]
-        result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace')
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=30
+        )
         if result.returncode == 0:
             return json.loads(result.stdout)
     except Exception as e:
         print(f"動画情報の取得に失敗: {e}")
     return None
+
+
+def _parse_aspect_ratio(value) -> Optional[float]:
+    """Parse an ffprobe ratio such as ``16:9`` into a positive float."""
+    if not isinstance(value, str) or value.strip().upper() in {"", "N/A", "0:0"}:
+        return None
+    try:
+        separator = ":" if ":" in value else "/" if "/" in value else None
+        if separator:
+            numerator, denominator = value.split(separator, 1)
+            ratio = float(numerator) / float(denominator)
+        else:
+            ratio = float(value)
+        return ratio if math.isfinite(ratio) and ratio > 0 else None
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+
+
+def _ffprobe_flag(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    try:
+        return int(value) != 0
+    except (TypeError, ValueError):
+        return isinstance(value, str) and value.strip().lower() in {"true", "yes"}
+
+
+def get_video_display_info(
+    video_path: str, fallback_width: int = 0, fallback_height: int = 0
+) -> Optional[dict]:
+    """Return display geometry and orientation for the primary video stream."""
+    info = get_video_info(video_path)
+    if not isinstance(info, dict):
+        return None
+
+    streams = info.get("streams")
+    if not isinstance(streams, list):
+        return None
+    video_streams = [
+        item for item in streams
+        if isinstance(item, dict)
+        and item.get("codec_type") == "video"
+        and not _ffprobe_flag(
+            (item.get("disposition") if isinstance(item.get("disposition"), dict) else {}).get("attached_pic", 0)
+        )
+    ]
+    if not video_streams:
+        return None
+    stream = next(
+        (
+            item for item in video_streams
+            if _ffprobe_flag(
+                (item.get("disposition") if isinstance(item.get("disposition"), dict) else {}).get("default", 0)
+            )
+        ),
+        video_streams[0],
+    )
+
+    try:
+        width = int(stream.get("width") or fallback_width)
+        height = int(stream.get("height") or fallback_height)
+    except (TypeError, ValueError):
+        return None
+    if width <= 0 or height <= 0:
+        return None
+
+    display_ratio = _parse_aspect_ratio(stream.get("display_aspect_ratio"))
+    if display_ratio is None:
+        sample_ratio = _parse_aspect_ratio(stream.get("sample_aspect_ratio"))
+        display_ratio = (width / height * sample_ratio) if sample_ratio is not None else width / height
+
+    rotation = None
+    side_data_list = stream.get("side_data_list")
+    if not isinstance(side_data_list, list):
+        side_data_list = []
+    for side_data in side_data_list:
+        if isinstance(side_data, dict) and "rotation" in side_data:
+            try:
+                rotation = float(side_data["rotation"])
+                break
+            except (TypeError, ValueError):
+                pass
+    if rotation is None:
+        try:
+            tags = stream.get("tags")
+            rotation = float((tags if isinstance(tags, dict) else {}).get("rotate", 0))
+        except (TypeError, ValueError):
+            rotation = 0.0
+    if not math.isfinite(rotation):
+        return None
+    rotation = ((rotation + 180.0) % 360.0) - 180.0
+    quarter_turns = round(rotation / 90.0)
+    if not math.isclose(rotation, quarter_turns * 90.0, abs_tol=0.5):
+        return None
+
+    decoded_width, decoded_height = width, height
+    if quarter_turns % 2:
+        display_ratio = 1.0 / display_ratio
+        decoded_width, decoded_height = height, width
+
+    if not math.isfinite(display_ratio) or display_ratio <= 0:
+        return None
+    return {
+        "display_aspect_ratio": display_ratio,
+        "raster_aspect_ratio": decoded_width / decoded_height,
+        "width": decoded_width,
+        "height": decoded_height,
+        "rotation_degrees": rotation,
+    }
 
 
 def get_video_duration(video_path: str) -> float:
