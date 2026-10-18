@@ -432,9 +432,12 @@ def concatenate_videos(
 
     # セーフモード: すべてのファイルを一時MPEG-TSに変換
     ts_temp_files = []
-    ts_temp_paths = []
     ts_temp_dir = None
     files_to_concat = valid_files # デフォルトは元のファイル
+
+    def cleanup_safe_concat_temp_dir():
+        if ts_temp_dir:
+            shutil.rmtree(ts_temp_dir, ignore_errors=True)
 
     if safe_mode:
         failed_conversion_files = []
@@ -448,10 +451,10 @@ def concatenate_videos(
             for i, vf in enumerate(valid_files):
                 # キャンセル確認
                 if cancel_check and cancel_check():
+                    cleanup_safe_concat_temp_dir()
                     return False, "処理がキャンセルされました"
 
                 ts_path = os.path.join(ts_dir, f"temp_{i:04d}.ts")
-                ts_temp_paths.append(ts_path)
                 
                 # ストリームコピーでTS変換 (高速)
                 # -bsf:v h264_mp4toannexb は自動で適用されることが多いが明示的に指定も可
@@ -485,6 +488,7 @@ def concatenate_videos(
                     ts_cmd, cancel_check
                 )
                 if was_cancelled:
+                    cleanup_safe_concat_temp_dir()
                     return False, "処理がキャンセルされました"
                 
                 # 変換成功チェック
@@ -510,6 +514,7 @@ def concatenate_videos(
                         repair_cmd, cancel_check
                     )
                     if was_cancelled:
+                        cleanup_safe_concat_temp_dir()
                         return False, "処理がキャンセルされました"
                     if repair_return_code == 0:
                         conversion_success = True
@@ -529,15 +534,7 @@ def concatenate_videos(
             if failed_conversion_files and ts_temp_files:
                 # Do not continue with a partial input list: a short omitted clip
                 # can still leave the output above the duration-ratio threshold.
-                for ts_file in ts_temp_paths:
-                    try:
-                        os.unlink(ts_file)
-                    except OSError:
-                        pass
-                try:
-                    os.rmdir(ts_temp_dir)
-                except OSError:
-                    pass
+                cleanup_safe_concat_temp_dir()
                 failed_names = ", ".join(os.path.basename(path) for path in failed_conversion_files)
                 return False, f"セーフモードで一部の動画を変換できなかったため、連結を中止しました: {failed_names}"
             
@@ -806,17 +803,7 @@ def concatenate_videos(
             pass
         
         # セーフモードの一時ファイルを削除
-        for ts_file in ts_temp_paths:
-            try:
-                os.unlink(ts_file)
-            except:
-                pass
-        # 一時ディレクトリ削除
-        if ts_temp_dir:
-            try:
-                os.rmdir(ts_temp_dir)
-            except:
-                pass
+        cleanup_safe_concat_temp_dir()
 
 
 def get_supported_video_extensions() -> List[str]:
