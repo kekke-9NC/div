@@ -434,7 +434,10 @@ def _create_single_video_with_mask(
         command = [
             'ffmpeg', '-y', '-f', 'rawvideo', '-vcodec', 'rawvideo',
             '-s', f'{base_width}x{base_height}', '-pix_fmt', 'bgr24',
-            '-r', str(base_fps), '-i', '-', '-an', '-c:v', 'libx264',
+            '-r', str(base_fps), '-i', '-',
+            '-vf', 'pad=ceil(iw/2)*2:ceil(ih/2)*2',
+            '-aspect', f"{video_info['display_aspect_ratio']:.12g}",
+            '-an', '-c:v', 'libx264',
             '-preset', 'medium', '-crf', '18', '-pix_fmt', 'yuv420p',
             output_path
         ]
@@ -589,7 +592,10 @@ def _create_lighten_blend_video_streaming(
     command = [
         'ffmpeg', '-y', '-f', 'rawvideo', '-vcodec', 'rawvideo',
         '-s', f'{base_width}x{base_height}', '-pix_fmt', 'bgr24',
-        '-r', str(base_fps), '-i', '-', '-an', '-c:v', 'libx264',
+        '-r', str(base_fps), '-i', '-',
+        '-vf', 'pad=ceil(iw/2)*2:ceil(ih/2)*2',
+        '-aspect', f"{video_infos[0]['display_aspect_ratio']:.12g}",
+        '-an', '-c:v', 'libx264',
         '-preset', 'medium', '-crf', '18', '-pix_fmt', 'yuv420p',
         output_path
     ]
@@ -896,7 +902,10 @@ def _create_lighten_blend_video_batched(
                 return False
             
             success = _create_lighten_blend_video_streaming(
-                final_infos, output_path, base_width, base_height, base_fps, 
+                final_infos, output_path,
+                base_width + base_width % 2,
+                base_height + base_height % 2,
+                base_fps,
                 max_frames, progress_callback, inclusion_mask=None
             )
             
