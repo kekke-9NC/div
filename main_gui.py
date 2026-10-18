@@ -6795,30 +6795,36 @@ atomcam2で利用する場合は、GitHubで公開されている
                     if self._close_wait_started:
                         return
                     # 動画ごとの個別マスクを作成（和集合ではなく、各動画に対応するマスクのみ適用）
-                    per_video_masks = {}
-                    base_shape = None
+                    base_shape = next(iter(video_composites.values()))['shape']
+                    # Default every input to an empty inclusion mask so videos
+                    # without detections (or without a preview result) cannot
+                    # contribute unmasked background to a meteor-only output.
+                    per_video_masks = {
+                        vp: np.zeros(base_shape, dtype=np.uint8)
+                        for vp in video_files
+                    }
                     has_detections = False
-                    
+
                     for vp, data in video_composites.items():
                         filename = data['filename']
-                        if filename in results:
-                            boxes = results[filename]['boxes']
-                            if boxes:
-                                has_detections = True
-                                h, w = data['shape']
-                                if base_shape is None:
-                                    base_shape = (h, w)
-                                
-                                mask = bright_area_detector.create_inclusion_mask_from_boxes(
-                                    (h, w), boxes, margin=40
+                        result = results.get(filename)
+                        boxes = result.get('boxes', []) if isinstance(result, dict) else []
+                        if boxes:
+                            has_detections = True
+                            h, w = data['shape']
+                            mask = bright_area_detector.create_inclusion_mask_from_boxes(
+                                (h, w), boxes, margin=40
+                            )
+
+                            # サイズが異なる場合は最近傍補間でリサイズ
+                            if base_shape != (h, w):
+                                mask = cv2.resize(
+                                    mask, (base_shape[1], base_shape[0]),
+                                    interpolation=cv2.INTER_NEAREST
                                 )
-                                
-                                # サイズが異なる場合はリサイズ
-                                if base_shape != (h, w):
-                                    mask = cv2.resize(mask, (base_shape[1], base_shape[0]))
-                                
-                                # 動画パスをキーとして個別マスクを保存
-                                per_video_masks[vp] = mask
+
+                            # 動画パスをキーとして個別マスクを保存
+                            per_video_masks[vp] = mask
                     
                     if not has_detections:
                         if not messagebox.askyesno("確認", "流星が検出されていないか、選択されていません。\\nマスクなしで（通常の比較明合成として）作成しますか？"):
@@ -6830,6 +6836,8 @@ atomcam2で利用する場合は、GitHubで公開されている
                                 except:
                                     pass
                             return
+                        # The user explicitly chose a regular, unmasked blend.
+                        per_video_masks = {}
                     
                     # 動画ごとのマスクを適用して動画作成
                     def run_video_task():
