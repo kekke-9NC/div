@@ -4966,16 +4966,23 @@ atomcam2で利用する場合は、GitHubで公開されている
                     # Avoid treating transient error words in exception text as 'complete',
                     # because many libraries surface English words like 'failed' in tracebacks
                     # and that would erroneously stop ETA updates.
+                    has_source_failures = "件の動画で失敗しました" in message
+                    has_pipeline_failure = message.startswith("パイプライン実行中に例外が発生しました:")
                     is_complete = (
                         "すべての処理が完了しました" in message or
                         "監視を終了しました" in message or
                         "統合処理終了" in message or
-                        "処理はキャンセルされました" in message
+                        "処理はキャンセルされました" in message or
+                        has_source_failures or
+                        has_pipeline_failure
                     )
                     if is_complete:
                         self.update_start_button_state()
                         self.cancel_button.config(state=tk.DISABLED)
-                        self.status_label.config(text="完了/停止")
+                        status = "処理失敗" if has_pipeline_failure else (
+                            "一部失敗" if has_source_failures else "完了/停止"
+                        )
+                        self.status_label.config(text=status)
                         if "すべての処理が完了しました" in message:
                             self.progress['value'] = self.progress['maximum']
                         self.start_time_gui = None
@@ -7724,12 +7731,11 @@ def worker_main_loop(
     if total_videos == 0: return
 
     # Use a two-stage pipeline (downloaders + processors) implemented in download_pipeline
-    tmp_root_dir = config.TEMP_VIDEO_DIR
-    os.makedirs(tmp_root_dir, exist_ok=True)
-
     try:
+        tmp_root_dir = config.TEMP_VIDEO_DIR
+        os.makedirs(tmp_root_dir, exist_ok=True)
         status_callback = getattr(progress_queue, "put_status", STATUS_CALLBACK)
-        download_pipeline.run_pipeline(
+        pipeline_result = download_pipeline.run_pipeline(
             sources=sources,
             max_workers=max_workers,
             interval=interval,
@@ -7748,7 +7754,14 @@ def worker_main_loop(
         )
 
         if not cancel_flag.is_set():
-            progress_queue.put(("すべての処理が完了しました。", None))
+            failures = pipeline_result.get("failures", []) if isinstance(pipeline_result, dict) else []
+            if failures:
+                progress_queue.put((
+                    f"処理は完了しましたが、{len(failures)}件の動画で失敗しました。ログを確認してください。",
+                    None,
+                ))
+            else:
+                progress_queue.put(("すべての処理が完了しました。", None))
         else:
             progress_queue.put(("処理はキャンセルされました。", None))
 

@@ -33,11 +33,20 @@ def run_pipeline(
     - cancel_flag: threading.Event to signal cancellation
     """
     if not sources:
-        return
+        return {"total_sources": 0, "failures": []}
 
     # simple shared index for downloaders
     src_lock = threading.Lock()
     src_index = {'i': 0}
+    failure_records = []
+
+    def record_failure(source_path, stage, error):
+        with src_lock:
+            failure_records.append({
+                "path": source_path,
+                "stage": stage,
+                "error": str(error),
+            })
 
     # Allow a larger buffer so downloaders can queue more items without
     # overwhelming processors; user requested max_workers * 20.
@@ -129,6 +138,7 @@ def run_pipeline(
 
             if last_exc is not None:
                 # final failure after retries
+                record_failure(path, "download", last_exc)
                 try:
                     progress_callback((f"ダウンロード失敗: {path} ({last_exc})", None))
                 except Exception:
@@ -173,9 +183,11 @@ def run_pipeline(
                 video_processing.create_line_video_clips(
                     local_path, False, interval, duration, config.MIN_LINE_LENGTH, mask, None, progress_callback,
                     meteor_save_path, not_meteor_save_path, (global_wcs_info is not None), global_wcs_info,
-                    plate_solve_mask, config.RTSP_BUFFER_DURATION, cancel_flag, save_options or {}, False, summary_video_config
+                    plate_solve_mask, config.RTSP_BUFFER_DURATION, cancel_flag, save_options or {}, False,
+                    summary_video_config, raise_on_error=True
                 )
             except Exception as e:
+                record_failure(src.get('path') if isinstance(src, dict) else local_path, "processing", e)
                 try:
                     progress_callback((f"処理エラー ({local_path}): {e}", None))
                 except Exception:
@@ -265,3 +277,9 @@ def run_pipeline(
         status_stop_event.set()
         if status_thread:
             status_thread.join()
+
+    with src_lock:
+        return {
+            "total_sources": len(sources),
+            "failures": list(failure_records),
+        }
