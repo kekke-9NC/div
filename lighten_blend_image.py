@@ -278,19 +278,22 @@ def create_lighten_blend_image(
         else:
             resized_mask = bright_area_mask
     
-    for idx, file_path in enumerate(all_files[1:], start=2):
+    for idx, file_path in enumerate(all_files, start=1):
         try:
             file_ext = Path(file_path).suffix.lower()
             
-            if file_ext in image_ext:
+            if file_ext in image_ext and idx == 1:
+                # The first image was already used to initialize the composite.
+                pass
+            elif file_ext in image_ext:
                 # 画像の場合
                 frame = _imread_unicode(file_path)
                 if frame is not None:
                     if frame.shape[1] != base_width or frame.shape[0] != base_height:
                         frame = cv2.resize(frame, (base_width, base_height))
-                    
+
                     frame_float = frame.astype(np.float32)
-                    
+
                     # 動的マスク生成（全画像処理）
                     current_mask = resized_mask
                     if mask_generator is not None:
@@ -300,12 +303,12 @@ def create_lighten_blend_image(
                                 current_mask = cv2.resize(generated, (base_width, base_height), interpolation=cv2.INTER_NEAREST)
                             else:
                                 current_mask = generated
-                    
+
                     if current_mask is not None:
                         # マスク領域（0の部分）は合成しない
                         mask_bool = current_mask > 0
-                        composite = np.where(mask_bool[:, :, np.newaxis], 
-                                             np.maximum(composite, frame_float), 
+                        composite = np.where(mask_bool[:, :, np.newaxis],
+                                             np.maximum(composite, frame_float),
                                              composite)
                     else:
                         np.maximum(composite, frame_float, out=composite)
@@ -323,14 +326,16 @@ def create_lighten_blend_image(
                     step = max(1, total_video_frames // max_video_frames_in_memory)
                     
                     frame_idx = 0
-                    video_frames_processed = 0
+                    # Count frame 0, which seeded the composite before this loop.
+                    video_frames_processed = 1 if idx == 1 else 0
                     
                     while True:
                         ret, frame = cap.read()
                         if not ret:
                             break
                         
-                        if frame_idx % step == 0:
+                        # The first video frame was already used to initialize the composite.
+                        if frame_idx % step == 0 and not (idx == 1 and frame_idx == 0):
                             if frame.shape[1] != base_width or frame.shape[0] != base_height:
                                 frame = cv2.resize(frame, (base_width, base_height))
                             
