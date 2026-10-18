@@ -6803,6 +6803,14 @@ atomcam2で利用する場合は、GitHubで公開されている
         
         # 動画ごとの一時ファイルパスを保存（画像はメモリに保持しない）
         video_composites = {}  # {video_path: {'temp_path': str, 'filename': str, 'shape': (h, w)}}
+
+        def cleanup_video_composites():
+            for data in video_composites.values():
+                try:
+                    if os.path.exists(data['temp_path']):
+                        os.remove(data['temp_path'])
+                except OSError:
+                    pass
         
         def run_prep_task():
             if self._close_wait_started:
@@ -6811,32 +6819,58 @@ atomcam2で利用する場合は、GitHubで公開されている
                 return
 
             # Step 1: 各動画から個別に比較明合成画像を作成
+            failed_videos = []
             for i, vp in enumerate(video_files):
                 self.append_log(f"動画 {i+1}/{len(video_files)} から合成画像を作成中: {os.path.basename(vp)}")
-                
-                composite_image = lighten_blend_video.create_composite_from_videos(
-                    [vp],  # 1つの動画のみ
-                    progress_callback=None,  # 個別のログは抑制
-                    sample_interval=1  # 全フレームを使用（流星を見逃さないため）
-                )
+
+                try:
+                    composite_image = lighten_blend_video.create_composite_from_videos(
+                        [vp],  # 1つの動画のみ
+                        progress_callback=None,  # 個別のログは抑制
+                        sample_interval=1  # 全フレームを使用（流星を見逃さないため）
+                    )
+                except Exception as exc:
+                    composite_image = None
+                    self.append_log(f"動画のプレビュー作成でエラー: {os.path.basename(vp)} - {exc}")
                 
                 if composite_image is not None:
                     # 一時ファイルとして保存
                     temp_path = os.path.join(config.TEMP_CLIP_DIR, f"temp_composite_{i}_{os.path.basename(vp)}.png")
                     h, w = composite_image.shape[:2]
-                    cv2.imwrite(temp_path, composite_image)
-                    
-                    video_composites[vp] = {
-                        'temp_path': temp_path,
-                        'filename': os.path.basename(temp_path),
-                        'shape': (h, w)  # サイズ情報のみ保持
-                    }
+                    try:
+                        saved = cv2.imwrite(temp_path, composite_image)
+                    except Exception as exc:
+                        saved = False
+                        self.append_log(f"プレビュー画像の保存でエラー: {os.path.basename(vp)} - {exc}")
+
+                    if saved:
+                        video_composites[vp] = {
+                            'temp_path': temp_path,
+                            'filename': os.path.basename(temp_path),
+                            'shape': (h, w)  # サイズ情報のみ保持
+                        }
+                    else:
+                        failed_videos.append(vp)
+                        try:
+                            if os.path.exists(temp_path):
+                                os.remove(temp_path)
+                        except OSError:
+                            pass
                     
                     # メモリ解放
                     del composite_image
                     gc.collect()
                 else:
+                    failed_videos.append(vp)
                     self.append_log(f"警告: 動画から合成画像を作成できませんでした: {os.path.basename(vp)}")
+
+            if failed_videos:
+                cleanup_video_composites()
+                failed_names = ", ".join(os.path.basename(path) for path in failed_videos)
+                message = f"次の動画をプレビュー用に処理できませんでした。入力を確認して、もう一度実行してください。\n{failed_names}"
+                self.append_log(message.replace("\n", " "))
+                self._show_worker_result_dialog("showerror", "動画の前処理エラー", message)
+                return
             
             if not video_composites:
                 self._show_worker_result_dialog("showerror", "エラー", "有効な合成画像を作成できませんでした。")
@@ -6851,6 +6885,17 @@ atomcam2で利用する場合は、GitHubで公開されている
                 # 合成開始コールバック
                 def start_video_synthesis_with_results(results):
                     if self._close_wait_started:
+                        return
+                    missing_previews = [
+                        data['temp_path']
+                        for data in video_composites.values()
+                        if data['filename'] not in results
+                    ]
+                    if missing_previews:
+                        failed_names = ", ".join(os.path.basename(path) for path in missing_previews)
+                        message = f"一部の動画プレビュー結果がありません。解析をやり直してください。\n{failed_names}"
+                        self.append_log(message.replace("\n", " "))
+                        self._show_worker_result_dialog("showerror", "動画解析未完了", message)
                         return
                     # 動画ごとの個別マスクを作成（和集合ではなく、各動画に対応するマスクのみ適用）
                     base_shape = next(iter(video_composites.values()))['shape']
@@ -6887,12 +6932,7 @@ atomcam2で利用する場合は、GitHubで公開されている
                     if not has_detections:
                         if not messagebox.askyesno("確認", "流星が検出されていないか、選択されていません。\\nマスクなしで（通常の比較明合成として）作成しますか？"):
                             # 一時ファイルのクリーンアップ
-                            for data in video_composites.values():
-                                try:
-                                    if os.path.exists(data['temp_path']):
-                                        os.remove(data['temp_path'])
-                                except:
-                                    pass
+                            cleanup_video_composites()
                             return
                         # The user explicitly chose a regular, unmasked blend.
                         per_video_masks = {}
@@ -6920,12 +6960,7 @@ atomcam2で利用する場合は、GitHubで公開されている
                             self.append_log("比較明合成動画の作成に失敗しました。")
                         
                         # 一時ファイルのクリーンアップ
-                        for data in video_composites.values():
-                            try:
-                                if os.path.exists(data['temp_path']):
-                                    os.remove(data['temp_path'])
-                            except:
-                                pass
+                        cleanup_video_composites()
                     
                     self._start_app_worker(run_video_task)
                 
@@ -6943,6 +6978,8 @@ atomcam2で利用する場合は、GitHubで公開されている
                     
                     if preview_window.winfo_exists():
                         self._schedule_ui_if_open(preview_window.start_analysis, total)
+
+                    unreadable_previews = []
                     
                     for i, (vp, data) in enumerate(video_composites.items()):
                         if self._close_wait_started:
@@ -6956,6 +6993,8 @@ atomcam2で利用する場合は、GitHubで公開されている
                         # 一時ファイルから画像を読み込み（メモリ節約）
                         composite_img = imread_with_japanese_path(data['temp_path'])
                         if composite_img is None:
+                            unreadable_previews.append(data['temp_path'])
+                            self.append_log(f"プレビュー画像を読み込めませんでした: {data['temp_path']}")
                             continue
                         
                         try:
@@ -6978,10 +7017,6 @@ atomcam2で利用する場合は、GitHubで公開されている
                         if self._close_wait_started:
                             return
                         
-                        # 検出後すぐにメモリ解放
-                        del composite_img
-                        gc.collect()
-                        
                         def reanalyze_wrapper(image):
                             return bright_area_detector.detect_meteors_with_boxes(image)
                         
@@ -6990,8 +7025,20 @@ atomcam2で利用する場合は、GitHubで公開されている
                             temp_path = data['temp_path']
                             self._schedule_ui_if_open(
                                 preview_window.add_item, filename, temp_path, boxes,
-                                reanalyze_wrapper, analysis_error=analysis_error
+                                reanalyze_wrapper, analysis_error=analysis_error,
+                                source_image_shape=composite_img.shape[:2]
                             )
+                        del composite_img
+                        gc.collect()
+
+                    if unreadable_previews:
+                        cleanup_video_composites()
+                        failed_names = ", ".join(os.path.basename(path) for path in unreadable_previews)
+                        message = f"一部の動画プレビュー画像を読み込めませんでした。解析をやり直してください。\n{failed_names}"
+                        self.append_log(message.replace("\n", " "))
+                        self._schedule_ui_if_open(preview_window.destroy)
+                        self._show_worker_result_dialog("showerror", "プレビュー画像の読込エラー", message)
+                        return
                     
                     if preview_window.winfo_exists():
                         self._schedule_ui_if_open(preview_window.finalize_analysis)
@@ -7066,14 +7113,46 @@ atomcam2で利用する場合は、GitHubで公開されている
 
         ai_source_files = []
         if is_ai_mode:
+            expanded_inputs = []
+            invalid_inputs = []
             for path in file_paths:
                 if os.path.isdir(path):
-                    ai_source_files.extend(lighten_blend_image.collect_files_from_folder(path))
+                    folder_files = lighten_blend_image.collect_files_from_folder(path)
+                    if folder_files:
+                        expanded_inputs.extend(folder_files)
+                    else:
+                        invalid_inputs.append(path)
                 elif os.path.isfile(path):
+                    expanded_inputs.append(path)
+                else:
+                    invalid_inputs.append(path)
+
+            if invalid_inputs:
+                failed_names = ", ".join(os.path.basename(path) or path for path in invalid_inputs)
+                messagebox.showerror(
+                    "入力ファイルを確認してください",
+                    f"次の入力が見つからないか、有効なファイルを含んでいません。\n{failed_names}",
+                    parent=self,
+                )
+                return
+
+            seen_inputs = set()
+            for path in expanded_inputs:
+                item_key = os.path.normcase(os.path.abspath(path))
+                if item_key not in seen_inputs:
                     ai_source_files.append(path)
+                    seen_inputs.add(item_key)
             ai_source_files.sort()
 
-            _, video_ext = lighten_blend_image.get_supported_extensions()
+            if not ai_source_files:
+                messagebox.showwarning(
+                    "画像がありません",
+                    "AI解析できる画像が見つかりませんでした。入力を選び直してください。",
+                    parent=self,
+                )
+                return
+
+            image_ext, video_ext = lighten_blend_image.get_supported_extensions()
             video_inputs = [
                 path for path in ai_source_files
                 if Path(path).suffix.lower() in video_ext
@@ -7083,6 +7162,19 @@ atomcam2で利用する場合は、GitHubで公開されている
                     "AI画像合成では動画を解析できません",
                     "AI画像合成は静止画のみ対応しています。動画を含む選択では合成を開始しません。\n"
                     "動画を除いて選び直すか、動画を含める場合は通常の比較明合成を選択してください。"
+                )
+                return
+
+            unsupported_inputs = [
+                path for path in ai_source_files
+                if Path(path).suffix.lower() not in image_ext
+            ]
+            if unsupported_inputs:
+                unsupported_names = ", ".join(os.path.basename(path) for path in unsupported_inputs)
+                messagebox.showwarning(
+                    "未対応のファイル形式",
+                    f"AI画像合成では次のファイル形式を扱えません。対応する画像を選び直してください。\n{unsupported_names}",
+                    parent=self,
                 )
                 return
 
@@ -7111,6 +7203,18 @@ atomcam2で利用する場合は、GitHubで公開されている
         print(f"DEBUG: detector_func = {detector_func.__name__}")
         
         def start_synthesis_with_results(results):
+            result_keys = set(results)
+            missing_inputs = [
+                path for path in ai_source_files
+                if os.path.normcase(os.path.abspath(path)) not in result_keys
+            ]
+            if missing_inputs:
+                failed_names = ", ".join(os.path.basename(path) for path in missing_inputs)
+                message = f"一部の画像の解析結果がありません。解析をやり直してください。\n{failed_names}"
+                self.append_log(message.replace("\n", " "))
+                self._show_worker_result_dialog("showerror", "画像解析未完了", message)
+                return
+
             def run_ai_task():
                 self.append_log("AI解析結果に基づく合成処理を開始します...")
                 # Resolve each mask by source path so skipped reads cannot shift assignments.
@@ -7128,9 +7232,9 @@ atomcam2で利用する場合は、GitHubで公開されている
                         else:
                             return bright_area_detector.create_mask_from_boxes((h, w), boxes)
                     self.append_log(
-                        f"解析結果がありません。安全のため対象画像を合成から除外します: {current_path}"
+                        f"解析結果がない画像を合成できません: {current_path}"
                     )
-                    return np.zeros(img.shape[:2], dtype=np.uint8)
+                    raise ValueError(f"解析結果がない画像は合成できません: {current_path}")
 
                 success = lighten_blend_image.create_lighten_blend_image(
                     all_files,
@@ -7164,6 +7268,8 @@ atomcam2で利用する場合は、GitHubで公開されている
                 
                 if preview_window.winfo_exists():
                     self._schedule_ui_if_open(preview_window.start_analysis, total)
+
+                unreadable_inputs = []
                 
                 for i, path in enumerate(all_files):
                     if self._close_wait_started:
@@ -7180,6 +7286,8 @@ atomcam2で利用する場合は、GitHubで公開されている
                     img = imread_with_japanese_path(path)
                     if img is None:
                         print(f"DEBUG: Failed to read image: {path}")
+                        unreadable_inputs.append(path)
+                        self.append_log(f"AI解析用の画像を読み込めませんでした: {path}")
                         continue
                     
                     def reanalyze_wrapper(image):
@@ -7207,8 +7315,17 @@ atomcam2で利用する場合は、GitHubで公開されている
                     if preview_window.winfo_exists():
                         self._schedule_ui_if_open(
                             preview_window.add_item, filename, path, boxes, reanalyze_wrapper,
-                            item_key=item_key, analysis_error=analysis_error
+                            item_key=item_key, analysis_error=analysis_error,
+                            source_image_shape=img.shape[:2]
                         )
+
+                if unreadable_inputs:
+                    failed_names = ", ".join(os.path.basename(path) for path in unreadable_inputs)
+                    message = f"一部の画像を読み込めなかったため、AI合成を中止しました。画像を確認して再実行してください。\n{failed_names}"
+                    self.append_log(message.replace("\n", " "))
+                    self._schedule_ui_if_open(preview_window.destroy)
+                    self._show_worker_result_dialog("showerror", "画像読込エラー", message)
+                    return
                 
                 self.append_log(
                     "画像の解析処理が終了しました。解析エラーがある画像は、再検出または枠のクリアが必要です。"
