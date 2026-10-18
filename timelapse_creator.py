@@ -458,6 +458,58 @@ def create_timelapse(
             progress_callback(f"エラー: ffmpegの起動に失敗しました: {e}")
         loader.cleanup()
         return False
+
+    stderr_tail = bytearray()
+    stderr_tail_limit = 64 * 1024
+
+    def drain_ffmpeg_stderr():
+        while True:
+            chunk = proc.stderr.read(4096)
+            if not chunk:
+                break
+            stderr_tail.extend(chunk)
+            if len(stderr_tail) > stderr_tail_limit:
+                del stderr_tail[:-stderr_tail_limit]
+
+    stderr_thread = threading.Thread(target=drain_ffmpeg_stderr, daemon=True)
+    stderr_thread.start()
+    ffmpeg_finalized = False
+
+    def finalize_ffmpeg(terminate=False):
+        nonlocal ffmpeg_finalized
+        if ffmpeg_finalized:
+            return bytes(stderr_tail)
+
+        if terminate and proc.poll() is None:
+            try:
+                proc.terminate()
+            except OSError:
+                pass
+
+        if proc.stdin and not proc.stdin.closed:
+            try:
+                proc.stdin.close()
+            except OSError:
+                # FFmpeg may have exited and closed its input pipe already.
+                pass
+
+        try:
+            proc.wait(timeout=5 if terminate else None)
+        except subprocess.TimeoutExpired:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+            proc.wait()
+
+        stderr_thread.join()
+        if proc.stderr:
+            try:
+                proc.stderr.close()
+            except OSError:
+                pass
+        ffmpeg_finalized = True
+        return bytes(stderr_tail)
     
     try:
         # 最初のフレームを書き込み
@@ -515,10 +567,7 @@ def create_timelapse(
                 progress = (processed + 1) / total_remaining * 100
                 progress_callback(f"処理中: {processed + 1}/{total_remaining + 1} フレーム ({progress:.1f}%)")
         
-        if proc.stdin:
-            proc.stdin.close()
-        
-        stderr_output = proc.communicate()[1]
+        stderr_output = finalize_ffmpeg()
         
         if proc.returncode != 0:
             if progress_callback:
@@ -533,8 +582,11 @@ def create_timelapse(
     except Exception as e:
         if progress_callback:
             progress_callback(f"エラー: フレーム処理中に問題が発生しました: {e}")
+        finalize_ffmpeg(terminate=True)
         return False
     finally:
+        if not ffmpeg_finalized:
+            finalize_ffmpeg(terminate=True)
         loader.cleanup()
         gc.collect()
     
