@@ -437,6 +437,7 @@ def concatenate_videos(
     files_to_concat = valid_files # デフォルトは元のファイル
 
     if safe_mode:
+        failed_conversion_files = []
         if progress_callback:
             progress_callback(0.0, "セーフモード: 一時ファイルを作成中（タイムスタンプ補正）...")
         
@@ -515,6 +516,7 @@ def concatenate_videos(
                         if progress_callback:
                             progress_callback(0.0, f"修復成功: {os.path.basename(vf)}")
                     else:
+                        failed_conversion_files.append(vf)
                         if progress_callback:
                             progress_callback(0.0, f"エラー: ファイルの修復に失敗しました ({os.path.basename(vf)}) -> このファイルをスキップします")
                 
@@ -523,6 +525,21 @@ def concatenate_videos(
                 
                 if progress_callback and i % 5 == 0:
                      progress_callback(0.0, f"セーフモード: 変換中 ({i+1}/{len(valid_files)})")
+
+            if failed_conversion_files and ts_temp_files:
+                # Do not continue with a partial input list: a short omitted clip
+                # can still leave the output above the duration-ratio threshold.
+                for ts_file in ts_temp_paths:
+                    try:
+                        os.unlink(ts_file)
+                    except OSError:
+                        pass
+                try:
+                    os.rmdir(ts_temp_dir)
+                except OSError:
+                    pass
+                failed_names = ", ".join(os.path.basename(path) for path in failed_conversion_files)
+                return False, f"セーフモードで一部の動画を変換できなかったため、連結を中止しました: {failed_names}"
             
             # 変換できたファイルのみを連結対象とする
             if ts_temp_files:
