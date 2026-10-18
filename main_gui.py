@@ -5553,6 +5553,10 @@ atomcam2で利用する場合は、GitHubで公開されている
             'auto_time_updater_enabled': self.auto_time_updater_enabled_var.get(),
             'rtsp_preset': self.rtsp_preset_var.get(),
             'rtsp_fps': self.rtsp_fps_var.get(),
+            'video_concat_bitrate': self.video_concat_bitrate_var.get(),
+            'video_concat_codec': self.video_concat_codec_var.get(),
+            'video_concat_fps': self.video_concat_fps_var.get(),
+            'video_concat_safe_mode': self.video_concat_safe_mode_var.get(),
             # RTSP time limit settings
             'rtsp_time_limit_enabled': self.rtsp_time_limit_var.get(),
             'rtsp_start_hour': self.rtsp_start_hour_var.get(), 'rtsp_start_minute': self.rtsp_start_min_var.get(),
@@ -5681,6 +5685,35 @@ atomcam2で利用する場合は、GitHubで公開されている
         
         try:
             with open(self.settings_file, 'r', encoding='utf-8') as f: settings = json.load(f)
+
+            allowed_bitrates = {"1000k", "2000k", "4000k", "8000k", "12000k", "16000k", "20000k"}
+            saved_bitrate = settings.get('video_concat_bitrate', "8000k")
+            self.video_concat_bitrate_var.set(
+                saved_bitrate
+                if isinstance(saved_bitrate, str) and saved_bitrate in allowed_bitrates
+                else "8000k"
+            )
+
+            allowed_codecs = {"h264", "h265"}
+            saved_codec = settings.get('video_concat_codec', "h264")
+            self.video_concat_codec_var.set(
+                saved_codec
+                if isinstance(saved_codec, str) and saved_codec in allowed_codecs
+                else "h264"
+            )
+
+            allowed_fps = {"Auto", "15", "24", "25", "30", "60"}
+            saved_fps = settings.get('video_concat_fps', "Auto")
+            self.video_concat_fps_var.set(
+                saved_fps
+                if isinstance(saved_fps, str) and saved_fps in allowed_fps
+                else "Auto"
+            )
+
+            saved_safe_mode = settings.get('video_concat_safe_mode', True)
+            self.video_concat_safe_mode_var.set(
+                saved_safe_mode if isinstance(saved_safe_mode, bool) else True
+            )
 
             self.periodic_scan_var.set(settings.get('periodic_scan_enabled', False))
             self.periodic_dir_var.set(settings.get('periodic_scan_directory', ''))
