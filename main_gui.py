@@ -4657,6 +4657,14 @@ atomcam2で利用する場合は、GitHubで公開されている
             messagebox.showwarning("情報", "別のプロセスが実行中です。")
             return
 
+        try:
+            max_workers = int(self.concurrency_var.get())
+            if max_workers < 1:
+                raise ValueError("同時処理数は1以上で指定してください。")
+        except (TypeError, ValueError) as e:
+            messagebox.showerror("設定エラー", f"パラメータ値が無効です: {e}")
+            return
+
         self._progress_run_generation += 1
         self._active_progress_run_generation = self._progress_run_generation
         run_progress_queue = _RunProgressQueue(
@@ -4688,7 +4696,7 @@ atomcam2で利用する場合は、GitHubで公開されている
                 return start_hour, start_minute, end_hour, end_minute
 
             params = {
-                'max_workers': int(self.concurrency_var.get()),
+                'max_workers': max_workers,
                 'interval_sec': float(self.interval_var.get()),
                 'duration_sec': float(self.duration_var.get()),
                 'save_options': {k: v.get() for k, v in self.save_options_vars.items()},

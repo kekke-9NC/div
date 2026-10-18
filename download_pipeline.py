@@ -35,6 +35,9 @@ def run_pipeline(
     if not sources:
         return {"total_sources": 0, "failures": []}
 
+    if max_workers < 1:
+        raise ValueError("max_workers must be at least 1")
+
     # simple shared index for downloaders
     src_lock = threading.Lock()
     src_index = {'i': 0}
