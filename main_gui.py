@@ -6875,6 +6875,25 @@ atomcam2で利用する場合は、GitHubで公開されている
             if not video_composites:
                 self._show_worker_result_dialog("showerror", "エラー", "有効な合成画像を作成できませんでした。")
                 return
+
+            base_height, base_width = next(iter(video_composites.values()))['shape']
+            aspect_mismatches = [
+                vp
+                for vp, data in video_composites.items()
+                if not np.isclose(
+                    data['shape'][1] / data['shape'][0],
+                    base_width / base_height,
+                    rtol=1e-3,
+                    atol=0.0
+                )
+            ]
+            if aspect_mismatches:
+                cleanup_video_composites()
+                failed_names = ", ".join(os.path.basename(path) for path in aspect_mismatches)
+                message = f"動画の縦横比が一致しないため、AI合成を開始できません: {failed_names}"
+                self.append_log(message)
+                self._show_worker_result_dialog("showerror", "動画の縦横比を確認してください", message)
+                return
             
             self.append_log(f"{len(video_composites)}個の合成画像を作成しました。")
             
