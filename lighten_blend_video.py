@@ -16,6 +16,7 @@ from pathlib import Path
 from datetime import datetime
 from typing import List, Optional, Callable
 import subprocess
+import threading
 
 # メモリ制限: 1GB = 1024 * 1024 * 1024 bytes
 MAX_MEMORY_BYTES = 1 * 1024 * 1024 * 1024
@@ -261,7 +262,7 @@ def _create_single_video_with_mask(
     
     try:
         proc = subprocess.Popen(
-            command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
+            command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
         )
     except Exception as e:
         cap.release()
@@ -303,7 +304,12 @@ def _create_single_video_with_mask(
     finally:
         cap.release()
         if proc.stdin:
-            proc.stdin.close()
+            try:
+                proc.stdin.close()
+            except OSError:
+                # FFmpeg may exit early and close its input pipe while frames
+                # are still being written.
+                pass
         proc.wait()
     
     return proc.returncode == 0
@@ -383,6 +389,21 @@ def _create_lighten_blend_video_streaming(
         for c in caps:
             c['cap'].release()
         return False
+
+    stderr_tail = bytearray()
+    stderr_tail_limit = 64 * 1024
+
+    def drain_ffmpeg_stderr():
+        while True:
+            chunk = proc.stderr.read(4096)
+            if not chunk:
+                break
+            stderr_tail.extend(chunk)
+            if len(stderr_tail) > stderr_tail_limit:
+                del stderr_tail[:-stderr_tail_limit]
+
+    stderr_thread = threading.Thread(target=drain_ffmpeg_stderr, daemon=True)
+    stderr_thread.start()
     
     try:
         # 共通マスクの前処理（ループ外で一度だけ実行）
@@ -492,9 +513,18 @@ def _create_lighten_blend_video_streaming(
             c['cap'].release()
         
         if proc.stdin:
-            proc.stdin.close()
+            try:
+                proc.stdin.close()
+            except OSError:
+                # FFmpeg may exit early and close its input pipe while frames
+                # are still being written.
+                pass
         
-        stderr_output = proc.communicate()[1]
+        proc.wait()
+        stderr_thread.join()
+        stderr_output = bytes(stderr_tail)
+        if proc.stderr:
+            proc.stderr.close()
         if proc.returncode != 0:
             if progress_callback:
                 progress_callback("警告: FFMPEGがエラーを返しました。")
