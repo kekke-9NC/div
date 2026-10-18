@@ -6802,7 +6802,7 @@ atomcam2で利用する場合は、GitHubで公開されている
         self.append_log("各動画から比較明合成画像を作成し、流星を検出します...")
         
         # 動画ごとの一時ファイルパスを保存（画像はメモリに保持しない）
-        video_composites = {}  # {video_path: {'temp_path': str, 'filename': str, 'shape': (h, w)}}
+        video_composites = {}  # path -> preview file, shape, and source display AR
 
         def cleanup_video_composites():
             for data in video_composites.values():
@@ -6822,6 +6822,14 @@ atomcam2で利用する場合は、GitHubで公開されている
             failed_videos = []
             for i, vp in enumerate(video_files):
                 self.append_log(f"動画 {i+1}/{len(video_files)} から合成画像を作成中: {os.path.basename(vp)}")
+
+                display_info = video_processor.get_video_display_info(vp)
+                if display_info is None:
+                    failed_videos.append(vp)
+                    self.append_log(
+                        f"警告: 動画の表示縦横比を取得できませんでした: {os.path.basename(vp)}"
+                    )
+                    continue
 
                 try:
                     composite_image = lighten_blend_video.create_composite_from_videos(
@@ -6847,7 +6855,8 @@ atomcam2で利用する場合は、GitHubで公開されている
                         video_composites[vp] = {
                             'temp_path': temp_path,
                             'filename': os.path.basename(temp_path),
-                            'shape': (h, w)  # サイズ情報のみ保持
+                            'shape': (h, w),
+                            'display_aspect_ratio': display_info['display_aspect_ratio'],
                         }
                     else:
                         failed_videos.append(vp)
@@ -6876,13 +6885,15 @@ atomcam2で利用する場合は、GitHubで公開されている
                 self._show_worker_result_dialog("showerror", "エラー", "有効な合成画像を作成できませんでした。")
                 return
 
-            base_height, base_width = next(iter(video_composites.values()))['shape']
+            first_preview = next(iter(video_composites.values()))
+            base_height, base_width = first_preview['shape']
+            base_display_aspect_ratio = first_preview['display_aspect_ratio']
             aspect_mismatches = [
                 vp
                 for vp, data in video_composites.items()
                 if not np.isclose(
-                    data['shape'][1] / data['shape'][0],
-                    base_width / base_height,
+                    data['display_aspect_ratio'],
+                    base_display_aspect_ratio,
                     rtol=1e-3,
                     atol=0.0
                 )
