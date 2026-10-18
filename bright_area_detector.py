@@ -1421,38 +1421,35 @@ def _parse_boxes(text: str) -> List[Tuple[int, int, int, int]]:
         - (x1,y1),(x2,y2) - 2つの座標ペア
         - (x1,y1),(x2,y2);(x1,y1),(x2,y2) - セミコロン区切りで複数
     """
+    if text is None or not text.strip():
+        raise ValueError("VLM returned an empty response instead of boxes or NONE.")
+
+    if text.strip().upper() == "NONE":
+        return []
+
+    pattern_4nums = re.compile(
+        r"\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)"
+    )
+    pattern_pair = re.compile(
+        r"\(\s*(\d+)\s*,\s*(\d+)\s*\)\s*,\s*"
+        r"\(\s*(\d+)\s*,\s*(\d+)\s*\)"
+    )
     boxes = []
 
-    if not text or "NONE" in text.upper():
-        return boxes
+    for segment in text.strip().split(';'):
+        segment = segment.strip()
+        match = pattern_4nums.fullmatch(segment) or pattern_pair.fullmatch(segment)
+        if match is None:
+            raise ValueError("VLM response contains a malformed bounding box.")
 
-    pattern_4nums = r"\((\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\)"
-    matches_4nums = re.findall(pattern_4nums, text)
-    
-    for match in matches_4nums:
-        try:
-            x1, y1, x2, y2 = map(int, match)
-            if all(0 <= v <= 1000 for v in [x1, y1, x2, y2]):
-                boxes.append((x1, y1, x2, y2))
-        except ValueError:
-            continue
+        x1, y1, x2, y2 = map(int, match.groups())
+        if not all(0 <= value <= 1000 for value in (x1, y1, x2, y2)):
+            raise ValueError("VLM response contains coordinates outside the 0–1000 range.")
+        if x1 >= x2 or y1 >= y2:
+            raise ValueError("VLM response contains a box with invalid geometry.")
 
-    if boxes:
-        return boxes
+        boxes.append((x1, y1, x2, y2))
 
-    segments = text.split(';')
-    pattern_pair = r"\((\d+)\s*,\s*(\d+)\)\s*,\s*\((\d+)\s*,\s*(\d+)\)"
-    
-    for segment in segments:
-        match = re.search(pattern_pair, segment.strip())
-        if match:
-            try:
-                x1, y1, x2, y2 = map(int, match.groups())
-                if all(0 <= v <= 1000 for v in [x1, y1, x2, y2]):
-                    boxes.append((x1, y1, x2, y2))
-            except ValueError:
-                continue
-    
     return boxes
 
 
@@ -1506,7 +1503,7 @@ def detect_bright_areas(
         margin: マスクの余白ピクセル
         
     Returns:
-        マスク画像 (255=通常領域, 0=マスク領域) or None（エラー時または検出なし）
+        マスク画像 (255=通常領域, 0=マスク領域) or None（エラー時）
     """
     def log(msg: str):
         if progress_callback:
@@ -1533,9 +1530,8 @@ def detect_bright_areas(
         
         if not boxes:
             log("明るいエリアは検出されませんでした。")
-            return None
-        
-        log(f"{len(boxes)}個の明るいエリアを検出しました。")
+        else:
+            log(f"{len(boxes)}個の明るいエリアを検出しました。")
 
         height, width = image.shape[:2]
         mask = create_mask_from_boxes((height, width), boxes, margin=margin)
@@ -1561,7 +1557,7 @@ def detect_bright_areas_with_boxes(
         margin: マスクの余白ピクセル
         
     Returns:
-        (マスク画像, ボックスリスト) or None（エラー時）
+        (マスク画像, ボックスリスト)。未検出は空のボックスリスト、Noneはエラー時。
     """
     def log(msg: str):
         print(f"[detect_bright_areas_with_boxes] {msg}")
@@ -1590,9 +1586,8 @@ def detect_bright_areas_with_boxes(
         
         if not boxes:
             log("明るいエリアは検出されませんでした。")
-            return None
-        
-        log(f"{len(boxes)}個の明るいエリアを検出しました。")
+        else:
+            log(f"{len(boxes)}個の明るいエリアを検出しました。")
 
         height, width = image.shape[:2]
         mask = create_mask_from_boxes((height, width), boxes, margin=margin)
@@ -1687,7 +1682,7 @@ def detect_meteors_with_boxes(
         margin: マスクの余白ピクセル
         
     Returns:
-        (マスク画像, ボックスリスト) or None（エラー時）
+        (マスク画像, ボックスリスト)。未検出は空のボックスリスト、Noneはエラー時。
         マスクは検出領域=255、それ以外=0
     """
     def log(msg: str):
@@ -1717,9 +1712,8 @@ def detect_meteors_with_boxes(
         
         if not boxes:
             log("流星は検出されませんでした。")
-            return None
-        
-        log(f"{len(boxes)}個の流星を検出しました。")
+        else:
+            log(f"{len(boxes)}個の流星を検出しました。")
 
         height, width = image.shape[:2]
         mask = create_inclusion_mask_from_boxes((height, width), boxes, margin=margin)

@@ -6958,11 +6958,23 @@ atomcam2で利用する場合は、GitHubで公開されている
                         if composite_img is None:
                             continue
                         
-                        res = bright_area_detector.detect_meteors_with_boxes(
-                            composite_img,
-                            progress_callback=None  # 個別ログ抑制
-                        )
-                        boxes = res[1] if res else []
+                        try:
+                            res = bright_area_detector.detect_meteors_with_boxes(
+                                composite_img,
+                                progress_callback=None  # 個別ログ抑制
+                            )
+                        except Exception as exc:
+                            print(f"ERROR: Meteor detection failed for {vp}: {exc}")
+                            res = None
+                        analysis_error = None
+                        if res is None:
+                            boxes = []
+                            analysis_error = "接続または推論に失敗しました。"
+                            self.append_log(
+                                f"AI解析エラー: {os.path.basename(vp)}。再検出するか、枠をクリアして確定してください。"
+                            )
+                        else:
+                            boxes = res[1]
                         if self._close_wait_started:
                             return
                         
@@ -6977,12 +6989,15 @@ atomcam2で利用する場合は、GitHubで公開されている
                             filename = data['filename']
                             temp_path = data['temp_path']
                             self._schedule_ui_if_open(
-                                preview_window.add_item, filename, temp_path, boxes, reanalyze_wrapper
+                                preview_window.add_item, filename, temp_path, boxes,
+                                reanalyze_wrapper, analysis_error=analysis_error
                             )
                     
                     if preview_window.winfo_exists():
                         self._schedule_ui_if_open(preview_window.finalize_analysis)
-                    self.append_log("全画像の検出が完了しました。結果を確認してください。")
+                    self.append_log(
+                        "動画ごとの検出処理が終了しました。解析エラーがある画像は、再検出または枠のクリアが必要です。"
+                    )
                 
                 self._start_app_worker(run_detection)
             
@@ -7168,22 +7183,36 @@ atomcam2で利用する場合は、GitHubで公開されている
                         continue
                     
                     def reanalyze_wrapper(image):
-                        res = detector_func(image)
-                        return res if res else (None, [])
+                        return detector_func(image)
                     
                     print(f"DEBUG: Calling detector_func for {filename}")
-                    res = detector_func(img)
-                    boxes = res[1] if res else []
+                    try:
+                        res = detector_func(img)
+                    except Exception as exc:
+                        print(f"ERROR: AI detection failed for {path}: {exc}")
+                        res = None
+                    analysis_error = None
+                    if res is None:
+                        boxes = []
+                        analysis_error = "接続または推論に失敗しました。"
+                        self.append_log(
+                            f"AI解析エラー: {filename}。再検出するか、枠をクリアして確定してください。"
+                        )
+                    else:
+                        boxes = res[1]
                     if self._close_wait_started:
                         return
                     print(f"DEBUG: Detection result for {filename}: {len(boxes)} boxes found")
                     
                     if preview_window.winfo_exists():
                         self._schedule_ui_if_open(
-                            preview_window.add_item, filename, path, boxes, reanalyze_wrapper, item_key=item_key
+                            preview_window.add_item, filename, path, boxes, reanalyze_wrapper,
+                            item_key=item_key, analysis_error=analysis_error
                         )
                 
-                self.append_log("全画像の解析が完了しました。検出結果を確認・修正してください。")
+                self.append_log(
+                    "画像の解析処理が終了しました。解析エラーがある画像は、再検出または枠のクリアが必要です。"
+                )
                 print("DEBUG: Analysis completed")
                 
                 if preview_window.winfo_exists():
@@ -7191,8 +7220,9 @@ atomcam2で利用する場合は、GitHubで公開されている
                      self._schedule_ui_if_open(preview_window.finalize_analysis)
                      self._show_worker_result_dialog(
                          "showinfo", "解析完了",
-                         "全画像の解析が完了しました。\n未検出の画像が上部に表示されています。\n"
-                         "プレビュー画面で結果を確認し、「修正を確定して合成を開始」ボタンを押してください。",
+                         "解析処理が終了しました。未検出の画像が上部に表示されています。\n"
+                         "AI解析エラーが表示された画像は、再検出するか枠をクリアしてください。\n"
+                         "問題がなければ「修正を確定して合成を開始」を押してください。",
                      )
             except Exception as e:
                 print(f"ERROR: run_analysis_task failed with exception: {e}")
