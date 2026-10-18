@@ -7145,9 +7145,42 @@ atomcam2で利用する場合は、GitHubで公開されている
             )
             self.append_log("比較明合成画像の作成に失敗しました。")
 
-    def _ensure_ai_model_loaded(self, detector_module) -> bool:
+    def _ensure_ai_model_loaded(self, detector_module, cancel_event=None) -> bool:
         """AI合成前に内部LLMのロード完了を保証する。"""
-        if self._close_wait_started:
+
+        def is_cancelled():
+            return bool(
+                self._close_wait_started
+                or (cancel_event is not None and cancel_event.is_set())
+            )
+
+        def run_cancelable_call(target, *args, **kwargs):
+            if cancel_event is None:
+                return target(*args, **kwargs)
+            if is_cancelled():
+                return None
+
+            result_queue = queue.Queue(maxsize=1)
+
+            def run_call():
+                try:
+                    result_queue.put((True, target(*args, **kwargs)))
+                except BaseException as exc:
+                    result_queue.put((False, exc))
+
+            # Remote checks and metadata lookups are safe to abandon during shutdown.
+            threading.Thread(target=run_call, daemon=True).start()
+            while not is_cancelled():
+                try:
+                    succeeded, result = result_queue.get(timeout=0.1)
+                except queue.Empty:
+                    continue
+                if succeeded:
+                    return result
+                raise result
+            return None
+
+        if is_cancelled():
             return False
         self.append_log("AIモデルのロードを確認中...")
         if hasattr(detector_module, "configure_ai_backend"):
@@ -7166,7 +7199,15 @@ atomcam2で利用する場合は、GitHubで公開されている
             uses_local_model = bool(uses_local_model_fn())
 
         if not uses_local_model:
-            connected, err = detector_module.check_vlm_connection(status_callback=self.append_log, force=True)
+            check_result = run_cancelable_call(
+                detector_module.check_vlm_connection,
+                status_callback=self.append_log,
+                force=True,
+                cancel_event=cancel_event,
+            )
+            if check_result is None or is_cancelled():
+                return False
+            connected, err = check_result
             if connected:
                 self.append_log("AIモデルの接続確認が完了しました。")
                 return True
@@ -7189,9 +7230,13 @@ atomcam2で利用する場合は、GitHubで公開されている
             has_local_model = os.path.isdir(local_model_dir)
 
         if not has_local_model:
+            if is_cancelled():
+                return False
             self.append_log(f"ローカルLLMモデルが見つかりません: {local_model_dir}")
             self.append_log("必要なディスク容量を見積もり中...")
-            req = self._estimate_llm_storage_requirements(detector_module)
+            req = run_cancelable_call(self._estimate_llm_storage_requirements, detector_module)
+            if req is None or is_cancelled():
+                return False
 
             info_lines = [
                 "ローカルLLMモデルが見つかりませんでした。",
@@ -7209,10 +7254,16 @@ atomcam2で利用する場合は、GitHubで公開されている
 
             should_download = bool(
                 self._run_on_main_thread(
-                    lambda msg="\n".join(info_lines): messagebox.askyesno("モデルダウンロード確認", msg, parent=self)
+                    lambda msg="\n".join(info_lines): (
+                        False
+                        if is_cancelled()
+                        else messagebox.askyesno("モデルダウンロード確認", msg, parent=self)
+                    )
                 )
             )
 
+            if is_cancelled():
+                return False
             if not should_download:
                 self.append_log("ユーザーがモデルダウンロードをキャンセルしました。")
                 return False
@@ -7220,11 +7271,19 @@ atomcam2で利用する場合は、GitHubで公開されている
             self.append_log("モデルダウンロードを開始します。")
             mirror_stream = _StderrProgressStream(self.append_log, passthrough=sys.stderr)
             with contextlib.redirect_stderr(mirror_stream), contextlib.redirect_stdout(mirror_stream):
-                connected, err = detector_module.check_vlm_connection(status_callback=self.append_log)
+                connected, err = detector_module.check_vlm_connection(
+                    status_callback=self.append_log,
+                    cancel_event=cancel_event,
+                )
             mirror_stream.flush()
         else:
-            connected, err = detector_module.check_vlm_connection(status_callback=self.append_log)
+            connected, err = detector_module.check_vlm_connection(
+                status_callback=self.append_log,
+                cancel_event=cancel_event,
+            )
 
+        if is_cancelled():
+            return False
         if connected:
             self.append_log("AIモデルのロードが完了しました。")
             return True

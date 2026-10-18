@@ -210,10 +210,30 @@ RTSPストリーム（ライブカメラ）を使う場合、URLを入力して�
         self.clear_btn.config(state='disabled')
         
         # Thread generation
-        if self.app and hasattr(self.app, "_start_app_worker"):
-            self.app._start_app_worker(self._get_response, args=(msg,))
+        if (
+            self.app
+            and callable(getattr(self.app, "_register_aux_cancel_event", None))
+            and callable(getattr(self.app, "_start_app_worker", None))
+            and callable(getattr(self.app, "_release_aux_cancel_event", None))
+        ):
+            cancel_event = self.app._register_aux_cancel_event()
+            try:
+                worker = self.app._start_app_worker(
+                    self._get_response,
+                    args=(msg, cancel_event),
+                )
+                if worker is None:
+                    self.app._release_aux_cancel_event(cancel_event)
+            except Exception:
+                self.app._release_aux_cancel_event(cancel_event)
+                raise
         else:
-            threading.Thread(target=self._get_response, args=(msg,), daemon=True).start()
+            cancel_event = threading.Event()
+            threading.Thread(
+                target=self._get_response,
+                args=(msg, cancel_event),
+                daemon=True,
+            ).start()
 
     def append_message(self, sender, message, tag=None):
         self.history_area.configure(state='normal')
@@ -443,11 +463,12 @@ RTSPストリーム（ライブカメラ）を使う場合、URLを入力して�
         self.history_area.configure(state='disabled')
         self.history_area.see(tk.END)
 
-    def _get_response(self, user_msg):
-        self._update_status("準備中...")
+    def _get_response(self, user_msg, cancel_event=None):
+        def is_cancelled():
+            return bool(cancel_event and cancel_event.is_set())
 
         def stream_handler(chunk):
-            if self._is_app_closing():
+            if is_cancelled() or self._is_app_closing():
                 return
             self.streaming_chunks.append(chunk)
             # Filter out shortcut markers from displayed chunks
@@ -456,9 +477,17 @@ RTSPストリーム（ライブカメラ）を使う場合、URLを入力して�
                 self._schedule_ui(self._append_stream_chunk, display_chunk)
             
         try:
+            if is_cancelled():
+                return
+            self._update_status("準備中...")
             if self.app and hasattr(self.app, "_ensure_ai_model_loaded"):
                 self._update_status("AIモデル確認中...")
-                if not self.app._ensure_ai_model_loaded(bright_area_detector):
+                if not self.app._ensure_ai_model_loaded(
+                    bright_area_detector,
+                    cancel_event=cancel_event,
+                ):
+                    if is_cancelled():
+                        return
                     self._schedule_ui(
                         self.append_message,
                         "System",
@@ -466,6 +495,8 @@ RTSPストリーム（ライブカメラ）を使う場合、URLを入力して�
                         "error",
                     )
                     return
+            if is_cancelled():
+                return
 
             # Collect streaming chunks to parse markers after completion
             self.streaming_chunks = []
@@ -482,13 +513,21 @@ RTSPストリーム（ライブカメラ）を使う場合、URLを入力して�
                 system_prompt=self.system_prompt,
                 history=history_context,
                 status_callback=self._update_status,
-                stream_callback=stream_handler
+                stream_callback=stream_handler,
+                cancel_event=cancel_event,
             )
+
+            if is_cancelled():
+                return
             
             # Parse shortcuts from full response
+            if is_cancelled():
+                return
             clean_response, shortcuts = self._parse_shortcuts_from_response(full_response)
             
             # 成功したら履歴に追加 (clean response without markers)
+            if is_cancelled():
+                return
             self.conversation_history.append({"role": "user", "content": user_msg})
             self.conversation_history.append({"role": "assistant", "content": clean_response})
             
@@ -510,11 +549,18 @@ RTSPストリーム（ライブカメラ）を使う場合、URLを入力して�
                     self._schedule_ui(self._append_analysis_actions_shortcut)
                 
         except Exception as e:
+            if is_cancelled():
+                return
             # エラー時は追記
             self._schedule_ui(self.append_message, "System", f"Error: {e}", "error")
         finally:
-            # 完了処理
-            self._schedule_ui(self._finalize_streaming_ui)
+            try:
+                # 完了処理
+                self._schedule_ui(self._finalize_streaming_ui)
+            finally:
+                release_cancel_event = getattr(self.app, "_release_aux_cancel_event", None)
+                if cancel_event is not None and callable(release_cancel_event):
+                    release_cancel_event(cancel_event)
 
 
 
