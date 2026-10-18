@@ -50,6 +50,7 @@ class DetectionPreviewWindow(tk.Toplevel):
         self.analysis_start_time: Optional[float] = None
         self.total_items: int = 0
         self.processed_items: int = 0
+        self.analysis_complete = False
         
         # UIセットアップ
         self.setup_ui()
@@ -218,13 +219,31 @@ class DetectionPreviewWindow(tk.Toplevel):
 
     def start_analysis(self, total_count: int):
         """解析開始時に呼び出す"""
+        self.analysis_complete = False
         self.total_items = total_count
         self.processed_items = 0
         self.analysis_start_time = time.time()
         self.progress['maximum'] = total_count
         self.progress['value'] = 0
         self.status_label.config(text="解析中")
+        self.btn_start.config(state=tk.DISABLED)
         self._update_time_display()
+
+    def _refresh_completion_state(self):
+        unresolved_errors = sum(
+            bool(data.get('analysis_error')) for data in self.results.values()
+        )
+        if self.analysis_complete:
+            self.status_label.config(
+                text=f"要確認: {unresolved_errors}件" if unresolved_errors else "解析完了"
+            )
+        self.btn_start.config(
+            state=(
+                tk.NORMAL
+                if self.analysis_complete and self.results and not unresolved_errors
+                else tk.DISABLED
+            )
+        )
 
     def _update_time_display(self):
         """経過時間とETAを更新"""
@@ -248,6 +267,7 @@ class DetectionPreviewWindow(tk.Toplevel):
 
     def finalize_analysis(self):
         """解析完了時に呼び出す。未検出画像を先頭に移動"""
+        self.analysis_complete = True
         # 未検出画像を先頭に、検出済み画像を後ろにソート
         no_detection = []
         with_detection = []
@@ -268,10 +288,7 @@ class DetectionPreviewWindow(tk.Toplevel):
 
         # 状態更新
         self.eta_label.config(text="ETA: 完了")
-        self.status_label.config(text="解析完了")
-        self.btn_start.config(
-            state=tk.NORMAL if self.results else tk.DISABLED
-        )
+        self._refresh_completion_state()
         # 最終経過時間を更新
         if self.analysis_start_time:
              elapsed = time.time() - self.analysis_start_time
@@ -289,7 +306,8 @@ class DetectionPreviewWindow(tk.Toplevel):
 
     def add_item(
         self, filename: str, image_path: str, boxes: List[Tuple],
-        reanalyze_callback: Callable, item_key: Optional[str] = None
+        reanalyze_callback: Callable, item_key: Optional[str] = None,
+        analysis_error: Optional[str] = None
     ):
         """
         リストにアイテムを追加（または更新）
@@ -306,7 +324,9 @@ class DetectionPreviewWindow(tk.Toplevel):
             'boxes': boxes,
             'image_path': image_path,
             'image_shape': (height, width),
-            'reanalyze_callback': reanalyze_callback
+            'reanalyze_callback': reanalyze_callback,
+            'analysis_error': analysis_error,
+            'reanalyze_error': None,
         }
         
         # 順序管理（新規追加時のみ）
@@ -356,6 +376,22 @@ class DetectionPreviewWindow(tk.Toplevel):
         ctrl_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=10, pady=5)
         
         ttk.Label(ctrl_frame, text=display_name, font=("", 11, "bold")).pack(anchor="nw")
+        analysis_error = data.get('analysis_error')
+        reanalyze_error = data.get('reanalyze_error')
+        if analysis_error:
+            ttk.Label(
+                ctrl_frame,
+                text=f"AI解析に失敗しました: {analysis_error}\n再検出するか、枠をクリアして未検出として確定してください。",
+                foreground="#b00020",
+                wraplength=450,
+            ).pack(anchor="nw", pady=3)
+        elif reanalyze_error:
+            ttk.Label(
+                ctrl_frame,
+                text=f"{reanalyze_error} 既存の枠は保持しています。",
+                foreground="#b00020",
+                wraplength=450,
+            ).pack(anchor="nw", pady=3)
         coord_label = ttk.Label(ctrl_frame, text=self._format_boxes(boxes))
         coord_label.pack(anchor="nw", pady=5)
         
@@ -467,9 +503,24 @@ class DetectionPreviewWindow(tk.Toplevel):
                 # コールバック実行 (bright_area_detectorの関数を呼ぶ想定)
                 result = callback(img)
                 if result is None:
-                    boxes = []
-                else:
-                    mask, boxes = result
+                    def show_failure():
+                        if getattr(self.app, "_close_wait_started", False) or not self.winfo_exists():
+                            return
+                        try:
+                            self.results[filename]['reanalyze_error'] = "再検出に失敗しました。"
+                            self._rebuild_ui(self.item_order)
+                            messagebox.showerror(
+                                "AI再検出エラー",
+                                "再検出に失敗しました。既存の枠を保持しました。ログを確認してください。",
+                                parent=self,
+                            )
+                        finally:
+                            self.config(cursor="")
+
+                    self.after(0, show_failure)
+                    return
+
+                _, boxes = result
                 
                 # メインスレッドでUI更新
                 def update_ui():
@@ -480,6 +531,9 @@ class DetectionPreviewWindow(tk.Toplevel):
                     try:
                         # データ更新
                         self.results[filename]['boxes'] = boxes
+                        self.results[filename]['analysis_error'] = None
+                        self.results[filename]['reanalyze_error'] = None
+                        self._refresh_completion_state()
                         
                         # UI再構築（順序を維持）
                         self._rebuild_ui(self.item_order)
@@ -489,12 +543,23 @@ class DetectionPreviewWindow(tk.Toplevel):
                 self.after(0, update_ui)
                 
             except Exception as e:
-                # エラー時もカーソルを戻す
-                def reset_cursor():
-                    if not getattr(self.app, "_close_wait_started", False) and self.winfo_exists():
-                        self.config(cursor="")
-                self.after(0, reset_cursor)
                 print(f"再検出エラー: {e}")
+
+                def show_failure():
+                    if getattr(self.app, "_close_wait_started", False) or not self.winfo_exists():
+                        return
+                    try:
+                        self.results[filename]['reanalyze_error'] = "再検出に失敗しました。"
+                        self._rebuild_ui(self.item_order)
+                        messagebox.showerror(
+                            "AI再検出エラー",
+                            "再検出に失敗しました。既存の枠を保持しました。ログを確認してください。",
+                            parent=self,
+                        )
+                    finally:
+                        self.config(cursor="")
+
+                self.after(0, show_failure)
         
         # バックグラウンドスレッドで実行
         if hasattr(self.app, "_start_app_worker"):
@@ -506,6 +571,9 @@ class DetectionPreviewWindow(tk.Toplevel):
 
     def _clear_boxes(self, filename, canvas, label_widget):
         self.results[filename]['boxes'] = []
+        self.results[filename]['analysis_error'] = None
+        self.results[filename]['reanalyze_error'] = None
+        self._refresh_completion_state()
         image_path = self.results[filename]['image_path']
         img = imread_with_japanese_path(image_path)
         if img is not None:
@@ -588,6 +656,9 @@ class DetectionPreviewWindow(tk.Toplevel):
             filename = self.drawing_state['filename']
             current_boxes = self.results[filename]['boxes']
             current_boxes.append((norm_x1, norm_y1, norm_x2, norm_y2))
+            self.results[filename]['analysis_error'] = None
+            self.results[filename]['reanalyze_error'] = None
+            self._refresh_completion_state()
             
             # 再描画
             self.refresh_view()
@@ -598,6 +669,20 @@ class DetectionPreviewWindow(tk.Toplevel):
     def on_start_synthesis(self):
         """合成開始"""
         if not self.results:
+            return
+        if not self.analysis_complete:
+            messagebox.showerror(
+                "AI解析中",
+                "すべての画像の解析が終了してから合成を開始してください。",
+                parent=self,
+            )
+            return
+        if any(data.get('analysis_error') for data in self.results.values()):
+            messagebox.showerror(
+                "AI解析エラー",
+                "AI解析に失敗した画像があります。再検出するか、枠をクリアしてから合成してください。",
+                parent=self,
+            )
             return
             
         # 結果データだけ渡して自分は閉じる
