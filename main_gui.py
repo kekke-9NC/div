@@ -5903,8 +5903,18 @@ atomcam2で利用する場合は、GitHubで公開されている
             
             # RTSPプリセット設定を復元
             self.rtsp_preset_var.set(settings.get('rtsp_preset', 'cloudy'))
-            self.rtsp_fps_var.set(settings.get('rtsp_fps', str(config.RTSP_FPS)))
-            config.RTSP_FPS = int(float(self.rtsp_fps_var.get())) # Apply immediately update config
+            try:
+                restored_rtsp_fps = int(float(settings.get('rtsp_fps', config.RTSP_FPS)))
+                if not 1 <= restored_rtsp_fps <= 120:
+                    raise ValueError("RTSP FPS must be between 1 and 120")
+            except (TypeError, ValueError, OverflowError):
+                restored_rtsp_fps = int(config.RTSP_FPS)
+                self.append_log(
+                    f"保存されたRTSP FPS設定が無効なため、既定値({restored_rtsp_fps})を使用します。"
+                )
+
+            self.rtsp_fps_var.set(str(restored_rtsp_fps))
+            config.RTSP_FPS = restored_rtsp_fps
 
             # Astrometry.net APIキーを復元
             api_key = settings.get('astrometry_api_key', '')
