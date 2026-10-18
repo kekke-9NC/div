@@ -7073,7 +7073,9 @@ atomcam2で利用する場合は、GitHubで公開されている
         if not file_paths_tuple:
             return
             
-        file_paths = set(file_paths_tuple)
+        # Keep the order returned by the file chooser; the first input defines
+        # the output dimensions in the blend implementation.
+        file_paths = list(dict.fromkeys(file_paths_tuple))
         
         if len(file_paths) < 1:
             messagebox.showwarning("警告", "有効なファイルが見つかりません。")
@@ -7082,7 +7084,7 @@ atomcam2で利用する場合は、GitHubで公開されている
         # 初期ディレクトリ設定
         default_output = "composite.png"
         if len(file_paths) == 1:
-            first_path = list(file_paths)[0]
+            first_path = file_paths[0]
             if os.path.isdir(first_path):
                 default_output = os.path.join(os.path.dirname(first_path), f"{os.path.basename(first_path)}_composite.png")
             else:
@@ -7142,8 +7144,6 @@ atomcam2で利用する場合は、GitHubで公開されている
                 if item_key not in seen_inputs:
                     ai_source_files.append(path)
                     seen_inputs.add(item_key)
-            ai_source_files.sort()
-
             if not ai_source_files:
                 messagebox.showwarning(
                     "画像がありません",
@@ -7184,7 +7184,7 @@ atomcam2で利用する場合は、GitHubで公開されている
             def run_normal_task():
                 self.append_log(f"比較明合成画像の作成を開始します... ({len(file_paths)}個の要素)")
                 success = lighten_blend_image.create_lighten_blend_image(
-                    list(file_paths),
+                    file_paths,
                     output_path,
                     progress_callback=self.append_log
                 )
