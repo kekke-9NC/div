@@ -181,7 +181,8 @@ def create_lighten_blend_image(
     progress_callback: Optional[Callable[[str], None]] = None,
     bright_area_mask: Optional[np.ndarray] = None,
     mask_generator: Optional[Callable[[np.ndarray], Optional[np.ndarray]]] = None,
-    inclusion_mode: bool = False
+    inclusion_mode: bool = False,
+    mask_generator_for_path: Optional[Callable[[np.ndarray, str], Optional[np.ndarray]]] = None
 ) -> bool:
     """
     複数のファイルから比較明合成画像を作成する。
@@ -196,6 +197,7 @@ def create_lighten_blend_image(
         bright_area_mask: 明るいエリアのマスク（0=マスク領域, 255=通常領域）
         mask_generator: 各フレームごとにマスクを生成するコールバック関数
         inclusion_mode: Trueの場合、マスク領域(255)のみ合成する（流星モード）
+        mask_generator_for_path: ファイルパスと画像からマスクを生成するコールバック関数
         
     Returns:
         bool: 成功したらTrue
@@ -253,10 +255,17 @@ def create_lighten_blend_image(
     
     composite = first_frame.astype(np.float32)
     processed = 1
+
+    def generate_mask(frame: np.ndarray, source_path: str) -> Optional[np.ndarray]:
+        if mask_generator_for_path is not None:
+            return mask_generator_for_path(frame, source_path)
+        if mask_generator is not None:
+            return mask_generator(frame)
+        return None
     
     # 最初のフレームにもマスクを適用
-    if mask_generator is not None:
-        first_mask = mask_generator(first_frame)
+    if mask_generator is not None or mask_generator_for_path is not None:
+        first_mask = generate_mask(first_frame, first_file)
         if first_mask is not None:
             if first_mask.shape[0] != base_height or first_mask.shape[1] != base_width:
                 first_mask = cv2.resize(first_mask, (base_width, base_height), interpolation=cv2.INTER_NEAREST)
@@ -296,8 +305,8 @@ def create_lighten_blend_image(
 
                     # 動的マスク生成（全画像処理）
                     current_mask = resized_mask
-                    if mask_generator is not None:
-                        generated = mask_generator(frame)
+                    if mask_generator is not None or mask_generator_for_path is not None:
+                        generated = generate_mask(frame, file_path)
                         if generated is not None:
                             if generated.shape[0] != base_height or generated.shape[1] != base_width:
                                 current_mask = cv2.resize(generated, (base_width, base_height), interpolation=cv2.INTER_NEAREST)
@@ -343,8 +352,8 @@ def create_lighten_blend_image(
                             
                             # 動的マスク生成（全画像処理）
                             current_mask = resized_mask
-                            if mask_generator is not None:
-                                generated = mask_generator(frame)
+                            if mask_generator is not None or mask_generator_for_path is not None:
+                                generated = generate_mask(frame, file_path)
                                 if generated is not None:
                                     if generated.shape[0] != base_height or generated.shape[1] != base_width:
                                         current_mask = cv2.resize(generated, (base_width, base_height), interpolation=cv2.INTER_NEAREST)

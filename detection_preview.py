@@ -269,6 +269,9 @@ class DetectionPreviewWindow(tk.Toplevel):
         # 状態更新
         self.eta_label.config(text="ETA: 完了")
         self.status_label.config(text="解析完了")
+        self.btn_start.config(
+            state=tk.NORMAL if self.results else tk.DISABLED
+        )
         # 最終経過時間を更新
         if self.analysis_start_time:
              elapsed = time.time() - self.analysis_start_time
@@ -326,9 +329,6 @@ class DetectionPreviewWindow(tk.Toplevel):
              # 更新の場合もリフレッシュ
              self.refresh_view()
         
-        # 合成開始ボタン有効化
-        self.btn_start.config(state=tk.NORMAL)
-
     def _create_item_widget(self, item_key: str):
         """指定されたファイルのUIアイテムを作成・表示（packする）"""
         if item_key not in self.results:

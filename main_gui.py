@@ -7098,20 +7098,12 @@ atomcam2で利用する場合は、GitHubで公開されている
         def start_synthesis_with_results(results):
             def run_ai_task():
                 self.append_log("AI解析結果に基づく合成処理を開始します...")
-                # Mask generation must follow the same expanded file order as synthesis.
+                # Resolve each mask by source path so skipped reads cannot shift assignments.
                 
                 all_files = ai_source_files
-                
-                # インデックス管理用
-                file_index = [0]
-                
-                def mask_generator(img):
-                    if file_index[0] >= len(all_files):
-                        return None
-                    
-                    current_path = all_files[file_index[0]]
+
+                def mask_generator_for_path(img, current_path):
                     item_key = os.path.normcase(os.path.abspath(current_path))
-                    file_index[0] += 1
                     
                     if item_key in results:
                         boxes = results[item_key]['boxes']
@@ -7120,13 +7112,16 @@ atomcam2で利用する場合は、GitHubで公開されている
                             return bright_area_detector.create_inclusion_mask_from_boxes((h, w), boxes)
                         else:
                             return bright_area_detector.create_mask_from_boxes((h, w), boxes)
-                    return None
+                    self.append_log(
+                        f"解析結果がありません。安全のため対象画像を合成から除外します: {current_path}"
+                    )
+                    return np.zeros(img.shape[:2], dtype=np.uint8)
 
                 success = lighten_blend_image.create_lighten_blend_image(
                     all_files,
                     output_path,
                     progress_callback=self.append_log,
-                    mask_generator=mask_generator,
+                    mask_generator_for_path=mask_generator_for_path,
                     inclusion_mode=is_meteor_mode
                 )
                 self._handle_synthesis_result(success, output_path)
