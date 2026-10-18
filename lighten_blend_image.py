@@ -277,7 +277,14 @@ def create_lighten_blend_image(
     
     # 最初のフレームにもマスクを適用
     if mask_generator is not None or mask_generator_for_path is not None:
-        first_mask = generate_mask(first_frame, first_file)
+        try:
+            first_mask = generate_mask(first_frame, first_file)
+        except Exception as e:
+            del composite
+            gc.collect()
+            if progress_callback:
+                progress_callback(f"最初のファイルのマスク生成に失敗しました: {first_file} - {e}")
+            return False
         if first_mask is not None:
             if first_mask.shape[0] != base_height or first_mask.shape[1] != base_width:
                 first_mask = cv2.resize(first_mask, (base_width, base_height), interpolation=cv2.INTER_NEAREST)

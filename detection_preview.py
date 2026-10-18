@@ -234,13 +234,23 @@ class DetectionPreviewWindow(tk.Toplevel):
             bool(data.get('analysis_error')) for data in self.results.values()
         )
         if self.analysis_complete:
-            self.status_label.config(
-                text=f"要確認: {unresolved_errors}件" if unresolved_errors else "解析完了"
-            )
+            missing_items = max(0, self.total_items - self.processed_items)
+            if missing_items:
+                status = f"未処理: {missing_items}件"
+            elif unresolved_errors:
+                status = f"要確認: {unresolved_errors}件"
+            else:
+                status = "解析完了"
+            self.status_label.config(text=status)
         self.btn_start.config(
             state=(
                 tk.NORMAL
-                if self.analysis_complete and self.results and not unresolved_errors
+                if (
+                    self.analysis_complete
+                    and self.processed_items == self.total_items
+                    and self.results
+                    and not unresolved_errors
+                )
                 else tk.DISABLED
             )
         )
@@ -307,18 +317,23 @@ class DetectionPreviewWindow(tk.Toplevel):
     def add_item(
         self, filename: str, image_path: str, boxes: List[Tuple],
         reanalyze_callback: Callable, item_key: Optional[str] = None,
-        analysis_error: Optional[str] = None
+        analysis_error: Optional[str] = None,
+        source_image_shape: Optional[Tuple[int, int]] = None,
     ):
         """
         リストにアイテムを追加（または更新）
         """
         item_key = item_key or filename
         # データ登録
-        full_image = imread_with_japanese_path(image_path)
-        if full_image is None:
-            return
-            
-        height, width = full_image.shape[:2]
+        if source_image_shape is None:
+            full_image = imread_with_japanese_path(image_path)
+            if full_image is None:
+                return False
+            image_shape = full_image.shape[:2]
+        else:
+            image_shape = source_image_shape
+
+        height, width = image_shape
         self.results[item_key] = {
             'display_name': filename,
             'boxes': boxes,
@@ -348,6 +363,7 @@ class DetectionPreviewWindow(tk.Toplevel):
         else:
              # 更新の場合もリフレッシュ
              self.refresh_view()
+        return True
         
     def _create_item_widget(self, item_key: str):
         """指定されたファイルのUIアイテムを作成・表示（packする）"""
@@ -491,6 +507,14 @@ class DetectionPreviewWindow(tk.Toplevel):
         # 画像読み込み
         img = imread_with_japanese_path(image_path)
         if img is None:
+            self.results[filename]['reanalyze_error'] = "画像を読み込めませんでした。既存の枠は保持しています。"
+            self._rebuild_ui(self.item_order)
+            self._refresh_completion_state()
+            messagebox.showerror(
+                "画像読込エラー",
+                "再検出する画像を読み込めませんでした。既存の枠は保持しています。",
+                parent=self,
+            )
             return
         
         # カーソルを待機状態に
@@ -674,6 +698,13 @@ class DetectionPreviewWindow(tk.Toplevel):
             messagebox.showerror(
                 "AI解析中",
                 "すべての画像の解析が終了してから合成を開始してください。",
+                parent=self,
+            )
+            return
+        if self.processed_items != self.total_items:
+            messagebox.showerror(
+                "未処理の画像",
+                "選択したすべての画像がプレビューに登録されていません。画像を読み込める状態にして、解析をやり直してください。",
                 parent=self,
             )
             return
