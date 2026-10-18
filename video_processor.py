@@ -266,6 +266,29 @@ def concatenate_videos(
     if len(input_files) < 2:
         return False, "連結には2つ以上の動画ファイルが必要です"
 
+    try:
+        output_path_abs = os.path.abspath(os.fsdecode(os.fspath(output_path)))
+        output_identity = os.path.normcase(os.path.realpath(output_path_abs))
+    except (OSError, TypeError, ValueError) as exc:
+        return False, f"出力先のパスが無効です: {exc}"
+
+    for input_file in input_files:
+        try:
+            input_path_abs = os.path.abspath(os.fsdecode(os.fspath(input_file)))
+            input_identity = os.path.normcase(os.path.realpath(input_path_abs))
+        except (OSError, TypeError, ValueError) as exc:
+            return False, f"入力ファイルのパスが無効です: {exc}"
+        try:
+            same_file = os.path.samefile(input_path_abs, output_path_abs)
+        except (TypeError, ValueError) as exc:
+            return False, f"入力/出力パスが無効です: {exc}"
+        except FileNotFoundError:
+            same_file = False
+        except OSError as exc:
+            return False, f"入力/出力ファイルを安全に確認できません: {exc}"
+        if same_file or input_identity == output_identity:
+            return False, f"出力先に連結元と同じファイルは指定できません: {input_file}"
+
     missing_tools = [
         tool for tool in (get_ffmpeg_path(), get_ffprobe_path())
         if shutil.which(tool) is None
