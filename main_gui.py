@@ -340,9 +340,11 @@ class App(TkinterDnD.Tk):
         self.worker_thread = None
         self.rtsp_thread = None
         self.periodic_scan_thread = None
+        self._close_wait_started = False
         self.cancel_flag = threading.Event()
         self._aux_cancel_events = set()
-        self._aux_cancel_events_lock = threading.Lock()
+        self._background_worker_threads = set()
+        self._background_workers_lock = threading.Lock()
         self.progress_queue = queue.Queue()
         self._plate_solve_status_marker = object()
         self._plate_solve_result_marker = object()
@@ -2072,10 +2074,10 @@ atomcam2で利用する場合は、GitHubで公開されている
                             fps_val = str(int(round(fps)))
                         else:
                             fps_val = f"{fps:.2f}"
-                        self.after(0, lambda: self.append_log(f"自動検出したFPSを設定しました: {fps_val}"))
+                        self._schedule_ui_if_open(self.append_log, f"自動検出したFPSを設定しました: {fps_val}")
                         # 必要ならここで変数を更新しても良いが、"Auto"のまま処理側で取得するのが安全
                 
-                threading.Thread(target=detect_fps, daemon=True).start()
+                self._start_app_worker(detect_fps)
             except:
                 pass
 
@@ -2137,16 +2139,61 @@ atomcam2で利用する場合は、GitHubで公開されている
     def _register_aux_cancel_event(self):
         """Create and track a cancellation event for a non-pipeline job."""
         cancel_event = threading.Event()
-        with self._aux_cancel_events_lock:
-            self._aux_cancel_events.add(cancel_event)
+        with self._background_workers_lock:
+            if self._close_wait_started:
+                cancel_event.set()
+            else:
+                self._aux_cancel_events.add(cancel_event)
         return cancel_event
 
     def _release_aux_cancel_event(self, cancel_event):
-        with self._aux_cancel_events_lock:
+        with self._background_workers_lock:
             self._aux_cancel_events.discard(cancel_event)
+
+    def _start_app_worker(self, target, args=(), kwargs=None, daemon=True):
+        """Start and track an app-owned worker, unless shutdown has started."""
+        thread = threading.Thread(
+            target=target,
+            args=args,
+            kwargs=kwargs or {},
+            daemon=daemon,
+        )
+        with self._background_workers_lock:
+            if self._close_wait_started:
+                return None
+            self._background_worker_threads = {
+                worker for worker in self._background_worker_threads if worker.is_alive()
+            }
+            self._background_worker_threads.add(thread)
+            try:
+                thread.start()
+            except Exception:
+                self._background_worker_threads.discard(thread)
+                raise
+        return thread
+
+    def _schedule_ui_if_open(self, callback, *args, **kwargs):
+        """Schedule a worker UI callback and recheck shutdown when it runs."""
+        if self._close_wait_started:
+            return
+
+        def run_if_open():
+            if self._close_wait_started:
+                return
+            try:
+                callback(*args, **kwargs)
+            except tk.TclError:
+                pass
+
+        try:
+            self.after(0, run_if_open)
+        except tk.TclError:
+            pass
 
     def start_video_concat(self):
         """動画連結処理を開始"""
+        if self._close_wait_started:
+            return
         if len(self.video_concat_files) < 2:
             messagebox.showwarning("情報", "連結するには2つ以上の動画ファイルを追加してください。")
             return
@@ -2183,13 +2230,13 @@ atomcam2で利用する場合は、GitHubで公開されている
         self.append_log(f"設定: ビットレート={bitrate}, コーデック={codec}, FPS={fps_str}")
         cancel_event = self._register_aux_cancel_event()
         
-        thread = threading.Thread(
-            target=self._video_concat_worker,
-            args=(files, output_path, bitrate, codec, fps_val, safe_mode, cancel_event),
-            daemon=True
-        )
         try:
-            thread.start()
+            worker = self._start_app_worker(
+                self._video_concat_worker,
+                args=(files, output_path, bitrate, codec, fps_val, safe_mode, cancel_event),
+            )
+            if worker is None:
+                self._release_aux_cancel_event(cancel_event)
         except Exception:
             self._release_aux_cancel_event(cancel_event)
             raise
@@ -2197,7 +2244,7 @@ atomcam2で利用する場合は、GitHubで公開されている
     def _video_concat_worker(self, files, output_path, bitrate, codec, fps, safe_mode, cancel_event):
         """動画連結のバックグラウンド処理"""
         def progress_callback(progress, message):
-            self.after(0, lambda: self.append_log(message))
+            self.append_log(message)
         
         def cancel_check():
             return cancel_event.is_set()
@@ -2215,17 +2262,22 @@ atomcam2で利用する場合は、GitHubで公開されている
             )
             
             if success:
-                self.after(0, lambda: messagebox.showinfo("完了", message))
-                self.after(0, lambda: self.append_log(f"連結完了: {output_path}"))
+                self._show_worker_result_dialog("showinfo", "完了", message)
+                self.append_log(f"連結完了: {output_path}")
             else:
-                self.after(0, lambda: messagebox.showerror("エラー", message))
-                self.after(0, lambda: self.append_log(f"連結エラー: {message}"))
+                self._show_worker_result_dialog("showerror", "エラー", message)
+                self.append_log(f"連結エラー: {message}")
         except Exception as e:
             error_msg = f"予期せぬエラー: {e}"
-            self.after(0, lambda: messagebox.showerror("エラー", error_msg))
-            self.after(0, lambda: self.append_log(error_msg))
+            self._show_worker_result_dialog("showerror", "エラー", error_msg)
+            self.append_log(error_msg)
         finally:
             self._release_aux_cancel_event(cancel_event)
+
+    def _show_worker_result_dialog(self, dialog_type, title, message):
+        self._schedule_ui_if_open(
+            getattr(messagebox, dialog_type), title, message, parent=self
+        )
 
     def start_analysis(self):
         if not self.check_admin_password():
@@ -2802,7 +2854,7 @@ atomcam2で利用する場合は、GitHubで公開されている
                     except Exception:
                         pass
 
-        threading.Thread(target=worker, daemon=True).start()
+        self._start_app_worker(worker)
 
     def on_ai_vlm_backend_changed(self):
         new_backend = self.ai_vlm_backend_var.get()
@@ -2839,6 +2891,8 @@ atomcam2で利用する場合は、GitHubで公開されている
                 return
 
             def update():
+                if self._close_wait_started:
+                    return
                 combo = getattr(self, "cmb_lm_studio_vlm_model", None)
                 if combo is None:
                     return
@@ -2852,9 +2906,10 @@ atomcam2で利用する場合は、GitHubで公開されている
                     self.lm_studio_vlm_model_var.set(model_ids[0])
                     self.on_lm_studio_vlm_model_selected()
 
-            self.after(0, update)
+            if not self._close_wait_started:
+                self.after(0, update)
 
-        threading.Thread(target=worker, daemon=True).start()
+        self._start_app_worker(worker)
 
     def _run_ai_vlm_model_action_async(self, action_name, action_func_name):
         if not self.apply_ai_model_settings(show_message=False):
@@ -2876,16 +2931,16 @@ atomcam2で利用する場合は、GitHubで公開されている
                         result = action_func(status_callback=self.append_log)
                     else:
                         result = action_func()
-                    self.after(0, lambda: self.ai_vlm_status_var.set(result))
-                    self.after(0, lambda: messagebox.showinfo("AIモデル", result, parent=self))
+                    self._schedule_ui_if_open(self.ai_vlm_status_var.set, result)
+                    self._show_worker_result_dialog("showinfo", "AIモデル", result)
                     if self._is_lm_studio_backend_selected():
                         self.refresh_lm_studio_vlm_models_async()
                 except Exception as e:
                     msg = f"{action_name}に失敗しました:\n{e}"
-                    self.after(0, lambda: self.ai_vlm_status_var.set("AIモデルエラー"))
-                    self.after(0, lambda: messagebox.showerror("AIモデル", msg, parent=self))
+                    self._schedule_ui_if_open(self.ai_vlm_status_var.set, "AIモデルエラー")
+                    self._show_worker_result_dialog("showerror", "AIモデル", msg)
 
-        threading.Thread(target=worker, daemon=True).start()
+        self._start_app_worker(worker)
 
     def load_ai_vlm_model_async(self):
         self._run_ai_vlm_model_action_async("Load Model", "load_selected_ai_model")
@@ -3033,27 +3088,27 @@ atomcam2で利用する場合は、GitHubで公開されている
                 connected, err = bright_area_detector.check_vlm_connection(status_callback=self.append_log, force=True)
                 if connected:
                     msg = f"接続OK: {bright_area_detector.get_active_model_name()}"
-                    self.after(0, lambda: self.ai_vlm_status_var.set(msg))
+                    self._schedule_ui_if_open(self.ai_vlm_status_var.set, msg)
                     if show_success:
-                        self.after(0, lambda: messagebox.showinfo("AIモデル接続確認", msg, parent=self))
+                        self._show_worker_result_dialog("showinfo", "AIモデル接続確認", msg)
                 else:
                     msg = f"接続NG: {err}"
-                    self.after(0, lambda: self.ai_vlm_status_var.set("接続NG"))
+                    self._schedule_ui_if_open(self.ai_vlm_status_var.set, "接続NG")
                     if self._is_lm_studio_backend_selected():
                         msg = (
                             "LM Studioに接続できません。\n"
                             "LM Studioを起動し、Local Serverを有効にしてください。\n\n"
                             f"詳細: {err}"
                         )
-                        self.after(0, lambda: messagebox.showerror("LM Studio 未起動", msg, parent=self))
+                        self._show_worker_result_dialog("showerror", "LM Studio 未起動", msg)
                     else:
-                        self.after(0, lambda: messagebox.showerror("AIモデル接続確認", msg, parent=self))
+                        self._show_worker_result_dialog("showerror", "AIモデル接続確認", msg)
             except Exception as e:
                 msg = f"接続確認に失敗しました: {e}"
-                self.after(0, lambda: self.ai_vlm_status_var.set("接続NG"))
-                self.after(0, lambda: messagebox.showerror("AIモデル接続確認", msg, parent=self))
+                self._schedule_ui_if_open(self.ai_vlm_status_var.set, "接続NG")
+                self._show_worker_result_dialog("showerror", "AIモデル接続確認", msg)
 
-        threading.Thread(target=worker, daemon=True).start()
+        self._start_app_worker(worker)
 
     def _create_basic_processing_params_section(self, parent):
         """Create basic processing controls moved from 保存設定 to 詳細設定 tab."""
@@ -3228,7 +3283,7 @@ atomcam2で利用する場合は、GitHubで公開されている
 
     def append_log(self, message: str):
         if threading.current_thread() is not threading.main_thread():
-            self.after(0, lambda m=message: self.append_log(m))
+            self._schedule_ui_if_open(self.append_log, message)
             return
         if not self.log_text.winfo_exists():
             return
@@ -3653,11 +3708,16 @@ atomcam2で利用する場合は、GitHubで公開されている
         self._summary_preview_photo = None
 
     def _run_on_main_thread(self, func):
+        if self._close_wait_started:
+            return None
         if threading.current_thread() is threading.main_thread():
             return func()
         result_queue = queue.Queue(maxsize=1)
 
         def wrapper():
+            if self._close_wait_started:
+                result_queue.put((True, None))
+                return
             try:
                 result_queue.put((True, func()))
             except Exception as e:
@@ -4034,7 +4094,7 @@ atomcam2で利用する場合は、GitHubで公開されている
 
     def fetch_current_location_rtsp(self):
         """Fetch current location and auto-set RTSP recording time based on sunset/sunrise."""
-        threading.Thread(target=self._fetch_current_location_rtsp_thread, daemon=True).start()
+        self._start_app_worker(self._fetch_current_location_rtsp_thread)
 
     def _fetch_current_location_rtsp_thread(self):
         try:
@@ -4044,7 +4104,9 @@ atomcam2で利用する場合は、GitHubで公開されている
             lat, lon = 35.0, 135.0
 
         try:
-            self.after(0, lambda: self.append_log(f"RTSP時間設定: 位置情報取得 (緯度={lat}, 経度={lon})"))
+            self._schedule_ui_if_open(
+                self.append_log, f"RTSP時間設定: 位置情報取得 (緯度={lat}, 経度={lon})"
+            )
         except Exception:
             pass
 
@@ -4054,14 +4116,14 @@ atomcam2で利用する場合は、GitHubで公開されている
             end_dt = period.get('end')
             if start_dt:
                 sh, sm = start_dt.hour, start_dt.minute
-                self.after(0, lambda: self.rtsp_start_hour_var.set(f"{sh:02d}"))
-                self.after(0, lambda: self.rtsp_start_min_var.set(f"{sm:02d}"))
-                self.after(0, lambda: self.append_log(f"RTSP時間設定: 録画開始時刻={sh:02d}:{sm:02d}"))
+            self._schedule_ui_if_open(self.rtsp_start_hour_var.set, f"{sh:02d}")
+            self._schedule_ui_if_open(self.rtsp_start_min_var.set, f"{sm:02d}")
+            self._schedule_ui_if_open(self.append_log, f"RTSP時間設定: 録画開始時刻={sh:02d}:{sm:02d}")
             if end_dt:
                 eh, em = end_dt.hour, end_dt.minute
-                self.after(0, lambda: self.rtsp_end_hour_var.set(f"{eh:02d}"))
-                self.after(0, lambda: self.rtsp_end_min_var.set(f"{em:02d}"))
-                self.after(0, lambda: self.append_log(f"RTSP時間設定: 録画終了時刻={eh:02d}:{em:02d}"))
+            self._schedule_ui_if_open(self.rtsp_end_hour_var.set, f"{eh:02d}")
+            self._schedule_ui_if_open(self.rtsp_end_min_var.set, f"{em:02d}")
+            self._schedule_ui_if_open(self.append_log, f"RTSP時間設定: 録画終了時刻={eh:02d}:{em:02d}")
         except Exception as e:
             print(f"compute_night_period for RTSP failed: {e}")
 
@@ -4071,7 +4133,7 @@ atomcam2で利用する場合は、GitHubで公開されている
         Uses div/location_utils.py (imported as location_utils). If retrieval fails,
         the helper returns the default coordinates (35.0, 135.0).
         """
-        threading.Thread(target=self._fetch_current_location_thread, daemon=True).start()
+        self._start_app_worker(self._fetch_current_location_thread)
 
     def _fetch_current_location_thread(self):
         try:
@@ -4081,14 +4143,14 @@ atomcam2で利用する場合は、GitHubで公開されている
             lat, lon = 35.0, 135.0
 
         try:
-            self.after(0, lambda: self.current_lat_var.set(f"{lat:.6f}"))
-            self.after(0, lambda: self.current_lon_var.set(f"{lon:.6f}"))
+            self._schedule_ui_if_open(self.current_lat_var.set, f"{lat:.6f}")
+            self._schedule_ui_if_open(self.current_lon_var.set, f"{lon:.6f}")
         except Exception:
             pass
 
         print(f"Current location: lat={lat}, lon={lon}")
         try:
-            self.after(0, lambda: self.append_log(f"取得した位置情報: 緯度={lat}, 経度={lon}"))
+            self._schedule_ui_if_open(self.append_log, f"取得した位置情報: 緯度={lat}, 経度={lon}")
         except Exception:
             pass
 
@@ -4105,8 +4167,12 @@ atomcam2で利用する場合は、GitHubで公開されている
             print(f"  Astronomical dusk (astro end): {fmt(times.get('astro_dusk'))}")
 
             try:
-                self.after(0, lambda: self.append_log(f"計算: 日の出={fmt(times.get('sunrise'))}, 日没={fmt(times.get('sunset'))}"))
-                self.after(0, lambda: self.append_log(f"計算: 天文薄明開始={fmt(times.get('astro_dawn'))}, 終了={fmt(times.get('astro_dusk'))}"))
+                self._schedule_ui_if_open(
+                    self.append_log, f"計算: 日の出={fmt(times.get('sunrise'))}, 日没={fmt(times.get('sunset'))}"
+                )
+                self._schedule_ui_if_open(
+                    self.append_log, f"計算: 天文薄明開始={fmt(times.get('astro_dawn'))}, 終了={fmt(times.get('astro_dusk'))}"
+                )
             except Exception:
                 pass
         except Exception as e:
@@ -4119,22 +4185,24 @@ atomcam2で利用する場合は、GitHubで公開されている
             end_dt = period.get('end')
             if start_dt:
                 sh, sm = start_dt.hour, start_dt.minute
-                self.after(0, lambda: self.start_hour_var.set(f"{sh:02d}"))
-                self.after(0, lambda: self.start_min_var.set(f"{sm:02d}"))
+                self._schedule_ui_if_open(self.start_hour_var.set, f"{sh:02d}")
+                self._schedule_ui_if_open(self.start_min_var.set, f"{sm:02d}")
                 print(f"Auto-set start time to {sh:02d}:{sm:02d} (midpoint sunset/astro_dusk)")
-                self.after(0, lambda: self.append_log(f"自動設定: 開始時刻={sh:02d}:{sm:02d}"))
+                self._schedule_ui_if_open(self.append_log, f"自動設定: 開始時刻={sh:02d}:{sm:02d}")
 
             if end_dt:
                 eh, em = end_dt.hour, end_dt.minute
-                self.after(0, lambda: self.end_hour_var.set(f"{eh:02d}"))
-                self.after(0, lambda: self.end_min_var.set(f"{em:02d}"))
+                self._schedule_ui_if_open(self.end_hour_var.set, f"{eh:02d}")
+                self._schedule_ui_if_open(self.end_min_var.set, f"{em:02d}")
                 print(f"Auto-set end time to {eh:02d}:{em:02d} (midpoint sunrise/astro_dawn next day)")
-                self.after(0, lambda: self.append_log(f"自動設定: 終了時刻={eh:02d}:{em:02d}"))
+                self._schedule_ui_if_open(self.append_log, f"自動設定: 終了時刻={eh:02d}:{em:02d}")
         except Exception as e:
             print(f"compute_night_period failed: {e}")
 
     def toggle_auto_time_updater(self):
         """自動更新の有効/無効を切り替え"""
+        if self._close_wait_started:
+            return
         if self.auto_time_updater_enabled_var.get():
             self.auto_updater.start()
         else:
@@ -4146,13 +4214,15 @@ atomcam2で利用する場合は、GitHubで公開されている
         GUIの時刻設定を更新する
         """
         def update_gui():
+            if self._close_wait_started:
+                return
             self.start_hour_var.set(f"{start_hour:02d}")
             self.start_min_var.set(f"{start_min:02d}")
             self.end_hour_var.set(f"{end_hour:02d}")
             self.end_min_var.set(f"{end_min:02d}")
         
         # メインスレッドで実行
-        self.after(0, update_gui)
+        self._schedule_ui_if_open(update_gui)
 
     def toggle_summary_settings_button(self, *args):
         if hasattr(self, 'btn_summary_settings'):
@@ -4217,6 +4287,8 @@ atomcam2で利用する場合は、GitHubで公開されている
                 messagebox.showerror("エラー", f"WCSファイルのロード/検証に失敗しました:\n{e}")
 
     def start_plate_solve(self):
+        if self._close_wait_started:
+            return
         self.apply_advanced_settings_to_config()
         video_file_path = self.plate_solve_video_path_var.get().strip()
         if not video_file_path:
@@ -4226,17 +4298,20 @@ atomcam2で利用する場合は、GitHubで公開されている
         self.plate_solve_status_var.set("プレートソルブ: 実行中...")
         cancel_event = self._register_aux_cancel_event()
         try:
-            threading.Thread(
-                target=self.execute_plate_solve_thread,
+            worker = self._start_app_worker(
+                self.execute_plate_solve_thread,
                 args=(video_file_path, self.plate_solve_mode_var.get(), self.plate_solve_mask_image, cancel_event),
-                daemon=True,
-            ).start()
+            )
+            if worker is None:
+                self._release_aux_cancel_event(cancel_event)
         except Exception:
             self._release_aux_cancel_event(cancel_event)
             raise
 
     def start_rtsp_plate_solve(self):
         """RTSPストリームからプレートソルブを実行する"""
+        if self._close_wait_started:
+            return
         self.apply_advanced_settings_to_config()
         # 選択されているRTSP URLを取得、選択がなければ最初のURLを使用
         if self.rtsp_selected_indices:
@@ -4250,11 +4325,12 @@ atomcam2で利用する場合は、GitHubで公開されている
         self.plate_solve_status_var.set("プレートソルブ: RTSP接続中...")
         cancel_event = self._register_aux_cancel_event()
         try:
-            threading.Thread(
-                target=self.execute_rtsp_plate_solve_thread,
+            worker = self._start_app_worker(
+                self.execute_rtsp_plate_solve_thread,
                 args=(rtsp_url, self.plate_solve_mode_var.get(), self.plate_solve_mask_image, cancel_event),
-                daemon=True,
-            ).start()
+            )
+            if worker is None:
+                self._release_aux_cancel_event(cancel_event)
         except Exception:
             self._release_aux_cancel_event(cancel_event)
             raise
@@ -4277,13 +4353,17 @@ atomcam2で利用する場合は、GitHubで公開されている
     def execute_rtsp_plate_solve_thread(self, rtsp_url: str, solve_mode: str, solve_mask, cancel_event):
         """RTSPストリームからフレームを取得してプレートソルブを実行するスレッド"""
         self.progress_queue.put((f"RTSPプレートソルブを実行中: {rtsp_url}", None))
+        cap = None
+        temp_composite_path = None
         try:
+            if cancel_event.is_set():
+                return
             cap = utils.create_rtsp_capture(rtsp_url)
-            cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 10000)
-            cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 10000)
             
             if not cap.isOpened():
                 raise IOError(f"RTSPストリームを開けません: {rtsp_url}")
+            if cancel_event.is_set():
+                return
             
             self._queue_plate_solve_status("プレートソルブ: フレーム取得中...")
             
@@ -4296,18 +4376,31 @@ atomcam2で利用する場合は、GitHubで公開されている
             composite_image = None
             frame_count = 0
             for _ in range(num_frames):
+                if cancel_event.is_set():
+                    return
                 ret, frame = cap.read()
+                if cancel_event.is_set():
+                    return
                 if not ret or frame is None:
                     # フレーム取得に失敗した場合、少し待って再試行
                     time.sleep(0.01)
+                    if cancel_event.is_set():
+                        return
                     ret, frame = cap.read()
+                    if cancel_event.is_set():
+                        return
                 if ret and frame is not None:
                     if composite_image is None:
                         composite_image = frame.copy()
                     else:
                         np.maximum(composite_image, frame, out=composite_image)
                     frame_count += 1
+
+            if cancel_event.is_set():
+                return
+
             cap.release()
+            cap = None
             
             if frame_count < 10:
                 raise ValueError(f"RTSPストリームから十分なフレームを取得できませんでした。取得フレーム数: {frame_count}")
@@ -4318,6 +4411,9 @@ atomcam2で利用する場合は、GitHubで公開されている
             temp_composite_path = os.path.join(config.TEMP_CLIP_DIR, f"rtsp_composite_{time.time_ns()}.jpg")
             os.makedirs(config.TEMP_CLIP_DIR, exist_ok=True)
             cv2.imwrite(temp_composite_path, composite_image)
+
+            if cancel_event.is_set():
+                return
             
             self._queue_plate_solve_status("プレートソルブ: 実行中...")
             self.progress_queue.put(("Astrometry.netにアップロード中...", None))
@@ -4330,8 +4426,9 @@ atomcam2で利用する場合は、GitHubで公開されている
                 scale_lower=config.RTSP_SCALE_LOWER, scale_upper=config.RTSP_SCALE_UPPER,
                 use_local=use_local_solver
             )
-            if os.path.exists(temp_composite_path):
-                os.remove(temp_composite_path)
+
+            if cancel_event.is_set():
+                return
             
             if plate_solve_result and 'wcs_file' in plate_solve_result:
                 ps_datetime = plate_solve_result.get('plate_solve_datetime', datetime.now())
@@ -4354,34 +4451,56 @@ atomcam2で利用する場合は、GitHubで公開されている
                 )
                 
         except Exception as e:
+            if cancel_event.is_set():
+                return
             error_message = f"RTSPプレートソルブ中にエラーが発生しました: {e}"
             self.progress_queue.put((error_message, None))
             self._queue_plate_solve_result(None, "プレートソルブ: エラー", "showerror", "エラー", error_message)
         finally:
-            self._release_aux_cancel_event(cancel_event)
+            try:
+                if cap is not None:
+                    cap.release()
+                if temp_composite_path and os.path.exists(temp_composite_path):
+                    os.remove(temp_composite_path)
+            finally:
+                self._release_aux_cancel_event(cancel_event)
 
     def execute_plate_solve_thread(self, video_file_path: str, solve_mode: str, solve_mask, cancel_event):
         self.progress_queue.put(("プレートソルブを実行中...", None))
+        cap = None
+        temp_composite_path = None
         try:
+            if cancel_event.is_set():
+                return
             cap = cv2.VideoCapture(video_file_path)
             if not cap.isOpened(): raise IOError("動画ファイルを開けません。")
             fps = cap.get(cv2.CAP_PROP_FPS) or config.DEFAULT_FPS
             num_frames = int(fps * 10)
             composite_image = None
             for _ in range(num_frames):
+                if cancel_event.is_set():
+                    return
                 ret, frame = cap.read()
+                if cancel_event.is_set():
+                    return
                 if not ret or frame is None:
                     break
                 if composite_image is None:
                     composite_image = frame.copy()
                 else:
                     np.maximum(composite_image, frame, out=composite_image)
+            if cancel_event.is_set():
+                return
             cap.release()
+            cap = None
             if composite_image is None: raise ValueError("動画からフレームを取得できませんでした。")
 
             temp_composite_path = os.path.join(config.TEMP_CLIP_DIR, f"temp_composite_{time.time_ns()}.jpg")
             os.makedirs(config.TEMP_CLIP_DIR, exist_ok=True)
             cv2.imwrite(temp_composite_path, composite_image)
+
+            if cancel_event.is_set():
+                return
 
             use_local_solver = (solve_mode == "local")
             plate_solve_result = astrometry.plate_solve_image(
@@ -4389,7 +4508,8 @@ atomcam2で利用する場合は、GitHubで公開されている
                 plate_solve_video_path=video_file_path, cancel_flag=cancel_event,
                 use_local=use_local_solver
             )
-            if os.path.exists(temp_composite_path): os.remove(temp_composite_path)
+            if cancel_event.is_set():
+                return
 
             if plate_solve_result and 'wcs_file' in plate_solve_result:
                 ps_datetime = plate_solve_result.get('plate_solve_datetime', datetime.now())
@@ -4412,14 +4532,22 @@ atomcam2で利用する場合は、GitHubで公開されている
                 )
 
         except Exception as e:
+            if cancel_event.is_set():
+                return
             error_message = f"プレートソルブ中にエラーが発生しました: {e}"
             self.progress_queue.put((error_message, None))
             self._queue_plate_solve_result(None, "プレートソルブ: エラー", "showerror", "エラー", error_message)
         finally:
-            self._release_aux_cancel_event(cancel_event)
+            try:
+                if cap is not None:
+                    cap.release()
+                if temp_composite_path and os.path.exists(temp_composite_path):
+                    os.remove(temp_composite_path)
+            finally:
+                self._release_aux_cancel_event(cancel_event)
 
     def on_closing(self):
-        if self._closing_dialog_active:
+        if self._closing_dialog_active or self._close_wait_started:
             return
         self._cancel_summary_preview_hide()
         self._closing_dialog_active = True
@@ -4449,15 +4577,20 @@ atomcam2で利用する場合は、GitHubで公開されている
                     if not exit_without_saving:
                         return
             self._hide_summary_preview()
-            # 自動更新を停止
-            if self.auto_updater:
-                self.auto_updater.stop()
+            with self._background_workers_lock:
+                self._close_wait_started = True
+            self._disable_interactive_widgets_for_close()
             self.cancel_flag.set()
-            with self._aux_cancel_events_lock:
+            with self._background_workers_lock:
                 aux_cancel_events = tuple(self._aux_cancel_events)
             for cancel_event in aux_cancel_events:
                 cancel_event.set()
-            self.destroy()
+            # Schedule the close poll before stopping any worker that may block.
+            self.after(100, self._wait_for_workers_before_destroy)
+            # 自動更新を停止
+            if self.auto_updater:
+                self.auto_updater.stop()
+            self.append_log("バックグラウンド処理の終了を待っています...")
             closing_completed = True
         finally:
             self._closing_dialog_active = False
@@ -4465,7 +4598,54 @@ atomcam2で利用する場合は、GitHubで公開されている
                 self._cancel_summary_preview_hide()
                 self._hide_summary_preview_if_pointer_outside()
 
+    def _disable_interactive_widgets_for_close(self):
+        interactive_classes = {
+            "Button", "TButton", "Checkbutton", "TCheckbutton",
+            "Radiobutton", "TRadiobutton", "Entry", "TEntry",
+            "Combobox", "TCombobox", "Spinbox", "TSpinbox",
+            "Scale", "TScale", "Listbox",
+        }
+        pending = list(self.winfo_children())
+        while pending:
+            widget = pending.pop()
+            try:
+                pending.extend(widget.winfo_children())
+                if widget.winfo_class() in interactive_classes:
+                    widget.configure(state=tk.DISABLED)
+            except tk.TclError:
+                continue
+
+    def _wait_for_workers_before_destroy(self):
+        if not self._close_wait_started:
+            return
+
+        with self._background_workers_lock:
+            workers = set(self._background_worker_threads)
+        workers.update((
+            self.worker_thread,
+            self.rtsp_thread,
+            self.periodic_scan_thread,
+            getattr(self.auto_updater, "update_thread", None),
+        ))
+        active_workers = [
+            worker for worker in workers
+            if worker is not None and worker is not threading.current_thread() and worker.is_alive()
+        ]
+        if active_workers:
+            try:
+                self.status_label.config(text=f"終了処理中... ({len(active_workers)} 件の処理を待機中)")
+            except Exception:
+                pass
+            self.after(200, self._wait_for_workers_before_destroy)
+            return
+
+        with self._background_workers_lock:
+            self._background_worker_threads.clear()
+        self.destroy()
+
     def start_processing(self):
+        if self._close_wait_started:
+            return
         # 詳細設定をconfigに適用
         self.apply_advanced_settings_to_config()
         if not self.apply_selected_model(silent=True):
@@ -4592,8 +4772,9 @@ atomcam2で利用する場合は、GitHubで公開されている
                 log_msg += f", 時間制限: {monitor_kwargs['start_hour']:02d}:{monitor_kwargs['start_minute']:02d} - {monitor_kwargs['end_hour']:02d}:{monitor_kwargs['end_minute']:02d}"
             self.append_log(log_msg)
 
-            self.periodic_scan_thread = threading.Thread(target=file_utils.monitor_directory, kwargs=monitor_kwargs, daemon=True)
-            self.periodic_scan_thread.start()
+            self.periodic_scan_thread = self._start_app_worker(
+                file_utils.monitor_directory, kwargs=monitor_kwargs
+            )
 
         elif self.rtsp_urls:
             selected_rtsp_index = min(self.rtsp_selected_indices) if self.rtsp_selected_indices else 0
@@ -4614,8 +4795,9 @@ atomcam2で利用する場合は、GitHubで公開されている
                 rtsp_time_limit, rtsp_sh, rtsp_sm, rtsp_eh, rtsp_em,
                 params['max_workers']
             )
-            self.rtsp_thread = threading.Thread(target=file_utils.rtsp_save_and_process_thread_target, args=rtsp_args, daemon=True)
-            self.rtsp_thread.start()
+            self.rtsp_thread = self._start_app_worker(
+                file_utils.rtsp_save_and_process_thread_target, args=rtsp_args
+            )
 
         elif self.folder_paths:
             sources_to_process = []
@@ -4654,8 +4836,7 @@ atomcam2で利用する場合は、GitHubで公開されている
                 params['meteor_save_path'], params['not_meteor_save_path'], self.cancel_flag,
                 params['save_options'], params['summary_config']
             )
-            self.worker_thread = threading.Thread(target=worker_main_loop, args=worker_args, daemon=True)
-            self.worker_thread.start()
+            self.worker_thread = self._start_app_worker(worker_main_loop, args=worker_args)
         else:
             messagebox.showerror("エラー", "処理対象がありません。")
             self.cancel_processing(restore_button_state=True)
@@ -4689,6 +4870,8 @@ atomcam2で利用する場合は、GitHubで公開されている
             self.status_label.config(text="停止")
 
     def update_progress(self):
+        if self._close_wait_started:
+            return
         if self.start_time_gui:
             elapsed_str = time.strftime("%H:%M:%S", time.gmtime(time.time() - self.start_time_gui))
             self.elapsed_label.config(text=f"経過: {elapsed_str}")
@@ -4707,9 +4890,10 @@ atomcam2で利用する場合は、GitHubで公開されている
                         if self.global_wcs_info:
                             self.plate_solve_wcs_path_var.set(self.global_wcs_info["wcs_file"])
                             self.update_start_button_state()
-                        getattr(messagebox, payload["dialog_type"])(
-                            payload["dialog_title"], payload["dialog_message"]
-                        )
+                        if not self._close_wait_started:
+                            getattr(messagebox, payload["dialog_type"])(
+                                payload["dialog_title"], payload["dialog_message"]
+                            )
                         continue
                 if (isinstance(queued_item, tuple) and len(queued_item) == 3 and
                         queued_item[0] is self._progress_envelope_marker):
@@ -4858,7 +5042,7 @@ atomcam2で利用する場合は、GitHubで公開されている
         progress_win.resizable(False, False)
         ttk.Label(progress_win, text="RTSPストリームに接続中...\nしばらくお待ちください。").pack(pady=15)
 
-        cancel_event = threading.Event()
+        cancel_event = self._register_aux_cancel_event()
         result_queue = queue.Queue(maxsize=1)
 
         def on_cancel():
@@ -4879,9 +5063,13 @@ atomcam2で利用する場合は、GitHubで公開されている
         def fetch_frame():
             cap = None
             try:
+                if cancel_event.is_set():
+                    return
                 cap = utils.create_rtsp_capture(rtsp_url)
                 if not cap.isOpened():
                     raise IOError("RTSPストリームを開けませんでした。")
+                if cancel_event.is_set():
+                    return
                 ret, frame = cap.read()
                 if cancel_event.is_set():
                     return
@@ -4892,11 +5080,18 @@ atomcam2で利用する場合は、GitHubで公開されている
                 if not cancel_event.is_set():
                     result_queue.put((None, str(e)))
             finally:
-                if cap is not None:
-                    cap.release()
+                try:
+                    if cap is not None:
+                        cap.release()
+                finally:
+                    self._release_aux_cancel_event(cancel_event)
 
-        fetch_thread = threading.Thread(target=fetch_frame, daemon=True)
-        fetch_thread.start()
+        fetch_thread = self._start_app_worker(fetch_frame)
+        if fetch_thread is None:
+            cancel_event.set()
+            self._release_aux_cancel_event(cancel_event)
+            progress_win.destroy()
+            return
 
         def check_result():
             if cancel_event.is_set():
@@ -5057,7 +5252,7 @@ atomcam2で利用する場合は、GitHubで公開されている
         progress_win.resizable(False, False)
         
         ttk.Label(progress_win, text="RTSPストリームに接続中...\nしばらくお待ちください。").pack(pady=15)
-        cancel_flag = threading.Event()
+        cancel_flag = self._register_aux_cancel_event()
         
         def on_cancel():
             cancel_flag.set()
@@ -5074,13 +5269,17 @@ atomcam2で利用する場合は、GitHubで公開されている
         result_holder = {'frame': None, 'error': None}
         
         def fetch_frame():
+            cap = None
             try:
+                if cancel_flag.is_set():
+                    return
                 cap = utils.create_rtsp_capture(rtsp_url)
                 if not cap.isOpened():
                     result_holder['error'] = "RTSPストリームを開けませんでした。"
                     return
+                if cancel_flag.is_set():
+                    return
                 ret, frame = cap.read()
-                cap.release()
                 if cancel_flag.is_set():
                     return
                 if not ret or frame is None:
@@ -5089,9 +5288,19 @@ atomcam2で利用する場合は、GitHubで公開されている
                     result_holder['frame'] = frame
             except Exception as e:
                 result_holder['error'] = str(e)
+            finally:
+                try:
+                    if cap is not None:
+                        cap.release()
+                finally:
+                    self._release_aux_cancel_event(cancel_flag)
         
-        fetch_thread = threading.Thread(target=fetch_frame, daemon=True)
-        fetch_thread.start()
+        fetch_thread = self._start_app_worker(fetch_frame)
+        if fetch_thread is None:
+            cancel_flag.set()
+            self._release_aux_cancel_event(cancel_flag)
+            progress_win.destroy()
+            return
         
         def check_thread():
             if cancel_flag.is_set():
@@ -5792,13 +6001,15 @@ atomcam2で利用する場合は、GitHubで公開されている
                 progress_callback=self.append_log
             )
             if success:
-                messagebox.showinfo("完了", "長時間輝線マップの作成が完了しました。")
+                self._show_worker_result_dialog("showinfo", "完了", "長時間輝線マップの作成が完了しました。")
                 self.append_log("長時間輝線マップの作成が完了しました。")
             else:
-                messagebox.showerror("エラー", "長時間輝線マップの作成に失敗しました。ログを確認してください。")
+                self._show_worker_result_dialog(
+                    "showerror", "エラー", "長時間輝線マップの作成に失敗しました。ログを確認してください。"
+                )
                 self.append_log("長時間輝線マップの作成に失敗しました。")
 
-        threading.Thread(target=run_task, daemon=True).start()
+        self._start_app_worker(run_task)
 
     def apply_distortion_correction_callback(self):
         """Callback for the 'Distortion Correction' button."""
@@ -5830,13 +6041,15 @@ atomcam2で利用する場合は、GitHubで公開されている
                 progress_callback=self.append_log
             )
             if success:
-                messagebox.showinfo("完了", "ゆがみ補正画像の作成が完了しました。")
+                self._show_worker_result_dialog("showinfo", "完了", "ゆがみ補正画像の作成が完了しました。")
                 self.append_log("ゆがみ補正画像の作成が完了しました。")
             else:
-                messagebox.showerror("エラー", "ゆがみ補正画像の作成に失敗しました。ログを確認してください。")
+                self._show_worker_result_dialog(
+                    "showerror", "エラー", "ゆがみ補正画像の作成に失敗しました。ログを確認してください。"
+                )
                 self.append_log("ゆがみ補正画像の作成に失敗しました。")
 
-        threading.Thread(target=run_task, daemon=True).start()
+        self._start_app_worker(run_task)
 
     def _select_selfcal_mask_mode(self) -> Optional[str]:
         """Select mask mode for night self-calibration."""
@@ -6204,19 +6417,19 @@ atomcam2で利用する場合は、GitHubで公開されている
                 self.append_log(f"  map_y: {map_y_path}")
                 self.append_log(f"  自動マスク: {auto_mask_output_path}")
                 self.append_log(f"  メタ情報: {metadata_output_path}")
-                messagebox.showinfo("完了", "\n".join(summary_lines))
+                self._show_worker_result_dialog("showinfo", "完了", "\n".join(summary_lines))
             except Exception as e:
                 import traceback
                 traceback.print_exc()
                 self.append_log(f"夜間自己校正マップ生成に失敗しました: {e}")
-                messagebox.showerror(
-                    "エラー",
+                self._show_worker_result_dialog(
+                    "showerror", "エラー",
                     "夜間自己校正マップ生成に失敗しました。\n"
                     "ログを確認してください。\n\n"
-                    f"詳細: {e}"
+                    f"詳細: {e}",
                 )
 
-        threading.Thread(target=run_task, daemon=True).start()
+        self._start_app_worker(run_task)
 
     def visualize_distortion_map_callback(self):
         """Visualize distortion map (map_x/map_y) on a Tk canvas as heatmap + vector field."""
@@ -6446,13 +6659,13 @@ atomcam2で利用する場合は、GitHubで公開されている
                 output_path
             )
             if success:
-                messagebox.showinfo("完了", msg)
+                self._show_worker_result_dialog("showinfo", "完了", msg)
                 self.append_log(f"角度分布分析完了: {msg}")
             else:
-                messagebox.showerror("エラー", msg)
+                self._show_worker_result_dialog("showerror", "エラー", msg)
                 self.append_log(f"角度分布分析失敗: {msg}")
 
-        threading.Thread(target=run_task, daemon=True).start()
+        self._start_app_worker(run_task)
 
     def create_lighten_blend_video_callback(self):
         """Callback for the 'Create Lighten Blend Video' button."""
@@ -6508,13 +6721,17 @@ atomcam2で利用する場合は、GitHubで公開されている
                     progress_callback=self.append_log
                 )
                 if success:
-                    messagebox.showinfo("完了", f"比較明合成動画の作成が完了しました。\\n保存先: {output_path}")
+                    self._show_worker_result_dialog(
+                        "showinfo", "完了", f"比較明合成動画の作成が完了しました。\\n保存先: {output_path}"
+                    )
                     self.append_log(f"比較明合成動画の作成が完了しました: {output_path}")
                 else:
-                    messagebox.showerror("エラー", "比較明合成動画の作成に失敗しました。ログを確認してください。")
+                    self._show_worker_result_dialog(
+                        "showerror", "エラー", "比較明合成動画の作成に失敗しました。ログを確認してください。"
+                    )
                     self.append_log("比較明合成動画の作成に失敗しました。")
             
-            threading.Thread(target=run_task, daemon=True).start()
+            self._start_app_worker(run_task)
         else:
             self._create_lighten_blend_video_with_meteor_detection(video_files, output_path)
 
@@ -6530,6 +6747,8 @@ atomcam2で利用する場合は、GitHubで公開されている
         video_composites = {}  # {video_path: {'temp_path': str, 'filename': str, 'shape': (h, w)}}
         
         def run_prep_task():
+            if self._close_wait_started:
+                return
             if not self._ensure_ai_model_loaded(bright_area_detector):
                 return
 
@@ -6562,15 +6781,19 @@ atomcam2で利用する場合は、GitHubで公開されている
                     self.append_log(f"警告: 動画から合成画像を作成できませんでした: {os.path.basename(vp)}")
             
             if not video_composites:
-                messagebox.showerror("エラー", "有効な合成画像を作成できませんでした。")
+                self._show_worker_result_dialog("showerror", "エラー", "有効な合成画像を作成できませんでした。")
                 return
             
             self.append_log(f"{len(video_composites)}個の合成画像を作成しました。")
             
             # メインスレッドでプレビューウィンドウを開く
             def open_preview():
+                if self._close_wait_started:
+                    return
                 # 合成開始コールバック
                 def start_video_synthesis_with_results(results):
+                    if self._close_wait_started:
+                        return
                     # 動画ごとの個別マスクを作成（和集合ではなく、各動画に対応するマスクのみ適用）
                     per_video_masks = {}
                     base_shape = None
@@ -6610,6 +6833,8 @@ atomcam2で利用する場合は、GitHubで公開されている
                     
                     # 動画ごとのマスクを適用して動画作成
                     def run_video_task():
+                        if self._close_wait_started:
+                            return
                         self.append_log("動画ごとのマスクを適用して動画を作成中...")
                         success = lighten_blend_video.create_lighten_blend_video(
                             list(video_files),
@@ -6618,10 +6843,14 @@ atomcam2で利用する場合は、GitHubで公開されている
                             per_video_masks=per_video_masks if per_video_masks else None
                         )
                         if success:
-                            messagebox.showinfo("完了", f"比較明合成動画の作成が完了しました。\\n保存先: {output_path}")
+                            self._show_worker_result_dialog(
+                                "showinfo", "完了", f"比較明合成動画の作成が完了しました。\\n保存先: {output_path}"
+                            )
                             self.append_log(f"比較明合成動画の作成が完了しました: {output_path}")
                         else:
-                            messagebox.showerror("エラー", "比較明合成動画の作成に失敗しました。ログを確認してください。")
+                            self._show_worker_result_dialog(
+                                "showerror", "エラー", "比較明合成動画の作成に失敗しました。ログを確認してください。"
+                            )
                             self.append_log("比較明合成動画の作成に失敗しました。")
                         
                         # 一時ファイルのクリーンアップ
@@ -6632,7 +6861,7 @@ atomcam2で利用する場合は、GitHubで公開されている
                             except:
                                 pass
                     
-                    threading.Thread(target=run_video_task, daemon=True).start()
+                    self._start_app_worker(run_video_task)
                 
                 # プレビューウィンドウ作成
                 preview_window = detection_preview.DetectionPreviewWindow(
@@ -6641,13 +6870,17 @@ atomcam2で利用する場合は、GitHubで公開されている
                 
                 # 各動画の合成画像に対して検出実行
                 def run_detection():
+                    if self._close_wait_started:
+                        return
                     total = len(video_composites)
                     self.append_log(f"AIによる流星検出を開始します... ({total}個の画像)")
                     
                     if preview_window.winfo_exists():
-                        self.after(0, lambda: preview_window.start_analysis(total))
+                        self._schedule_ui_if_open(preview_window.start_analysis, total)
                     
                     for i, (vp, data) in enumerate(video_composites.items()):
+                        if self._close_wait_started:
+                            return
                         if not preview_window.winfo_exists():
                             self.append_log("検出が中断されました。")
                             return
@@ -6664,6 +6897,8 @@ atomcam2で利用する場合は、GitHubで公開されている
                             progress_callback=None  # 個別ログ抑制
                         )
                         boxes = res[1] if res else []
+                        if self._close_wait_started:
+                            return
                         
                         # 検出後すぐにメモリ解放
                         del composite_img
@@ -6675,18 +6910,19 @@ atomcam2で利用する場合は、GitHubで公開されている
                         if preview_window.winfo_exists():
                             filename = data['filename']
                             temp_path = data['temp_path']
-                            self.after(0, lambda fn=filename, fp=temp_path, b=boxes, cb=reanalyze_wrapper:
-                                preview_window.add_item(fn, fp, b, cb))
+                            self._schedule_ui_if_open(
+                                preview_window.add_item, filename, temp_path, boxes, reanalyze_wrapper
+                            )
                     
                     if preview_window.winfo_exists():
-                        self.after(0, preview_window.finalize_analysis)
+                        self._schedule_ui_if_open(preview_window.finalize_analysis)
                     self.append_log("全画像の検出が完了しました。結果を確認してください。")
                 
-                threading.Thread(target=run_detection, daemon=True).start()
+                self._start_app_worker(run_detection)
             
-            self.after(0, open_preview)
+            self._schedule_ui_if_open(open_preview)
         
-        threading.Thread(target=run_prep_task, daemon=True).start()
+        self._start_app_worker(run_prep_task)
 
     def create_lighten_blend_image_callback(self):
         """比較明合成画像作成ボタンのコールバック"""
@@ -6758,7 +6994,7 @@ atomcam2で利用する場合は、GitHubで公開されている
                 )
                 self._handle_synthesis_result(success, output_path)
             
-            threading.Thread(target=run_normal_task, daemon=True).start()
+            self._start_app_worker(run_normal_task)
             return
 
         # AI解析モードの場合
@@ -6814,18 +7050,20 @@ atomcam2で利用する場合は、GitHubで公開されている
                 )
                 self._handle_synthesis_result(success, output_path)
 
-            threading.Thread(target=run_ai_task, daemon=True).start()
+            self._start_app_worker(run_ai_task)
 
         preview_window = detection_preview.DetectionPreviewWindow(self, start_synthesis_with_results)
         
         def run_analysis_task():
             try:
+                if self._close_wait_started:
+                    return
                 print("DEBUG: run_analysis_task started")
                 self.append_log("AIによる画像解析を開始します...")
 
                 if not self._ensure_ai_model_loaded(bright_area_detector):
                     if preview_window.winfo_exists():
-                        self.after(0, preview_window.destroy)
+                        self._schedule_ui_if_open(preview_window.destroy)
                     return
                 
                 all_files = []
@@ -6840,9 +7078,11 @@ atomcam2で利用する場合は、GitHubで公開されている
                 print(f"DEBUG: Processing {total} files")
                 
                 if preview_window.winfo_exists():
-                    self.after(0, lambda: preview_window.start_analysis(total))
+                    self._schedule_ui_if_open(preview_window.start_analysis, total)
                 
                 for i, path in enumerate(all_files):
+                    if self._close_wait_started:
+                        return
                     if not preview_window.winfo_exists():
                         self.append_log("解析が中断されました。")
                         return
@@ -6864,19 +7104,26 @@ atomcam2で利用する場合は、GitHubで公開されている
                     print(f"DEBUG: Calling detector_func for {filename}")
                     res = detector_func(img)
                     boxes = res[1] if res else []
+                    if self._close_wait_started:
+                        return
                     print(f"DEBUG: Detection result for {filename}: {len(boxes)} boxes found")
                     
                     if preview_window.winfo_exists():
-                        self.after(0, lambda fn=filename, key=item_key, fp=path, b=boxes, cb=reanalyze_wrapper:
-                                  preview_window.add_item(fn, fp, b, cb, item_key=key))
+                        self._schedule_ui_if_open(
+                            preview_window.add_item, filename, path, boxes, reanalyze_wrapper, item_key=item_key
+                        )
                 
                 self.append_log("全画像の解析が完了しました。検出結果を確認・修正してください。")
                 print("DEBUG: Analysis completed")
                 
                 if preview_window.winfo_exists():
                      # 完了処理（未検出を先頭になど）
-                     self.after(0, preview_window.finalize_analysis)
-                     messagebox.showinfo("解析完了", "全画像の解析が完了しました。\n未検出の画像が上部に表示されています。\nプレビュー画面で結果を確認し、「修正を確定して合成を開始」ボタンを押してください。")
+                     self._schedule_ui_if_open(preview_window.finalize_analysis)
+                     self._show_worker_result_dialog(
+                         "showinfo", "解析完了",
+                         "全画像の解析が完了しました。\n未検出の画像が上部に表示されています。\n"
+                         "プレビュー画面で結果を確認し、「修正を確定して合成を開始」ボタンを押してください。",
+                     )
             except Exception as e:
                 print(f"ERROR: run_analysis_task failed with exception: {e}")
                 import traceback
@@ -6884,18 +7131,24 @@ atomcam2で利用する場合は、GitHubで公開されている
                 self.append_log(f"AI解析中にエラーが発生しました: {e}")
 
         print("DEBUG: Starting run_analysis_task thread")
-        threading.Thread(target=run_analysis_task, daemon=True).start()
+        self._start_app_worker(run_analysis_task)
 
     def _handle_synthesis_result(self, success, output_path):
         if success:
-            messagebox.showinfo("完了", f"比較明合成画像の作成が完了しました。\n保存先: {output_path}")
+            self._show_worker_result_dialog(
+                "showinfo", "完了", f"比較明合成画像の作成が完了しました。\n保存先: {output_path}"
+            )
             self.append_log(f"比較明合成画像の作成が完了しました: {output_path}")
         else:
-            messagebox.showerror("エラー", "比較明合成画像の作成に失敗しました。ログを確認してください。")
+            self._show_worker_result_dialog(
+                "showerror", "エラー", "比較明合成画像の作成に失敗しました。ログを確認してください。"
+            )
             self.append_log("比較明合成画像の作成に失敗しました。")
 
     def _ensure_ai_model_loaded(self, detector_module) -> bool:
         """AI合成前に内部LLMのロード完了を保証する。"""
+        if self._close_wait_started:
+            return False
         self.append_log("AIモデルのロードを確認中...")
         if hasattr(detector_module, "configure_ai_backend"):
             detector_module.configure_ai_backend(
@@ -6920,7 +7173,7 @@ atomcam2で利用する場合は、GitHubで公開されている
 
             error_message = f"AIモデルの接続確認に失敗しました: {err}"
             self.append_log(error_message)
-            self.after(0, lambda msg=error_message: messagebox.showerror("エラー", msg, parent=self))
+            self._show_worker_result_dialog("showerror", "エラー", error_message)
             return False
 
         local_model_dir = getattr(detector_module, "LOCAL_MODEL_DIR", "./quantized_model")
@@ -6978,7 +7231,7 @@ atomcam2で利用する場合は、GitHubで公開されている
 
         error_message = f"AIモデルのロードに失敗しました: {err}"
         self.append_log(error_message)
-        self.after(0, lambda msg=error_message: messagebox.showerror("エラー", msg, parent=self))
+        self._show_worker_result_dialog("showerror", "エラー", error_message)
         return False
 
 
@@ -7267,13 +7520,17 @@ class TimelapseDragDropWindow(Toplevel):
                 mask=mask
             )
             if success:
-                messagebox.showinfo("完了", f"タイムラプス動画の作成が完了しました。\n保存先: {output_path}")
+                self.parent._show_worker_result_dialog(
+                    "showinfo", "完了", f"タイムラプス動画の作成が完了しました。\n保存先: {output_path}"
+                )
                 self.log_callback(f"タイムラプス動画の作成が完了しました: {output_path}")
             else:
-                messagebox.showerror("エラー", "タイムラプス動画の作成に失敗しました。ログを確認してください。")
+                self.parent._show_worker_result_dialog(
+                    "showerror", "エラー", "タイムラプス動画の作成に失敗しました。ログを確認してください。"
+                )
                 self.log_callback("タイムラプス動画の作成に失敗しました。")
         
-        threading.Thread(target=run_task, daemon=True).start()
+        self.parent._start_app_worker(run_task)
 
 
 

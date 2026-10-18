@@ -210,7 +210,10 @@ RTSPストリーム（ライブカメラ）を使う場合、URLを入力して�
         self.clear_btn.config(state='disabled')
         
         # Thread generation
-        threading.Thread(target=self._get_response, args=(msg,), daemon=True).start()
+        if self.app and hasattr(self.app, "_start_app_worker"):
+            self.app._start_app_worker(self._get_response, args=(msg,))
+        else:
+            threading.Thread(target=self._get_response, args=(msg,), daemon=True).start()
 
     def append_message(self, sender, message, tag=None):
         self.history_area.configure(state='normal')
@@ -220,7 +223,18 @@ RTSPストリーム（ライブカメラ）を使う場合、URLを入力して�
         self.history_area.see(tk.END)
 
     def _update_status(self, text):
-        self.after(0, lambda: self.status_label.config(text=text))
+        self._schedule_ui(self.status_label.config, text=text)
+
+    def _is_app_closing(self):
+        return bool(self.app and getattr(self.app, "_close_wait_started", False))
+
+    def _run_ui_if_open(self, callback, args, kwargs):
+        if not self._is_app_closing():
+            callback(*args, **kwargs)
+
+    def _schedule_ui(self, callback, *args, **kwargs):
+        if not self._is_app_closing():
+            self.after(0, self._run_ui_if_open, callback, args, kwargs)
 
     def _prepare_streaming_ui(self):
         self.history_area.configure(state='normal')
@@ -235,6 +249,8 @@ RTSPストリーム（ライブカメラ）を使う場合、URLを入力して�
         self.history_area.see(tk.END)
 
     def _finalize_streaming_ui(self):
+        if self._is_app_closing():
+            return
         self.history_area.configure(state='normal')
         self.history_area.insert(tk.END, "\n")
         self.history_area.configure(state='disabled')
@@ -431,24 +447,31 @@ RTSPストリーム（ライブカメラ）を使う場合、URLを入力して�
         self._update_status("準備中...")
 
         def stream_handler(chunk):
+            if self._is_app_closing():
+                return
             self.streaming_chunks.append(chunk)
             # Filter out shortcut markers from displayed chunks
             display_chunk = re.sub(r'\[SHORTCUT:(SOURCE|START|RTSP|MASK_RTSP|MASK_DETECTION|MASK_PLATESOLVE|ANALYSIS_ACTIONS)\]', '', chunk)
             if display_chunk:
-                self.after(0, self._append_stream_chunk, display_chunk)
+                self._schedule_ui(self._append_stream_chunk, display_chunk)
             
         try:
             if self.app and hasattr(self.app, "_ensure_ai_model_loaded"):
                 self._update_status("AIモデル確認中...")
                 if not self.app._ensure_ai_model_loaded(bright_area_detector):
-                    self.after(0, lambda: self.append_message("System", "AIモデルの準備がキャンセルまたは失敗しました。", "error"))
+                    self._schedule_ui(
+                        self.append_message,
+                        "System",
+                        "AIモデルの準備がキャンセルまたは失敗しました。",
+                        "error",
+                    )
                     return
 
             # Collect streaming chunks to parse markers after completion
             self.streaming_chunks = []
 
             # UI側でAIのメッセージ開始枠を作る
-            self.after(0, self._prepare_streaming_ui)
+            self._schedule_ui(self._prepare_streaming_ui)
 
             # ストリーミング実行（戻り値の全文は無視して、ストリームで表示済みのものを正とする）
             # 履歴の過去10件を取得
@@ -472,26 +495,26 @@ RTSPストリーム（ライブカメラ）を使う場合、URLを入力して�
             # Add shortcut links based on AI's decision
             if self.app:
                 if shortcuts['source']:
-                    self.after(0, self._append_source_shortcut)
+                    self._schedule_ui(self._append_source_shortcut)
                 if shortcuts['start']:
-                    self.after(0, self._append_start_button_shortcut)
+                    self._schedule_ui(self._append_start_button_shortcut)
                 if shortcuts['rtsp']:
-                    self.after(0, self._append_rtsp_shortcut)
+                    self._schedule_ui(self._append_rtsp_shortcut)
                 if shortcuts['mask_rtsp']:
-                    self.after(0, self._append_rtsp_mask_shortcut)
+                    self._schedule_ui(self._append_rtsp_mask_shortcut)
                 if shortcuts['mask_detection']:
-                    self.after(0, self._append_detection_mask_shortcut)
+                    self._schedule_ui(self._append_detection_mask_shortcut)
                 if shortcuts['mask_ps']:
-                    self.after(0, self._append_ps_mask_shortcut)
+                    self._schedule_ui(self._append_ps_mask_shortcut)
                 if shortcuts['analysis_actions']:
-                    self.after(0, self._append_analysis_actions_shortcut)
+                    self._schedule_ui(self._append_analysis_actions_shortcut)
                 
         except Exception as e:
             # エラー時は追記
-            self.after(0, lambda: self.append_message("System", f"Error: {e}", "error"))
+            self._schedule_ui(self.append_message, "System", f"Error: {e}", "error")
         finally:
             # 完了処理
-            self.after(0, self._finalize_streaming_ui)
+            self._schedule_ui(self._finalize_streaming_ui)
 
 
 

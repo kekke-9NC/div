@@ -31,6 +31,7 @@ class DetectionPreviewWindow(tk.Toplevel):
 
     def __init__(self, parent, start_synthesis_callback: Callable[[Dict], None]):
         super().__init__(parent)
+        self.app = parent.winfo_toplevel()
         self.title("検出結果の確認と編集")
         self.geometry("1000x800")
         self.start_synthesis_callback = start_synthesis_callback
@@ -472,6 +473,8 @@ class DetectionPreviewWindow(tk.Toplevel):
                 
                 # メインスレッドでUI更新
                 def update_ui():
+                    if getattr(self.app, "_close_wait_started", False):
+                        return
                     if not self.winfo_exists():
                         return
                     try:
@@ -488,13 +491,18 @@ class DetectionPreviewWindow(tk.Toplevel):
             except Exception as e:
                 # エラー時もカーソルを戻す
                 def reset_cursor():
-                    if self.winfo_exists():
+                    if not getattr(self.app, "_close_wait_started", False) and self.winfo_exists():
                         self.config(cursor="")
                 self.after(0, reset_cursor)
                 print(f"再検出エラー: {e}")
         
         # バックグラウンドスレッドで実行
-        threading.Thread(target=run_detection, daemon=True).start()
+        if hasattr(self.app, "_start_app_worker"):
+            worker = self.app._start_app_worker(run_detection)
+            if worker is None:
+                self.config(cursor="")
+        else:
+            threading.Thread(target=run_detection, daemon=True).start()
 
     def _clear_boxes(self, filename, canvas, label_widget):
         self.results[filename]['boxes'] = []
