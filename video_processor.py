@@ -541,7 +541,6 @@ def concatenate_videos(
 
     
     # concat demuxer用の一時ファイルを作成
-    # デバッグ用: 一時ファイルを出力先フォルダにも保存
     debug_concat_list_path = None
     try:
         with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8') as f:
@@ -553,15 +552,25 @@ def concatenate_videos(
                 safe_path = normalized_path.replace("'", "'\\''")
                 f.write(f"file '{safe_path}'\n")
         
-        # デバッグ用: 出力先フォルダにconcat listを保存
+        # Keep a uniquely named debug copy so an existing user file is never overwritten.
         try:
-            output_dir = os.path.dirname(output_path)
-            debug_concat_list_path = os.path.join(output_dir, "debug_concat_list.txt")
-            import shutil
-            shutil.copy(concat_list_path, debug_concat_list_path)
+            output_dir = os.path.dirname(os.path.abspath(output_path))
+            debug_dir = output_dir if os.path.isdir(output_dir) else None
+            with tempfile.NamedTemporaryFile(
+                mode='wb', prefix="debug_concat_list_", suffix=".txt",
+                delete=False, dir=debug_dir
+            ) as debug_file:
+                debug_concat_list_path = debug_file.name
+                with open(concat_list_path, 'rb') as source_file:
+                    shutil.copyfileobj(source_file, debug_file)
             if progress_callback:
                 progress_callback(0.0, f"[DEBUG] concat listを保存: {debug_concat_list_path}")
         except Exception as e:
+            if debug_concat_list_path and os.path.exists(debug_concat_list_path):
+                try:
+                    os.remove(debug_concat_list_path)
+                except OSError:
+                    pass
             if progress_callback:
                 progress_callback(0.0, f"[DEBUG] concat list保存に失敗: {e}")
                 
@@ -693,11 +702,16 @@ def concatenate_videos(
         elapsed = time.time() - start_time
         elapsed_str = format_time(elapsed)
         
-        # デバッグ用: stderrを出力先フォルダにも保存
+        # Save stderr under a unique name so an existing user file is preserved.
+        debug_stderr_path = None
         try:
-            output_dir = os.path.dirname(output_path)
-            debug_stderr_path = os.path.join(output_dir, "debug_ffmpeg_stderr.txt")
-            with open(debug_stderr_path, 'w', encoding='utf-8') as f:
+            output_dir = os.path.dirname(os.path.abspath(output_path))
+            debug_dir = output_dir if os.path.isdir(output_dir) else None
+            with tempfile.NamedTemporaryFile(
+                mode='w', prefix="debug_ffmpeg_stderr_", suffix=".txt",
+                delete=False, dir=debug_dir, encoding='utf-8'
+            ) as f:
+                debug_stderr_path = f.name
                 f.write(f"=== FFmpeg Stderr Log ===\n")
                 f.write(f"Total input files: {len(valid_files)}\n")
                 f.write(f"Expected duration: {total_duration:.2f}s\n")
@@ -708,6 +722,12 @@ def concatenate_videos(
             if progress_callback:
                 progress_callback(1.0, f"[DEBUG] stderrログを保存: {debug_stderr_path}")
         except Exception as e:
+            if debug_stderr_path and os.path.exists(debug_stderr_path):
+                try:
+                    os.remove(debug_stderr_path)
+                except OSError:
+                    pass
+            debug_stderr_path = None
             if progress_callback:
                 progress_callback(1.0, f"[DEBUG] stderrログ保存に失敗: {e}")
         
@@ -742,7 +762,11 @@ def concatenate_videos(
                 if progress_callback:
                     progress_callback(1.0, f"連結完了（警告あり） (処理時間: {elapsed_str})")
                 
-                return True, f"{warning_msg}\n出力パス: {output_path}\n詳細ログ: {debug_stderr_path}"
+                log_status = (
+                    f"詳細ログ: {debug_stderr_path}"
+                    if debug_stderr_path else "詳細ログは保存できませんでした。"
+                )
+                return True, f"{warning_msg}\n出力パス: {output_path}\n{log_status}"
             
             if progress_callback:
                 progress_callback(1.0, f"連結完了 (処理時間: {elapsed_str})")
