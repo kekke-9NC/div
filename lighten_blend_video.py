@@ -17,12 +17,13 @@ from datetime import datetime
 from typing import List, Optional, Callable
 import subprocess
 import threading
+import tempfile
 
 # メモリ制限: 1GB = 1024 * 1024 * 1024 bytes
 MAX_MEMORY_BYTES = 1 * 1024 * 1024 * 1024
 
 
-def get_video_info(video_path: str) -> dict:
+def get_video_info(video_path: str) -> Optional[dict]:
     """
     動画ファイルの情報を取得する。
     
@@ -33,18 +34,21 @@ def get_video_info(video_path: str) -> dict:
         dict: fps, frame_count, width, height を含む辞書
     """
     cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
+    try:
+        if not cap.isOpened():
+            return None
+
+        return {
+            'path': video_path,
+            'fps': cap.get(cv2.CAP_PROP_FPS),
+            'frame_count': int(cap.get(cv2.CAP_PROP_FRAME_COUNT)),
+            'width': int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
+            'height': int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        }
+    except Exception:
         return None
-    
-    info = {
-        'path': video_path,
-        'fps': cap.get(cv2.CAP_PROP_FPS),
-        'frame_count': int(cap.get(cv2.CAP_PROP_FRAME_COUNT)),
-        'width': int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
-        'height': int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    }
-    cap.release()
-    return info
+    finally:
+        cap.release()
 
 
 def calculate_frame_memory(width: int, height: int, num_videos: int) -> int:
@@ -81,7 +85,7 @@ def create_composite_from_videos(
     Returns:
         合成画像 (BGR) or None
     """
-    if not video_paths:
+    if not video_paths or sample_interval <= 0:
         return None
         
     composite_image = None
@@ -91,32 +95,48 @@ def create_composite_from_videos(
             progress_callback(f"動画をスキャン中 ({i+1}/{len(video_paths)}): {os.path.basename(vp)}")
             
         cap = cv2.VideoCapture(vp)
-        if not cap.isOpened():
-            continue
+        try:
+            if not cap.isOpened():
+                if progress_callback:
+                    progress_callback(f"エラー: 動画を開けません: {os.path.basename(vp)}")
+                return None
             
-        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        if frame_count <= 0:
+            frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            if frame_count <= 0:
+                if progress_callback:
+                    progress_callback(f"エラー: 動画のフレーム数を取得できません: {os.path.basename(vp)}")
+                return None
+
+            count = 0
+            while True:
+                ret, frame = cap.read()
+                if not ret or frame is None:
+                    break
+
+                if count % sample_interval == 0:
+                    if composite_image is None:
+                        composite_image = frame.copy()
+                    else:
+                        # サイズが異なる場合はリサイズ（今回は簡易的に最初の動画に合わせる）
+                        if frame.shape != composite_image.shape:
+                            frame = cv2.resize(frame, (composite_image.shape[1], composite_image.shape[0]))
+                        composite_image = np.maximum(composite_image, frame)
+
+                count += 1
+
+            if count < frame_count:
+                if progress_callback:
+                    progress_callback(
+                        f"エラー: 動画を最後まで読み込めません: {os.path.basename(vp)} "
+                        f"({count}/{frame_count} フレーム)"
+                    )
+                return None
+        except Exception as e:
+            if progress_callback:
+                progress_callback(f"エラー: 動画の読み込みに失敗しました: {os.path.basename(vp)}: {e}")
+            return None
+        finally:
             cap.release()
-            continue
-            
-        count = 0
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-                
-            if count % sample_interval == 0:
-                if composite_image is None:
-                    composite_image = frame.copy()
-                else:
-                    # サイズが異なる場合はリサイズ（今回は簡易的に最初の動画に合わせる）
-                    if frame.shape != composite_image.shape:
-                        frame = cv2.resize(frame, (composite_image.shape[1], composite_image.shape[0]))
-                    composite_image = np.maximum(composite_image, frame)
-            
-            count += 1
-            
-        cap.release()
         
     return composite_image
 
@@ -162,11 +182,16 @@ def create_lighten_blend_video(
     video_infos = []
     for vp in video_paths:
         info = get_video_info(vp)
-        if info and info['frame_count'] > 0:
-            video_infos.append(info)
-        else:
+        if (
+            info is None
+            or info['frame_count'] <= 0
+            or info['width'] <= 0
+            or info['height'] <= 0
+        ):
             if progress_callback:
-                progress_callback(f"警告: 動画を読み込めません: {os.path.basename(vp)}")
+                progress_callback(f"エラー: 動画を読み込めません: {os.path.basename(vp)}")
+            return False
+        video_infos.append(info)
     
     if not video_infos:
         if progress_callback:
@@ -212,30 +237,65 @@ def create_lighten_blend_video(
         progress_callback(f"出力設定: {base_width}x{base_height}, {base_fps:.2f}fps, {max_frames}フレーム")
         progress_callback(f"メモリ使用量: 約{total_memory_mb:.1f}MB (上限: 500MB, 同時処理: {min(len(video_infos), max_concurrent_videos)}動画)")
     
-    # 動画数が1の場合は単純コピー（マスク適用のみ）
-    if len(video_infos) == 1:
-        single_mask = inclusion_mask
-        if per_video_masks and video_infos[0]['path'] in per_video_masks:
-            single_mask = per_video_masks[video_infos[0]['path']]
-        return _create_single_video_with_mask(
-            video_infos[0], output_path, base_width, base_height, base_fps,
-            progress_callback, single_mask
+    output_dir = os.path.dirname(os.path.abspath(output_path))
+    output_suffix = Path(output_path).suffix or '.mp4'
+    temp_output_path = None
+    try:
+        temp_fd, temp_output_path = tempfile.mkstemp(
+            prefix=f".{Path(output_path).stem}.",
+            suffix=output_suffix,
+            dir=output_dir
         )
-    
-    # 動画数がメモリ制限を超える場合はバッチ処理
-    if len(video_infos) > max_concurrent_videos:
+        os.close(temp_fd)
+        os.unlink(temp_output_path)
+
+        # 一時ファイルへ最後まで書き出し、成功した場合だけ出力先を置き換える。
+        if len(video_infos) == 1:
+            single_mask = inclusion_mask
+            if per_video_masks and video_infos[0]['path'] in per_video_masks:
+                single_mask = per_video_masks[video_infos[0]['path']]
+            success = _create_single_video_with_mask(
+                video_infos[0], temp_output_path, base_width, base_height, base_fps,
+                progress_callback, single_mask
+            )
+        elif len(video_infos) > max_concurrent_videos:
+            if progress_callback:
+                progress_callback(
+                    f"動画数({len(video_infos)})が多いため段階的バッチ処理を使用します "
+                    f"（最大{max_concurrent_videos}動画/バッチ）..."
+                )
+            success = _create_lighten_blend_video_batched(
+                video_infos, temp_output_path, base_width, base_height, base_fps,
+                max_frames, max_concurrent_videos, progress_callback, inclusion_mask, per_video_masks
+            )
+        else:
+            success = _create_lighten_blend_video_streaming(
+                video_infos, temp_output_path, base_width, base_height, base_fps,
+                max_frames, progress_callback, inclusion_mask, per_video_masks
+            )
+
+        if not success:
+            return False
+        if not os.path.isfile(temp_output_path) or os.path.getsize(temp_output_path) == 0:
+            if progress_callback:
+                progress_callback("エラー: 出力動画が作成されませんでした。")
+            return False
+
+        os.replace(temp_output_path, output_path)
+        temp_output_path = None
         if progress_callback:
-            progress_callback(f"動画数({len(video_infos)})が多いため段階的バッチ処理を使用します（最大{max_concurrent_videos}動画/バッチ）...")
-        return _create_lighten_blend_video_batched(
-            video_infos, output_path, base_width, base_height, base_fps, 
-            max_frames, max_concurrent_videos, progress_callback, inclusion_mask, per_video_masks
-        )
-    
-    # 通常処理（メモリに収まる場合）
-    return _create_lighten_blend_video_streaming(
-        video_infos, output_path, base_width, base_height, base_fps,
-        max_frames, progress_callback, inclusion_mask, per_video_masks
-    )
+            progress_callback(f"比較明合成動画を保存しました: {output_path}")
+        return True
+    except Exception as e:
+        if progress_callback:
+            progress_callback(f"エラー: 動画の作成に失敗しました: {e}")
+        return False
+    finally:
+        if temp_output_path and os.path.exists(temp_output_path):
+            try:
+                os.remove(temp_output_path)
+            except OSError:
+                pass
 
 
 def _create_single_video_with_mask(
@@ -249,45 +309,52 @@ def _create_single_video_with_mask(
 ) -> bool:
     """単一動画にマスクを適用して出力"""
     cap = cv2.VideoCapture(video_info['path'])
-    if not cap.isOpened():
-        return False
-    
-    command = [
-        'ffmpeg', '-y', '-f', 'rawvideo', '-vcodec', 'rawvideo',
-        '-s', f'{base_width}x{base_height}', '-pix_fmt', 'bgr24',
-        '-r', str(base_fps), '-i', '-', '-an', '-c:v', 'libx264',
-        '-preset', 'medium', '-crf', '18', '-pix_fmt', 'yuv420p',
-        output_path
-    ]
-    
+    proc = None
     try:
-        proc = subprocess.Popen(
-            command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
-    except Exception as e:
-        cap.release()
-        if progress_callback:
-            progress_callback(f"エラー: ffmpegの起動に失敗: {e}")
-        return False
+        if not cap.isOpened():
+            if progress_callback:
+                progress_callback(f"エラー: 動画を開けません: {os.path.basename(video_info['path'])}")
+            return False
     
-    frame_count = video_info['frame_count']
+        command = [
+            'ffmpeg', '-y', '-f', 'rawvideo', '-vcodec', 'rawvideo',
+            '-s', f'{base_width}x{base_height}', '-pix_fmt', 'bgr24',
+            '-r', str(base_fps), '-i', '-', '-an', '-c:v', 'libx264',
+            '-preset', 'medium', '-crf', '18', '-pix_fmt', 'yuv420p',
+            output_path
+        ]
+        try:
+            proc = subprocess.Popen(
+                command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+        except Exception as e:
+            if progress_callback:
+                progress_callback(f"エラー: ffmpegの起動に失敗: {e}")
+            return False
     
-    # マスクの前処理
-    mask_3ch = None
-    if inclusion_mask is not None:
-        if inclusion_mask.shape[:2] != (base_height, base_width):
-            resized_mask = cv2.resize(inclusion_mask, (base_width, base_height))
-        else:
-            resized_mask = inclusion_mask
-        if len(resized_mask.shape) == 2:
-            mask_3ch = cv2.merge([resized_mask, resized_mask, resized_mask])
-        else:
-            mask_3ch = resized_mask
+        frame_count = video_info['frame_count']
     
-    try:
+        # マスクの前処理
+        mask_3ch = None
+        if inclusion_mask is not None:
+            if inclusion_mask.shape[:2] != (base_height, base_width):
+                resized_mask = cv2.resize(inclusion_mask, (base_width, base_height))
+            else:
+                resized_mask = inclusion_mask
+            if len(resized_mask.shape) == 2:
+                mask_3ch = cv2.merge([resized_mask, resized_mask, resized_mask])
+            else:
+                mask_3ch = resized_mask
+
+        frames_written = 0
         for frame_idx in range(frame_count):
             ret, frame = cap.read()
-            if not ret:
+            if not ret or frame is None:
+                if progress_callback:
+                    progress_callback(
+                        f"エラー: 動画を最後まで読み込めません: "
+                        f"{os.path.basename(video_info['path'])} ({frames_written}/{frame_count} フレーム)"
+                    )
                 break
             
             if frame.shape[1] != base_width or frame.shape[0] != base_height:
@@ -297,22 +364,38 @@ def _create_single_video_with_mask(
                 frame = cv2.bitwise_and(frame, mask_3ch)
             
             proc.stdin.write(frame.tobytes())
+            frames_written += 1
             
             if progress_callback and frame_idx % 30 == 0:
                 progress = (frame_idx + 1) / frame_count * 100
                 progress_callback(f"処理中: {frame_idx + 1}/{frame_count} フレーム ({progress:.1f}%)")
+        if frames_written != frame_count:
+            return False
+        ret, extra_frame = cap.read()
+        if ret and extra_frame is not None:
+            if progress_callback:
+                progress_callback(
+                    f"エラー: 動画のフレーム数情報と実際の内容が一致しません: "
+                    f"{os.path.basename(video_info['path'])}"
+                )
+            return False
+    except Exception as e:
+        if progress_callback:
+            progress_callback(f"エラー: フレーム処理中に問題が発生しました: {e}")
+        return False
     finally:
         cap.release()
-        if proc.stdin:
+        if proc is not None and proc.stdin:
             try:
                 proc.stdin.close()
             except OSError:
                 # FFmpeg may exit early and close its input pipe while frames
                 # are still being written.
                 pass
-        proc.wait()
+        if proc is not None:
+            proc.wait()
     
-    return proc.returncode == 0
+    return proc is not None and proc.returncode == 0
 
 
 def _create_lighten_blend_video_streaming(
@@ -337,24 +420,31 @@ def _create_lighten_blend_video_streaming(
     caps = []
     for info in video_infos:
         cap = cv2.VideoCapture(info['path'])
+        if not cap.isOpened():
+            cap.release()
+            for cap_info in caps:
+                cap_info['cap'].release()
+            if progress_callback:
+                progress_callback(f"エラー: 動画を開けません: {os.path.basename(info['path'])}")
+            return False
+
         # バッファサイズを最小に設定してメモリ節約
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        if cap.isOpened():
-            source_fps = info.get('source_fps', info.get('fps', base_fps))
-            if not np.isfinite(source_fps) or source_fps <= 0 or source_fps > 120:
-                source_fps = base_fps
-            frame_count = info['frame_count']
-            caps.append({
-                'cap': cap,
-                'frame_count': frame_count,
-                'source_fps': source_fps,
-                'duration': info.get('duration', frame_count / source_fps),
-                'read_index': 0,
-                'current_frame': None,
-                'width': info['width'],
-                'height': info['height'],
-                'path': info['path']  # パスを保持（per_video_masks用）
-            })
+        source_fps = info.get('source_fps', info.get('fps', base_fps))
+        if not np.isfinite(source_fps) or source_fps <= 0 or source_fps > 120:
+            source_fps = base_fps
+        frame_count = info['frame_count']
+        caps.append({
+            'cap': cap,
+            'frame_count': frame_count,
+            'source_fps': source_fps,
+            'duration': info.get('duration', frame_count / source_fps),
+            'read_index': 0,
+            'current_frame': None,
+            'width': info['width'],
+            'height': info['height'],
+            'path': info['path']  # パスを保持（per_video_masks用）
+        })
     
     if not caps:
         if progress_callback:
@@ -450,37 +540,41 @@ def _create_lighten_blend_video_streaming(
                     while cap_info['read_index'] <= source_frame_idx:
                         ret, next_frame = cap.read()
                         if not ret or next_frame is None:
-                            cap_info['current_frame'] = None
-                            cap_info['read_index'] = cap_info['frame_count']
-                            break
+                            raise RuntimeError(
+                                f"動画を最後まで読み込めません: "
+                                f"{os.path.basename(cap_info['path'])} "
+                                f"(フレーム {cap_info['read_index'] + 1}/{cap_info['frame_count']})"
+                            )
                         cap_info['current_frame'] = next_frame
                         cap_info['read_index'] += 1
 
                     frame = cap_info['current_frame']
-                    if frame is not None:
-                        # 解像度が異なる場合はリサイズ
-                        if frame.shape[1] != base_width or frame.shape[0] != base_height:
-                            frame = cv2.resize(frame, (base_width, base_height))
+                    if frame is None:
+                        raise RuntimeError(
+                            f"動画フレームを取得できません: {os.path.basename(cap_info['path'])}"
+                        )
+                    # 解像度が異なる場合はリサイズ
+                    if frame.shape[1] != base_width or frame.shape[0] != base_height:
+                        frame = cv2.resize(frame, (base_width, base_height))
                         
-                        # 動画ごとのマスクを適用（指定がある場合）
-                        video_path = cap_info['path']
-                        if video_path in per_video_masks_3ch:
-                            frame = np.where(per_video_masks_3ch[video_path] > 0, frame, 0).astype(np.uint8)
+                    # 動画ごとのマスクを適用（指定がある場合）
+                    video_path = cap_info['path']
+                    if video_path in per_video_masks_3ch:
+                        frame = np.where(per_video_masks_3ch[video_path] > 0, frame, 0).astype(np.uint8)
                         
-                        if composite_frame is None:
-                            composite_frame = frame.copy()
-                        else:
-                            # 比較明合成（その場で更新してメモリ節約）
-                            np.maximum(composite_frame, frame, out=composite_frame)
+                    if composite_frame is None:
+                        composite_frame = frame.copy()
+                    else:
+                        # 比較明合成（その場で更新してメモリ節約）
+                        np.maximum(composite_frame, frame, out=composite_frame)
                         
-                        frames_used += 1
-                        # 使用済みフレームの参照を削除
-                        del frame
+                    frames_used += 1
+                    # 使用済みフレームの参照を削除
+                    del frame
             
             if composite_frame is None:
-                # フレームがない場合は黒フレーム
-                composite_frame = np.zeros((base_height, base_width, 3), dtype=np.uint8)
-            elif common_mask_3ch is not None:
+                raise RuntimeError(f"合成対象フレームがありません: {frame_idx + 1}/{max_frames}")
+            if common_mask_3ch is not None:
                 # 共通マスク適用: マスクが0の場所は黒にする
                 composite_frame = np.where(common_mask_3ch > 0, composite_frame, 0).astype(np.uint8)
             
@@ -499,6 +593,23 @@ def _create_lighten_blend_video_streaming(
             if progress_callback and frame_idx % 30 == 0:
                 progress = (frame_idx + 1) / max_frames * 100
                 progress_callback(f"処理中: {frame_idx + 1}/{max_frames} フレーム ({progress:.1f}%)")
+
+        # 出力fpsの変換で読み飛ばした末尾フレームも読み込み、各入力の全フレームを確認する。
+        for cap_info in caps:
+            while cap_info['read_index'] < cap_info['frame_count']:
+                ret, frame = cap_info['cap'].read()
+                if not ret or frame is None:
+                    raise RuntimeError(
+                        f"動画を最後まで読み込めません: {os.path.basename(cap_info['path'])} "
+                        f"(フレーム {cap_info['read_index'] + 1}/{cap_info['frame_count']})"
+                    )
+                cap_info['read_index'] += 1
+            ret, extra_frame = cap_info['cap'].read()
+            if ret and extra_frame is not None:
+                raise RuntimeError(
+                    f"動画のフレーム数情報と実際の内容が一致しません: "
+                    f"{os.path.basename(cap_info['path'])}"
+                )
         
         if progress_callback:
             progress_callback(f"エンコード完了: {max_frames}フレーム処理しました。")
@@ -539,7 +650,7 @@ def _create_lighten_blend_video_streaming(
         gc.collect()
     
     if progress_callback:
-        progress_callback(f"比較明合成動画を保存しました: {output_path}")
+        progress_callback("動画のエンコードが完了しました。")
     
     return True
 
@@ -589,9 +700,10 @@ def _create_lighten_blend_video_batched(
             intermediate_files.append(intermediate_path)
             
             # バッチを処理（マスクも適用）
+            batch_max_frames = int(np.ceil(max(info['duration'] for info in batch_infos) * base_fps))
             success = _create_lighten_blend_video_streaming(
                 batch_infos, intermediate_path, base_width, base_height, base_fps,
-                max_frames, None, inclusion_mask, per_video_masks  # per_video_masksも渡す
+                batch_max_frames, None, inclusion_mask, per_video_masks  # per_video_masksも渡す
             )
             
             if not success:
@@ -612,7 +724,13 @@ def _create_lighten_blend_video_batched(
             
             # 中間ファイルの情報を取得
             final_infos = [get_video_info(f) for f in intermediate_files]
-            final_infos = [info for info in final_infos if info is not None]
+            if any(
+                info is None or info['frame_count'] <= 0 or info['width'] <= 0 or info['height'] <= 0
+                for info in final_infos
+            ):
+                if progress_callback:
+                    progress_callback("エラー: 中間動画を読み込めませんでした。")
+                return False
             
             success = _create_lighten_blend_video_streaming(
                 final_infos, output_path, base_width, base_height, base_fps, 
@@ -623,7 +741,7 @@ def _create_lighten_blend_video_batched(
                 return False
         
         if progress_callback:
-            progress_callback(f"比較明合成動画を保存しました: {output_path}")
+            progress_callback("バッチ処理が完了しました。")
         
         return True
         
