@@ -6990,6 +6990,29 @@ atomcam2で利用する場合は、GitHubで公開されている
         mode = dialog.result  # 0:通常, 1:明るいエリアマスク, 2:流星のみ
         is_ai_mode = (mode != 0)
         is_meteor_mode = (mode == 2)
+
+        ai_source_files = []
+        if is_ai_mode:
+            for path in file_paths:
+                if os.path.isdir(path):
+                    ai_source_files.extend(lighten_blend_image.collect_files_from_folder(path))
+                elif os.path.isfile(path):
+                    ai_source_files.append(path)
+            ai_source_files.sort()
+
+            _, video_ext = lighten_blend_image.get_supported_extensions()
+            video_inputs = [
+                path for path in ai_source_files
+                if Path(path).suffix.lower() in video_ext
+            ]
+            if video_inputs:
+                messagebox.showwarning(
+                    "AI画像合成では動画を解析できません",
+                    "AI画像合成は静止画のみ対応しています。動画を含む選択では合成を開始しません。\n"
+                    "動画を除いて選び直すか、動画を含める場合は通常の比較明合成を選択してください。"
+                )
+                return
+
         print(f"DEBUG: ProcessingOptionDialog result: mode={mode}, is_ai_mode={is_ai_mode}, is_meteor_mode={is_meteor_mode}")
 
         if not is_ai_mode:
@@ -7019,15 +7042,7 @@ atomcam2で利用する場合は、GitHubで公開されている
                 self.append_log("AI解析結果に基づく合成処理を開始します...")
                 # Mask generation must follow the same expanded file order as synthesis.
                 
-                all_files = []
-                image_ext, video_ext = lighten_blend_image.get_supported_extensions()
-                for path in file_paths:
-                    if os.path.isdir(path):
-                        all_files.extend(lighten_blend_image.collect_files_from_folder(path))
-                    elif os.path.isfile(path):
-                        all_files.append(path)
-                
-                all_files.sort()  # 名前順で処理されると仮定
+                all_files = ai_source_files
                 
                 # インデックス管理用
                 file_index = [0]
@@ -7074,13 +7089,7 @@ atomcam2で利用する場合は、GitHubで公開されている
                         self._schedule_ui_if_open(preview_window.destroy)
                     return
                 
-                all_files = []
-                for path in file_paths:
-                    if os.path.isdir(path):
-                        all_files.extend(lighten_blend_image.collect_files_from_folder(path))
-                    elif os.path.isfile(path):
-                        all_files.append(path)
-                all_files.sort()
+                all_files = ai_source_files
                 
                 total = len(all_files)
                 print(f"DEBUG: Processing {total} files")
