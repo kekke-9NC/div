@@ -19,6 +19,7 @@ import re
 import gc
 import time
 import threading
+import queue
 from pathlib import Path
 from typing import Optional, Tuple, Callable, List
 from PIL import Image
@@ -401,8 +402,14 @@ def _call_lm_studio_chat(
     status_callback: Optional[Callable[[str], None]] = None,
     stream_callback: Optional[Callable[[str], None]] = None,
     max_tokens: int = 512,
+    cancel_event: Optional[threading.Event] = None,
 ) -> str:
-    if status_callback:
+    def is_cancelled() -> bool:
+        return bool(cancel_event and cancel_event.is_set())
+
+    if is_cancelled():
+        return ""
+    if status_callback and not is_cancelled():
         status_callback(f"LM Studioへ送信中: {_lm_studio_model_id}")
 
     payload = {
@@ -416,53 +423,180 @@ def _call_lm_studio_chat(
 
     if stream_callback:
         url = f"{normalize_lm_studio_url(_lm_studio_url)}/chat/completions"
-        try:
-            response = requests.post(
-                url,
-                headers=_lm_studio_headers(),
-                json=payload,
-                timeout=300,
-                stream=True,
-            )
-        except requests.RequestException as exc:
-            raise RuntimeError(f"LM Studioに接続できません: {normalize_lm_studio_url(_lm_studio_url)}\n{exc}") from exc
+        response_state_lock = threading.Lock()
+        response_state = {"response": None, "error": None}
+        response_ready = threading.Event()
 
-        if not response.ok:
+        def open_response():
+            if is_cancelled():
+                response_ready.set()
+                return
             try:
-                detail = response.json()
-            except ValueError:
-                detail = response.text.strip()
-            raise RuntimeError(f"LM Studio APIエラー ({response.status_code}): {detail}")
+                opened_response = requests.post(
+                    url,
+                    headers=_lm_studio_headers(),
+                    json=payload,
+                    timeout=300,
+                    stream=True,
+                )
+            except BaseException as exc:
+                with response_state_lock:
+                    response_state["error"] = exc
+                response_ready.set()
+                return
 
+            with response_state_lock:
+                if is_cancelled():
+                    close_response = True
+                else:
+                    response_state["response"] = opened_response
+                    close_response = False
+            if close_response:
+                try:
+                    opened_response.close()
+                except Exception:
+                    pass
+            response_ready.set()
+
+        request_thread = threading.Thread(target=open_response, daemon=True)
+        request_thread.start()
+
+        while not response_ready.wait(0.1):
+            if is_cancelled():
+                with response_state_lock:
+                    pending_response = response_state["response"]
+                if pending_response is not None:
+                    try:
+                        pending_response.close()
+                    except Exception:
+                        pass
+                return ""
+        if is_cancelled():
+            with response_state_lock:
+                pending_response = response_state["response"]
+            if pending_response is not None:
+                try:
+                    pending_response.close()
+                except Exception:
+                    pass
+            return ""
+
+        with response_state_lock:
+            response = response_state["response"]
+            request_error = response_state["error"]
+        if request_error is not None:
+            if is_cancelled():
+                return ""
+            if isinstance(request_error, requests.RequestException):
+                raise RuntimeError(
+                    f"LM Studioに接続できません: {normalize_lm_studio_url(_lm_studio_url)}\n{request_error}"
+                ) from request_error
+            raise request_error
+        if response is None:
+            return ""
+
+        watcher_stop = threading.Event()
+        stream_stop = threading.Event()
+        response_watcher = None
+        stream_thread = None
+        stream_queue = queue.Queue()
+        stream_end = object()
+        stream_error = object()
         output_text = ""
-        for raw_line in response.iter_lines(decode_unicode=True):
-            if not raw_line:
-                continue
-            line = raw_line.strip()
-            if line.startswith("data:"):
-                line = line[len("data:"):].strip()
-            if not line or line == "[DONE]":
-                continue
+
+        def close_response_on_cancel():
+            while not watcher_stop.wait(0.05):
+                if is_cancelled():
+                    with response_state_lock:
+                        active_response = response_state["response"]
+                    if active_response is not None:
+                        try:
+                            active_response.close()
+                        except Exception:
+                            pass
+                    return
+
+        def read_response_stream():
             try:
-                chunk = json.loads(line)
-            except ValueError:
-                continue
+                for raw_line in response.iter_lines(decode_unicode=True):
+                    if is_cancelled() or stream_stop.is_set():
+                        break
+                    if not raw_line:
+                        continue
+                    line = raw_line.strip()
+                    if line.startswith("data:"):
+                        line = line[len("data:"):].strip()
+                    if not line or line == "[DONE]":
+                        continue
+                    try:
+                        chunk = json.loads(line)
+                    except ValueError:
+                        continue
 
-            choices = chunk.get("choices") or []
-            if not choices:
-                continue
-            delta = choices[0].get("delta") or {}
-            content = delta.get("content")
-            if isinstance(content, list):
-                text = "".join(str(item.get("text", "")) for item in content if isinstance(item, dict))
-            else:
-                text = str(content or "")
-            if text:
-                output_text += text
-                stream_callback(text)
-        return output_text.strip()
+                    choices = chunk.get("choices") or []
+                    if not choices:
+                        continue
+                    delta = choices[0].get("delta") or {}
+                    content = delta.get("content")
+                    if isinstance(content, list):
+                        text = "".join(str(item.get("text", "")) for item in content if isinstance(item, dict))
+                    else:
+                        text = str(content or "")
+                    if text and not is_cancelled() and not stream_stop.is_set():
+                        stream_queue.put(("chunk", text))
+            except Exception as exc:
+                if not is_cancelled() and not stream_stop.is_set():
+                    stream_queue.put((stream_error, exc))
+            finally:
+                stream_queue.put((stream_end, None))
 
+        try:
+            if is_cancelled():
+                return output_text
+            if cancel_event is not None:
+                response_watcher = threading.Thread(target=close_response_on_cancel, daemon=True)
+                response_watcher.start()
+            if not response.ok:
+                try:
+                    detail = response.json()
+                except ValueError:
+                    detail = response.text.strip()
+                raise RuntimeError(f"LM Studio APIエラー ({response.status_code}): {detail}")
+
+            stream_thread = threading.Thread(target=read_response_stream, daemon=True)
+            stream_thread.start()
+            while not is_cancelled():
+                try:
+                    message_type, payload_value = stream_queue.get(timeout=0.1)
+                except queue.Empty:
+                    if not stream_thread.is_alive():
+                        break
+                    continue
+
+                if message_type is stream_end:
+                    break
+                if message_type is stream_error:
+                    raise payload_value
+                if message_type == "chunk" and not is_cancelled():
+                    output_text += payload_value
+                    stream_callback(payload_value)
+            return output_text.strip()
+        finally:
+            stream_stop.set()
+            watcher_stop.set()
+            try:
+                response.close()
+            finally:
+                if response_watcher is not None:
+                    response_watcher.join(timeout=0.2)
+                if stream_thread is not None:
+                    stream_thread.join(timeout=0.2)
+
+    if is_cancelled():
+        return ""
     data = _lm_studio_request("POST", "/chat/completions", payload=payload, timeout=300)
+    if is_cancelled():
+        return ""
     choices = data.get("choices") or []
     if not choices:
         raise RuntimeError("LM Studioから有効な応答が返りませんでした。")
@@ -902,6 +1036,7 @@ def _get_model(status_callback: Optional[Callable[[str], None]] = None):
 def check_vlm_connection(
     status_callback: Optional[Callable[[str], None]] = None,
     force: bool = False,
+    cancel_event: Optional[threading.Event] = None,
 ) -> tuple:
     """
     モデルの利用可否を確認する
@@ -911,12 +1046,17 @@ def check_vlm_connection(
     """
     global _model, _processor, _lm_studio_connection_cache_key
     try:
+        if cancel_event is not None and cancel_event.is_set():
+            return (False, "cancelled")
+
         if _ai_backend == AI_BACKEND_LM_STUDIO:
             cache_key = (normalize_lm_studio_url(_lm_studio_url), _lm_studio_model_id, _lm_studio_api_key)
             if not force and _lm_studio_connection_cache_key == cache_key:
                 return (True, get_active_model_name())
 
             model_ids = list_lm_studio_model_ids()
+            if cancel_event is not None and cancel_event.is_set():
+                return (False, "cancelled")
             if not model_ids:
                 return (False, "LM StudioでVision対応モデルが見つかりません。")
             if model_ids and _lm_studio_model_id not in model_ids:
@@ -931,7 +1071,11 @@ def check_vlm_connection(
         if _model is not None and _processor is not None:
             _reset_offload_timer()
             return (True, MODEL_ID)
+        if cancel_event is not None and cancel_event.is_set():
+            return (False, "cancelled")
         _get_model(status_callback)
+        if cancel_event is not None and cancel_event.is_set():
+            return (False, "cancelled")
         return (True, MODEL_ID)
     except Exception as e:
         return (False, str(e))
@@ -1054,7 +1198,8 @@ def generate_response(
     image: Optional[np.ndarray] = None,
     history: Optional[List[dict]] = None,
     status_callback: Optional[Callable[[str], None]] = None,
-    stream_callback: Optional[Callable[[str], None]] = None
+    stream_callback: Optional[Callable[[str], None]] = None,
+    cancel_event: Optional[threading.Event] = None,
 ) -> str:
     """
     汎用的なチャット応答を生成する
@@ -1064,14 +1209,23 @@ def generate_response(
         system_prompt: システムプロンプト
         image: オプションの画像 (BGR)
         history: 会話履歴 [{'role': 'user'|'assistant', 'content': str}]
+        cancel_event: Optional event set when the caller no longer needs the response.
         
     Returns:
         応答テキスト
     """
+    def is_cancelled() -> bool:
+        return bool(cancel_event and cancel_event.is_set())
+
+    if is_cancelled():
+        return ""
+
     if _ai_backend == AI_BACKEND_LM_STUDIO:
-        if status_callback:
+        if status_callback and not is_cancelled():
             status_callback("LM Studio接続確認中...")
-        connected, err = check_vlm_connection(status_callback)
+        connected, err = check_vlm_connection(status_callback, cancel_event=cancel_event)
+        if is_cancelled():
+            return ""
         if not connected:
             return f"エラー: LM Studioモデルの確認に失敗しました: {err}"
 
@@ -1086,18 +1240,33 @@ def generate_response(
         else:
             user_content = user_prompt
         messages.append({"role": "user", "content": user_content})
-        return _call_lm_studio_chat(messages, status_callback, stream_callback)
+        if is_cancelled():
+            return ""
+        return _call_lm_studio_chat(
+            messages,
+            status_callback,
+            stream_callback,
+            cancel_event=cancel_event,
+        )
 
-    from transformers import TextIteratorStreamer
+    from transformers import StoppingCriteria, StoppingCriteriaList, TextIteratorStreamer
     from qwen_vl_utils import process_vision_info
-    if status_callback: status_callback("接続確認中...")
-    connected, err = check_vlm_connection(status_callback)
+    if status_callback and not is_cancelled():
+        status_callback("接続確認中...")
+    connected, err = check_vlm_connection(status_callback, cancel_event=cancel_event)
+    if is_cancelled():
+        return ""
     if not connected:
         return f"エラー: モデルの読み込みに失敗しました: {err}"
 
+    if is_cancelled():
+        return ""
     model, processor = _get_model(status_callback)
+    if is_cancelled():
+        return ""
     
-    if status_callback: status_callback("回答を生成中...")
+    if status_callback and not is_cancelled():
+        status_callback("回答を生成中...")
     content = []
     
     image_inputs = None
@@ -1129,64 +1298,111 @@ def generate_response(
         inputs_args["videos"] = video_inputs
         
     inputs = processor(**inputs_args).to("cuda")
+    output_text = ""
+    generation_cancel = threading.Event()
+    generation_thread = None
 
-    if image is not None:
-        pass
-    
-    if stream_callback:
-        streamer = TextIteratorStreamer(processor, skip_prompt=True, skip_special_tokens=True)
-        inputs_args["streamer"] = streamer
-        
-        generation_kwargs = dict(
-            **inputs,
-            max_new_tokens=512,
-            temperature=0.7,
-            top_p=0.8,
-            top_k=20,
-            do_sample=True,
-            streamer=streamer,
-        )
-        
-        thread = threading.Thread(target=model.generate, kwargs=generation_kwargs)
-        thread.start()
-        
-        output_text = ""
-        for new_text in streamer:
-            output_text += new_text
-            stream_callback(new_text)
-            
-        thread.join()
-        
-    else:
-
-        with torch.no_grad():
-            generated_ids = model.generate(
-                **inputs,
-                max_new_tokens=512,
-                temperature=0.7,
-                top_p=0.8,
-                top_k=20,
-                do_sample=True,
+    class CancelGenerationCriteria(StoppingCriteria):
+        def __call__(self, input_ids, scores, **kwargs):
+            should_stop = is_cancelled() or generation_cancel.is_set()
+            return torch.full(
+                (input_ids.shape[0],),
+                should_stop,
+                dtype=torch.bool,
+                device=input_ids.device,
             )
-        
-        generated_ids_trimmed = [
-            out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
-        ]
-        output_text = processor.batch_decode(
-            generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
-        )[0]
 
-    del inputs
-    if "generated_ids" in locals(): del generated_ids
-    if image_inputs is not None:
-        del image_inputs
-    if video_inputs is not None:
-        del video_inputs
-    torch.cuda.empty_cache()
-    gc.collect()
-    
-    _reset_offload_timer()
-    
+    generation_kwargs = dict(
+        **inputs,
+        max_new_tokens=512,
+        temperature=0.7,
+        top_p=0.8,
+        top_k=20,
+        do_sample=True,
+        stopping_criteria=StoppingCriteriaList([CancelGenerationCriteria()]),
+    )
+
+    try:
+        if not is_cancelled() and stream_callback:
+            streamer = TextIteratorStreamer(
+                processor,
+                skip_prompt=True,
+                skip_special_tokens=True,
+                timeout=0.2,
+            )
+            generation_kwargs["streamer"] = streamer
+            generation_errors = []
+
+            def run_generation():
+                try:
+                    if not is_cancelled() and not generation_cancel.is_set():
+                        model.generate(**generation_kwargs)
+                except BaseException as exc:
+                    generation_errors.append(exc)
+                finally:
+                    # Wake the consumer if generate() failed before sending its end marker.
+                    try:
+                        streamer.end()
+                    except Exception:
+                        pass
+
+            generation_thread = threading.Thread(target=run_generation, daemon=True)
+            generation_thread.start()
+            streamer_drained_after_exit = False
+            try:
+                while not is_cancelled():
+                    try:
+                        new_text = next(streamer)
+                    except StopIteration:
+                        break
+                    except queue.Empty:
+                        if not generation_thread.is_alive():
+                            # generate() calls streamer.end() in its finally block
+                            # before the thread exits. Drain its final decoded text
+                            # and stop marker instead of dropping that last chunk.
+                            if streamer_drained_after_exit:
+                                break
+                            streamer_drained_after_exit = True
+                        continue
+
+                    if new_text and not is_cancelled():
+                        output_text += new_text
+                        stream_callback(new_text)
+            finally:
+                generation_cancel.set()
+                # A CUDA forward pass cannot be interrupted from another thread.
+                # Keep app shutdown bounded if that call stalls; this worker is a
+                # daemon and the generation closure retains its tensors until it exits.
+                generation_thread.join(timeout=0.2 if is_cancelled() else None)
+
+            if generation_errors and not is_cancelled():
+                raise generation_errors[0]
+        elif not is_cancelled():
+            with torch.no_grad():
+                generated_ids = model.generate(**generation_kwargs)
+
+            if not is_cancelled():
+                generated_ids_trimmed = [
+                    out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
+                ]
+                output_text = processor.batch_decode(
+                    generated_ids_trimmed,
+                    skip_special_tokens=True,
+                    clean_up_tokenization_spaces=False,
+                )[0]
+    finally:
+        if generation_thread is None or not generation_thread.is_alive():
+            del inputs
+            if "generated_ids" in locals():
+                del generated_ids
+            if image_inputs is not None:
+                del image_inputs
+            if video_inputs is not None:
+                del video_inputs
+            torch.cuda.empty_cache()
+            gc.collect()
+            _reset_offload_timer()
+
     return output_text
 
 
